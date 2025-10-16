@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Economist to ChatGPT",
+  "version": "1.1",
+  "description": "Kopiuje tekst z kart Economist do ChatGPT z prompt chain",
+  "permissions": [
+    "tabs",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.economist.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Kopiuj Economist do ChatGPT"
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["prompt-dialog.html", "prompt-dialog.js"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

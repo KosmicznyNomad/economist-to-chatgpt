@@ -1,0 +1,67 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Test Both URLs</title>
+</head>
+<body>
+    <h1>Test Both Google Apps Script URLs</h1>
+    <button id="testOld">Test OLD URL</button>
+    <button id="testNew">Test NEW URL</button>
+    <div id="result"></div>
+
+    <script>
+        const OLD_URL = "https://script.google.com/macros/s/AKfycbyAxc-OmX1Unj_o7wpH7fgcAoKnD7wD4HY0jewTeH90PBM7QPQcEDvqxGnHwCT89p2a/exec";
+        const NEW_URL = "https://script.google.com/macros/s/AKfycbxM9dGsIZqg56ttKRiZ2zu51A9PseWL98d19rp93UCErjYJgk-8eqwPIhlj0UhoOXK-/exec";
+        
+        async function testUrl(url, name) {
+            const resultDiv = document.getElementById('result');
+            resultDiv.innerHTML += `<h3>Testing ${name}</h3>`;
+            
+            try {
+                console.log(`Testing ${name}: ${url}`);
+                
+                const response = await fetch(url, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ 
+                        response: `Test from ${name} - ${new Date().toISOString()}`,
+                        timestamp: new Date().toISOString(),
+                        source: 'test-browser'
+                    })
+                });
+                
+                console.log(`${name} response status:`, response.status);
+                const result = await response.text();
+                console.log(`${name} response body:`, result);
+                
+                resultDiv.innerHTML += `
+                    <div style="color: ${response.ok ? 'green' : 'red'}; margin: 10px 0; padding: 10px; border: 1px solid #ccc;">
+                        <strong>${name}:</strong> ${response.ok ? '✅ SUCCESS' : '❌ FAILED'}<br>
+                        Status: ${response.status}<br>
+                        Response: ${result}
+                    </div>
+                `;
+                
+            } catch (error) {
+                console.error(`${name} failed:`, error);
+                resultDiv.innerHTML += `
+                    <div style="color: red; margin: 10px 0; padding: 10px; border: 1px solid #ccc;">
+                        <strong>${name}:</strong> ❌ ERROR<br>
+                        Error: ${error.message}
+                    </div>
+                `;
+            }
+        }
+        
+        document.getElementById('testOld').addEventListener('click', () => {
+            document.getElementById('result').innerHTML = '';
+            testUrl(OLD_URL, 'OLD URL');
+        });
+        
+        document.getElementById('testNew').addEventListener('click', () => {
+            document.getElementById('result').innerHTML = '';
+            testUrl(NEW_URL, 'NEW URL');
+        });
+    </script>
+</body>
+</html>
