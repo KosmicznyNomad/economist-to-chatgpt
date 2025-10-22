@@ -892,6 +892,97 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     }
   }
   
+  // Funkcja próbująca naprawić błąd przez Edit+Resend
+  async function tryEditResend() {
+    try {
+      console.log('🔧 Próbuję naprawić przez Edit+Resend...');
+      
+      // Znajdź ostatnią wiadomość użytkownika
+      const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+      if (userMessages.length === 0) {
+        console.warn('⚠️ Brak wiadomości użytkownika');
+        return false;
+      }
+      
+      const lastUserMessage = userMessages[userMessages.length - 1];
+      console.log('✓ Znaleziono ostatnią wiadomość użytkownika');
+      
+      // Znajdź przycisk Edit bezpośrednio w wiadomości (różne selektory)
+      let editButton = lastUserMessage.querySelector('button[aria-label="Edit message"]');
+      if (!editButton) {
+        editButton = lastUserMessage.querySelector('button.right-full[aria-label*="Edit"]');
+      }
+      if (!editButton) {
+        editButton = lastUserMessage.querySelector('button[aria-label*="Edit"]');
+      }
+      
+      if (!editButton) {
+        console.warn('⚠️ Nie znaleziono przycisku Edit');
+        return false;
+      }
+      
+      console.log('✓ Znaleziono przycisk Edit');
+      
+      // Usuń klasy ukrywające (invisible, hidden) i wymuś widoczność
+      if (editButton.classList.contains('invisible')) {
+        editButton.classList.remove('invisible');
+        console.log('✓ Usunięto klasę invisible');
+      }
+      if (editButton.classList.contains('hidden')) {
+        editButton.classList.remove('hidden');
+        console.log('✓ Usunięto klasę hidden');
+      }
+      
+      // Wymuś widoczność przez style (na wypadek CSS)
+      const originalStyle = editButton.style.cssText;
+      editButton.style.visibility = 'visible';
+      editButton.style.display = 'block';
+      
+      console.log('✓ Klikam przycisk Edit...');
+      editButton.click();
+      
+      // Przywróć oryginalny styl po kliknięciu
+      setTimeout(() => {
+        editButton.style.cssText = originalStyle;
+      }, 100);
+      
+      // Czekaj na pojawienie się edytora
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      // Znajdź przycisk Send
+      let sendButton = document.querySelector('[data-testid="send-button"]');
+      if (!sendButton) {
+        sendButton = document.querySelector('button[aria-label*="Send"]');
+      }
+      if (!sendButton) {
+        sendButton = document.querySelector('#composer-submit-button');
+      }
+      
+      if (!sendButton) {
+        console.warn('⚠️ Nie znaleziono przycisku Send po Edit');
+        return false;
+      }
+      
+      if (sendButton.disabled) {
+        console.warn('⚠️ Przycisk Send jest disabled');
+        return false;
+      }
+      
+      console.log('✓ Znaleziono przycisk Send - klikam...');
+      sendButton.click();
+      
+      // Czekaj aby prompt się wysłał
+      await new Promise(resolve => setTimeout(resolve, 1000));
+      
+      console.log('✅ Edit+Resend wykonane pomyślnie');
+      return true;
+      
+    } catch (error) {
+      console.error('❌ Błąd w tryEditResend:', error);
+      return false;
+    }
+  }
+  
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
   async function waitForResponse(maxWaitMs) {
     const startTime = Date.now();
@@ -905,13 +996,22 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const startTimeout = Math.min(maxWaitMs, 1200000); // Max 20 minut na start
     
     while (Date.now() - startTime < startTimeout) {
-      // Sprawdź czy pojawił się komunikat błędu i kliknij Retry
+      // Sprawdź czy pojawił się komunikat błędu i napraw przez Edit+Resend lub Retry
       const errorMessages = document.querySelectorAll('[class*="text"]');
       for (const msg of errorMessages) {
         if (msg.textContent.includes('Something went wrong while generating the response')) {
-          console.log('⚠️ Znaleziono komunikat błędu - szukam przycisku Retry...');
+          console.log('⚠️ Znaleziono komunikat błędu - próbuję naprawić...');
           
-          // Szukaj przycisku Retry w pobliżu komunikatu błędu
+          // Najpierw spróbuj Edit+Resend
+          const editSuccess = await tryEditResend();
+          if (editSuccess) {
+            console.log('✅ Naprawiono przez Edit+Resend - kontynuuję czekanie...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue; // Kontynuuj czekanie w tej samej pętli
+          }
+          
+          // Jeśli Edit nie zadziałał, spróbuj Retry
+          console.log('⚠️ Edit+Resend nie zadziałał - szukam przycisku Retry...');
           let retryButton = msg.parentElement?.querySelector('button[aria-label="Retry"]');
           if (!retryButton) {
             retryButton = msg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
@@ -983,13 +1083,22 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     let logInterval = 0;
     
     while (Date.now() - startTime < maxWaitMs) {
-      // Sprawdź czy pojawił się komunikat błędu i kliknij Retry
+      // Sprawdź czy pojawił się komunikat błędu i napraw przez Edit+Resend lub Retry
       const errorMessages = document.querySelectorAll('[class*="text"]');
       for (const msg of errorMessages) {
         if (msg.textContent.includes('Something went wrong while generating the response')) {
-          console.log('⚠️ Znaleziono komunikat błędu - szukam przycisku Retry...');
+          console.log('⚠️ Znaleziono komunikat błędu - próbuję naprawić...');
           
-          // Szukaj przycisku Retry w pobliżu komunikatu błędu
+          // Najpierw spróbuj Edit+Resend
+          const editSuccess = await tryEditResend();
+          if (editSuccess) {
+            console.log('✅ Naprawiono przez Edit+Resend - kontynuuję czekanie...');
+            await new Promise(resolve => setTimeout(resolve, 2000));
+            continue; // Kontynuuj czekanie w tej samej pętli
+          }
+          
+          // Jeśli Edit nie zadziałał, spróbuj Retry
+          console.log('⚠️ Edit+Resend nie zadziałał - szukam przycisku Retry...');
           let retryButton = msg.parentElement?.querySelector('button[aria-label="Retry"]');
           if (!retryButton) {
             retryButton = msg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
