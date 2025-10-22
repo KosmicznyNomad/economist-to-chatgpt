@@ -1,0 +1,183 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Wybierz artykuły do analizy portfela</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      padding: 20px;
+      background: #f5f5f5;
+    }
+    
+    .container {
+      max-width: 700px;
+      background: white;
+      border-radius: 8px;
+      padding: 24px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    
+    h1 {
+      font-size: 20px;
+      margin-bottom: 8px;
+      color: #333;
+    }
+    
+    .description {
+      font-size: 14px;
+      color: #666;
+      margin-bottom: 20px;
+      line-height: 1.5;
+    }
+    
+    .articles-list {
+      max-height: 400px;
+      overflow-y: auto;
+      margin-bottom: 16px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      padding: 12px;
+    }
+    
+    .article-item {
+      padding: 12px;
+      margin-bottom: 8px;
+      border: 2px solid #e0e0e0;
+      border-radius: 6px;
+      cursor: pointer;
+      transition: all 0.2s;
+      display: flex;
+      align-items: flex-start;
+      gap: 12px;
+    }
+    
+    .article-item:hover {
+      border-color: #4285f4;
+      background: #f8f9fa;
+    }
+    
+    .article-item.selected {
+      border-color: #4285f4;
+      background: #e8f0fe;
+    }
+    
+    .article-checkbox {
+      flex-shrink: 0;
+      width: 20px;
+      height: 20px;
+      margin-top: 2px;
+      cursor: pointer;
+    }
+    
+    .article-content {
+      flex: 1;
+    }
+    
+    .article-title {
+      font-size: 14px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 4px;
+      line-height: 1.4;
+    }
+    
+    .article-url {
+      font-size: 12px;
+      color: #888;
+      word-break: break-all;
+    }
+    
+    .info {
+      font-size: 13px;
+      color: #888;
+      margin-bottom: 16px;
+      padding: 10px;
+      background: #f8f9fa;
+      border-radius: 4px;
+    }
+    
+    .buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .left-buttons {
+      display: flex;
+      gap: 12px;
+    }
+    
+    button {
+      padding: 10px 20px;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    
+    .cancel-btn {
+      background: #f1f3f4;
+      color: #5f6368;
+    }
+    
+    .cancel-btn:hover {
+      background: #e8eaed;
+    }
+    
+    .select-all-btn {
+      background: #e8eaed;
+      color: #5f6368;
+    }
+    
+    .select-all-btn:hover {
+      background: #dadce0;
+    }
+    
+    .submit-btn {
+      background: #4285f4;
+      color: white;
+    }
+    
+    .submit-btn:hover {
+      background: #3367d6;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Wybierz artykuły do analizy portfela</h1>
+    <p class="description">
+      Zaznacz artykuły, które mają zostać dodatkowo przeanalizowane w kontekście portfela. 
+      Wszystkie artykuły zostaną przeanalizowane standardowo (analiza spółki).
+    </p>
+    
+    <div class="info" id="selectionInfo">Nie zaznaczono artykułów</div>
+    
+    <div class="articles-list" id="articlesList">
+      <!-- Artykuły będą wstawione przez JS -->
+    </div>
+    
+    <div class="buttons">
+      <div class="left-buttons">
+        <button class="cancel-btn" id="cancelBtn">Anuluj</button>
+        <button class="select-all-btn" id="selectAllBtn">Zaznacz wszystkie</button>
+      </div>
+      <button class="submit-btn" id="submitBtn">Dalej</button>
+    </div>
+  </div>
+
+  <script src="article-selector.js"></script>
+</body>
+</html>
+

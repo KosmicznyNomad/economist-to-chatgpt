@@ -1,0 +1,48 @@
+{
+  "manifest_version": 3,
+  "name": "News to ChatGPT",
+  "version": "2.0",
+  "description": "Kopiuje artykuły z news sites do ChatGPT z prompt chain",
+  "permissions": [
+    "tabs",
+    "scripting",
+    "contextMenus",
+    "storage"
+  ],
+  "host_permissions": [
+    "https://*.economist.com/*",
+    "https://asia.nikkei.com/*",
+    "https://*.caixinglobal.com/*",
+    "https://*.theafricareport.com/*",
+    "https://*.nzz.ch/*",
+    "https://*.project-syndicate.org/*",
+    "https://the-ken.com/*",
+    "https://chatgpt.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "action": {
+    "default_title": "Kopiuj artykuły do ChatGPT",
+    "default_popup": "popup.html"
+  },
+  "commands": {
+    "_execute_action": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+E"
+      }
+    },
+    "open_responses": {
+      "suggested_key": {
+        "default": "Ctrl+Shift+R"
+      },
+      "description": "Otwórz zebrane odpowiedzi"
+    }
+  },
+  "web_accessible_resources": [
+    {
+      "resources": ["prompt-dialog.html", "prompt-dialog.js", "article-selector.html", "article-selector.js", "responses.html", "responses.js", "prompts-company.txt", "prompts-portfolio.txt"],
+      "matches": ["<all_urls>"]
+    }
+  ]
+}

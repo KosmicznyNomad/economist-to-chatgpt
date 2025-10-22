@@ -1,0 +1,264 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Zebrane odpowiedzi ChatGPT</title>
+  <style>
+    * {
+      margin: 0;
+      padding: 0;
+      box-sizing: border-box;
+    }
+    
+    body {
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      background: #f5f5f5;
+      padding: 20px;
+    }
+    
+    .container {
+      max-width: 1200px;
+      margin: 0 auto;
+    }
+    
+    .header {
+      background: white;
+      padding: 24px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      margin-bottom: 20px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    h1 {
+      font-size: 24px;
+      color: #333;
+    }
+    
+    .count {
+      font-size: 14px;
+      color: #666;
+      margin-top: 4px;
+    }
+    
+    .clear-btn {
+      padding: 10px 20px;
+      background: #dc3545;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    
+    .clear-btn:hover {
+      background: #c82333;
+    }
+    
+    .clear-btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    
+    .copy-all-btn {
+      padding: 10px 20px;
+      background: #28a745;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 14px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+    }
+    
+    .copy-all-btn:hover {
+      background: #218838;
+    }
+    
+    .copy-all-btn:disabled {
+      background: #ccc;
+      cursor: not-allowed;
+    }
+    
+    .copy-all-btn.copied {
+      background: #20c997;
+    }
+    
+    .responses-list {
+      display: flex;
+      flex-direction: column;
+      gap: 16px;
+    }
+    
+    .response-item {
+      background: white;
+      padding: 20px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+    }
+    
+    .response-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      margin-bottom: 12px;
+      padding-bottom: 12px;
+      border-bottom: 1px solid #eee;
+    }
+    
+    .response-meta {
+      flex: 1;
+    }
+    
+    .response-source {
+      font-size: 16px;
+      font-weight: 600;
+      color: #333;
+      margin-bottom: 4px;
+    }
+    
+    .response-time {
+      font-size: 13px;
+      color: #888;
+    }
+    
+    .copy-btn {
+      padding: 8px 16px;
+      background: #4285f4;
+      color: white;
+      border: none;
+      border-radius: 4px;
+      font-size: 13px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+    
+    .copy-btn:hover {
+      background: #3367d6;
+    }
+    
+    .copy-btn.copied {
+      background: #28a745;
+    }
+    
+    .response-text {
+      font-size: 14px;
+      line-height: 1.6;
+      color: #333;
+      white-space: pre-wrap;
+      word-wrap: break-word;
+      max-height: 300px;
+      overflow-y: auto;
+      padding: 12px;
+      background: #f8f9fa;
+      border-radius: 4px;
+    }
+    
+    .empty-state {
+      background: white;
+      padding: 60px 24px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      text-align: center;
+    }
+    
+    .empty-state h2 {
+      font-size: 20px;
+      color: #666;
+      margin-bottom: 8px;
+    }
+    
+    .empty-state p {
+      font-size: 14px;
+      color: #888;
+    }
+    
+    .section-header {
+      background: white;
+      padding: 20px 24px;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      margin-bottom: 16px;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+    }
+    
+    .section-title {
+      font-size: 18px;
+      font-weight: 600;
+      color: #333;
+    }
+    
+    .section-actions {
+      display: flex;
+      gap: 12px;
+      align-items: center;
+    }
+    
+    .section-count {
+      font-size: 14px;
+      color: #666;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <div class="header">
+      <div>
+        <h1>Zebrane odpowiedzi ChatGPT</h1>
+        <div class="count" id="responseCount">0 odpowiedzi</div>
+      </div>
+      <div style="display: flex; gap: 12px;">
+        <button class="clear-btn" id="clearBtn">Wyczyść wszystkie</button>
+      </div>
+    </div>
+    
+    <!-- Sekcja: Analiza spółki -->
+    <div class="section-header">
+      <h2 class="section-title">Analiza spółki</h2>
+      <div class="section-actions">
+        <span class="section-count" id="companyCount">0 odpowiedzi</span>
+        <button class="copy-all-btn" id="copyAllCompanyBtn">Kopiuj wszystkie</button>
+      </div>
+    </div>
+    
+    <div id="companyResponsesList" class="responses-list"></div>
+    
+    <div id="companyEmptyState" class="empty-state" style="display: none;">
+      <h2>Brak odpowiedzi z analizy spółki</h2>
+      <p>Odpowiedzi z analizy spółki będą pojawiać się tutaj</p>
+    </div>
+    
+    <!-- Separator -->
+    <div style="height: 40px;"></div>
+    
+    <!-- Sekcja: Analiza portfela -->
+    <div class="section-header">
+      <h2 class="section-title">Analiza portfela</h2>
+      <div class="section-actions">
+        <span class="section-count" id="portfolioCount">0 odpowiedzi</span>
+        <button class="copy-all-btn" id="copyAllPortfolioBtn">Kopiuj wszystkie</button>
+      </div>
+    </div>
+    
+    <div id="portfolioResponsesList" class="responses-list"></div>
+    
+    <div id="portfolioEmptyState" class="empty-state" style="display: none;">
+      <h2>Brak odpowiedzi z analizy portfela</h2>
+      <p>Odpowiedzi z analizy portfela będą pojawiać się tutaj</p>
+    </div>
+  </div>
+
+  <script src="responses.js"></script>
+</body>
+</html>
+

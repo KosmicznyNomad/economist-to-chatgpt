@@ -1,0 +1,89 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="utf-8">
+  <style>
+    body {
+      width: 280px;
+      padding: 16px;
+      margin: 0;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+    }
+    
+    .title {
+      color: white;
+      font-size: 18px;
+      font-weight: 600;
+      margin-bottom: 16px;
+      text-align: center;
+    }
+    
+    .btn {
+      display: block;
+      width: 100%;
+      padding: 12px 16px;
+      margin-bottom: 10px;
+      background: white;
+      color: #667eea;
+      border: none;
+      border-radius: 8px;
+      font-size: 14px;
+      font-weight: 600;
+      cursor: pointer;
+      transition: transform 0.2s, box-shadow 0.2s;
+      text-align: left;
+    }
+    
+    .btn:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+    }
+    
+    .btn:active {
+      transform: translateY(0);
+    }
+    
+    .btn-icon {
+      margin-right: 8px;
+    }
+    
+    .shortcut {
+      float: right;
+      font-size: 11px;
+      opacity: 0.6;
+      font-weight: 400;
+    }
+    
+    .info {
+      color: rgba(255,255,255,0.9);
+      font-size: 12px;
+      text-align: center;
+      margin-top: 8px;
+      line-height: 1.4;
+    }
+  </style>
+</head>
+<body>
+  <div class="title">News → ChatGPT</div>
+  
+  <button class="btn" id="runBtn">
+    <span class="btn-icon">🚀</span>
+    Uruchom analizę
+    <span class="shortcut">Ctrl+Shift+E</span>
+  </button>
+  
+  <button class="btn" id="responsesBtn">
+    <span class="btn-icon">📋</span>
+    Zobacz odpowiedzi
+    <span class="shortcut">Ctrl+Shift+R</span>
+  </button>
+  
+  <div class="info">
+    Otwórz artykuły z obsługiwanych źródeł i kliknij "Uruchom analizę"
+  </div>
+  
+  <script src="popup.js"></script>
+</body>
+</html>
+

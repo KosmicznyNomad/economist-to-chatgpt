@@ -1,0 +1,1506 @@
+Investment Analysis Framework: 11-Stage Process
+This conversation will execute a comprehensive 11-stage investment analysis. Each stage builds on previous results, creating a systematic process from industry identification to final investment decision.
+The 11 Stages
+Stage 1: Porter's Five Forces + Capital Cycle Structural attractiveness analysis of industries linked to investment thesis. Porter's Five Forces assessment plus capital cycle overlay. Select top 2-3 most attractive industries.
+Stage 2: Stock Selection (15 Companies) Select 15 publicly traded companies based on thesis and Porter's analysis. Three tiers: 5 infrastructure plays (safest), 7 adjacent beneficiaries (less obvious), 3 high-conviction contrarian (currently overlooked).
+Stage 3: Competitive Position Analysis Narrow to 4 best-positioned companies. Deep analysis of market position, competitive advantages, business quality, and thesis exposure. Detailed profiles for each finalist.
+Stage 4: Pairwise Flip-Gate Head-to-head comparison of top 2 candidates. Probability analysis that #1 outperforms #2. Define conditions where #2 takes the lead. Position management rules.
+Stage 5: DuPont ROE Quality Assessment Decompose return on equity into three components: margins, asset efficiency, leverage. Determine if high returns come from operational strength or just debt. Forecast how thesis impacts each element.
+Stage 6: Thesis Monetization Quantification Convert thesis into actual dollars. How much new revenue? What margins? How much free cash flow? Value per share in three scenarios (bear/base/bull).
+Stage 7: Reverse DCF Determine what market has already priced in. What growth is in current stock price? How does your forecast differ from market expectations? Assess upside/downside asymmetry. Classification: strong buy / attractive / fair value / avoid.
+Stage 8: Four-Gate Framework Final investment decision through four filters: quality (risk elimination), value (market mispricing), proof (objective thesis validation), execution (position sizing and conditions). Output: BUY X% / AVOID.
+Stage 9: Simple Story Tell entire analysis in plain Polish language. No jargon or numbers. What's the company, why it might grow, what are risks, what could trigger growth. Easy-to-read format.
+Stage 10: Completeness Verification Check if all 9 previous stages were executed correctly with all required outputs. List what's complete, what's missing, what needs improvement.
+
+Process Rules
+Sequential: Complete each stage before moving to next
+Complete: Deliver all required outputs per stage
+Consistent: Findings from earlier stages feed into later ones
+Documented: All analytical reasoning captured in thinking blocks
+
+Ready to begin? In your next message, provide the source material with the investment thesis, and I'll start with Stage 1: Porter's Five Forces + Capital Cycle Analysis.
+Do you confirm you understand this framework?
+
+~
+
+You are a financial analyst specializing in Porter's Five Forces analysis combined with capital cycle and S-curve timing analysis for investment research. You will analyze industries connected to an investment thesis to identify structurally attractive opportunities with optimal timing and defensible positions.
+The investment thesis and source material you need to analyze is in the first user input and your response:
+Your task is to conduct a rigorous, systematic analysis that builds directly on previous thesis work to identify the top 2-3 most attractive industries for investment consideration.
+## Critical Requirements Based on System Architecture
+**Inheritance Mechanism**: You must explicitly import and build upon findings from the thesis analysis. Do not start from scratch - demonstrate how your industry analysis connects to the established thesis framework.
+**Evidence-Based Reasoning**: Every analytical conclusion must be supported by specific quotes from the source material. Do not invent metrics or make unsupported claims.
+**Multi-Dimensional Analysis**: Consider structure (Porter), timing (S-curve), and geography (local monopolies) as integrated factors, not separate modules.
+## Systematic Analysis Process
+Before providing your final output, conduct your analysis inside <analysis> tags within your thinking block following this systematic approach. It's OK for this section to be quite long, as you'll need to work through multiple industries and complex scoring frameworks.
+### Step 1: Thesis Inheritance and Comprehension
+- Quote the most important 3-5 findings from the thesis analysis verbatim to keep them top of mind
+- Identify the specific causal mechanisms that will drive value creation
+- Extract the time horizons and falsification criteria
+- Demonstrate understanding of where structural advantages will emerge
+### Step 2: Industry Extraction with Thesis Linkage
+- Extract 5-8 candidate industries directly linked to thesis value capture
+- For each industry, provide a Thesis Fit Score (1-5) based on centrality to thesis:
+ * 5 = Directly mentioned in thesis as critical component
+ * 4 = Logically flows from primary thesis causal mechanism
+ * 3 = Indirectly supports thesis execution
+ * 2 = Tangentially related
+ * 1 = Marginally relevant
+
+ MANDATORY: Only industries scoring 3+ advance to Porter analysis. If an industry scores below 3, explicitly note why you're excluding it from further analysis. This ensures you focus analytical resources on true structural opportunities.
+- Define what buyers actually purchase in each industry
+- Include upstream, midstream, and downstream segments where relevant
+- Only analyze industries scoring 3+ on Thesis Fit
+### Step 2.5: Sub-Segment Granularity Verification
+
+Before proceeding to detailed Porter analysis, verify each "industry" is sufficiently specific.
+
+For each candidate industry, ask:
+- Does this category contain multiple sub-segments with different competitive dynamics?
+- Would the same companies logically compete across all sub-segments?
+- Do different sub-segments have materially different S-curve stages?
+
+RED FLAG examples of insufficient granularity:
+- "Semiconductors" (too broad - equipment ≠ design ≠ fabrication)
+- "Renewable Energy" (too broad - solar ≠ wind ≠ storage)
+- "Data Centers" (too broad - hyperscale ≠ edge ≠ colocation)
+
+RULE: If two sub-segments have BOTH different S-curve stages AND different Porter dynamics (e.g., one is global commodity, other is regional monopoly), treat as separate industries.
+
+PRACTICAL TEST: If you cannot clearly define "what buyers purchase" without adding qualifiers like "depending on the segment," your industry definition is too broad.
+
+If needed, break broad categories into specific sub-segments before proceeding to Porter analysis. It's better to analyze 8-10 specific industries than 5-6 overly broad ones.
+### Step 3: Two-Part Porter Analysis
+For each qualifying industry, assess each force with both baseline and thesis impact. For each force, collect and quote specific evidence from the source material before making your assessment:
+**Format for each force:**
+- Evidence Quotes: Write down specific quotes that relate to this competitive force
+- Baseline Assessment: How does this force typically operate in this industry?
+- Thesis Impact: How does the specific thesis strengthen or weaken this force?
+- Adjusted Rating: Final force rating after considering thesis impact (write out the logic)
+**Five Forces to Assess:**
+1. Threat of New Entrants (barriers to entry)
+2. Bargaining Power of Suppliers (upstream dependencies)
+3. Bargaining Power of Buyers (customer concentration/price sensitivity)
+4. Threat of Substitutes (alternative solutions)
+5. Competitive Rivalry (intensity of competition)
+**CRITICAL: Porter Force Summary Table Requirement**
+
+For your top-scoring industries (those likely to be in final Top 2-3), you must create a Porter Force Breakdown table in your thinking section to ensure full traceability of scoring:
+
+| Force | Rating (Fav/Unfav) | Key Evidence (quote) | Thesis Impact | Contribution to Score |
+|-------|-------------------|----------------------|---------------|----------------------|
+| Threat of New Entrants | Low (Favorable) | "quote showing barriers" | Thesis strengthens barriers | +1 |
+| Supplier Power | Medium (Neutral) | "quote about suppliers" | Thesis neutral | 0 |
+| Buyer Power | High (Unfavorable) | "quote about buyers" | Thesis makes worse | 0 |
+| Threat of Substitutes | Low (Favorable) | "quote showing no alternatives" | Thesis eliminates substitutes | +1 |
+| Competitive Rivalry | Medium (Neutral) | "quote about competition" | Thesis consolidates | 0 |
+| **PORTER BASELINE SCORE** | | | | **2/5** |
+
+Then show Thesis Adjustment calculation:
+- Entry Barriers strengthened by thesis: +0.5
+- Substitutes eliminated by thesis: +0.5  
+- Buyer captivity created by thesis: +0.5
+- Urgency created by thesis: +0.5
+**THESIS ADJUSTMENT: +2.0**
+
+This detailed breakdown ensures that when you report "Porter Score: 2, Thesis Adj: +2" in your final output, the reasoning is fully documented and challengeable. You don't need to duplicate this table in the final output—it's for your working analysis—but it must exist in your thinking process for top selections.
+
+### Step 4: S-Curve Stage Assessment
+For each industry, determine:
+- Current S-Curve Stage: 1=Emergence, 2=Inflection, 3=Maturity, 4=Saturation
+- Thesis-Driven Inflection: Does thesis catalyst move industry to different stage?
+- Timeline: When does inflection occur (0-12 months, 1-3 years, 3+ years)
+Confidence Level — Assignment Criteria
+High Confidence
+ Assign when evidence includes hard, committed triggers, such as:
+Explicit budget allocations with concrete amounts
+
+
+Treaty obligations or binding legal mandates
+
+
+Quantitative, verifiable targets
+
+
+Named deadlines or delivery dates
+
+
+Multiple corroborating, independent sources
+
+
+
+Medium Confidence
+ Assign when the claim is policy-dependent but likely, based on:
+Government statements of intent, without firm budget or law
+
+
+Mentioned programs with unclear timing or scale
+
+
+Requires sustained political will but remains plausible
+
+
+Based on a single source or implied context
+
+
+Still pending regulatory or legislative approval
+
+
+
+Low Confidence
+ Assign when the claim is aspirational or highly uncertain, characterized by:
+Vague or tentative future intentions
+
+
+Dependence on immature or unproven technology
+
+
+Presence of multiple political or technical hurdles
+
+
+Contradictory or inconsistent signals
+
+
+Very long time horizon (5+ years) with many dependencies
+
+
+
+Borderline Cases
+ When uncertain, err toward the lower confidence level.
+ Always document reasoning, e.g.:
+Rated Medium, not High, because while a budget is mentioned, allocation to this specific sub-segment is implied, not explicit.
+- Supporting Evidence: Quote relevant material supporting your stage assessment
+### Step 5: Regional Lock-In Analysis
+For each industry, assess geographic competitive dynamics:
+
+- Regional Lock-In Score (0-3): 0=global commodity, 3=local natural monopoly
+- Evidence for regional advantages (permits, relationships, physical assets)
+- Thesis impact on local bottlenecks
+- Local market sizing vs. global market context using this approach:
+  
+  Since source material rarely provides precise local market numbers, use triangulation:
+ 
+  1. Start with global market size if mentioned (or reasonable estimate)
+  2. Estimate relevant geography's share based on population/GDP/regulatory scope
+  3. Narrow to addressable segment (what % requires this specific sub-segment?)
+  4. State your assumptions explicitly
+  5. Provide range rather than false precision (e.g., "$50-150M" not "$87M")
+  
+  **IMPORTANT: Attempt triangulation before defaulting to "Not disclosed"**
+  
+    ONLY use "Not disclosed" when there is truly no reasonable basis for even a rough estimate. If source gives you ANY quantitative hook (budget figures, unit counts, timelines), attempt calculation.
+  
+### Step 6: Qualitative Supply-Demand Assessment
+Based on source material evidence, assess:
+- Supply Constraint Signals: bottlenecks, lead times, capacity shortages (quote evidence)
+- Demand Acceleration Signals: urgent needs, mandates, exponential growth (quote evidence)
+- Capital Discipline Signals: high barriers, consolidation, financing difficulty (quote evidence)
+- Overall Assessment: Supply Deficit/Balanced/Oversupply Risk
+### Step 7: Integrated Scoring
+Calculate composite scores transparently, showing your work step by step:
+- Porter Score (0-5): +1 for each favorable force (write out: Force 1: +1, Force 2: +0, etc.)
+- Thesis Adjustment (-2 to +2): Net impact of thesis on competitive position
+- S-Curve Inflection Bonus (0-3): +3 immediate, +2 near-term, +1 sustained
+- Local Champion Bonus (0-3): Based on Regional Lock-In Score and thesis impact
+- Final Score (0-14): Sum of all components (show the math: X + Y + Z = Final)
+### Step 8: Sub-Segment Granularity Check
+Verify each "industry" is sufficiently specific:
+- Can the same company logically compete across all sub-segments?
+- Do sub-segments have materially different competitive dynamics?
+- If no to first or yes to second, break into separate industries
+## Required Output Format
+After completing your analysis, provide exactly these three sections:
+**A) Comparative Ranking Table**
+Create a table with these columns:
+| Industry | Porter Score (0-5) | Thesis Adj | S-Curve Bonus | Local Bonus | Final Score | Tier | Key Strength | Key Weakness | Inflection Timeline |
+**B) S-Curve Inflection Map**
+Focus on timing opportunities:
+| Industry | Current Stage | Inflection (Y/N) | Timeline | Catalyst | Confidence | Priority |
+**C) Local Champion Opportunities**
+For industries with Regional Lock-In Score ≥2:
+| Industry | Lock-In Score | Local Market Size | Expansion Projection | Required Attributes | Timing |
+Then provide:
+- **Top 2-3 Selections**: List your highest-scoring industries with one sentence each explaining how they capture structural value from the thesis
+- **Investment Thesis Summary**: For each selection, write 3-4 sentences explaining the thesis linkage, competitive dynamics, timing, and potential returns
+## Example Output Structure
+**A) Comparative Ranking Table**
+| Industry | Porter Score | Thesis Adj | S-Curve Bonus | Local Bonus | Final Score | Tier | Key Strength | Key Weakness | Inflection Timeline |
+|----------|--------------|------------|---------------|-------------|-------------|------|--------------|--------------|-------------------|
+| [Industry Name] | [0-5] | [-2 to +2] | [0-3] | [0-3] | [0-14] | [S/1/2/3] | [Force + reason] | [Force + reason] | [0-12mo/1-3yr/3+yr] |
+**B) S-Curve Inflection Map**
+| Industry | Current Stage | Inflection | Timeline | Catalyst | Confidence | Priority |
+|----------|---------------|------------|----------|----------|------------|----------|
+| [Industry] | [1-4] | [Y/N] | [Timeline] | [Quoted catalyst] | [H/M/L] | [H/M/L] |
+**C) Local Champion Opportunities**
+| Industry | Lock-In Score | Local Market Size | Expansion Projection | Required Attributes | Timing |
+|----------|---------------|-------------------|---------------------|-------------------|---------|
+| [Industry] | [0-3] | [$X million] | [Growth projection] | [Key capabilities] | [When acute] |
+**Top 2-3 Selections:**
+- [Industry Name]: [One sentence explaining structural value capture from thesis]
+**Investment Thesis Summary:**
+**[Industry Name]**: [3-4 sentences explaining thesis linkage, competitive dynamics, timing, and potential returns]
+Your final output should consist only of the three tables, top selections, and investment thesis summaries as specified above. Do not duplicate or rehash any of the analytical work you performed in the thinking block.
+
+~
+The investment thesis you need to analyze is in the first response:
+
+You are an expert investment analyst tasked with identifying 15 high-conviction stock picks based on a specific investment thesis. You will use Capital Cycles reasoning and systematic analysis to identify companies best positioned to benefit from structural and cyclical dynamics over a 3-5 year timeframe.
+## Your Analysis Framework
+You must work through 7 systematic analysis phases. Conduct your reasoning, research queries, calculations, and filtering decisions inside <systematic_analysis> tags within your thinking block before presenting your final recommendations. It's OK for this section to be quite long given the detailed nature of the 7-phase analysis.
+### Phase 1: Thesis Decomposition & Capital Flow Analysis
+Extract and decompose the thesis into:
+**Source Reasoning (Capital Flow Physics):**
+- Who is actually paying TODAY (not "will want to")
+- Which value chain elements CANNOT be easily replicated
+- Are spending decisions concentrated (few buyers) or fragmented?
+**Value Flow Mapping:**
+- 1st order: Direct recipients of new spending
+- 2nd order: Suppliers/enablers to 1st order
+- 3rd order: Bottlenecks/constraints that must scale
+- 4th order: Unintended beneficiaries (hidden leverage)
+**Structural Mechanisms (Non-linear exploders):**
+- Non-bypassable chokepoints in value chain
+- Operational leverage points (where 2x volume → 4x profit)
+- Asymmetric access advantages (regulatory, data, network)
+**Dynamic Timing Evidence:**
+- Signs of tension NOW (lead times, backlogs, pricing > volume)
+- Transitions from projects → long contracts (revenue visibility)
+- Regulatory/tech changes activating latent economic power
+In your analysis, quote specific parts of the thesis that support each element and write down your reasoning for how the capital flows will actually work.
+### Phase 2: Market Segmentation & Opportunity Sizing
+Identify market segments and estimate:
+- Total addressable market size for each segment
+- Current penetration rates
+- Growth trajectory assumptions
+- Key adoption drivers and barriers
+Document your assumptions and calculations explicitly.
+### Phase 3: Company Universe Generation (Exposure-Based)
+Generate initial candidate list (20-30 companies maximum) using exposure-based prioritization:
+**Target Distribution (15 companies total):**
+*PRIMARY CRITERION - Thesis Exposure:*
+- Core Plays: 6-9 companies with thesis exposure >40% of company value
+→ These monetize the thesis directly and should dominate the list
+- Material Plays: 4-6 companies with thesis exposure 20-40% of company value
+→ Significant benefit but diversified across other revenue streams
+- Catalytic Plays: 0-3 companies with thesis exposure 10-20% of company value
+→ Only if Category Leader with exceptional moat where thesis = upside optionality
+*SECONDARY CRITERION - Market Cap Diversity (risk management):*
+- Ensure representation across at least 3 market cap segments
+- No fixed quotas per segment - let thesis exposure determine natural distribution
+Liquidity floor: Maximum 3 companies with avg daily volume <$5M
+→ If thesis points to >3 illiquid opportunities, flag for position sizing (<2% each)
+→ Never exclude Core Play solely due to liquidity - adjust sizing instead
+*PRIORITIZATION RULES:*
+1. Small-cap with 60% exposure > Large-cap with 15% exposure
+2. If Core Plays yield 12+ candidates → select best 9, reduce/skip Material/Catalytic
+3. If thesis naturally clusters in one cap segment → embrace it, don't force diversity
+4. Eliminate Catalytic entirely if 15 strong Core+Material candidates exist
+**Documentation Requirement:**
+For each company, state: "Thesis exposure: X%, Tier: Core/Material/Catalytic, Cap: $XB"
+List out each candidate company with this information explicitly documented.
+### Phase 4: Competitive Positioning & Moat Analysis
+Apply sequential filters to each candidate:
+**Filter 1: Replaceability Test**
+"If this company disappears tomorrow - who specifically takes their place?"
+- No one specific / value fragments → PASS (unique position)
+- Anyone can easily replace → FAIL (commoditized)
+**Filter 2: Moat Scoring (Additive Model)**
+Score each moat source (0 = absent, 1 = developing, 2 = strong):
+- Network effects (critical mass + self-reinforcing)
+- Switching costs (>$1M + >6mo + technical integration)
+- Regulatory barriers (>2yr qualification + standards influence)
+- Proprietary assets (data/tech/IP competitors can't replicate)
+- Brand/trust (>20% premium without share loss)
+- Scale economies (LRMC declining with volume)
+Total Moat Score:
+- 6+ points = Strong moat → Priority candidate
+- 3-5 points = Moderate moat → Acceptable if other factors strong
+- 0-2 points = Weak/No moat → Eliminate UNLESS:
+* First-mover in emerging category (<2 years old)
+* Execution velocity >2x competitors (measured by product releases, customer wins)
+* Market share trajectory +10pp/year for 2 consecutive years
+**Filter 3: Market Position (Context-Dependent)**
+*For MATURE markets (>5 years post-emergence):*
+- Category Leader → strong signal
+- Strong Contender → acceptable
+- Follower → eliminate
+*For EMERGING markets (<3 years post-emergence):*
+Ask: "Who's gaining share fastest?" and "Who owns the new use case?"
+- Market Shaper: Defining new category (even if small today)
+- Fast Follower: Credible copy + execution speed
+- Legacy Player: Adapting old business model → eliminate unless proven
+Document elimination decisions explicitly with reasoning for each company, showing the specific scores and filter results.
+### Phase 5: Valuation, Margin of Safety & Asymmetry Assessment
+For remaining candidates, create detailed assessment:
+**Thesis Sensitivity** (quantify both revenue and profit):
+- Thesis revenue TODAY: $X (Y% of total)
+- Thesis revenue Year 3: $X (Y% of total)
+- Thesis EBIT TODAY: $X (Y% of total EBIT)
+- Thesis EBIT Year 3: $X (Y% of total EBIT)
+- Margin delta: Thesis margin vs company average margin
+- Value exposure: Thesis NPV / Current Market Cap = Z%
+→ Z% >50% = Pure-play
+→ Z% 30-50% = Material
+→ Z% <30% = Marginal
+**Asymmetry Calculation (Scenario-Based):**
+*Scenario Definitions:*
+- Bear case = "Thesis fails BUT company survives with core business"
+* For diversified (thesis <30%): Model company without thesis revenue
+* For pure-plays (thesis >60%): Model 50% haircut + pivot to adjacent market
+- Base case = "Thesis unfolds as modeled in Phase 1"
+- Bull case = "Thesis accelerates beyond base case assumptions"
+*Asymmetry Assessment:*
+- Pure-plays (>60% exposure): Asymmetry >3:1 required
+- Diversified (<30% exposure): Asymmetry >2:1 acceptable if Category Leader
+- Asymmetry <2:1 → AUTO-ELIMINATE regardless of moat
+Show all mathematical calculations step-by-step for each valuation assessment, writing out each computation explicitly.
+### Phase 6: Market Timing & Risk Filter
+For each passing candidate, calculate Context-Adjusted Overheating Risk Score (0-10):
+**Add points:**
+- +3 pts: YTD return >+40% vs S&P BUT thesis revenue <20% total
+- +2 pts: Forward P/S >2.5x historical average AND no new catalysts in 90 days
+- +2 pts: Price within 3% of 52-week high AND volume declining last 30 days
+- +2 pts: Short interest <2% AND stock is large-cap (>$10B)
+- +1 pt: 3+ analyst upgrades in 90 days AND average price target <+15% from current
+**Subtract points for positive signals:**
+- -2 pts: Insider buying >$1M in last 90 days
+- -1 pt: Institutional ownership increasing +5pp YoY
+- -1 pt: New customer wins disclosed in last quarter
+**Classification:**
+- <2: STRONG BUY WINDOW
+- 2-4: HEALTHY
+- 5-7: ELEVATED (wait for 10-15% pullback)
+- 8+: OVERHEATED (avoid or size <2%)
+Document EVERY search query used and create summary table: Ticker | Price | YTD% | Score | Classification
+### Phase 7: Historical Analog & Timing Analysis
+For each serious candidate:
+- Historical analog with specific company/years
+- Inflection metric showing convex acceleration
+- Adoption percentage assessment
+- Key differentiating factor from historical analog
+## Selection Constraints
+**Final selection (15 stocks):**
+*EXPOSURE-BASED TIERS (mandatory distribution):*
+- Core Plays (thesis >40% of value): 6-9 companies
+- Material Plays (thesis 20-40% of value): 4-6 companies
+- Catalytic Plays (thesis 10-20% of value): 0-3 companies
+*CONSTRAINTS:*
+- Minimum 6 Core Plays required
+- If <6 Core Plays identified → THESIS IS WEAK, abort or revise thesis
+- Maximum 2 Catalytic Plays allowed
+- Maximum 2 stocks with overheating score ≥7
+- Minimum 8 stocks with score ≤4
+## Required Output Format
+Present your final 15 selections using this exact structure for each stock:
+**[Company Name] ([TICKER])**
+**Value flow position**: [How company benefits from thesis - specify order (1st/2nd/3rd/4th) and specific revenue/cost impact mechanism]
+**Financial snapshot**: [Key metrics, growth rates, profitability, balance sheet strength with specific numbers]
+**Competitive moat**: [Classification (Strong/Moderate/Weak), sustainable advantages, market position, differentiation factors]
+**Margin of safety summary**: [Current valuation vs intrinsic value, downside protection, risk-reward asymmetry ratio with calculations]
+**Historical parallel**: [Specific company/time period analog, key similarities and differences, what made that situation successful]
+**Adoption timing**: [Expected inflection points, adoption curve position, catalyst timeline with specific dates/metrics]
+**Market timing**: Price $[X], YTD [±%] vs S&P | 52W range position [%] | Overheat score: [X]/10
+**Risk factors**: [Key risks that could impair thesis or company-specific performance]
+### Example Format (Generic):
+**[Generic Technology Company] ([GTCH])**
+**Value flow position**: 2nd order supplier providing critical components to 1st order beneficiaries, generating 45% of revenue from thesis-related segments
+**Financial snapshot**: Revenue $2.1B (25% CAGR), EBITDA margin 18%, Net cash $400M, ROE 15%
+**Competitive moat**: Strong (7/12 points) - switching costs + regulatory barriers + proprietary technology
+**Margin of safety summary**: Trading at 3.2x EV/Sales vs 4.1x historical average, 4.2:1 risk-reward asymmetry
+**Historical parallel**: Company ABC 2015-2018 during Industry Transition X, similar dynamics but stronger market position today
+**Adoption timing**: Inflection expected Q2 2025 based on customer procurement cycles, currently 15% penetrated
+**Market timing**: Price $45.20, YTD +12% vs S&P | 52W range 35% | Overheat score: 3/10
+**Risk factors**: Customer concentration (top 3 = 60% revenue), regulatory changes in Region Y could impact 25% of business
+## Summary Analysis
+After presenting all 15 stocks, provide:
+- Selection rationale: Why these specific companies versus others
+- Second-level insights that drove your selection process
+- Consensus mispricing opportunities identified
+- Market timing distribution and rationale
+- Entry sequencing recommendations
+- Position sizing logic based on conviction and liquidity
+- Expected 3-5 year outcome if thesis materializes
+- Portfolio falsifiers: 3 specific metrics/events with thresholds that would invalidate the thesis
+Work through your complete systematic analysis, documenting your thesis decomposition, candidate generation, filtering decisions with explicit reasoning, web search queries, step-by-step calculations, and selection rationale in your thinking block. Your final output should consist only of the 15 stock recommendations in the specified format followed by the summary analysis, and should not duplicate or rehash any of the systematic analysis work you performed in the thinking block.
+
+
+~
+You are an investment analyst conducting competitive position analysis of above positions to identify the 4 best-positioned companies to capture value from a specific investment thesis. Your approach follows the Tiger Global and Baillie Gifford philosophy: invest in market leadership at inflection points through structural deduction, not arithmetic scoring or cheap assets without trajectory.
+
+The investment thesis you need to analyze and list of companies is above.
+
+Your goal is to select 4 companies through qualitative structural deduction based on competitive advantages and market momentum. You must work through your analysis systematically, focusing on structural thinking rather than weighted scoring.
+
+## Analysis Framework
+
+Work through each company using this prioritized framework:
+
+**PHASE 1: UNIVERSE QUALIFICATION**
+For each company, ask: "If this firm disappears tomorrow - who specifically takes their place?"
+- No one specific / value would fragment → unique position, continue analyzing
+- Anyone can easily replace them → commoditized, eliminate
+
+**PHASE 2: MARKET POWER ASSESSMENT** 
+(Highest Priority - defines long-term winners)
+
+Classify remaining companies by asking: "Who will control pricing and standards in this market 3 years from now?"
+
+- **Category Leaders**: Define industry standards, competitors position against them, increasing distance from #2
+- **Strong Contenders**: Top 3 position, win in specific verticals, credible threat to leader, rising share
+- **Followers**: Reactive positioning, playing catch-up, no clear differentiation, losing ground
+
+Eliminate Followers unless they have exceptional moats.
+
+**PHASE 3: MOAT DEPTH ASSESSMENT**
+(Second Priority - determines durability)
+
+For each Leader/Contender, use decision trees to identify PRIMARY moat:
+
+*Network Effects Decision Tree:*
+- Are network effects present? → If yes: Have they achieved critical mass? → If yes: Do effects strengthen with scale? → Strong moat
+- If no network effects, continue to next moat type
+
+*Switching Costs Decision Tree:*
+- Migration cost >$1M + >6 months? → If yes: Technical integration or just contractual? → Technical = Strong moat
+- If low switching costs, continue to next moat type
+
+*Regulatory Barriers Decision Tree:*
+- New player qualification time >2 years? → If yes: Do they influence/shape standards? → If yes = Strong moat
+- If low barriers, continue to next moat type
+
+*Proprietary Data/Technology:*
+- Unique datasets competitors cannot replicate? OR enforced patent portfolio? OR talent concentration? → If yes = Moderate moat
+
+*Brand/Trust:*
+- Can charge 20%+ premium without losing share? → If yes = Weak moat (but acceptable if other factors strong)
+
+If no meaningful moat identified → Likely commodity, eliminate unless exceptional execution
+
+**PHASE 4: THESIS ACTIVATION CHECK**
+(Third Priority - validates timing)
+
+Look for evidence the thesis is ALREADY working:
+- Thesis-related revenue: Dollar amount, percentage of total, YoY growth rate
+- Pipeline momentum: Book-to-bill ratio >1.2 indicates acceleration  
+- Customer adoption: New logos, case studies, design wins in thesis-related areas
+- Momentum classification: Convex (accelerating), Linear (steady), or Concave (decelerating)
+
+Eliminate or watchlist companies with Concave momentum unless clear inflection point visible.
+
+**PHASE 5: FINANCIAL SUSTAINABILITY**
+Apply knockout criteria (eliminate if company fails 2+ of these):
+1. Revenue growth ≥15% YoY?
+2. FCF positive or clear path (not burning >$200M/year indefinitely)?  
+3. Debt/EBITDA <3x + liquidity >12 months?
+4. Revenue visibility: >30% recurring?
+
+**PHASE 6: STRUCTURAL SELECTION**
+Select 4 companies based on structural advantages:
+
+Selection Constraints:
+- Prioritize Category Leaders with expanding moats
+- Include max 1 Strong Contender only if momentum is Convex  
+- Ensure value chain diversity (avoid 4 companies in same position)
+- Maximum 2 companies from same industry
+- Prefer higher thesis exposure (>40% of company value)
+
+For tie-breaks, consider:
+- Track record of execution during previous market shifts
+- Position on adoption curve (earlier = more runway)
+- Competitive response time (faster = better)
+
+## Instructions
+
+Before providing your final selections, work through your structural thinking systematically in <analysis> tags inside your thinking block. In your analysis:
+
+1. First, list out all companies from the input to keep them organized
+2. Apply each phase sequentially to every company, explicitly documenting your decision for each company at each phase - this will help ensure no companies are accidentally overlooked. It's OK for this section to be quite long.
+3. For the moat assessment, work through each decision tree step-by-step for each remaining company, answering each question explicitly
+4. When comparing companies in tie-break situations, create explicit side-by-side comparisons showing the structural advantages of your chosen companies over the alternatives
+5. Include a "contrarian check": what would have to be true for a company you eliminated to actually be the best choice?
+
+After completing your analysis, provide your final output using this structure:
+
+**COMPETITIVE POSITION ANALYSIS RESULTS**
+
+**UNIVERSE QUALIFICATION**
+[List eliminated companies with brief elimination reason for each]
+
+**TOP 4 SELECTIONS**
+
+**#1: [COMPANY NAME] – [TICKER]**
+
+**WHY WINS:** [3 sentences explaining value capture mechanism + competitive advantage + catalyst]
+
+**POSITION SNAPSHOT:**
+• Market: [rank, share %, trajectory]  
+• Moat: [primary type + evidence]
+• GTM: [channel + efficiency metric]
+
+**THESIS TRACTION:**
+• Revenue: $[X]M thesis-related, +[Y]% YoY
+• Momentum: [convex/linear/concave]  
+• Adoption stage: [position on S-curve]
+• Pipeline: [book-to-bill, backlog trend]
+
+**BUSINESS QUALITY:**
+• LTV/CAC: [X]x, payback [Y] months
+• NRR: [X]%, FCF margin: [Y]%
+• Operating leverage: [EBIT scaling path]
+
+**FINANCIALS:**
+• Revenue: $[X]M, +[Y]% YoY
+• FCF: $[X]M, [Y]% margin  
+• Balance: [net cash or debt/EBITDA ratio]
+
+**EXPOSURE:** [High/Med/Low] - [X]% of value
+**MECHANISM:** [Specific: what they sell/to whom/at what price/why them]
+
+**PRIMARY RISK:** [One measurable risk, not generic]
+**CATALYST (6-12M):** [Specific upcoming event]
+
+**SELECTION REASONING:**
+• Why #1 not #5: [Specific structural advantage over next best alternative]
+• Primary concern: [What could break this thesis for this specific company]  
+• Confidence level: [High/Medium + reasoning]
+
+[Repeat this format for companies #2, #3, and #4]
+
+**PORTFOLIO SUMMARY**
+Universe: [total analyzed] → Finalists: 4 → Eliminated: [number]
+
+Value Capture Distribution:
+• #1: [position type + mechanism]
+• #2: [position type + mechanism]
+• #3: [position type + mechanism]  
+• #4: [position type + mechanism]
+
+Overall Stage: [Early Adopters/Early Majority/etc.]
+Key Catalysts: [2-3 events in next 6-12 months]
+
+Remember: Focus on structural competitive advantages and momentum, not valuation metrics. Seek companies that define categories rather than follow them, with expanding moats and accelerating thesis adoption. Your reasoning should demonstrate qualitative deduction, not arithmetic scoring.
+
+Your final output should consist only of the competitive position analysis results and should not duplicate or rehash any of the detailed phase-by-phase work you completed in the thinking block.
+~
+Pairwise Flip-Gate (Finalist #1 vs Finalist #2)
+
+Your task is to perform a direct head-to-head comparison between the top two finalists from Step 3. The goal is not just to rank them, but to:
+
+Quantify the probability that #1 outperforms #2.
+
+Identify the mechanism deltas (where they differ in value capture).
+
+Define the conditions under which #2 would surpass #1 (“switching frontier”).
+
+Evaluate the Value of Information (VOI) — whether it is worth delaying full position sizing until new data arrives.
+
+Provide clear positioning rules (core, shadow, or flip triggers).
+
+Required Analysis
+1. Mechanism Delta (PMD Table)
+
+Compare Finalist #1 and #2 across 6 key dimensions:
+
+Thesis capture rate
+
+Capture timing (speed of monetization)
+
+Incremental margin from thesis revenues
+
+Capital intensity / payback
+
+Share of contracted revenues (>3 years)
+
+Structural resilience (supply, regulation, customer concentration)
+
+For each dimension, present: KPI, value for #1, value for #2, delta (#1−#2), and the estimated EBIT/FCF impact.
+
+2. Probabilistic Scoring
+
+Normalize each dimension (z-scores).
+
+Apply weights: Capture 30%, Timing 20%, Margin 20%, Capex 10%, Contracted Revenues 10%, Resilience 10%.
+
+Calculate overall scores θ₁ and θ₂.
+
+Compute P(#1 > #2) = e^(θ₁) / (e^(θ₁) + e^(θ₂)).
+
+3. Switching Frontier (Dueling DCF)
+
+Use identical assumptions for WACC, horizon, and terminal value.
+
+Let capture, timing, incremental margin, and reinvestment differ.
+
+Identify the combinations where NPV(#2) ≥ NPV(#1).
+
+Output the delta-to-flip (minimum change in capture rate or timing needed for #2 to outperform).
+
+4. Value of Information (VOI)
+
+Run a sensitivity test for both candidates.
+
+Highlight the top 1–2 parameters driving the largest NPV difference.
+
+Estimate VOI = |ΔNPV| × probability that new evidence will change the decision.
+
+State whether waiting for that information justifies holding a partial/shadow position instead of full size.
+
+5. Positioning Rules
+
+If P(#1 > #2) ≥ 60% and margin of safety for #1 is ≥5pp stronger than #2 → make #1 the core position; keep #2 as shadow (≤30%).
+
+If the Switching Frontier is crossed for 2 consecutive reporting periods → flip allocation to #2 (50–100%).
+
+Document hard flip triggers (e.g., backlog growth, book-to-bill ratio, utilization rates, margin improvement).
+
+Required Output
+
+Pairwise Mechanism Delta table with KPIs and EBIT/FCF impact.
+
+Probabilistic win score (θ₁, θ₂, and P(#1 > #2)).
+
+Switching Frontier description with delta-to-flip.
+
+VOI analysis with conclusion (wait vs. act now).
+
+Final positioning recommendation (core/shadow, flip conditions, and kill-switches).
+~
+# DuPont ROE Quality Assessment
+
+## Context
+
+You selected one company through competitive position analysis. Bottom-Up validated business model strength and thesis-fit. Now assess financial performance quality by decomposing return on equity into operational drivers and evaluating how thesis transformation impacts these drivers.
+
+## Analytical Purpose
+
+DuPont framework disaggregates ROE into three components revealing whether returns stem from operational excellence, asset efficiency, or financial leverage. For thesis-driven investments, the critical question is whether market transformation improves ROE quality by strengthening operational drivers or merely maintains returns through increased leverage.
+
+## Framework Application
+
+Calculate ROE decomposition using most recent fiscal year data. Return on Equity equals Net Profit Margin multiplied by Asset Turnover multiplied by Equity Multiplier. Net Profit Margin measures operational efficiency through net income divided by revenue. Asset Turnover measures asset utilization through revenue divided by total assets. Equity Multiplier measures financial leverage through total assets divided by shareholders equity.
+
+Show your calculations for each component and verify that their multiplication produces the reported ROE. If discrepancies exist, explain the variance source.
+
+## Component Analysis
+
+Evaluate each driver independently then assess their interaction. For Net Profit Margin, determine whether current margin reflects sustainable operational efficiency or temporary factors. Compare to industry benchmarks and identify margin trajectory over past three years. Assess whether margin expansion or compression is occurring and what drives the trend.
+
+For Asset Turnover, evaluate how efficiently the company generates revenue from its asset base. Compare to capital-intensive versus asset-light peers in the sector. Determine whether low turnover reflects strategic positioning requiring heavy assets or operational inefficiency. Identify turnover trajectory and whether asset base is growing faster or slower than revenue.
+
+For Equity Multiplier, assess leverage appropriateness for the business model and industry. Distinguish between financial leverage enhancing returns and leverage creating financial fragility. Evaluate debt maturity profile, interest coverage, and covenant headroom. Determine whether leverage is increasing or decreasing and the strategic rationale.
+
+## Thesis Impact on ROE Drivers
+
+This is where DuPont analysis integrates with your investment thesis. Assess how market transformation will impact each component over the next three years.
+
+For margin trajectory under thesis, determine whether transformation enables pricing power expansion through increased differentiation or market consolidation. Consider whether thesis drives unit cost reduction through scale economies or automation. Evaluate whether competitive dynamics intensify margin pressure through commoditization or new entry. Conclude whether thesis improves, maintains, or compresses net profit margins.
+
+For asset efficiency evolution, assess whether thesis drives revenue growth on existing asset base improving turnover. Consider whether thesis requires significant asset additions reducing turnover. Determine whether business model shifts toward asset-light operations. Conclude whether thesis improves, maintains, or deteriorates asset turnover.
+
+For leverage implications, evaluate whether thesis requires debt-financed capital expenditures increasing equity multiplier. Consider whether thesis generates excess cash enabling deleveraging. Assess whether transformation risk necessitates balance sheet conservatism. Conclude whether thesis increases, maintains, or reduces financial leverage.
+
+## Integrated ROE Forecast
+
+Synthesize component trajectories into forward ROE projection. State current ROE from your calculations. Project thesis-adjusted ROE three years forward based on component analysis. Identify which component contributes most to ROE change under thesis. Determine whether projected ROE improvement stems from operational enhancement or financial engineering.
+
+## Quality Assessment
+
+Conclude whether current ROE represents sustainable competitive advantage or financial structure artifact. High ROE driven by superior margins and asset efficiency with moderate leverage indicates durable quality. High ROE driven primarily by equity multiplier with mediocre operational metrics indicates financial engineering masking operational weakness.
+
+Assess whether thesis transformation improves ROE quality by strengthening operational components or degrades quality by requiring margin sacrifice or asset-heavy investment despite revenue growth. Compare ROE quality versus finalists from competitive position analysis if multiple companies were evaluated.
+
+## Required Output
+
+# DuPont ROE Quality Assessment - Output Requirements
+
+**ROE Decomposition:**
+- Net Profit Margin = ___%
+- Asset Turnover = __x
+- Equity Multiplier = __x
+- ROE = NPM × Turnover × Multiplier = ___%
+
+Verify calculation matches reported ROE.
+
+**Thesis Impact (Year 3 projection):**
+- Net Profit Margin: baseline __% → thesis-adjusted __% (reason: ___)
+- Asset Turnover: baseline __x → thesis-adjusted __x (reason: ___)
+- Equity Multiplier: baseline __x → thesis-adjusted __x (reason: ___)
+- Projected ROE Year 3: ___%
+
+**Quality Assessment:**
+Does ROE stem from operational excellence (margins + efficiency) or financial leverage?
+Does thesis improve or degrade ROE quality?
+
+**Pass to Thesis Monetization:**
+- Current Net Profit Margin: ___%
+- Thesis-adjusted Net Profit Margin (Y3): ___%
+- Current Asset Turnover: __x
+- Thesis-adjusted Asset Turnover (Y3): __x
+
+Advance to Thesis Monetization Quantification.
+~
+ THESIS MONETIZATION QUANTIFICATION
+
+## What You're Doing
+
+Calculate how much money the thesis generates and what that's worth per share. Use DuPont findings as your margin and efficiency baseline.
+
+---
+
+## Required Inputs First
+
+Before calculating anything, collect these base assumptions:
+
+- Currency and FX rate
+- Base fiscal year for comparison
+- Tax rate
+- WACC (discount rate)
+- Change in net working capital as % of revenue change
+- Maintenance capex as % of revenue
+- Growth capex as % of incremental revenue
+- Current capacity utilization rate
+- Fully diluted shares outstanding
+
+---
+
+## Three-Layer Valuation
+
+### 1. Size the Incremental Pool
+
+Calculate how many new dollars the thesis creates using three methods:
+
+**Method A**: Count affected entities, multiply by spending increase per entity, multiply by adoption rate.
+
+**Method B**: Get TAM forecasts from industry analysts. Adjust for inflation and policy changes.
+
+**Method C**: Find a similar historical transformation. Use its growth rate, adjust for structural differences.
+
+All three should land within 2x of each other. If not, fix your assumptions.
+
+Build three scenarios based on adoption speed: Bear (slow), Base (medium), Bull (fast). Assign 25%, 50%, 25% probabilities unless data suggests otherwise.
+
+Split by geography if the company has regional concentration.
+
+**Deliver**: Table showing pool, capture %, resulting revenue Years 1-3 for each scenario.
+---
+
+### 2. Calculate Capture Rate
+
+Run the pool through four filters:
+
+**Geographic**: What % of pool is in regions company operates? Check 10-K.
+
+**Product**: What % needs this company's solution specifically? Check Porter's substitution analysis.
+
+**Channel**: Can company reach these buyers? Calculate: Sales headcount × quota per rep × attainment rate.
+
+**Win rate**: What % of competitive deals does company win? Use disclosed data or infer from market share trends.
+
+Multiply the four filters. That's addressable revenue.
+
+Check capacity: Can they deliver this volume? Calculate throughput as headcount × quota × attainment × utilization. If capture exceeds throughput, either cap it or note the investment needed.
+
+**Deliver**: Table showing pool, capture %, resulting revenue Years 1-3 for each scenario. Flag any capacity constraints.
+
+---
+
+### 3. Model Margin Structure
+
+Start with current margins from DuPont analysis.
+
+**Gross margin**: Adjust current GM for thesis-specific factors. Premium pricing adds points. Scale economies add points. Product complexity subtracts points. Competitive pressure subtracts points. Quantify each.
+
+**Operating margin**: Thesis EBIT improves with utilization. Use: EBIT% = Base_EBIT% + 50bps per 10pp utilization increase.
+
+**FCF margin**: Subtract capex and working capital needs from operating profit after tax.
+
+Formula: **FCF = EBIT × (1 - Tax) + D&A - (Maintenance_Capex + Growth_Capex) - ΔNWC**
+
+**Deliver**: Table showing gross margin, EBIT margin, FCF margin Years 1-3 for each scenario. State the DuPont connection: "Net margin moves from X% to Y%, asset turnover from A to B."
+
+---
+
+### 4. Calculate NPV Per Share
+
+Project free cash flow Years 1-3 using revenue from Step 2 and margins from Step 3.
+
+Calculate terminal value: TV = Year_3_FCF × (1 + perpetual_growth) / (WACC - perpetual_growth)
+
+Use 2-3% perpetual growth (lower end for mature markets, higher for structural growth).
+
+Discount everything back to present at WACC. Sum them. Divide by fully diluted shares.
+
+Run all three scenarios. Weight by probabilities for expected value.
+
+**Critical reverse calculation**: Solve for what capture rate makes NPV equal current market cap. That's what the market expects. Compare to your base case.
+
+**Deliver**: 
+
+Table with columns: Scenario, Pool Y3, Capture %, Revenue Y3, FCF margin, NPV per share, % of current price.
+
+Below table state:
+- Expected value (probability-weighted)
+- Market implied capture rate vs. your base case
+- Resulting upside if you're right
+
+Run sensitivity on ±5pp capture, ±150bps FCF margin, ±100bps WACC.
+
+---
+
+## What to Monitor
+
+List the three variables that drive 80% of NPV variance.
+
+Format: Variable name | Current value | Bull case needs | Specific metric to track and frequency.
+
+---
+
+## When to Exit
+
+State objective conditions that invalidate the thesis.
+
+Format: Exit if [metric] crosses [threshold] for [duration].
+
+---
+
+# Package for Next Stage
+
+Provide these fields for Reverse DCF:
+
+**Company basics:**
+- Ticker
+- Current stock price
+- Fully diluted shares outstanding
+
+**Market valuation:**
+- Market capitalization (price × shares)
+- Net debt (total debt minus cash)
+- Enterprise Value (market cap + net debt)
+
+**Discount rate:**
+- WACC used in NPV calculations
+
+**Three scenarios (Years 1-3):**
+
+Bear case (25% probability):
+- Revenue CAGR
+- FCF margin Year 3
+- NPV per share
+
+Base case (50% probability):
+- Revenue CAGR
+- FCF margin Year 3
+- NPV per share
+
+Bull case (25% probability):
+- Revenue CAGR
+- FCF margin Year 3
+- NPV per share
+
+**Summary metrics:**
+- Expected NPV per share (probability-weighted: 0.25×Bear + 0.50×Base + 0.25×Bull)
+- Market-implied capture rate vs. your Base case assumption
+- DuPont margin evolution: Net profit margin baseline → thesis-adjusted
+
+**Verify before advancing:**
+All three NPV values calculated? Enterprise Value includes net debt? WACC documented?
+
+Advance to Reverse DCF.
+~
+You are conducting a Reverse DCF analysis to determine what growth expectations are already priced into a stock and whether there's an actionable investment opportunity. This analysis follows prior fundamental research stages and focuses on finding where your view differs from market expectations.
+## Framework Philosophy
+Your goal is not to calculate fair value, but to extract what expectations are already embedded in the current stock price and compare them to your thesis. Alpha comes from finding gaps between your view and what's priced in.
+## Analysis Requirements
+**Computational Requirements:**
+- Use Python for all numerical calculations (DCF, CAGR, NPV, return multiples)
+- Verify current market data (stock price, market cap) using internet search when needed
+- Explicitly note when calculations are performed using Python
+**Prerequisites Check:**
+Before proceeding, verify you have from the thesis monetization results:
+- Bear/Base/Bull NPV per share with scenario probabilities
+- Bear/Base/Bull revenue CAGR (Years 1-3)
+- Bear/Base/Bull FCF margin Year 3
+- WACC used in calculations
+- Current stock price and enterprise value
+If any data is missing, state what's needed and stop the analysis.
+## Step-by-Step Process
+### Step 1: Determine Market Position
+Compare current stock price to your three NPV scenarios. Calculate what percentage of your thesis is already priced in using:
+% Priced = (Current Price − Bear NPV) / (Bull NPV − Bear NPV) × 100%
+### Step 2: Solve for Market-Implied Growth
+Use linear interpolation between scenarios to determine what revenue CAGR the market is implying. If price falls between Bear and Base scenarios:
+Market CAGR = Bear CAGR + [(Price − Bear NPV) / (Base NPV − Bear NPV)] × (Base CAGR − Bear CAGR)
+Apply similar logic if price falls between Base and Bull scenarios.
+### Step 3: Calculate Risk-Reward Metrics
+Compute:
+- Expected value using scenario probabilities: (25% × Bear NPV) + (50% × Base NPV) + (25% × Bull NPV)
+- Upside/downside asymmetry ratio
+- 5-year annualized return CAGRs for each scenario: [(NPV / Current Price)^(1/5) - 1] × 100%
+- Return multiples: NPV / Current Price for each scenario
+### Step 4: Identify the Divergence
+Analyze why your view differs from market expectations. Common divergences include:
+- Market underestimating capture rates, monetization speed, margin leverage, TAM expansion
+- Market overestimating growth durability, margin expansion, market share sustainability
+## Tier Classification System
+**Tier 1 - Strong Buy:** Market-implied CAGR >500bps below Base case, Expected value >50% above current, Asymmetry >4:1, Bull case >5x return (>38% CAGR), Base case >2.5x return (>20% CAGR), Bear downside <40%
+**Tier 2 - Attractive:** Market-implied CAGR >300bps below Base case, Expected value >30% above current, Asymmetry >3:1, Bull case >3x return (>25% CAGR), Base case >1.8x return (>13% CAGR), Bear downside <50%
+**Tier 3 - Fair Value:** Market within ±200bps of Base case, Expected value 10-30% above current, Asymmetry 2-3:1, Bull case 2-3x return
+**Tier 4 - Avoid:** Market at/above Base case, Expected value <10% above current, Asymmetry <2:1, Bear case >50% downside
+## Required Output Format
+Your analysis must include:
+**1. Market Expectations**
+- Market-implied revenue CAGR (Python calculated)
+- Assessment vs. historical growth
+- Percentage of thesis already priced in
+**2. Scenario Comparison Table**
+Four-row table showing Bear/Market/Base/Bull with Revenue CAGR, FCF margin Y3, NPV/share, % vs. current price
+**3. Risk-Reward Analysis**
+- Expected value and percentage above/below current price
+- Asymmetry ratio
+- 5-year return profiles for each scenario (multiples and CAGRs, Python calculated)
+- Assessment of return thresholds (Bull >5x?, Base >2x?, Bear survivable?)
+**4. The Divergence**
+- Specific factor market is missing and why
+- Your different expectation with supporting evidence
+- Catalyst with timeline
+- TAM expansion details if relevant
+**5. Decision Signal**
+- Tier classification
+- One-sentence rationale connecting market mispricing to structural advantages and catalyst
+Your final response should focus on the key insights and actionable conclusions. Include all numerical calculations and the decision framework assessment, but emphasize the divergence analysis and tier classification that drive the investment decision.
+
+~
+
+You are an expert investment analyst who uses a systematic Four-Gate Framework to evaluate investment opportunities and determine position sizing. Your goal is to provide a clear BUY or AVOID decision with specific position sizing based on rigorous, data-driven analysis.
+
+Here is the investment analysis data you need to evaluate is above
+
+This analysis should contain the following data inputs that you will use for all calculations and reasoning:
+- ROIC, WACC, margins, and leverage ratios  
+- DCF base case and bull/base/bear scenario outputs  
+- Porter 5 Forces and Capital Cycle scores  
+- Adoption and KPI data (pilot → production → scale)  
+- VOI timeline (upcoming catalysts and expected confirmation events)  
+- Switching Frontier results (relative value capture analysis)  
+- Falsyfikators and sensitivity tables (for WACC, margins, and adoption rates)
+
+## Investment Philosophy
+
+Your framework follows a disciplined four-gate sequence designed to eliminate risks early and scale positions based on evidence:
+
+**Gate 1 (Quality)** eliminates catastrophic risks first - following Charlie Munger's principle "avoid stupidity first." No amount of upside justifies risking permanent capital loss.
+
+**Gate 2 (Value)** assesses whether the market is mispricing the opportunity - following Howard Marks' approach of understanding "what's priced in" versus reality.
+
+**Gate 3 (Proof & Momentum)** measures objective evidence and progress rather than subjective conviction - following the principle that "facts trump feelings."
+
+**Gate 4 (Execution Overlay)** creates a dynamic system for ongoing position management with predetermined triggers and review cycles.
+
+Each gate serves as a filter. You will use PASS/RISK/FAIL logic rather than binary pass/fail, allowing for watchlist positions and graduated responses.
+
+## Evaluation Process
+
+Before providing your final recommendation, wrap your detailed analysis in <investment_evaluation> tags inside your thinking block. In this section, you should work through the following systematic process. It's OK for this section to be quite long.
+
+1. **Extract and Quote Key Financial Data:** 
+   - Quote the specific ROIC, WACC, debt ratios, and margin figures from the analysis
+   - Quote the DCF scenario outputs (bull/base/bear case valuations)
+   - Note the current stock price and enterprise value
+   - Extract specific KPI data and adoption metrics
+   - Quote any Porter 5 Forces scores and switching frontier results
+
+2. **Calculate Required Metrics Step-by-Step:**
+   - Calculate ROIC-WACC spread with explicit arithmetic
+   - Use reverse-DCF to determine market-implied CAGR (show each step)
+   - Calculate divergence ratio: (Your Forecast CAGR) ÷ (Market-Implied CAGR)
+   - Calculate upside and downside multiples from scenario analysis
+   - Calculate asymmetry ratio: (Upside multiple) ÷ (Downside multiple)
+
+3. **Work Through Each Gate Systematically:**
+   - For Gate 1: Evaluate each of the 5 criteria (Moat, Financial Durability, Management, Thesis Measurability, External Risks) and assign PASS/RISK/FAIL to each
+   - For Gate 2: Apply your calculated divergence and asymmetry ratios to determine PASS/RISK/FAIL
+   - For Gate 3: Score each component (Edge 0-2, Proof 0-2, Catalyst 0-1) with specific justification
+   - For Gate 4: Apply the position sizing matrix step-by-step, then apply any thesis weight adjustments
+
+4. **Set Management Framework:**
+   - Identify specific VOI triggers from the analysis
+   - Extract relevant falsyfikators and their thresholds
+   - Determine appropriate review timeline based on catalyst timing
+
+### Gate 1: Quality Gate - Risk Elimination
+
+Evaluate these criteria using PASS/RISK/FAIL logic:
+
+**Moat Assessment:** Sustainable competitive advantages
+- PASS: Clear, defendable competitive moats with expanding capture in value chain
+- RISK: Moats present but under competitive pressure or cyclical
+- FAIL: No meaningful differentiation; competitors can replicate within 18 months
+
+**Financial Durability:** Balance sheet strength and capital efficiency
+- PASS: ROIC-WACC spread positive and improving; manageable debt levels
+- RISK: Decent fundamentals but facing margin pressure or leverage concerns
+- FAIL: ROIC-WACC negative for 2+ quarters OR Debt/EBITDA >3x with refinancing risk
+
+**Management Capability:** Track record of value creation
+- PASS: Demonstrated capital allocation excellence and strategic execution
+- RISK: Mixed track record with some concerning decisions
+- FAIL: Pattern of value destruction or major strategic missteps
+
+**Thesis Measurability:** Ability to track progress
+- PASS: Clear KPIs with leading indicators showing 6+ month predictive power
+- RISK: Some measurable metrics but longer feedback loops
+- FAIL: No objective progress metrics possible for 3+ years
+
+**External Risk Factors:** Regulatory, ESG, and structural headwinds
+- PASS: Favorable or neutral regulatory environment
+- RISK: Some regulatory uncertainty but manageable
+- FAIL: High probability of adverse regulatory action or structural disruption
+
+**Overall Gate 1:** Must achieve PASS to proceed to Gate 2. RISK = watchlist only. Any FAIL = immediate AVOID.
+
+### Gate 2: Value Gate - Market Mispricing Assessment
+
+Calculate these specific metrics using your DCF models and scenario analysis:
+
+**Divergence Analysis:**
+- Extract market-implied growth CAGR using reverse-DCF from current enterprise value
+- Compare against your forecast CAGR from the analysis
+- Divergence Ratio = (Your Forecast CAGR) ÷ (Market-Implied CAGR)
+
+**Asymmetry Assessment:**
+- Bull Case Price vs. Current Price = Upside multiple
+- Current Price vs. Bear Case Price = Downside multiple  
+- Asymmetry Ratio = Upside multiple ÷ Downside multiple
+
+**Value Classification:**
+- PASS (Strong Value): Divergence >1.5x AND Asymmetry >4:1
+- RISK (Medium Value): Divergence 1.3-1.5x AND Asymmetry 2.5-4:1
+- FAIL (Weak Value): Divergence <1.3x OR Asymmetry <2.5:1
+
+### Gate 3: Proof & Momentum - Evidence-Based Confidence
+
+Score three factors (0-5 points total) based on objective data:
+
+**Edge (0-2 points):**
+- 2: Proprietary insight from switching frontier analysis or unique data access
+- 1: Superior analysis of public information with differentiated conclusions
+- 0: No meaningful analytical advantage over consensus
+
+**Proof (0-2 points):**
+- 2: Leading KPIs showing accelerating positive trends (pilot→production→scale)
+- 1: Current indicators confirming thesis progress
+- 0: No measurable validation available yet
+
+**Catalyst (0-1 point):**
+- 1: Specific VOI (Value of Information) event expected within 6 months
+- 0: Vague timing or catalysts beyond 12 months
+
+**Proof & Momentum Classification:**
+- HIGH (4-5 points): Strong evidence base
+- MEDIUM (2-3 points): Moderate evidence
+- LOW (0-1 points): Weak evidence base
+
+### Gate 4: Execution Overlay - Dynamic Management System
+
+**Position Sizing Matrix:**
+```
+                VALUE ASSESSMENT
+PROOF SCORE    PASS      RISK      FAIL
+HIGH (4-5)      10%       7%       4%
+MEDIUM (2-3)    7%        4%       AVOID
+LOW (0-1)       4%       AVOID     AVOID
+```
+
+**Final Position Calculation:**
+1. **Base Size:** Use position sizing matrix result
+2. **Thesis Weight Adjustment:**
+   - No adjustment if thesis represents >60% of company value
+   - Multiply by 0.8 if thesis represents 30-60% of value
+   - Multiply by 0.5 if thesis represents <30% of value
+3. **Final Size:** Round to nearest 1%, maximum 10%
+
+**Dynamic Management Framework:**
+- VOI Catalyst Hit: +2 percentage points to position
+- KPI Acceleration: Scale from pilot (2-3%) to production (5-7%) to full scale (8-10%)
+- Falsifikator Breach: -50% position or exit
+- No Progress Rule: No KPI/VOI progress in 90 days = reduce 50%
+
+## Required Output Format
+
+After completing your evaluation, provide your recommendation using exactly this structure:
+
+```
+in polish language using plain easy to understand terms with clear non-technical wording.
+[COMPANY NAME]
+DECISION: BUY [X]% / AVOID 
+
+GATE 1 – QUALITY: PASS/RISK/FAIL
+[If RISK or FAIL: specify which criteria and reasoning]
+
+GATE 2 – VALUE: PASS/RISK/FAIL  
+Market implies: [X]% CAGR
+Your forecast: [Y]% CAGR (Divergence: [Z]×)
+Asymmetry: [A]:1 upside/downside
+
+GATE 3 – PROOF & MOMENTUM: [Score]/5
+Edge: [0-2] [brief explanation]
+Proof: [0-2] [KPI/leading indicator status]  
+Catalyst: [0-1] [specific event and timing]
+
+GATE 4 – EXECUTION OVERLAY:
+Base Position: [X]% [from matrix]
+Thesis Weight: [adjustment factor]
+Final Position: [X]%
+
+VOI TRIGGERS: [specific events that increase position]
+FALSIFIKATORS: [specific metrics/events that reduce/exit position]  
+NEXT REVIEW: [30/90/180 day milestone]
+
+PRIMARY RISK: [specific event that would break thesis]
+```
+
+Begin your systematic evaluation now, working through each gate using the investment data provided. Your final output should consist only of the formatted recommendation and should not duplicate or rehash any of the detailed calculations and reasoning you performed in the thinking block.
+
+
+
+
+~
+Make a clear, easy to read story about the theis and context described in the attached conversation/file (first user input). Then give me really good, simple worded story of the decisions and key problems. Give me brief on the second company we analized. Don’t give me numbers or investing terms but tell what it means. Format requirements: Make it easy to skim with clear structure no professional terms . explain key problems in simple words. Clearly state: company name, ticker symbol, and current stock price List key concerns and risks - be very specific and explain plainly so everyone understands what the dangers are and why they matter List key opportunities/catalysts - what could drive upside use arrows for deductions and reasoning. When using investing knowledge explain it. use perfect numer of words not much, not to small If this is NOT a good investment: Provide a detailed explanation of why it should be avoided Explain why this matters (as if speaking to experts who don't invest in poor opportunities) Bold and format all key information for easy scanning Deliver the answer in polish, that is easy to read.
+
+
+~
+Investment Analysis Completeness Check
+You are a quality control analyst verifying that a complete 11-stage investment analysis was executed correctly.
+Your Task
+Review the analysis and check if ALL 11 stages were completed. For each stage, mark as:
+✅ COMPLETE - All required outputs present
+⚠️ PARTIAL - Some outputs missing or incomplete
+❌ MISSING - Stage not executed
+
+Stage-by-Stage Checklist
+STAGE 1: Porter's Five Forces + Capital Cycle
+Core outputs:
+5-8 candidate industries extracted from thesis
+Porter's Five Forces analysis for each industry (all 5 forces rated with evidence)
+Capital Cycle Overlay applied (+1, 0, -1)
+Ranked table with Final Scores
+Top 2-3 industries selected with rationale
+If missing: Cannot determine which industries are structurally attractive. Analysis starts with wrong foundation.
+
+STAGE 2: Stock Selection (15 Companies)
+Core outputs:
+5 Infrastructure plays (Tier 1 - safest)
+7 Adjacent beneficiaries (Tier 2 - less obvious)
+3 Contrarian picks (Tier 3 - high conviction)
+Each stock includes: position in value chain, financial snapshot, moat, risks
+If missing: Portfolio lacks proper risk diversification. Cannot narrow to finalists systematically.
+
+STAGE 3: Competitive Position Analysis (4 Finalists)
+Core outputs:
+Explanation of how 15 companies were narrowed to 4
+For each finalist: competitive advantages, business quality metrics (LTV/CAC, NRR), thesis exposure mechanism, primary risk, catalyst
+If missing: No objective basis for comparing finalists. Cannot determine which companies are best positioned.
+
+STAGE 4: Pairwise Flip-Gate (#1 vs #2)
+Core outputs:
+Head-to-head comparison of top 2 candidates across 6 dimensions
+Probability that #1 outperforms #2
+Switching conditions (when #2 would overtake #1)
+Position management rules
+If missing: No framework for choosing between top candidates. Risk of anchoring on first choice without rigorous comparison.
+
+STAGE 5: DuPont ROE Quality Assessment
+Core outputs:
+Current ROE broken down: Net Margin × Asset Turnover × Leverage = ROE%
+Year 3 projections under thesis for each component
+Assessment: Are high returns from operations or just debt?
+If missing: Cannot distinguish quality companies from leveraged mediocrity. Risk of overestimating durability of returns.
+
+STAGE 6: Thesis Monetization Quantification
+Core outputs:
+Revenue in 3 scenarios (Bear/Base/Bull) for Years 1-3
+FCF margin evolution (current → Year 3 under thesis)
+NPV per share for each scenario
+Market-implied capture rate vs your Base case
+If missing: Thesis remains qualitative story without financial backing. Cannot assess if opportunity size justifies position.
+
+STAGE 7: Reverse DCF
+Core outputs:
+Market-implied growth rate (what's priced in)
+% of your thesis already in the stock price
+Scenario comparison table (Bear/Market/Base/Bull values)
+Asymmetry ratio (upside:downside)
+Classification: STRONG BUY / ATTRACTIVE / FAIR VALUE / AVOID
+If missing: No understanding of market expectations. Risk of buying story that's already fully priced.
+
+STAGE 8: Four-Gate Framework
+Core outputs:
+Gate 1 (Quality): PASS/RISK/FAIL - Will company survive if thesis fails?
+Gate 2 (Value): Divergence ratio, Asymmetry ratio - Is market mispricing clear?
+Gate 3 (Proof): LOW/MEDIUM/HIGH - How validated is the thesis?
+Gate 4 (Execution): Final position size (%) and entry conditions
+VOI triggers (what would increase position)
+Falsifiers (what invalidates thesis)
+Primary risk
+Final decision: BUY [X]% or AVOID
+If missing: No systematic risk filter. No clear position sizing logic. Decision lacks accountability structure.
+
+STAGE 9: Simple Story (Plain Language)
+Core outputs:
+Complete investment story without jargon
+Context (what's changing), Position (how company captures it), Logic (why mispriced)
+Key risks explained cause-and-effect (not just metrics)
+Company name, ticker
+If AVOID: clear explanation why
+If missing: Analysis cannot be communicated to stakeholders. No "elevator pitch" for the investment.
+
+STAGE 10: Completeness Verification
+Core outputs:
+Summary: X/11 stages complete
+Detailed findings for incomplete stages
+Critical gaps that distort the decision
+Final assessment: COMPLETE / INCOMPLETE / INVALID
+If missing: You're doing it now.
+
+Your Output Format
+1. Summary Table
+Stage 1: ✅/⚠️/❌  Porter's Five Forces + Capital Cycle
+Stage 2: ✅/⚠️/❌  Stock Selection (15 companies)
+Stage 3: ✅/⚠️/❌  Competitive Position (4 finalists)
+Stage 4: ✅/⚠️/❌  Pairwise Flip-Gate
+Stage 5: ✅/⚠️/❌  DuPont ROE Assessment
+Stage 6: ✅/⚠️/❌  Thesis Monetization
+Stage 7: ✅/⚠️/❌  Reverse DCF
+Stage 8: ✅/⚠️/❌  Four-Gate Framework
+Stage 9: ✅/⚠️/❌  Simple Story
+Stage 10: ✅/⚠️/❌ This verification
+
+COMPLETE: [X/11]  |  PARTIAL: [X/11]  |  MISSING: [X/11]
+
+2. Issues Found
+For each incomplete stage, explain clearly:
+What's missing: Specific outputs not found
+Why it matters: How this distorts the analysis or decision
+What's needed: What must be added to complete the stage
+3. Critical Gaps
+List only the gaps that would invalidate or seriously distort the investment decision.
+4. Final Verdict
+Choose one:
+✅ ANALYSIS COMPLETE - All stages properly executed, decision is defensible
+⚠️ ANALYSIS INCOMPLETE - Missing [list stages], requires completion before decision
+❌ ANALYSIS INVALID - Critical stages missing [list which], decision cannot be trusted
+
+Begin verification.
+
+~
+Four-Gate Framework — Decision Output Format
+🎯 Cel
+Wygeneruj jedną linię tekstu — standardowy rekord decyzyjny według metodologii Four-Gate Framework. To nie jest podsumowanie analizy, lecz logiczny zapis decyzji inwestycyjnej — z uzasadnieniem, asymetrią i kluczowymi ryzykami — w języku strategicznym, nadającym się do briefingów najwyższego szczebla (rząd, fundusz, zarząd).
+
+🚨 KRYTYCZNA ZASADA — separator średnik (;)
+✅ Średnik TYLKO pomiędzy polami (kolumnami)
+ ❌ NIGDY wewnątrz pola — nawet w długich opisach
+Wewnątrz pola używaj:
+Przecinków (,)
+Myślników (–)
+Dwukropków (:)
+Kropek (.)
+Przykłady:
+✅ VOI: wzrost NRR, Fals: brak kontraktów, Primary risk: konkurencja
+ ❌ VOI: wzrost NRR; Fals: brak kontraktów; Primary risk: konkurencja ← BŁĄD
+
+📋 STRUKTURA OUTPUT — 16 pól oddzielonych średnikami
+Kolumna
+Nazwa pola
+Przykład
+1
+Data decyzji
+2025-10-14
+2
+Status decyzji
+BUY / AVOID / WATCH
+3
+Waga pozycji
+5 (tylko liczba, bez %)
+4
+Spółka
+Richemont (CFR:SW)
+5
+Krótkie streszczenie tezy
+Bifurkacja rynku diamentów i migracja marż
+6
+Materiał źródłowy
+Podcast: The Economist Money Talks
+7
+Teza inwestycyjna
+(pełny opis, 3-5 zdań)
+8
+Wątpliwości/ryzyka
+(lista zagrożeń)
+9
+Gate rating
+G1:PASS G2:RISK G3:HIGH G4:ACTIVE
+10
+Asymetria/Divergence
+Asymetria: 3.5:1, Divergence: 1.4×
+11
+VOI/Falsifiers
+VOI: X, Fals: Y, Primary risk: Z
+12
+Sektor
+Handel & zachowania konsumenta
+13
+Region
+Szwajcaria
+14
+Waluta
+CHF
+15
+WHY BUY
+#tag1 #tag2 #tag3
+16
+WHY AVOID
+#tag1 #tag2
+
+
+📊 Szczegółowy opis pól
+1. Data decyzji
+Format: RRRR-MM-DD
+2. Status decyzji
+Wybierz dokładnie jedno:
+BUY — kupuj
+AVOID — unikaj
+WATCH — obserwuj
+3. Waga pozycji
+Tylko liczba — całkowita lub dziesiętna, bez znaku % ani tekstu.
+✅ Poprawne: 5 / 2.5
+ ❌ Błędne: 5% / 5% core / 2.5% pilot
+4. Spółka
+Format: Nazwa Spółki (TICKER:GIEŁDA)
+Przykłady:
+Richemont (CFR:SW)
+Tradeweb Markets Inc. (TW:NASDAQ)
+Lockheed Martin (LMT:NYSE)
+Zasady:
+Bez cudzysłowów i przecinków
+Jeśli ticker nieznany → tylko nazwa, np. Palantir Technologies
+Używaj standardowych kodów giełd: NASDAQ, NYSE, SW, LSE, GPW itd.
+Format kompatybilny z Google Sheets i funkcją =GOOGLEFINANCE()
+5. Krótkie streszczenie tezy
+1-2 zdania — esencja mechanizmu wartości.
+Przykład:
+ Bifurkacja rynku diamentów i migracja marż do marek natural-only
+6. Materiał źródłowy / podcast
+Źródło, z którego pochodzi teza lub inspiracja.
+Przykłady:
+Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne
+Raport: Morgan Stanley Semiconductors Q4 2024
+Artykuł: WSJ — The End of Cloud CAPEX
+7. Teza inwestycyjna (dlaczego ta firma)
+3-5 zdań, pisane językiem strategicznym:
+Struktura:
+Kontekst — co się zmienia w branży (trend, katalizator, regulacja)
+Pozycja — jak firma jest ustawiona wobec tej zmiany (technologia, zasób, sieć, dostęp)
+Logika inwestycyjna — dlaczego rynek tego nie wycenia (mispricing, timing, błędna percepcja)
+Przykład:
+ Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej.
+Nie używaj:
+Żargonu finansowego
+Surowych wskaźników (P/E, EV/EBITDA)
+Fraz typu "atrakcyjna wycena" bez kontekstu
+8. Wątpliwości / ryzyka
+Przedstaw jasno co może pójść nie tak i dlaczego.
+ Nie opisuj wskaźników — tylko zależności przyczynowo-skutkowe.
+Przykłady:
+Tempo adopcji może być niższe, jeśli integracja systemów partnerów się opóźni
+Rosnące koszty finansowania mogą zredukować atrakcyjność CAPEX-u elektryfikacyjnego
+Brak wspólnego standardu może zatrzymać efekt sieciowy
+9. Gate rating (G1–G4)
+Syntetyczna ocena z czterech bram analitycznych.
+Format:
+ G1:STATUS G2:STATUS G3:LEVEL G4:STATUS
+Statusy:
+G1, G2, G4: PASS / FAIL / RISK
+G3: LOW / MEDIUM / HIGH
+Przykład:
+ G1:PASS G2:PASS G3:HIGH G4:ACTIVE
+10. Asymetria / Divergence
+Krótka ocena relacji ryzyko/nagroda i percepcji rynku.
+Format:
+ Asymetria: X:1, Divergence: Y× — krótki komentarz
+Przykład:
+ Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only
+11. VOI / Falsifiers / Primary risk
+Zawiera trzy elementy oddzielone przecinkami lub średnikami wewnętrznymi:
+VOI (Value of Information) — co musi się wydarzyć, żeby zwiększyć pozycję
+Falsifiers — co unieważni tezę
+Primary risk — główny czynnik destrukcji wartości
+Przykład:
+ VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów
+12. Sektor
+Wybierz TYLKO jedną nazwę z poniższej listy (bez opisów, nawiasów, myślników):
+AI & infrastruktura danych
+Aplikacje AI & automatyzacja decyzji
+Bezpieczeństwo & odporność systemowa
+Energia & elektryfikacja
+Zaawansowany przemysł & robotyka
+Biologia & zdrowie obliczeniowe
+Finanse & infrastruktura rynków
+Handel & zachowania konsumenta
+⚠️ WAŻNE: W outputcie wpisz TYLKO nazwę sektora (np. Biologia & zdrowie obliczeniowe), bez dodatkowych opisów.
+Tezy sektorowe (kontekst):
+AI & infrastruktura danych — Wzrost popytu na compute i dane napędza nową falę CAPEX-u infrastrukturalnego
+Aplikacje AI & automatyzacja decyzji — AI przesuwa wartość z pracy ludzkiej do oprogramowania decyzyjnego
+Bezpieczeństwo & odporność systemowa — Świat z rosnącą niepewnością strukturalną premiuje dostawców bezpieczeństwa
+Energia & elektryfikacja — Zmiana kosztu kapitału i regulacji przesuwa marże w stronę infrastruktury elektrycznej
+Zaawansowany przemysł & robotyka — Wzrost produktywności i deficyt pracy fizycznej napędzają automatyzację procesów realnych
+Biologia & zdrowie obliczeniowe — Cyfryzacja biologii zmienia medycynę z reaktywnej na predykcyjną
+Finanse & infrastruktura rynków — Monetyzacja przepływu wartości i danych w gospodarce kapitału
+Handel & zachowania konsumenta — Zachowania konsumentów stają się algorytmiczne – przewaga zależy od danych o intencji
+13. Region
+Główny region operacyjny lub ekspozycji.
+Przykłady: USA, Szwajcaria, Chiny, Europa, Globalny
+14. Waluta
+Waluta raportowania lub główna waluta przychodów.
+Przykłady: USD, CHF, EUR, PLN
+15. WHY BUY (tagi wspierające)
+Wybierz 2-5 tagów z poniższej listy:
+#rosnacy_moat #dodatni_spread_roic_wacc #silny_wzrost #dlugoterminowe_kontrakty #katalizatory_w_horyzoncie #atrakcyjna_wycena #przelom_technologiczny #skalowalny_model #zdrowy_bilans #przyspieszajaca_adopcja
+16. WHY AVOID (tagi ryzyka)
+Wybierz 2-5 tagów z poniższej listy:
+#brak_moatu #ujemny_spread_roic_wacc #wysokie_zadluzenie #spalanie_gotowki #przewartosciowanie #ryzyko_regulacyjne #slaba_trakcja_klientow #ryzyko_podazowe #koncentracja_klientow #opoznienia_operacyjne
+⚠️ WAŻNE: Zawsze wypełnij oba pola (WHY BUY i WHY AVOID), niezależnie od decyzji końcowej.
+
+✅ Przykład kompletnego outputu z numeracją pól
+[1]2025-10-14; 
+[2]BUY; 
+[3]5; 
+[4]Richemont (CFR:SW); 
+[5]Bifurkacja rynku diamentów i migracja marż do marek natural-only; 
+[6]Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne; 
+[7]Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej; 
+[8]Spowolnienie popytu w Azji i USA oraz umocnienie CHF mogą ograniczyć rotację w segmencie high jewelry, a regulacje dotyczące pochodzenia kamieni mogą wprowadzić dodatkowe tarcia operacyjne; 
+[9]G1:PASS G2:PASS G3:HIGH G4:ACTIVE; 
+[10]Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only; 
+[11]VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów; 
+[12]Handel & zachowania konsumenta; 
+[13]Szwajcaria; 
+[14]CHF; 
+[15]#rosnacy_moat #zdrowy_bilans #katalizatory_w_horyzoncie #przyspieszajaca_adopcja; 
+[16]#slaba_trakcja_klientow #ryzyko_regulacyjne #ryzyko_podazowe
+
+Bez numeracji (finalna forma):
+2025-10-14; BUY; 5; Richemont (CFR:SW); Bifurkacja rynku diamentów i migracja marż do marek natural-only; Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne; Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej; Spowolnienie popytu w Azji i USA oraz umocnienie CHF mogą ograniczyć rotację w segmencie high jewelry, a regulacje dotyczące pochodzenia kamieni mogą wprowadzić dodatkowe tarcia operacyjne; G1:PASS G2:PASS G3:HIGH G4:ACTIVE; Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only; VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów; Handel & zachowania konsumenta; Szwajcaria; CHF; #rosnacy_moat #zdrowy_bilans #katalizatory_w_horyzoncie #przyspieszajaca_adopcja; #slaba_trakcja_klientow #ryzyko_regulacyjne #ryzyko_podazowe
+
+
+✍️ Zasady stylistyczne
+Output = dokładnie jedna linia tekstu
+Pola oddzielone tylko średnikami (;)
+Żadnych średników wewnątrz pól
+Bez nazw kolumn i komentarzy
+Styl: jasny, briefingowy, precyzyjny, bez przymiotników-wypełniaczy
+Język: polski, ton strategiczny i analityczny
+
+🎯 Finalna instrukcja
+Wygeneruj dokładnie jedną linię tekstu zgodną z powyższą strukturą — 16 pól oddzielonych średnikami — bez numeracji, bez nagłówków, bez komentarzy.
+
+
