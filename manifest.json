@@ -17,6 +17,10 @@
     "https://*.nzz.ch/*",
     "https://*.project-syndicate.org/*",
     "https://the-ken.com/*",
+    "https://www.youtube.com/*",
+    "https://youtu.be/*",
+    "https://*.wsj.com/*",
+    "https://*.foreignaffairs.com/*",
     "https://chatgpt.com/*"
   ],
   "background": {

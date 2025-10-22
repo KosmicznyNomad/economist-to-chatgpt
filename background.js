@@ -53,13 +53,17 @@ loadPrompts();
 
 // Obsługiwane źródła artykułów
 const SUPPORTED_SOURCES = [
-  { pattern: "*://*.economist.com/*", name: "The Economist" },
-  { pattern: "*://asia.nikkei.com/*", name: "Nikkei Asia" },
-  { pattern: "*://*.caixinglobal.com/*", name: "Caixin Global" },
-  { pattern: "*://*.theafricareport.com/*", name: "The Africa Report" },
-  { pattern: "*://*.nzz.ch/*", name: "NZZ" },
-  { pattern: "*://*.project-syndicate.org/*", name: "Project Syndicate" },
-  { pattern: "*://the-ken.com/*", name: "The Ken" }
+  { pattern: "https://*.economist.com/*", name: "The Economist" },
+  { pattern: "https://asia.nikkei.com/*", name: "Nikkei Asia" },
+  { pattern: "https://*.caixinglobal.com/*", name: "Caixin Global" },
+  { pattern: "https://*.theafricareport.com/*", name: "The Africa Report" },
+  { pattern: "https://*.nzz.ch/*", name: "NZZ" },
+  { pattern: "https://*.project-syndicate.org/*", name: "Project Syndicate" },
+  { pattern: "https://the-ken.com/*", name: "The Ken" },
+  { pattern: "https://www.youtube.com/*", name: "YouTube" },
+  { pattern: "https://youtu.be/*", name: "YouTube" },
+  { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
+  { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" }
 ];
 
 // Funkcja zwracająca tablicę URLi do query
@@ -195,6 +199,8 @@ async function getPromptChain() {
 
 // Funkcja wyboru artykułów do analizy portfela
 async function getArticleSelection(articles) {
+  console.log(`getArticleSelection: otrzymano ${articles.length} artykułów`);
+  
   return new Promise((resolve) => {
     let resolved = false;
     
@@ -205,9 +211,13 @@ async function getArticleSelection(articles) {
       id: tab.id
     }));
     
+    console.log(`getArticleSelection: przygotowano dane dla ${articlesData.length} artykułów:`, articlesData);
+    
     // Enkoduj dane do URL
     const encodedData = encodeURIComponent(JSON.stringify(articlesData));
+    console.log(`getArticleSelection: długość zakodowanych danych: ${encodedData.length} znaków`);
     const selectorUrl = chrome.runtime.getURL(`article-selector.html?articles=${encodedData}`);
+    console.log(`getArticleSelection: otwieranie selektora: ${selectorUrl.substring(0, 150)}...`);
     
     // Stwórz małe okno z dialogiem
     chrome.windows.create({
@@ -320,6 +330,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       
       // Wykryj źródło artykułu
       let sourceName;
+      let transcriptLang = null;
       if (isManualSource) {
         sourceName = "Manual Source";
       } else {
@@ -333,10 +344,28 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
             break;
           }
         }
+        
+        // Dla YouTube - pobierz język transkrypcji z injected script
+        if (sourceName === "YouTube") {
+          try {
+            const langResults = await chrome.scripting.executeScript({
+              target: { tabId: tab.id },
+              function: () => window._ytTranscriptLang || null
+            });
+            transcriptLang = langResults[0]?.result;
+            console.log(`[${analysisType}] Język transkrypcji YouTube: ${transcriptLang || 'unknown'}`);
+          } catch (e) {
+            console.warn(`[${analysisType}] Nie udało się pobrać języka transkrypcji:`, e);
+          }
+        }
       }
 
       // Złóż payload z metadanymi źródła
-      const payload = `Źródło: ${sourceName}\nTytuł: ${title}\n\n${extractedText}`;
+      let payload = `Źródło: ${sourceName}`;
+      if (transcriptLang) {
+        payload += `\nJęzyk transkrypcji: ${transcriptLang}`;
+      }
+      payload += `\nTytuł: ${title}\n\n${extractedText}`;
 
       // Otwórz nowe okno ChatGPT
       const window = await chrome.windows.create({
@@ -350,11 +379,20 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       await waitForTabComplete(chatTabId);
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
-      await chrome.scripting.executeScript({
+      const results = await chrome.scripting.executeScript({
         target: { tabId: chatTabId },
         function: injectToChat,
         args: [payload, promptChain, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
       });
+
+      // Zapisz ostatnią odpowiedź zwróconą z injectToChat
+      const result = results[0]?.result;
+      if (result && result.success && result.lastResponse) {
+        await saveResponse(result.lastResponse, title, analysisType);
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Zapisano odpowiedź dla: ${title}`);
+      } else if (result && !result.success) {
+        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces zakończony bez odpowiedzi: ${title}`);
+      }
 
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
       return { success: true, title };
@@ -397,17 +435,25 @@ async function runAnalysis() {
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
     const allTabs = [];
-    for (const pattern of getSupportedSourcesQuery()) {
+    const patterns = getSupportedSourcesQuery();
+    console.log(`Szukam artykułów w ${patterns.length} źródłach:`, patterns);
+    
+    for (const pattern of patterns) {
       const tabs = await chrome.tabs.query({url: pattern});
+      console.log(`  - ${pattern}: znaleziono ${tabs.length} kart`);
+      if (tabs.length > 0) {
+        tabs.forEach(tab => console.log(`    • ${tab.title} (${tab.url})`));
+      }
       allTabs.push(...tabs);
     }
     
     if (allTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
+      alert("Nie znaleziono otwartych artykułów z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Wall Street Journal\n- Foreign Affairs\n- YouTube");
       return;
     }
 
-    console.log(`✅ Znaleziono ${allTabs.length} artykułów`);
+    console.log(`✅ Znaleziono ${allTabs.length} artykułów łącznie`);
     
     // KROK 3: Wybór artykułów do analizy portfela
     console.log("\n🎯 Krok 3: Wybór artykułów do analizy portfela");
@@ -506,9 +552,192 @@ async function runManualSourceAnalysis(text, title, instances) {
 // Ikona uruchamia popup, a popup wysyła message RUN_ANALYSIS
 
 // Funkcja ekstrakcji tekstu (content script)
-function extractText() {
+async function extractText() {
   const hostname = window.location.hostname;
   console.log(`Próbuję wyekstrahować tekst z: ${hostname}`);
+  
+  // === OBSŁUGA YOUTUBE ===
+  if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
+    console.log('Wykryto YouTube - pobieram transkrypcję przez YouTube Internal API...');
+    
+    // === 3.1 WYCIĄGNIJ VIDEO ID Z URL ===
+    function extractVideoId(url) {
+      try {
+        const urlObj = new URL(url);
+        
+        // Format: youtube.com/watch?v=VIDEO_ID
+        if (urlObj.hostname.includes('youtube.com')) {
+          const videoId = urlObj.searchParams.get('v');
+          if (videoId) return videoId;
+        }
+        
+        // Format: youtu.be/VIDEO_ID
+        if (urlObj.hostname.includes('youtu.be')) {
+          const videoId = urlObj.pathname.slice(1); // Usuń pierwszy slash
+          if (videoId) return videoId;
+        }
+        
+        console.error('Nie udało się wyciągnąć Video ID z URL:', url);
+        return null;
+      } catch (e) {
+        console.error('Błąd parsowania URL:', e);
+        return null;
+      }
+    }
+    
+    const videoId = extractVideoId(window.location.href);
+    if (!videoId) {
+      console.error('❌ Brak Video ID - pomijam');
+      return '';
+    }
+    
+    console.log(`✓ Video ID: ${videoId}`);
+    
+     // === 3.2 WYCIĄGNIJ URL TRANSKRYPCJI Z ytInitialPlayerResponse ===
+     function getCaptionTracksFromPlayerResponse() {
+       try {
+         // YouTube zapisuje dane w <script> tagach w HTML (content script ma dostęp do DOM)
+         let ytInitialPlayerResponse = null;
+         
+         // Szukaj w script tagach
+         const scripts = document.querySelectorAll('script');
+         for (const script of scripts) {
+           const content = script.textContent || script.innerText || '';
+           
+           // Szukaj wzorca: var ytInitialPlayerResponse = {...};
+           const match = content.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
+           if (match && match[1]) {
+             try {
+               ytInitialPlayerResponse = JSON.parse(match[1]);
+               console.log('✓ Znaleziono ytInitialPlayerResponse w <script> tagu');
+               break;
+             } catch (e) {
+               console.warn('⚠️ Nie udało się sparsować ytInitialPlayerResponse:', e);
+               continue;
+             }
+           }
+         }
+         
+         if (!ytInitialPlayerResponse) {
+           console.error('❌ Nie znaleziono ytInitialPlayerResponse w HTML');
+           return null;
+         }
+         
+         const captions = ytInitialPlayerResponse.captions;
+         if (!captions) {
+           console.error('❌ Brak sekcji captions w ytInitialPlayerResponse');
+           return null;
+         }
+         
+         const captionTracks = captions.playerCaptionsTracklistRenderer?.captionTracks;
+         if (!captionTracks || captionTracks.length === 0) {
+           console.error('❌ Brak dostępnych napisów dla tego filmu');
+           console.error('💡 Film prawdopodobnie nie ma transkrypcji/napisów');
+           return null;
+         }
+         
+         console.log(`✓ Znaleziono ${captionTracks.length} dostępnych transkrypcji`);
+         
+         // Wybierz pierwszą dostępną transkrypcję (dowolny język)
+         const selectedTrack = captionTracks[0];
+         const langCode = selectedTrack.languageCode || 'unknown';
+         const langName = selectedTrack.name?.simpleText || langCode;
+         const baseUrl = selectedTrack.baseUrl;
+         
+         if (!baseUrl) {
+           console.error('❌ Brak baseUrl w wybranej transkrypcji');
+           return null;
+         }
+         
+         console.log(`✓ Wybrałem transkrypcję: ${langName} (${langCode})`);
+         console.log(`📍 URL transkrypcji: ${baseUrl.substring(0, 100)}...`);
+         
+         return {
+           url: baseUrl,
+           langCode: langCode,
+           langName: langName
+         };
+         
+       } catch (e) {
+         console.error('❌ Błąd wyciągania transkrypcji z ytInitialPlayerResponse:', e);
+         return null;
+       }
+     }
+    
+     const captionTrack = getCaptionTracksFromPlayerResponse();
+     if (!captionTrack) {
+       console.error('❌ Nie znaleziono transkrypcji dla tego filmu');
+       return '';
+     }
+     
+     // Zapisz język w zmiennej globalnej (do użycia w payload metadata)
+     window._ytTranscriptLang = captionTrack.langCode;
+     
+     console.log(`✓ Pobieram transkrypcję przez fetch (content script - bez CORS)...`);
+     
+     // Pobierz XML w content script (brak problemów CORS)
+     try {
+       // Dodaj format parametr - spróbuj różnych formatów
+       const urlWithFormat = captionTrack.url + '&fmt=srv3';
+       console.log(`🔗 Pełny URL: ${urlWithFormat}`);
+       
+       // Użyj XMLHttpRequest - czasami działa lepiej niż fetch dla YouTube API
+       const transcriptXml = await new Promise((resolve, reject) => {
+         const xhr = new XMLHttpRequest();
+         xhr.open('GET', urlWithFormat, true);
+         xhr.timeout = 10000;
+         
+         xhr.onload = () => {
+           console.log(`📡 XHR status: ${xhr.status} ${xhr.statusText}`);
+           console.log(`📡 XHR responseType: ${xhr.responseType}`);
+           console.log(`📡 XHR response length: ${xhr.responseText?.length || 0}`);
+           
+           if (xhr.status >= 200 && xhr.status < 300) {
+             resolve(xhr.responseText);
+           } else {
+             reject(new Error(`HTTP ${xhr.status}`));
+           }
+         };
+         
+         xhr.onerror = () => reject(new Error('Network error'));
+         xhr.ontimeout = () => reject(new Error('Timeout'));
+         
+         xhr.send();
+       });
+       
+       console.log(`✓ Transkrypcja pobrana: ${transcriptXml.length} znaków`);
+       console.log(`📝 Preview XML (pierwsze 500 znaków): ${transcriptXml.substring(0, 500)}...`);
+       
+       // Parsuj XML do tekstu (używamy DOMParser - dostępny w content script)
+       const parser = new DOMParser();
+       const doc = parser.parseFromString(transcriptXml, 'text/xml');
+       const textElements = doc.querySelectorAll('text');
+       
+       if (textElements.length === 0) {
+         console.error('❌ Brak elementów <text> w XML transkrypcji');
+         return '';
+       }
+       
+       // Wyciągnij tekst z każdego elementu
+       const texts = Array.from(textElements).map(element => {
+         const text = element.textContent || '';
+         // Dekoduj HTML entities
+         const textarea = document.createElement('textarea');
+         textarea.innerHTML = text;
+         return textarea.value.trim();
+       }).filter(text => text.length > 0);
+       
+       const fullText = texts.join(' ');
+       console.log(`✓ Sparsowano transkrypcję: ${textElements.length} segmentów → ${fullText.length} znaków`);
+       console.log(`📝 Preview: "${fullText.substring(0, 150)}..."`);
+       
+       return fullText;
+       
+     } catch (error) {
+       console.error('❌ Błąd pobierania/parsowania transkrypcji:', error);
+       return '';
+     }
+  }
   
   // Mapa selektorów specyficznych dla każdego źródła
   const sourceSelectors = {
@@ -553,6 +782,18 @@ function extractText() {
       '.story-content',
       '[data-article-body]',
       '.article-body'
+    ],
+    'wsj.com': [
+      'article',
+      '[itemprop="articleBody"]',
+      '.article-content',
+      '.wsj-snippet-body'
+    ],
+    'foreignaffairs.com': [
+      'article',
+      '.article-body',
+      '[itemprop="articleBody"]',
+      '.article-content'
     ]
   };
   
@@ -1242,11 +1483,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Główna logika
   const startTime = Date.now();
   
-  // Retry loop - czekaj na textarea
+  // Retry loop - czekaj na editor (contenteditable div, nie textarea!)
   while (Date.now() - startTime < textareaWaitMs) {
-    const textarea = document.querySelector('textarea');
+    const editor = document.querySelector('[role="textbox"]') ||
+                   document.querySelector('[contenteditable]') ||
+                   document.querySelector('[data-testid="composer-input"]');
     
-    if (textarea) {
+    if (editor) {
       console.log("=== ROZPOCZYNAM PRZETWARZANIE ===");
       console.log(`Artykuł: ${payload.substring(0, 100)}...`);
       
@@ -1389,18 +1632,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           
           console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
           
-          // Zapisz TYLKO odpowiedź z ostatniego prompta
+          // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
           if (isLastPrompt && responseText && responseText.length > 0) {
-            chrome.runtime.sendMessage({
-              type: 'SAVE_RESPONSE',
-              text: responseText,
-              source: articleTitle || 'Artykuł',
-              analysisType: analysisType
-            });
-            console.log(`💾 Zapisano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length}`);
+            // Zmienna lastResponse będzie zwrócona na końcu funkcji
+            window._lastResponseToSave = responseText;
+            console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${responseText.length} znaków)`);
           } else if (!isLastPrompt) {
-            console.log(`⏭️ Pomijam zapis odpowiedzi ${i + 1}/${promptChain.length} - nie jest to ostatni prompt`);
+            console.log(`⏭️ Pomijam odpowiedź ${i + 1}/${promptChain.length} - nie jest to ostatni prompt`);
           }
           
           // Minimalna pauza przed następnym promptem - główne czekanie jest w sendPrompt
@@ -1413,14 +1652,24 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         
         // Usuń licznik z animacją sukcesu
         removeCounter(counter, true);
+        
+        // Zwróć ostatnią odpowiedź do zapisania
+        const lastResponse = window._lastResponseToSave || '';
+        delete window._lastResponseToSave;
+        console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        return { success: true, lastResponse: lastResponse };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
         
         // Usuń licznik
         removeCounter(counter, true);
+        
+        // Brak prompt chain - nie ma odpowiedzi do zapisania
+        return { success: true, lastResponse: '' };
       }
       
-      return;
+      // Ten return nigdy nie powinien zostać osiągnięty
+      return { success: false };
     }
     
     // Czekaj przed następną próbą
@@ -1428,6 +1677,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   console.error("Nie znaleziono textarea w ChatGPT po " + textareaWaitMs + "ms");
+  return { success: false, error: 'Nie znaleziono textarea' };
 }
 
 // Funkcja pomocnicza do czekania

@@ -10,16 +10,23 @@ let articles = [];
 let selectedArticleIds = new Set();
 
 // Pobierz dane artykułów z URL parameters
+console.log('article-selector: inicjalizacja');
 const urlParams = new URLSearchParams(window.location.search);
 const articlesData = urlParams.get('articles');
+console.log('article-selector: articlesData długość:', articlesData?.length || 0);
 
 if (articlesData) {
   try {
     articles = JSON.parse(decodeURIComponent(articlesData));
+    console.log('article-selector: sparsowano', articles.length, 'artykułów:', articles);
     renderArticles();
   } catch (error) {
     console.error('Błąd parsowania danych artykułów:', error);
+    articlesList.innerHTML = '<div style="padding: 20px; text-align: center; color: #d32f2f;">Błąd parsowania danych artykułów. Sprawdź konsolę.</div>';
   }
+} else {
+  console.warn('article-selector: brak parametru articles w URL');
+  articlesList.innerHTML = '<div style="padding: 20px; text-align: center; color: #d32f2f;">Brak danych artykułów w URL</div>';
 }
 
 // Renderuj listę artykułów
