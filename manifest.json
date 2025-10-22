@@ -22,6 +22,11 @@
   "background": {
     "service_worker": "background.js"
   },
+  "icons": {
+    "16": "icon16.png",
+    "48": "icon48.png",
+    "128": "icon128.png"
+  },
   "action": {
     "default_title": "Kopiuj artykuły do ChatGPT",
     "default_popup": "popup.html"
@@ -41,7 +46,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["prompt-dialog.html", "prompt-dialog.js", "article-selector.html", "article-selector.js", "responses.html", "responses.js", "prompts-company.txt", "prompts-portfolio.txt"],
+      "resources": ["prompt-dialog.html", "prompt-dialog.js", "article-selector.html", "article-selector.js", "manual-source.html", "manual-source.js", "responses.html", "responses.js", "prompts-company.txt", "prompts-portfolio.txt"],
       "matches": ["<all_urls>"]
     }
   ]

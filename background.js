@@ -111,6 +111,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     saveResponse(message.text, message.source, message.analysisType);
   } else if (message.type === 'RUN_ANALYSIS') {
     runAnalysis();
+  } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
+    console.log('📩 Otrzymano MANUAL_SOURCE_SUBMIT:', { 
+      titleLength: message.title?.length, 
+      textLength: message.text?.length, 
+      instances: message.instances 
+    });
+    runManualSourceAnalysis(message.text, message.title, message.instances);
+    sendResponse({ success: true });
+    return true; // Utrzymuj kanał otwarty dla async
   }
 });
 
@@ -276,32 +285,53 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       // Małe opóźnienie między startami aby nie przytłoczyć przeglądarki
       await sleep(index * 500);
       
-      // Ekstraktuj tekst z karty (bez aktywacji - nie przeszkadzamy użytkownikowi)
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        function: extractText
-      });
-
-      const extractedText = results[0]?.result;
-      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
+      // Sprawdź czy to pseudo-tab (ręcznie wklejone źródło)
+      const isManualSource = tab.url === "manual://source";
+      let extractedText;
       
-      if (!extractedText || extractedText.length < 50) {
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - za mało tekstu`);
-        return { success: false, reason: 'za mało tekstu' };
+      if (isManualSource) {
+        // Użyj tekstu przekazanego bezpośrednio
+        extractedText = tab.manualText;
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Używam ręcznie wklejonego tekstu: ${extractedText?.length || 0} znaków`);
+        
+        // Dla manual source: brak walidacji długości (zgodnie z planem)
+        if (!extractedText || extractedText.length === 0) {
+          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - pusty tekst`);
+          return { success: false, reason: 'pusty tekst' };
+        }
+      } else {
+        // Ekstraktuj tekst z karty (bez aktywacji - nie przeszkadzamy użytkownikowi)
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          function: extractText
+        });
+        extractedText = results[0]?.result;
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
+        
+        // Dla automatycznych źródeł: walidacja minimum 50 znaków
+        if (!extractedText || extractedText.length < 50) {
+          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - za mało tekstu`);
+          return { success: false, reason: 'za mało tekstu' };
+        }
       }
 
       // Pobierz tytuł
       const title = tab.title || "Bez tytułu";
       
       // Wykryj źródło artykułu
-      const url = new URL(tab.url);
-      const hostname = url.hostname;
-      let sourceName = "Unknown";
-      for (const source of SUPPORTED_SOURCES) {
-        const domain = source.pattern.replace('*://*.', '').replace('*://', '').replace('/*', '');
-        if (hostname.includes(domain)) {
-          sourceName = source.name;
-          break;
+      let sourceName;
+      if (isManualSource) {
+        sourceName = "Manual Source";
+      } else {
+        const url = new URL(tab.url);
+        const hostname = url.hostname;
+        sourceName = "Unknown";
+        for (const source of SUPPORTED_SOURCES) {
+          const domain = source.pattern.replace('*://*.', '').replace('*://', '').replace('/*', '');
+          if (hostname.includes(domain)) {
+            sourceName = source.name;
+            break;
+          }
         }
       }
 
@@ -427,6 +457,48 @@ async function runAnalysis() {
 
   } catch (error) {
     console.error("❌ Błąd główny:", error);
+  }
+}
+
+// Funkcja uruchamiająca analizę z ręcznie wklejonego źródła
+async function runManualSourceAnalysis(text, title, instances) {
+  try {
+    console.log("\n=== ROZPOCZYNAM ANALIZĘ Z RĘCZNEGO ŹRÓDŁA ===");
+    console.log(`Tytuł: ${title}`);
+    console.log(`Tekst: ${text.length} znaków`);
+    console.log(`Instancje: ${instances}`);
+    
+    // Sprawdź czy prompty są wczytane
+    if (PROMPTS_COMPANY.length === 0) {
+      console.error("❌ Brak promptów dla analizy spółki");
+      alert("Błąd: Brak promptów dla analizy spółki. Sprawdź plik prompts-company.txt");
+      return;
+    }
+    
+    console.log(`✅ Prompty załadowane: ${PROMPTS_COMPANY.length}`);
+    
+    // Stwórz pseudo-taby (N kopii tego samego źródła)
+    const timestamp = Date.now();
+    const pseudoTabs = [];
+    
+    for (let i = 0; i < instances; i++) {
+      pseudoTabs.push({
+        id: `manual-${timestamp}-${i}`,
+        title: title,
+        url: "manual://source",
+        manualText: text  // Przechowuj tekst bezpośrednio
+      });
+    }
+    
+    console.log(`✅ Utworzono ${pseudoTabs.length} pseudo-tabów`);
+    
+    // Uruchom proces analizy
+    await processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company');
+    
+    console.log("\n✅ ZAKOŃCZONO URUCHAMIANIE ANALIZY Z RĘCZNEGO ŹRÓDŁA");
+    
+  } catch (error) {
+    console.error("❌ Błąd w runManualSourceAnalysis:", error);
   }
 }
 

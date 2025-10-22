@@ -4,6 +4,17 @@ document.getElementById('runBtn').addEventListener('click', () => {
   window.close();
 });
 
+// Obsługa przycisku wklej źródło
+document.getElementById('manualSourceBtn').addEventListener('click', () => {
+  chrome.windows.create({
+    url: chrome.runtime.getURL('manual-source.html'),
+    type: 'popup',
+    width: 800,
+    height: 600
+  });
+  window.close();
+});
+
 // Obsługa przycisku zobacz odpowiedzi
 document.getElementById('responsesBtn').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('responses.html') });
