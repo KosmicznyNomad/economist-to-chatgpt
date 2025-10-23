@@ -674,36 +674,64 @@ async function extractText() {
      window._ytTranscriptLang = captionTrack.langCode;
      
      console.log(`✓ Pobieram transkrypcję przez fetch (content script - bez CORS)...`);
-     
+
      // Pobierz XML w content script (brak problemów CORS)
      try {
-       // Dodaj format parametr - spróbuj różnych formatów
-       const urlWithFormat = captionTrack.url + '&fmt=srv3';
-       console.log(`🔗 Pełny URL: ${urlWithFormat}`);
-       
-       // Użyj XMLHttpRequest - czasami działa lepiej niż fetch dla YouTube API
-       const transcriptXml = await new Promise((resolve, reject) => {
-         const xhr = new XMLHttpRequest();
-         xhr.open('GET', urlWithFormat, true);
-         xhr.timeout = 10000;
-         
-         xhr.onload = () => {
-           console.log(`📡 XHR status: ${xhr.status} ${xhr.statusText}`);
-           console.log(`📡 XHR responseType: ${xhr.responseType}`);
-           console.log(`📡 XHR response length: ${xhr.responseText?.length || 0}`);
-           
-           if (xhr.status >= 200 && xhr.status < 300) {
-             resolve(xhr.responseText);
-           } else {
-             reject(new Error(`HTTP ${xhr.status}`));
+       // Spróbuj różnych formatów: srv3 (nowoczesny), srv1 (legacy), json3
+       const formats = ['srv3', 'srv1', 'json3'];
+       let transcriptXml = null;
+       let lastError = null;
+
+       for (const format of formats) {
+         try {
+           // Bezpieczne dodawanie parametru fmt do URL
+           const url = new URL(captionTrack.url);
+           url.searchParams.set('fmt', format);
+           const urlWithFormat = url.toString();
+
+           console.log(`🔗 Próbuję format ${format}: ${urlWithFormat.substring(0, 150)}...`);
+
+           // Użyj XMLHttpRequest - czasami działa lepiej niż fetch dla YouTube API
+           transcriptXml = await new Promise((resolve, reject) => {
+             const xhr = new XMLHttpRequest();
+             xhr.open('GET', urlWithFormat, true);
+             xhr.timeout = 30000; // Zwiększono z 10s na 30s
+
+             xhr.onload = () => {
+               console.log(`📡 [${format}] XHR status: ${xhr.status} ${xhr.statusText}`);
+               console.log(`📡 [${format}] Response length: ${xhr.responseText?.length || 0} znaków`);
+
+               if (xhr.status >= 200 && xhr.status < 300) {
+                 resolve(xhr.responseText);
+               } else {
+                 reject(new Error(`HTTP ${xhr.status}: ${xhr.statusText}`));
+               }
+             };
+
+             xhr.onerror = () => reject(new Error('Network error'));
+             xhr.ontimeout = () => reject(new Error('Timeout po 30s'));
+
+             xhr.send();
+           });
+
+           // Jeśli udało się pobrać, przerwij pętlę
+           if (transcriptXml && transcriptXml.length > 0) {
+             console.log(`✅ Sukces z formatem ${format}`);
+             break;
            }
-         };
-         
-         xhr.onerror = () => reject(new Error('Network error'));
-         xhr.ontimeout = () => reject(new Error('Timeout'));
-         
-         xhr.send();
-       });
+
+         } catch (error) {
+           console.warn(`⚠️ Format ${format} nieudany:`, error.message);
+           lastError = error;
+           // Kontynuuj do następnego formatu
+         }
+       }
+
+       // Jeśli żaden format nie zadziałał
+       if (!transcriptXml || transcriptXml.length === 0) {
+         console.error('❌ Wszystkie formaty (srv3, srv1, json3) zawiodły');
+         throw lastError || new Error('Brak transkrypcji we wszystkich formatach');
+       }
        
        console.log(`✓ Transkrypcja pobrana: ${transcriptXml.length} znaków`);
        console.log(`📝 Preview XML (pierwsze 500 znaków): ${transcriptXml.substring(0, 500)}...`);
