@@ -47,6 +47,17 @@ const editor = document.querySelector('[contenteditable]');
 const editor = document.querySelector('[role="textbox"]');
 ```
 
+#### Selektory z alternatywnych źródeł (fallbacki):
+```javascript
+// Fallback z community (październik 2025)
+const editor = document.querySelector('textarea#prompt-textarea');
+
+// Fallback dla starszych wersji
+const editor = document.querySelector('[data-testid="composer-input"]');
+```
+
+**Uwaga**: `textarea#prompt-textarea` może być bardziej stabilne w przyszłych wersjach ChatGPT.
+
 ### Wstawianie tekstu do edytora
 
 ⚠️ **WAŻNE**: Zwykłe `element.value = text` NIE DZIAŁA z contenteditable!
@@ -204,6 +215,23 @@ setTimeout(() => {
 }, 100);
 ```
 
+#### Dodatkowe fallbacki (październik 2025):
+```javascript
+// Lokalizacja polska
+editButton = lastUserMessage.querySelector('button[aria-label*="Edytuj"]');
+
+// Szukanie w conversation-turn container
+const turnContainer = lastUserMessage.closest('[data-testid^="conversation-turn-"]');
+editButton = turnContainer?.querySelector('button[aria-label*="Edit"]');
+
+// Szukanie w toolbar
+const toolbar = lastUserMessage.querySelector('[role="toolbar"]');
+editButton = toolbar?.querySelector('button[aria-label*="Edit"]');
+
+// Symulacja hover (pokazuje ukryte przyciski)
+lastUserMessage.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+```
+
 #### Po kliknięciu Edit:
 ```javascript
 // Czekaj na pojawienie się edytora
@@ -300,6 +328,26 @@ function extractMainContent(element) {
 
 const responseText = extractMainContent(lastResponse);
 ```
+
+### Turny konwersacji (Conversation Turns)
+
+ChatGPT organizuje rozmowę w "turny" - pary user/assistant message.
+
+```javascript
+// Znajdź wszystkie turny
+const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+
+// Znajdź ostatni turn z assistant
+for (let i = turns.length - 1; i >= 0; i--) {
+  const assistantMsg = turns[i].querySelector('[data-message-author-role="assistant"]');
+  if (assistantMsg) {
+    console.log('Znaleziono ostatnią odpowiedź assistant');
+    break;
+  }
+}
+```
+
+**Stabilność**: Selektor `[data-testid^="conversation-turn-"]` jest często używany w community extensions i userscripts.
 
 ### Fallback: Wyszukiwanie przez article
 

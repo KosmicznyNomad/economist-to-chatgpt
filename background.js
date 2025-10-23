@@ -907,6 +907,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       const lastUserMessage = userMessages[userMessages.length - 1];
       console.log('✓ Znaleziono ostatnią wiadomość użytkownika');
       
+      // Symuluj hover aby pokazać ukryte narzędzia
+      lastUserMessage.dispatchEvent(new MouseEvent('mouseenter', { bubbles: true }));
+      await new Promise(resolve => setTimeout(resolve, 150));
+      
       // Znajdź przycisk Edit bezpośrednio w wiadomości (różne selektory)
       let editButton = lastUserMessage.querySelector('button[aria-label="Edit message"]');
       if (!editButton) {
@@ -914,6 +918,32 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
       if (!editButton) {
         editButton = lastUserMessage.querySelector('button[aria-label*="Edit"]');
+      }
+      
+      // Fallback 1: lokalizacja polska
+      if (!editButton) {
+        editButton = lastUserMessage.querySelector('button[aria-label*="Edytuj"]');
+        if (editButton) console.log('✓ Znaleziono przycisk Edit (fallback: polska lokalizacja)');
+      }
+      
+      // Fallback 2: szukaj w conversation-turn container
+      if (!editButton) {
+        const turnContainer = lastUserMessage.closest('[data-testid^="conversation-turn-"]');
+        if (turnContainer) {
+          editButton = turnContainer.querySelector('button[aria-label*="Edit"]') ||
+                       turnContainer.querySelector('button[aria-label*="Edytuj"]');
+          if (editButton) console.log('✓ Znaleziono przycisk Edit (fallback: conversation-turn container)');
+        }
+      }
+      
+      // Fallback 3: szukaj w toolbar
+      if (!editButton) {
+        const toolbar = lastUserMessage.querySelector('[role="toolbar"]');
+        if (toolbar) {
+          editButton = toolbar.querySelector('button[aria-label*="Edit"]') ||
+                       toolbar.querySelector('button[aria-label*="Edytuj"]');
+          if (editButton) console.log('✓ Znaleziono przycisk Edit (fallback: toolbar)');
+        }
       }
       
       if (!editButton) {
@@ -1268,9 +1298,27 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return text;
     }
     
-    // Fallback - szukaj artykułów z odpowiedziami
+    // Fallback 2: szukaj przez conversation-turn containers
+    const turnContainers = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+    console.log(`🔍 Znaleziono ${turnContainers.length} conversation turns w DOM (fallback 2)`);
+    
+    if (turnContainers.length > 0) {
+      // Szukaj ostatniego turnu z assistant
+      for (let i = turnContainers.length - 1; i >= 0; i--) {
+        const turn = turnContainers[i];
+        const assistantMsg = turn.querySelector('[data-message-author-role="assistant"]');
+        if (assistantMsg) {
+          const text = extractMainContent(assistantMsg);
+          console.log(`✓ Znaleziono odpowiedź przez conversation-turn (fallback 2): ${text.length} znaków`);
+          console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+          return text;
+        }
+      }
+    }
+    
+    // Fallback 3: szukaj artykułów z odpowiedziami
     const articles = document.querySelectorAll('article');
-    console.log(`🔍 Znaleziono ${articles.length} articles w DOM (fallback)`);
+    console.log(`🔍 Znaleziono ${articles.length} articles w DOM (fallback 3)`);
     
     if (articles.length > 0) {
       const lastArticle = articles[articles.length - 1];
@@ -1431,8 +1479,11 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const startTime = Date.now();
     
     while (Date.now() - startTime < maxWait) {
-      editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-               document.querySelector('div[contenteditable="true"]');
+      editor = document.querySelector('textarea#prompt-textarea') ||
+               document.querySelector('[role="textbox"][contenteditable="true"]') ||
+               document.querySelector('div[contenteditable="true"]') ||
+               document.querySelector('[data-testid="composer-input"]') ||
+               document.querySelector('[contenteditable]');
       if (editor) {
         break;
       }
