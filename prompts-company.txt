@@ -424,163 +424,216 @@ Work through your complete systematic analysis, documenting your thesis decompos
 
 
 ~
-You are an investment analyst conducting competitive position analysis of above positions to identify the 4 best-positioned companies to capture value from a specific investment thesis. Your approach follows the Tiger Global and Baillie Gifford philosophy: invest in market leadership at inflection points through structural deduction, not arithmetic scoring or cheap assets without trajectory.
+You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. Your approach follows the Tiger Global and Baillie Gifford philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
-The investment thesis you need to analyze and list of companies is above.
+The investment thesis and list of companies to analyze are provided above.
 
-Your goal is to select 4 companies through qualitative structural deduction based on competitive advantages and market momentum. You must work through your analysis systematically, focusing on structural thinking rather than weighted scoring.
+Your goal is to select 4 companies through qualitative structural deduction based on asymmetric return potential, competitive advantages, and S-curve positioning. Focus on identifying companies with the highest risk/reward ratios (upside/downside >3:1 preferred) rather than simply the strongest market positions.
 
 ## Analysis Framework
 
-Work through each company using this prioritized framework:
+Work through each company using this systematic framework, prioritizing asymmetric returns:
 
 **PHASE 1: UNIVERSE QUALIFICATION**
-For each company, ask: "If this firm disappears tomorrow - who specifically takes their place?"
-- No one specific / value would fragment → unique position, continue analyzing
+For each company, ask: "If this firm disappears tomorrow, who specifically takes their place?"
+- No one specific / value would fragment → unique position, continue analyzing  
 - Anyone can easily replace them → commoditized, eliminate
 
-**PHASE 2: MARKET POWER ASSESSMENT** 
-(Highest Priority - defines long-term winners)
+**PHASE 2: MARKET POWER + LEVERAGE ASSESSMENT**
+Classify companies by asking: "Who will control pricing and capture disproportionate value 3 years from now?"
 
-Classify remaining companies by asking: "Who will control pricing and standards in this market 3 years from now?"
-
+Position Classification:
 - **Category Leaders**: Define industry standards, competitors position against them, increasing distance from #2
 - **Strong Contenders**: Top 3 position, win in specific verticals, credible threat to leader, rising share
 - **Followers**: Reactive positioning, playing catch-up, no clear differentiation, losing ground
 
-Eliminate Followers unless they have exceptional moats.
+Market Structure Assessment (Critical for Asymmetry):
+- Is this a "winner-take-most" market (leader captures 60%+ of profits) or "many winners" market?
+- Does the leading position create exponential value capture or linear scaling?
+- Are competitive advantages expanding or compressing over time?
 
-**PHASE 3: MOAT DEPTH ASSESSMENT**
-(Second Priority - determines durability)
+Eliminate Followers unless they have exceptional asymmetric potential.
 
-For each Leader/Contender, use decision trees to identify PRIMARY moat:
+**PHASE 3: MOAT DEPTH + LEVERAGE ANALYSIS** 
+For each remaining company, identify the PRIMARY moat AND assess its scaling characteristics:
 
-*Network Effects Decision Tree:*
-- Are network effects present? → If yes: Have they achieved critical mass? → If yes: Do effects strengthen with scale? → Strong moat
-- If no network effects, continue to next moat type
+Moat Leverage Hierarchy (for asymmetric returns):
+1. **Network Effects** (Quadratic Scaling): Value increases exponentially with users
+2. **Data/Platform Effects** (Exponential Scaling): Each customer improves product for all others  
+3. **Switching Costs** (Linear Scaling): Defensive but limited upside leverage
+4. **Regulatory/Brand** (Defensive Only): Protection without significant scaling
 
-*Switching Costs Decision Tree:*
-- Migration cost >$1M + >6 months? → If yes: Technical integration or just contractual? → Technical = Strong moat
-- If low switching costs, continue to next moat type
+Decision Trees:
+- Network Effects: Are they present? → Critical mass achieved? → Strengthening with scale? → HIGH LEVERAGE
+- Data/Platform: Proprietary data that improves with scale? → Feedback loops active? → HIGH LEVERAGE  
+- Switching Costs: Migration cost >$1M + >6 months? → Technical integration? → MODERATE LEVERAGE
+- Regulatory/Brand: Barriers >2 years? → Premium pricing sustainable? → LOW LEVERAGE
 
-*Regulatory Barriers Decision Tree:*
-- New player qualification time >2 years? → If yes: Do they influence/shape standards? → If yes = Strong moat
-- If low barriers, continue to next moat type
+Prioritize HIGH LEVERAGE moats for asymmetric potential.
 
-*Proprietary Data/Technology:*
-- Unique datasets competitors cannot replicate? OR enforced patent portfolio? OR talent concentration? → If yes = Moderate moat
+**PHASE 4: S-CURVE POSITIONING ANALYSIS**
+Determine where each company sits on the adoption curve:
 
-*Brand/Trust:*
-- Can charge 20%+ premium without losing share? → If yes = Weak moat (but acceptable if other factors strong)
+Critical Metrics:
+- **TAM Adoption %**: What percentage of total addressable market has adopted this solution? (Hard number required)
+- **Inflection Point Distance**: How far to the typical 15-25% adoption inflection point?
+- **Adoption Velocity**: Rate of market penetration (% per quarter)
+- **Buyer Cohort Analysis**: Who's next - early adopters, early majority, or late majority?
 
-If no meaningful moat identified → Likely commodity, eliminate unless exceptional execution
+Classifications:
+- **Pre-Inflection** (0-15% TAM adoption): Maximum asymmetry potential, highest uncertainty
+- **Inflection Zone** (15-30% adoption): Strong momentum, good asymmetry, lower risk
+- **Growth Phase** (30-60% adoption): Solid growth but limited asymmetry remaining
+- **Maturity** (60%+ adoption): Linear growth, minimal asymmetry
 
-**PHASE 4: THESIS ACTIVATION CHECK**
-(Third Priority - validates timing)
+Prioritize Pre-Inflection and Inflection Zone companies for asymmetric returns.
 
-Look for evidence the thesis is ALREADY working:
-- Thesis-related revenue: Dollar amount, percentage of total, YoY growth rate
-- Pipeline momentum: Book-to-bill ratio >1.2 indicates acceleration  
-- Customer adoption: New logos, case studies, design wins in thesis-related areas
-- Momentum classification: Convex (accelerating), Linear (steady), or Concave (decelerating)
+**PHASE 5: ASYMMETRY DECOMPOSITION**
+For each company that passed prior phases, calculate explicit risk/reward ratios:
 
-Eliminate or watchlist companies with Concave momentum unless clear inflection point visible.
+Upside Analysis:
+- Primary upside driver (network effects activation, pricing power, margin expansion, TAM expansion)
+- Magnitude if materialized: +X% 
+- Probability estimate: Y%
+- Time horizon: Z quarters
+- Secondary drivers and optionality
 
-**PHASE 5: FINANCIAL SUSTAINABILITY**
-Apply knockout criteria (eliminate if company fails 2+ of these):
-1. Revenue growth ≥15% YoY?
-2. FCF positive or clear path (not burning >$200M/year indefinitely)?  
-3. Debt/EBITDA <3x + liquidity >12 months?
-4. Revenue visibility: >30% recurring?
+Downside Analysis:  
+- Primary risk (competitive response, regulation, demand shock)
+- Magnitude if occurs: -X%
+- Downside floor calculation (contracted revenue, liquidation value, worst-case scenario)
+- Maximum realistic drawdown: -Y%
 
-**PHASE 6: STRUCTURAL SELECTION**
-Select 4 companies based on structural advantages:
+Asymmetry Ratio Calculation:
+- Probability-weighted upside: +X%
+- Probability-weighted downside: -Y%  
+- Risk/Reward Ratio: X/Y:1
 
-Selection Constraints:
-- Prioritize Category Leaders with expanding moats
-- Include max 1 Strong Contender only if momentum is Convex  
-- Ensure value chain diversity (avoid 4 companies in same position)
-- Maximum 2 companies from same industry
-- Prefer higher thesis exposure (>40% of company value)
+Classification Thresholds:
+- **High Asymmetry** (>4:1): Prioritize regardless of position strength
+- **Medium Asymmetry** (2-4:1): Consider if other factors strong
+- **Low Asymmetry** (<2:1): Eliminate unless exceptional quality and defensiveness
+
+**PHASE 6: VALUATION SANITY CHECK**
+Apply sanity filters to prevent selecting overvalued assets:
+
+Quick Valuation Screen:
+- Current P/S or EV/Sales multiple vs 5-year historical range
+- Percentile vs history (RED FLAG if >90th percentile without new catalyst)
+- Implied growth backout: What CAGR and margins are embedded in current price?
+- Comparable analysis: How did similar companies trade through similar cycles?
+
+Upside Remaining Calculation:
+- Bull case value: +X% potential from current price
+- Already priced in: Y% of bull case reflected in current valuation
+- Remaining upside: Z%
+- ELIMINATE if >70% of bull case already priced in
+
+**PHASE 7: STRUCTURAL SELECTION**
+Select 4 companies based on asymmetric return potential:
+
+Selection Principles:
+- **Prioritize highest asymmetry ratios (>3:1) with sufficient moat durability**
+- Prefer Strong Contender with 5:1 asymmetry over Category Leader with 2:1 asymmetry  
+- Require explicit trade-off justification when choosing lower asymmetry options
+- Ensure value chain diversity and maximum 2 companies from same industry
+- Prefer Pre-Inflection positioning with high-leverage moats
 
 For tie-breaks, consider:
-- Track record of execution during previous market shifts
-- Position on adoption curve (earlier = more runway)
-- Competitive response time (faster = better)
+- Track record executing through market shifts
+- Position on S-curve (earlier = more runway)
+- Operating leverage trajectory
+- Hidden optionality (platform expansion, new markets)
 
 ## Instructions
 
-Before providing your final selections, work through your structural thinking systematically in <analysis> tags inside your thinking block. In your analysis:
+Before providing your final selections, wrap your analysis work inside <analysis> tags within your thinking block. In your analysis work:
 
-1. First, list out all companies from the input to keep them organized
-2. Apply each phase sequentially to every company, explicitly documenting your decision for each company at each phase - this will help ensure no companies are accidentally overlooked. It's OK for this section to be quite long.
-3. For the moat assessment, work through each decision tree step-by-step for each remaining company, answering each question explicitly
-4. When comparing companies in tie-break situations, create explicit side-by-side comparisons showing the structural advantages of your chosen companies over the alternatives
-5. Include a "contrarian check": what would have to be true for a company you eliminated to actually be the best choice?
+1. **Company Inventory**: First, explicitly list all companies from the input to ensure comprehensive coverage
+2. **Phase-by-Phase Tracking**: Create a tracking table/matrix as you work through each phase, documenting which companies advance or get eliminated at each stage
+3. **Systematic Application**: Apply each phase sequentially to every remaining company, explicitly documenting your decisions - this ensures no companies are overlooked  
+4. **Quantitative Calculations**: For S-curve positioning, provide hard numbers for TAM adoption % and distance to inflection points with your reasoning
+5. **Explicit Asymmetry Math**: For asymmetry decomposition, show step-by-step upside/downside calculations using the exact formula: (Probability × Upside) / (Probability × Downside) = X:1 ratio
+6. **Decision Tree Documentation**: For moat assessment, work through decision trees step-by-step and explicitly classify leverage potential (High/Moderate/Low)
+7. **Valuation Context**: Include valuation sanity checks with historical context and implied assumptions, showing your calculation work
+8. **Side-by-Side Finalist Comparison**: When comparing final candidates for selection, create explicit side-by-side asymmetry comparisons in table format
+9. **Elimination Justification**: For each eliminated company, provide specific reasoning tied to the framework phases
+
+It's OK for this analysis section to be quite long given the comprehensive nature of the framework and the need to evaluate multiple companies across seven phases.
 
 After completing your analysis, provide your final output using this structure:
 
 **COMPETITIVE POSITION ANALYSIS RESULTS**
 
 **UNIVERSE QUALIFICATION**
-[List eliminated companies with brief elimination reason for each]
+[List eliminated companies with brief elimination reasons]
 
 **TOP 4 SELECTIONS**
 
 **#1: [COMPANY NAME] – [TICKER]**
 
-**WHY WINS:** [3 sentences explaining value capture mechanism + competitive advantage + catalyst]
+**WHY WINS:** [3 sentences explaining asymmetric value capture mechanism + competitive advantage + catalyst timing]
+
+**ASYMMETRY PROFILE:**
+• Upside Potential: +[X]% (primary driver: [specific mechanism])
+• Downside Risk: -[Y]% (floor: [contracted revenue/liquidation basis])
+• Risk/Reward Ratio: [Z]:1
+• Confidence Level: [High/Medium + reasoning]
 
 **POSITION SNAPSHOT:**
-• Market: [rank, share %, trajectory]  
-• Moat: [primary type + evidence]
-• GTM: [channel + efficiency metric]
+• Market Position: [rank, share %, trajectory vs #2/#3]
+• Moat Type: [primary moat + leverage classification: High/Moderate/Low]  
+• Market Structure: [Winner-take-most vs Many-winners]
+
+**S-CURVE POSITIONING:**
+• TAM Adoption: [X]% currently adopted
+• Distance to Inflection: [X] percentage points to 15-25% inflection zone
+• Adoption Velocity: +[X]% TAM per quarter
+• Classification: [Pre-Inflection/Inflection Zone/Growth/Maturity]
+• Next Buyer Cohort: [Early Adopters/Early Majority/etc.]
 
 **THESIS TRACTION:**
-• Revenue: $[X]M thesis-related, +[Y]% YoY
-• Momentum: [convex/linear/concave]  
-• Adoption stage: [position on S-curve]
-• Pipeline: [book-to-bill, backlog trend]
+• Thesis-Related Revenue: $[X]M, +[Y]% YoY
+• Pipeline Momentum: [book-to-bill ratio, backlog trend]
+• Customer Evidence: [new logos, case studies, design wins]
 
 **BUSINESS QUALITY:**
-• LTV/CAC: [X]x, payback [Y] months
-• NRR: [X]%, FCF margin: [Y]%
-• Operating leverage: [EBIT scaling path]
-
-**FINANCIALS:**
 • Revenue: $[X]M, +[Y]% YoY
-• FCF: $[X]M, [Y]% margin  
-• Balance: [net cash or debt/EBITDA ratio]
+• FCF: $[X]M, [Y]% margin
+• Operating Leverage: [expanding/stable/compressing margins]
+• Balance Sheet: [net cash or debt/EBITDA ratio]
 
-**EXPOSURE:** [High/Med/Low] - [X]% of value
-**MECHANISM:** [Specific: what they sell/to whom/at what price/why them]
+**VALUATION CONTEXT:**
+• Current Multiple: [X]× sales ([Y] percentile vs 5yr history)
+• Implied Assumptions: [X]% revenue CAGR, [Y]% terminal margins
+• Upside Remaining: +[X]% to bull case ([Y]% already priced in)
 
-**PRIMARY RISK:** [One measurable risk, not generic]
-**CATALYST (6-12M):** [Specific upcoming event]
+**PRIMARY RISK:** [Specific measurable risk with probability estimate]
+**CATALYST (6-12M):** [Specific upcoming inflection point]
 
 **SELECTION REASONING:**
-• Why #1 not #5: [Specific structural advantage over next best alternative]
-• Primary concern: [What could break this thesis for this specific company]  
-• Confidence level: [High/Medium + reasoning]
+• Asymmetry Advantage: [Why this has superior risk/reward vs alternatives]
+• S-Curve Timing: [Why current adoption stage creates opportunity]
+• Primary Concern: [What could break the asymmetric thesis]
 
 [Repeat this format for companies #2, #3, and #4]
 
 **PORTFOLIO SUMMARY**
 Universe: [total analyzed] → Finalists: 4 → Eliminated: [number]
 
-Value Capture Distribution:
-• #1: [position type + mechanism]
-• #2: [position type + mechanism]
-• #3: [position type + mechanism]  
-• #4: [position type + mechanism]
+Asymmetry Distribution:
+• #1: [X]:1 ratio ([position on S-curve])
+• #2: [X]:1 ratio ([position on S-curve])  
+• #3: [X]:1 ratio ([position on S-curve])
+• #4: [X]:1 ratio ([position on S-curve])
 
-Overall Stage: [Early Adopters/Early Majority/etc.]
-Key Catalysts: [2-3 events in next 6-12 months]
+Average Risk/Reward: [X]:1 across portfolio
+Primary Diversification: [value chain positions, industries, S-curve stages]
+Key Portfolio Catalysts: [2-3 events in next 6-12 months that could trigger asymmetric returns]
 
-Remember: Focus on structural competitive advantages and momentum, not valuation metrics. Seek companies that define categories rather than follow them, with expanding moats and accelerating thesis adoption. Your reasoning should demonstrate qualitative deduction, not arithmetic scoring.
+Remember: Prioritize asymmetric risk/reward ratios and S-curve positioning over pure market leadership strength. Seek companies with >3:1 upside/downside ratios at attractive entry points, positioned before major adoption inflection points.
 
-Your final output should consist only of the competitive position analysis results and should not duplicate or rehash any of the detailed phase-by-phase work you completed in the thinking block.
-~
+Your final output should consist only of the structured competitive position analysis results and should not duplicate or rehash any of the detailed analysis work you completed in the thinking block.~
 Pairwise Flip-Gate (Finalist #1 vs Finalist #2)
 
 Your task is to perform a direct head-to-head comparison between the top two finalists from Step 3. The goal is not just to rank them, but to:
@@ -1164,9 +1217,88 @@ Begin your systematic evaluation now, working through each gate using the invest
 
 
 ~
-Make a clear, easy to read story about the theis and context described in the attached conversation/file (first user input). Then give me really good, simple worded story of the decisions and key problems. Give me brief on the second company we analized. Don’t give me numbers or investing terms but tell what it means. Format requirements: Make it easy to skim with clear structure no professional terms . explain key problems in simple words. Clearly state: company name, ticker symbol, and current stock price List key concerns and risks - be very specific and explain plainly so everyone understands what the dangers are and why they matter List key opportunities/catalysts - what could drive upside use arrows for deductions and reasoning. When using investing knowledge explain it. use perfect numer of words not much, not to small If this is NOT a good investment: Provide a detailed explanation of why it should be avoided Explain why this matters (as if speaking to experts who don't invest in poor opportunities) Bold and format all key information for easy scanning Deliver the answer in polish, that is easy to read.
+Stwórz pełną narrację procesu decyzyjnego inwestora, krok po kroku — tak, aby czytelnik mógł zrozumieć tok myślenia, przepływy kapitału i logikę inwestycyjną:
+jak inwestor analizuje rynek, wycenia ryzyko, szuka asymetrii i podejmuje decyzję.
 
+🔹 Struktura (każdy etap obowiązkowo w opisie)
 
+Kontekst rynkowy i strategiczny
+
+Opisz, co się dzieje w otoczeniu rynkowym.
+
+Wskaż główne siły napędowe (popyt, podaż, regulacje, technologie, kapitał).
+
+Pokaż, skąd i dokąd płynie kapitał w tym sektorze.
+
+Model biznesowy i pozycja spółki
+
+Jak firma zarabia, kto płaci i dlaczego właśnie jej.
+
+Co ją wyróżnia (lub co ogranicza).
+
+Jaką część wartości przechwytuje w łańcuchu kapitałowym.
+
+Wycena i jakość finansów (Valuation & Fundamentals)
+
+Wskaż, jak wygląda wycena w kontekście sektora.
+
+Nie tylko liczby – co te liczby oznaczają o kondycji i zdolności firmy do generowania wartości.
+
+Teza inwestycyjna (Market Thesis)
+
+Wyjaśnij, dlaczego inwestor mógłby tu ulokować kapitał.
+
+Jakie mechanizmy rynkowe i przepływy pieniężne wspierają tę decyzję.
+
+Co musi się wydarzyć, żeby teza „zadziałała”.
+
+Proces myślowy inwestora – krok po kroku
+
+Odtwórz logiczny tok rozumowania:
+
+Jak inwestor identyfikuje szansę.
+
+Jak ocenia trwałość przepływów pieniężnych.
+
+Jak waży ryzyka vs. potencjalny zysk.
+
+Jak definiuje „asymetrię” — tzn. czy zysk potencjalny rekompensuje ryzyko kapitału.
+
+Ryzyka i zagrożenia (Key Concerns / Risks)
+
+Opisz konkretnie: co może pójść źle, dlaczego to realne, jak wpływa na przepływy.
+
+Nie ogólniki – konkretne punkty awarii: marże, popyt, regulacje, konkurencja, finansowanie.
+
+Katalizatory wzrostu (Opportunities / Catalysts)
+
+Co może wywołać wzrost wartości spółki.
+
+Jakie zmiany w przepływach kapitału mogą wzmocnić jej pozycję.
+
+Kiedy i dlaczego mogłoby to się zmaterializować.
+
+Wnioski końcowe i decyzja inwestycyjna
+
+Jasno określ: czy to dobra inwestycja i dlaczego / dlaczego nie.
+
+Jeśli NIE: wyjaśnij dokładnie, dlaczego warto jej unikać, co w strukturze rynku lub spółki czyni ją nieatrakcyjną.
+
+Uzasadnij to z perspektywy inwestora myślącego kapitałowo (alokacja, ryzyko, timing).
+
+Kluczowe pojęcia do zrozumienia rynku
+
+Wypunktuj krótko najważniejsze pojęcia i mechanizmy, które pomagają zrozumieć ten rynek (np. bariery wejścia, rotacja kapitału, efekt dźwigni, poziom kontraktacji).
+
+🔹 Format i styl
+
+Pisz po polsku, w stylu czytelnym i narracyjnym, nie akademickim.
+
+Pogrubiaj najważniejsze informacje i pojęcia.
+
+Zachowaj równowagę — ani za dużo technicznych terminów, ani nadmiernego uproszczenia.
+
+Nie streszczaj — wyjaśniaj tok myślenia.
 ~
 Investment Analysis Completeness Check
 You are a quality control analyst verifying that a complete 11-stage investment analysis was executed correctly.

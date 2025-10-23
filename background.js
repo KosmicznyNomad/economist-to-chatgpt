@@ -5,6 +5,23 @@ const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 1200000; // 20 minut na odpowiedź ChatGPT
 const RETRY_INTERVAL_MS = 500;
 
+// Globalny rejestr aktywnych procesów
+const activeProcesses = new Map();
+let monitorWindowId = null;
+let monitorTabId = null;
+
+function broadcastProcessUpdate() {
+  if (monitorTabId) {
+    chrome.tabs.sendMessage(monitorTabId, {
+      type: 'PROCESSES_UPDATE',
+      processes: Array.from(activeProcesses.entries()).map(([id, data]) => ({
+        id,
+        ...data
+      }))
+    }).catch(() => {});
+  }
+}
+
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
 let PROMPTS_PORTFOLIO = [];
@@ -124,6 +141,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     runManualSourceAnalysis(message.text, message.title, message.instances);
     sendResponse({ success: true });
     return true; // Utrzymuj kanał otwarty dla async
+  } else if (message.type === 'KEEP_ALIVE') {
+    // Odpowiedź utrzymuje service worker przy życiu
+    sendResponse({ alive: true });
+    return true;
+  } else if (message.type === 'PROCESS_NEEDS_ACTION') {
+    // Znajdź proces po tabId
+    for (const [id, process] of activeProcesses.entries()) {
+      if (process.tabId === sender.tab.id) {
+        process.needsAction = true;
+        process.currentPrompt = message.currentPrompt || process.currentPrompt;
+        broadcastProcessUpdate();
+        break;
+      }
+    }
+  } else if (message.type === 'PROCESS_ACTION_RESOLVED') {
+    // User kliknął przycisk - proces kontynuuje
+    for (const [id, process] of activeProcesses.entries()) {
+      if (process.tabId === sender.tab.id) {
+        process.needsAction = false;
+        broadcastProcessUpdate();
+        break;
+      }
+    }
+  } else if (message.type === 'GET_PROCESSES') {
+    sendResponse({ 
+      processes: Array.from(activeProcesses.entries()).map(([id, data]) => ({
+        id,
+        ...data
+      }))
+    });
+    return true;
   }
 });
 
@@ -367,6 +415,23 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       }
       payload += `\nTytuł: ${title}\n\n${extractedText}`;
 
+      // Zarejestruj proces
+      const processId = `${analysisType}-${Date.now()}-${index}`;
+      const processInfo = {
+        title: title,
+        windowId: null,
+        tabId: null,
+        status: 'starting',
+        currentPrompt: 0,
+        totalPrompts: promptChain.length,
+        analysisType: analysisType,
+        timestamp: Date.now(),
+        needsAction: false
+      };
+      
+      activeProcesses.set(processId, processInfo);
+      broadcastProcessUpdate();
+
       // Otwórz nowe okno ChatGPT
       const window = await chrome.windows.create({
         url: chatUrl,
@@ -374,9 +439,25 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       });
 
       const chatTabId = window.tabs[0].id;
+      
+      // Aktualizuj proces z ID okna i karty
+      processInfo.windowId = window.id;
+      processInfo.tabId = chatTabId;
+      broadcastProcessUpdate();
 
       // Czekaj na załadowanie strony
       await waitForTabComplete(chatTabId);
+
+      // Wstrzyknij monitoring script
+      try {
+        await chrome.scripting.executeScript({
+          target: { tabId: chatTabId },
+          files: ['chatgpt-monitor.js']
+        });
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wstrzyknięto chatgpt-monitor.js`);
+      } catch (e) {
+        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Błąd wstrzykiwania monitora:`, e);
+      }
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
       const results = await chrome.scripting.executeScript({
@@ -390,15 +471,25 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       if (result && result.success && result.lastResponse) {
         await saveResponse(result.lastResponse, title, analysisType);
         console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Zapisano odpowiedź dla: ${title}`);
+        processInfo.status = 'completed';
+        processInfo.currentPrompt = processInfo.totalPrompts;
       } else if (result && !result.success) {
         console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces zakończony bez odpowiedzi: ${title}`);
+        processInfo.status = 'error';
       }
+
+      // Usuń proces z rejestru i rozgłoś update
+      activeProcesses.delete(processId);
+      broadcastProcessUpdate();
 
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
       return { success: true, title };
 
     } catch (error) {
       console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd:`, error);
+      // Usuń proces w przypadku błędu
+      activeProcesses.delete(processId);
+      broadcastProcessUpdate();
       return { success: false, error: error.message };
     }
   });
@@ -416,6 +507,44 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 async function runAnalysis() {
   try {
     console.log("\n=== ROZPOCZYNAM KONFIGURACJĘ ANALIZY ===");
+    
+    // Otwórz centralne okno monitoringu (jeśli jeszcze nie istnieje)
+    if (!monitorWindowId) {
+      try {
+        const monitorWindow = await chrome.windows.create({
+          url: chrome.runtime.getURL('process-monitor.html'),
+          type: 'popup',
+          width: 700,
+          height: 600,
+          focused: false
+        });
+        monitorWindowId = monitorWindow.id;
+        monitorTabId = monitorWindow.tabs[0].id;
+        
+        // Listener na zamknięcie okna
+        const windowListener = (closedId) => {
+          if (closedId === monitorWindowId) {
+            monitorWindowId = null;
+            monitorTabId = null;
+            chrome.windows.onRemoved.removeListener(windowListener);
+          }
+        };
+        chrome.windows.onRemoved.addListener(windowListener);
+        
+        console.log("✅ Otwarto okno monitora procesów:", monitorWindowId);
+      } catch (error) {
+        console.error("❌ Błąd otwierania monitora:", error);
+        // Fallback: otwórz jako kartę
+        const monitorTab = await chrome.tabs.create({
+          url: chrome.runtime.getURL('process-monitor.html'),
+          active: false
+        });
+        monitorTabId = monitorTab.id;
+        console.log("✅ Otwarto monitor jako kartę:", monitorTabId);
+      }
+    } else {
+      console.log("ℹ️ Monitor już otwarty, używam istniejącego:", monitorWindowId);
+    }
     
     // KROK 1: Sprawdź czy prompty są wczytane
     console.log("\n📝 Krok 1: Sprawdzanie promptów");
@@ -836,6 +965,25 @@ async function extractText() {
 
 // Funkcja wklejania do ChatGPT (content script)
 async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company') {
+  // Keep-alive mechanism - utrzymuj service worker przy życiu
+  let keepAliveInterval = null;
+  
+  function startKeepAlive() {
+    keepAliveInterval = setInterval(() => {
+      chrome.runtime.sendMessage({ type: 'KEEP_ALIVE' })
+        .catch(() => console.log('Service worker ping failed, ale kontynuujemy'));
+    }, 20000); // Co 20s
+    console.log('🔄 Keep-alive uruchomiony');
+  }
+  
+  function stopKeepAlive() {
+    if (keepAliveInterval) {
+      clearInterval(keepAliveInterval);
+      keepAliveInterval = null;
+      console.log('🛑 Keep-alive zatrzymany');
+    }
+  }
+  
   // Funkcja tworząca licznik promptów
   function createCounter() {
     const counter = document.createElement('div');
@@ -1592,6 +1740,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Główna logika
   const startTime = Date.now();
   
+  // Uruchom keep-alive na początku analizy
+  startKeepAlive();
+  
   // Retry loop - czekaj na editor (contenteditable div, nie textarea!)
   while (Date.now() - startTime < textareaWaitMs) {
     const editor = document.querySelector('[role="textbox"]') ||
@@ -1766,6 +1917,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
         console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        stopKeepAlive();
         return { success: true, lastResponse: lastResponse };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
@@ -1774,10 +1926,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         removeCounter(counter, true);
         
         // Brak prompt chain - nie ma odpowiedzi do zapisania
+        stopKeepAlive();
         return { success: true, lastResponse: '' };
       }
       
       // Ten return nigdy nie powinien zostać osiągnięty
+      stopKeepAlive();
       return { success: false };
     }
     
@@ -1786,6 +1940,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   console.error("Nie znaleziono textarea w ChatGPT po " + textareaWaitMs + "ms");
+  stopKeepAlive();
   return { success: false, error: 'Nie znaleziono textarea' };
 }
 
