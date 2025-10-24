@@ -76,22 +76,30 @@ async function copyAllByType(analysisType, button) {
 // Funkcja wczytująca odpowiedzi z storage
 async function loadResponses() {
   try {
+    console.log(`📥 [loadResponses] Wczytuję odpowiedzi z storage...`);
     const result = await chrome.storage.session.get(['responses']);
     const responses = result.responses || [];
     
+    console.log(`📦 [loadResponses] Wczytano ${responses.length} odpowiedzi:`, responses);
+    
     renderResponses(responses);
   } catch (error) {
-    console.error('❌ Błąd wczytywania odpowiedzi:', error);
+    console.error('❌ [loadResponses] Błąd wczytywania odpowiedzi:', error);
+    console.error('Stack trace:', error.stack);
     showEmptyStates();
   }
 }
 
 // Funkcja renderująca listę odpowiedzi
 function renderResponses(responses) {
+  console.log(`🎨 [renderResponses] Renderuję ${responses.length} odpowiedzi`);
+  
   // Rozdziel odpowiedzi na dwa typy
   // Starsze odpowiedzi bez analysisType domyślnie 'company'
   const companyResponses = responses.filter(r => (r.analysisType || 'company') === 'company');
   const portfolioResponses = responses.filter(r => r.analysisType === 'portfolio');
+  
+  console.log(`   Company: ${companyResponses.length}, Portfolio: ${portfolioResponses.length}`);
   
   // Aktualizuj liczniki
   const totalCount = responses.length;
@@ -269,7 +277,11 @@ function showEmptyStates() {
 
 // Nasłuchuj zmian w storage (gdy nowe odpowiedzi są dodawane)
 chrome.storage.onChanged.addListener((changes, namespace) => {
+  console.log(`🔔 [responses.js] Storage changed:`, { namespace, changes });
   if (namespace === 'session' && changes.responses) {
+    console.log(`✅ [responses.js] Responses changed, reloading...`);
+    console.log(`   Old length: ${changes.responses.oldValue?.length || 0}`);
+    console.log(`   New length: ${changes.responses.newValue?.length || 0}`);
     loadResponses();
   }
 });

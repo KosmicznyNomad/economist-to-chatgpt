@@ -64,7 +64,9 @@ function findStopButton() {
   return (
     document.querySelector('button[aria-label*="Stop"]') ||
     document.querySelector('[data-testid="stop-button"]') ||
-    document.querySelector('button[aria-label*="stop"]')
+    document.querySelector('button[aria-label*="stop"]') ||
+    document.querySelector('button[aria-label="Zatrzymaj"]') ||
+    document.querySelector('button[aria-label*="Zatrzymaj"]')
   );
 }
 
@@ -85,8 +87,12 @@ function findRetryButton() {
  * @returns {boolean}
  */
 function isChatGPTGenerating() {
-  // Sprawdź przycisk Stop
-  const stopButton = findStopButton();
+  // Sprawdź przycisk Stop (wszystkie fallbacki)
+  const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
+                     document.querySelector('[data-testid="stop-button"]') ||
+                     document.querySelector('button[aria-label*="stop"]') ||
+                     document.querySelector('button[aria-label="Zatrzymaj"]') ||
+                     document.querySelector('button[aria-label*="Zatrzymaj"]');
   if (stopButton) return true;
 
   // Sprawdź stan edytora
@@ -261,9 +267,24 @@ async function clickSendButton() {
     const editorEmpty = editor && (editor.textContent || '').trim().length === 0;
     const sendBtn = findSendButton();
     const sendDisabled = sendBtn && sendBtn.disabled;
+    
+    // Weryfikacja DOM: czy są wiadomości?
+    const messages = document.querySelectorAll('[data-message-author-role]');
+    const hasMessages = messages.length > 0;
+    
+    // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
+    const hasStopButton = !!stopBtn;
+    
+    // ALTERNATYWNY: interface zablokowany + wiadomości w DOM
+    const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
 
-    if (stopBtn || editorDisabled || (editorEmpty && sendDisabled)) {
-      console.log(`✅ Prompt faktycznie wysłany (${verifyTime}ms)`);
+    if (hasStopButton || interfaceBlocked) {
+      console.log(`✅ Prompt faktycznie wysłany (${verifyTime}ms)`, {
+        stopBtn: !!stopBtn,
+        editorDisabled,
+        hasMessages,
+        msgCount: messages.length
+      });
       return true;
     }
 
@@ -383,41 +404,72 @@ function extractMainContent(element) {
 
 /**
  * Wyciąga ostatnią odpowiedź ChatGPT z DOM
- * @returns {string}
+ * UWAGA: Funkcja async z retry loop - czeka na wyrenderowanie treści (max 4.5s)
+ * @returns {Promise<string>}
  */
-function getLastResponseText() {
+async function getLastResponseText() {
   console.log('🔍 Wyciągam ostatnią odpowiedź ChatGPT...');
 
-  // Szukaj wiadomości asystenta
-  const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-  console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant`);
-
-  if (messages.length > 0) {
-    const lastMessage = messages[messages.length - 1];
-
-    // Sprawdź czy to nie thinking indicator
-    const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
-    if (thinkingIndicators.length > 0) {
-      console.warn('⚠️ Ostatnia wiadomość zawiera thinking indicator');
+  // RETRY LOOP - React może asynchronicznie renderować treść
+  const maxRetries = 15;
+  const retryDelay = 300; // 300ms = max 4.5s
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (attempt > 0) {
+      console.log(`🔄 Retry ${attempt}/${maxRetries - 1} - czekam na renderowanie...`);
+      await new Promise(r => setTimeout(r, retryDelay));
     }
+    
+    // Szukaj wiadomości asystenta
+    const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant`);
 
-    const text = extractMainContent(lastMessage);
-    console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków`);
-    return text;
+    if (messages.length > 0) {
+      const lastMessage = messages[messages.length - 1];
+
+      // Sprawdź czy to nie thinking indicator
+      const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
+      if (thinkingIndicators.length > 0) {
+        console.warn('⚠️ Ostatnia wiadomość zawiera thinking indicator');
+        continue; // Retry
+      }
+
+      const text = extractMainContent(lastMessage);
+      
+      // Sukces - znaleziono niepustą odpowiedź
+      if (text.length > 0) {
+        console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków (attempt ${attempt + 1})`);
+        return text;
+      }
+      
+      // Pusta - retry
+      if (attempt < maxRetries - 1) {
+        console.warn(`⚠️ Tekst pusty (attempt ${attempt + 1}) - retry...`);
+      }
+    }
   }
 
-  // Fallback: szukaj przez article
-  const articles = document.querySelectorAll('article');
-  console.log(`🔍 Fallback: Znaleziono ${articles.length} articles`);
+  // Fallback: szukaj przez article (z retry)
+  console.log('🔍 Fallback: Szukam przez article...');
+  for (let attempt = 0; attempt < 5; attempt++) {
+    if (attempt > 0) {
+      await new Promise(r => setTimeout(r, 300));
+    }
+    
+    const articles = document.querySelectorAll('article');
+    console.log(`🔍 Fallback: Znaleziono ${articles.length} articles`);
 
-  if (articles.length > 0) {
-    const lastArticle = articles[articles.length - 1];
-    const text = extractMainContent(lastArticle);
-    console.log(`✅ Znaleziono odpowiedź (fallback): ${text.length} znaków`);
-    return text;
+    if (articles.length > 0) {
+      const lastArticle = articles[articles.length - 1];
+      const text = extractMainContent(lastArticle);
+      if (text.length > 0) {
+        console.log(`✅ Znaleziono odpowiedź (fallback): ${text.length} znaków`);
+        return text;
+      }
+    }
   }
 
-  console.warn('⚠️ Nie znaleziono odpowiedzi ChatGPT w DOM');
+  console.error('❌ Nie znaleziono odpowiedzi ChatGPT w DOM po wszystkich próbach');
   return '';
 }
 
@@ -597,7 +649,7 @@ async function sendPromptAndGetResponse(promptText, responseTimeout = 600000) {
 
     // 6. Wyciągnij odpowiedź
     console.log('📥 Wyciągam odpowiedź...');
-    const responseText = getLastResponseText();
+    const responseText = await getLastResponseText();
 
     if (!responseText || responseText.length < 10) {
       console.warn('⚠️ Odpowiedź jest pusta lub za krótka');

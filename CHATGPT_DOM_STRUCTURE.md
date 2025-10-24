@@ -159,12 +159,38 @@ await new Promise(r => setTimeout(r, 500));
 sendButton.click();
 
 // Weryfikacja wysłania (sprawdź czy UI się zmienił):
-await new Promise(r => setTimeout(r, 1000));
-const stopBtn = document.querySelector('button[aria-label*="Stop"]');
-const editorDisabled = editor.getAttribute('contenteditable') === 'false';
-if (stopBtn || editorDisabled) {
-  console.log('✅ Wiadomość wysłana');
-} else {
+let verified = false;
+let verifyTime = 0;
+const maxVerifyWait = 5000;
+
+while (verifyTime < maxVerifyWait) {
+  // Wszystkie fallbacki dla stopButton
+  const stopBtn = document.querySelector('button[aria-label*="Stop"]') ||
+                  document.querySelector('[data-testid="stop-button"]') ||
+                  document.querySelector('button[aria-label*="stop"]') ||
+                  document.querySelector('button[aria-label="Zatrzymaj"]');
+  
+  const editorNow = document.querySelector('[role="textbox"]') ||
+                    document.querySelector('[contenteditable]');
+  const editorDisabled = editorNow && editorNow.getAttribute('contenteditable') === 'false';
+  
+  // Weryfikacja DOM: czy są wiadomości?
+  const messages = document.querySelectorAll('[data-message-author-role]');
+  const hasMessages = messages.length > 0;
+  
+  // GŁÓWNY warunek: stopButton (najbardziej pewny)
+  // ALTERNATYWNY: editorDisabled + wiadomości w DOM
+  if (stopBtn || (editorDisabled && hasMessages)) {
+    console.log('✅ Wiadomość wysłana');
+    verified = true;
+    break;
+  }
+  
+  await new Promise(r => setTimeout(r, 100));
+  verifyTime += 100;
+}
+
+if (!verified) {
   console.error('❌ Wysłanie nie powiodło się');
 }
 ```
@@ -366,9 +392,12 @@ const text = extractMainContent(lastArticle);
 
 ```javascript
 function isChatGPTGenerating() {
-  // 1. Sprawdź przycisk Stop
+  // 1. Sprawdź przycisk Stop (wszystkie fallbacki)
   const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
-                     document.querySelector('[data-testid="stop-button"]');
+                     document.querySelector('[data-testid="stop-button"]') ||
+                     document.querySelector('button[aria-label*="stop"]') ||
+                     document.querySelector('button[aria-label="Zatrzymaj"]') ||
+                     document.querySelector('button[aria-label*="Zatrzymaj"]');
   if (stopButton) return true;
 
   // 2. Sprawdź stan edytora
@@ -378,7 +407,9 @@ function isChatGPTGenerating() {
   if (editorDisabled) return true;
 
   // 3. Sprawdź przycisk Send
-  const sendButton = document.querySelector('[data-testid="send-button"]');
+  const sendButton = document.querySelector('[data-testid="send-button"]') ||
+                     document.querySelector('#composer-submit-button') ||
+                     document.querySelector('button[aria-label="Send"]');
   if (sendButton && sendButton.disabled) return true;
 
   return false;
@@ -390,12 +421,56 @@ function isChatGPTGenerating() {
 ```javascript
 async function waitForChatGPTResponse(maxWaitMs = 600000) { // 10 minut
   const startTime = Date.now();
+  
+  // FAZA 1: Czekaj aż ChatGPT ZACZNIE generować
+  console.log('⏳ FAZA 1: Czekam na start odpowiedzi...');
+  let responseStarted = false;
+  const startTimeout = Math.min(maxWaitMs, 300000); // Max 5 minut na start
+  
+  while (Date.now() - startTime < startTimeout) {
+    // Fallbacki dla stopButton
+    const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
+                      document.querySelector('[data-testid="stop-button"]') ||
+                      document.querySelector('button[aria-label*="stop"]') ||
+                      document.querySelector('button[aria-label*="Zatrzymaj"]');
+    
+    const editor = document.querySelector('[role="textbox"]') ||
+                   document.querySelector('[contenteditable]');
+    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+    
+    // Weryfikacja DOM: czy jest nowa treść?
+    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    const hasNewContent = assistantMessages.length > 0;
+    
+    // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
+    const hasStopButton = !!stopButton;
+    
+    // ALTERNATYWNY wskaźnik: interface zablokowany + nowa treść w DOM
+    const interfaceBlocked = editorDisabled && hasNewContent;
+    
+    if (hasStopButton || interfaceBlocked) {
+      console.log('✅ ChatGPT zaczął generować');
+      responseStarted = true;
+      break;
+    }
+    
+    await new Promise(r => setTimeout(r, 500));
+  }
+  
+  if (!responseStarted) {
+    console.error('❌ ChatGPT nie zaczął odpowiadać - prompt nie został wysłany');
+    return false;
+  }
+  
+  // FAZA 2: Czekaj aż ChatGPT ZAKOŃCZY generowanie
+  console.log('⏳ FAZA 2: Czekam na zakończenie odpowiedzi...');
   let consecutiveReady = 0;
 
   while (Date.now() - startTime < maxWaitMs) {
     // Sprawdź czy interface jest gotowy
     const editor = document.querySelector('[role="textbox"][contenteditable="true"]');
-    const stopButton = document.querySelector('button[aria-label*="Stop"]');
+    const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
+                      document.querySelector('[data-testid="stop-button"]');
 
     const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
     const noGeneration = !stopButton;
@@ -406,7 +481,15 @@ async function waitForChatGPTResponse(maxWaitMs = 600000) { // 10 minut
       if (consecutiveReady >= 3) { // Potwierdź przez 3 sprawdzenia (1.5s)
         console.log('✅ ChatGPT zakończył odpowiedź');
         await new Promise(r => setTimeout(r, 1000)); // Stabilizacja UI
-        return true;
+        
+        // Weryfikacja finalna: czy faktycznie jest odpowiedź?
+        const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
+        if (messages.length > 0) {
+          return true;
+        } else {
+          console.warn('⚠️ Interface gotowy ale brak odpowiedzi w DOM');
+          return true; // Kontynuuj mimo wszystko
+        }
       }
     } else {
       consecutiveReady = 0;
@@ -499,6 +582,31 @@ console.log('🔍 Stan interfejsu:', {
 });
 ```
 
+### 7. Cachuj już sprawdzone błędy
+
+```javascript
+// W długich pętlach czekania (FAZA 1, FAZA 2)
+const checkedFixedErrors = new Set();
+
+while (czekaj...) {
+  const lastError = findLastError();
+  if (lastError) {
+    const errorId = `${errorIndex}_${errorText.substring(0, 50)}`;
+    
+    if (checkedFixedErrors.has(errorId)) {
+      // Ciche pominięcie - nie spamuj logów
+    } else {
+      // Sprawdź błąd i dodaj do cache
+      if (errorAlreadyFixed) {
+        checkedFixedErrors.add(errorId);
+      }
+    }
+  }
+}
+```
+
+**Dlaczego**: Stare komunikaty błędów mogą pozostawać w DOM. Bez cache system sprawdza je w każdej iteracji (co 500ms), generując spam w logach.
+
 ---
 
 ## Częste problemy
@@ -524,7 +632,51 @@ editor.appendChild(textNode);
 editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
 ```
 
-### Problem 3: Send button nie staje się enabled
+### Problem 3: False positive - detektor uważa że wysłano ale nic się nie stało
+
+**Objaw**: Mechanizm wykrywania stwierdza że prompt został wysłany i odpowiedź rozpoczęta, ale faktycznie ChatGPT nie zaczął odpowiadać.
+
+**Przyczyna**: Interface przejściowo blokuje się zaraz po kliknięciu Send (editor staje się disabled, sendButton disabled), ale to nie oznacza że wiadomość faktycznie została wysłana. Może to być tylko chwilowa reakcja UI.
+
+**Rozwiązanie**: Weryfikuj WIELOMA wskaźnikami naraz
+
+```javascript
+// ❌ ZŁE - słabe warunki
+const editorDisabled = editor.getAttribute('contenteditable') === 'false';
+if (editorDisabled) {
+  // Może być false positive!
+  return true;
+}
+
+// ✅ DOBRE - mocne warunki z weryfikacją DOM
+const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
+                   document.querySelector('[data-testid="stop-button"]');
+
+const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+
+// Weryfikacja: czy faktycznie jest treść w DOM?
+const messages = document.querySelectorAll('[data-message-author-role]');
+const hasMessages = messages.length > 0;
+
+// GŁÓWNY wskaźnik (najbardziej pewny)
+const hasStopButton = !!stopButton;
+
+// ALTERNATYWNY (wymaga wielu warunków)
+const interfaceBlocked = editorDisabled && hasMessages;
+
+// Akceptuj TYLKO jeśli stopButton LUB (interface zablokowany + są wiadomości)
+if (hasStopButton || interfaceBlocked) {
+  return true;
+}
+```
+
+**Kluczowe zasady**:
+1. **stopButton** jest najbardziej wiarygodnym wskaźnikiem - jeśli istnieje, ChatGPT NA PEWNO generuje
+2. Inne wskaźniki (editorDisabled, sendDisabled) MUSZĄ być połączone z weryfikacją DOM
+3. Sprawdź czy faktycznie są wiadomości w DOM (`[data-message-author-role]`)
+4. Dodaj wszystkie fallbacki dla stopButton (włącznie z polską lokalizacją)
+
+### Problem 4: Send button nie staje się enabled
 
 **Rozwiązanie**: Czekaj dłużej (do 10 sekund) + triggeruj więcej eventów
 
@@ -543,7 +695,7 @@ while (waitTime < 10000) {
 }
 ```
 
-### Problem 4: ChatGPT nie zaczyna odpowiadać po wysłaniu
+### Problem 5: ChatGPT nie zaczyna odpowiadać po wysłaniu
 
 **Rozwiązanie**: Sprawdź komunikaty błędów + użyj Edit+Resend lub Retry
 
@@ -557,7 +709,7 @@ if (checkForErrors()) {
 }
 ```
 
-### Problem 5: Timeout przy długich odpowiedziach (chain-of-thought)
+### Problem 6: Timeout przy długich odpowiedziach (chain-of-thought)
 
 **Rozwiązanie**: Zwiększ timeout + detekcja dwufazowa (start + koniec)
 
@@ -575,18 +727,62 @@ while (Date.now() - startTime < MAX_START_WAIT) {
 await waitForChatGPTResponse(1200000); // 20 minut
 ```
 
-### Problem 6: Wiadomości są puste po wyciągnięciu
+### Problem 7: Wiadomości są puste po wyciągnięciu (length 0)
 
-**Rozwiązanie**: Sprawdź thinking indicators + czekaj dłużej
+**Objaw**: `waitForResponse()` kończy się sukcesem (interface gotowy), ale wyekstrahowany tekst ma długość 0 znaków.
+
+**Przyczyna**: React renderuje DOM asynchronicznie. Nawet jeśli interface jest gotowy (editor enabled, brak stopButton), treść odpowiedzi może jeszcze być w trakcie renderowania w DOM.
+
+**Rozwiązanie**: Retry loop w funkcji ekstrakcji tekstu
 
 ```javascript
-const lastMessage = assistantMessages[assistantMessages.length - 1];
-const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
-if (thinkingIndicators.length > 0) {
-  console.warn('⚠️ ChatGPT jeszcze myśli...');
-  // Czekaj dłużej
+async function getLastResponseText() {
+  const maxRetries = 15; // 15 prób
+  const retryDelay = 300; // 300ms między próbami = max 4.5s
+  
+  for (let attempt = 0; attempt < maxRetries; attempt++) {
+    if (attempt > 0) {
+      console.log(`🔄 Retry ${attempt} - czekam na renderowanie treści...`);
+      await new Promise(r => setTimeout(r, retryDelay));
+    }
+    
+    const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (messages.length > 0) {
+      const lastMessage = messages[messages.length - 1];
+      
+      // Sprawdź thinking indicators
+      const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
+      if (thinkingIndicators.length > 0) {
+        console.warn('⚠️ ChatGPT jeszcze myśli...');
+        continue; // Retry
+      }
+      
+      const text = extractMainContent(lastMessage);
+      
+      // Sukces - znaleziono niepustą odpowiedź
+      if (text.length > 0) {
+        console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków`);
+        return text;
+      }
+      
+      // Pusta - retry (chyba że ostatnia próba)
+      if (attempt < maxRetries - 1) {
+        console.warn(`⚠️ Tekst pusty (attempt ${attempt + 1}) - retry...`);
+      }
+    }
+  }
+  
+  console.error('❌ Nie znaleziono treści po wszystkich próbach');
+  return '';
 }
 ```
+
+**Kluczowe zasady**:
+1. **NIE** wyciągaj tekstu natychmiast po `waitForResponse()`
+2. Dodaj retry loop z opóźnieniem 200-500ms między próbami
+3. Sprawdź czy element nie zawiera tylko thinking indicators
+4. Akceptuj tylko niepuste wyniki (length > 0)
+5. Funkcja ekstrakcji **MUSI** być `async` z `await` w retry loop
 
 ---
 
@@ -641,9 +837,29 @@ async function sendPromptToChatGPT(promptText) {
   await new Promise(r => setTimeout(r, 500));
   sendButton.click();
 
-  // 7. Weryfikuj
-  await new Promise(r => setTimeout(r, 1000));
-  if (!isChatGPTGenerating()) {
+  // 7. Weryfikuj wysłanie
+  let verified = false;
+  let verifyTime = 0;
+  const maxVerifyWait = 5000;
+  
+  while (verifyTime < maxVerifyWait) {
+    const stopBtn = document.querySelector('button[aria-label*="Stop"]') ||
+                    document.querySelector('[data-testid="stop-button"]');
+    const editorNow = document.querySelector('[role="textbox"]');
+    const editorDisabled = editorNow && editorNow.getAttribute('contenteditable') === 'false';
+    const messages = document.querySelectorAll('[data-message-author-role]');
+    
+    // stopButton (pewny) LUB (editorDisabled + wiadomości w DOM)
+    if (stopBtn || (editorDisabled && messages.length > 0)) {
+      verified = true;
+      break;
+    }
+    
+    await new Promise(r => setTimeout(r, 100));
+    verifyTime += 100;
+  }
+  
+  if (!verified) {
     throw new Error('Wysłanie nie powiodło się');
   }
 
@@ -665,6 +881,17 @@ async function sendPromptToChatGPT(promptText) {
 ---
 
 ## Aktualizacje i zmiany
+
+### Październik 2025
+- Naprawiono problem false positives w detekcji wysłania wiadomości
+- Naprawiono problem pustych odpowiedzi (length 0) poprzez dodanie retry loop w ekstrakcji tekstu
+- Naprawiono spam logów z "Błąd już naprawiony" poprzez cache sprawdzonych błędów
+- Dodano weryfikację DOM (sprawdzanie czy faktycznie są wiadomości) do wszystkich mechanizmów wykrywania
+- Rozszerzono fallbacki dla stopButton (włącznie z polską lokalizacją "Zatrzymaj")
+- Wzmocniono warunki wykrywania: stopButton (pewny) LUB (interfaceBlocked + hasMessages)
+- Dodano dwufazową detekcję odpowiedzi (start + koniec) z weryfikacją DOM
+- `getLastResponseText()` teraz async z retry loop (15 prób × 300ms = max 4.5s dodatkowego czekania)
+- Cache sprawdzonych błędów (`Set`) zapobiega powtórnemu sprawdzaniu starych komunikatów błędów
 
 ### Styczeń 2025
 - Dokumentacja utworzona na podstawie działającego rozszerzenia
