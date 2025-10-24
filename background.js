@@ -5,23 +5,6 @@ const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 1200000; // 20 minut na odpowiedź ChatGPT
 const RETRY_INTERVAL_MS = 500;
 
-// Globalny rejestr aktywnych procesów
-const activeProcesses = new Map();
-let monitorWindowId = null;
-let monitorTabId = null;
-
-function broadcastProcessUpdate() {
-  if (monitorTabId) {
-    chrome.tabs.sendMessage(monitorTabId, {
-      type: 'PROCESSES_UPDATE',
-      processes: Array.from(activeProcesses.entries()).map(([id, data]) => ({
-        id,
-        ...data
-      }))
-    }).catch(() => {});
-  }
-}
-
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
 let PROMPTS_PORTFOLIO = [];
@@ -109,20 +92,37 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // Funkcja zapisująca odpowiedź do storage
 async function saveResponse(responseText, source, analysisType = 'company') {
   try {
-    const result = await chrome.storage.session.get(['responses']);
-    const responses = result.responses || [];
-    
-    responses.push({
-      text: responseText,
-      timestamp: Date.now(),
+    console.log(`📝 [saveResponse] Rozpoczynam zapisywanie:`, {
+      textLength: responseText?.length || 0,
       source: source,
       analysisType: analysisType
     });
     
+    const result = await chrome.storage.session.get(['responses']);
+    const responses = result.responses || [];
+    
+    console.log(`📦 [saveResponse] Obecny stan storage: ${responses.length} odpowiedzi`);
+    
+    const newResponse = {
+      text: responseText,
+      timestamp: Date.now(),
+      source: source,
+      analysisType: analysisType
+    };
+    
+    responses.push(newResponse);
+    
     await chrome.storage.session.set({ responses });
-    console.log(`✅ Zapisano odpowiedź do storage (${responses.length} łącznie, typ: ${analysisType})`);
+    console.log(`✅ [saveResponse] Zapisano odpowiedź do storage (${responses.length} łącznie, typ: ${analysisType})`);
+    console.log(`📤 [saveResponse] Nowa odpowiedź:`, {
+      textPreview: responseText.substring(0, 100),
+      timestamp: newResponse.timestamp,
+      source: source,
+      analysisType: analysisType
+    });
   } catch (error) {
-    console.error('❌ Błąd zapisywania odpowiedzi:', error);
+    console.error('❌ [saveResponse] Błąd zapisywania odpowiedzi:', error);
+    console.error('Stack trace:', error.stack);
   }
 }
 
@@ -141,37 +141,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     runManualSourceAnalysis(message.text, message.title, message.instances);
     sendResponse({ success: true });
     return true; // Utrzymuj kanał otwarty dla async
-  } else if (message.type === 'KEEP_ALIVE') {
-    // Odpowiedź utrzymuje service worker przy życiu
-    sendResponse({ alive: true });
-    return true;
-  } else if (message.type === 'PROCESS_NEEDS_ACTION') {
-    // Znajdź proces po tabId
-    for (const [id, process] of activeProcesses.entries()) {
-      if (process.tabId === sender.tab.id) {
-        process.needsAction = true;
-        process.currentPrompt = message.currentPrompt || process.currentPrompt;
-        broadcastProcessUpdate();
-        break;
-      }
-    }
-  } else if (message.type === 'PROCESS_ACTION_RESOLVED') {
-    // User kliknął przycisk - proces kontynuuje
-    for (const [id, process] of activeProcesses.entries()) {
-      if (process.tabId === sender.tab.id) {
-        process.needsAction = false;
-        broadcastProcessUpdate();
-        break;
-      }
-    }
-  } else if (message.type === 'GET_PROCESSES') {
-    sendResponse({ 
-      processes: Array.from(activeProcesses.entries()).map(([id, data]) => ({
-        id,
-        ...data
-      }))
-    });
-    return true;
   }
 });
 
@@ -415,23 +384,6 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       }
       payload += `\nTytuł: ${title}\n\n${extractedText}`;
 
-      // Zarejestruj proces
-      const processId = `${analysisType}-${Date.now()}-${index}`;
-      const processInfo = {
-        title: title,
-        windowId: null,
-        tabId: null,
-        status: 'starting',
-        currentPrompt: 0,
-        totalPrompts: promptChain.length,
-        analysisType: analysisType,
-        timestamp: Date.now(),
-        needsAction: false
-      };
-      
-      activeProcesses.set(processId, processInfo);
-      broadcastProcessUpdate();
-
       // Otwórz nowe okno ChatGPT
       const window = await chrome.windows.create({
         url: chatUrl,
@@ -439,25 +391,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       });
 
       const chatTabId = window.tabs[0].id;
-      
-      // Aktualizuj proces z ID okna i karty
-      processInfo.windowId = window.id;
-      processInfo.tabId = chatTabId;
-      broadcastProcessUpdate();
 
       // Czekaj na załadowanie strony
       await waitForTabComplete(chatTabId);
-
-      // Wstrzyknij monitoring script
-      try {
-        await chrome.scripting.executeScript({
-          target: { tabId: chatTabId },
-          files: ['chatgpt-monitor.js']
-        });
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wstrzyknięto chatgpt-monitor.js`);
-      } catch (e) {
-        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Błąd wstrzykiwania monitora:`, e);
-      }
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
       const results = await chrome.scripting.executeScript({
@@ -468,28 +404,20 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
       const result = results[0]?.result;
-      if (result && result.success && result.lastResponse) {
+      if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null) {
         await saveResponse(result.lastResponse, title, analysisType);
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Zapisano odpowiedź dla: ${title}`);
-        processInfo.status = 'completed';
-        processInfo.currentPrompt = processInfo.totalPrompts;
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Zapisano odpowiedź dla: ${title} (${result.lastResponse.length} znaków)`);
       } else if (result && !result.success) {
         console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces zakończony bez odpowiedzi: ${title}`);
-        processInfo.status = 'error';
+      } else if (result && result.success && !result.lastResponse) {
+        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces udany ale brak lastResponse: ${title}`);
       }
-
-      // Usuń proces z rejestru i rozgłoś update
-      activeProcesses.delete(processId);
-      broadcastProcessUpdate();
 
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
       return { success: true, title };
 
     } catch (error) {
       console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd:`, error);
-      // Usuń proces w przypadku błędu
-      activeProcesses.delete(processId);
-      broadcastProcessUpdate();
       return { success: false, error: error.message };
     }
   });
@@ -507,44 +435,6 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 async function runAnalysis() {
   try {
     console.log("\n=== ROZPOCZYNAM KONFIGURACJĘ ANALIZY ===");
-    
-    // Otwórz centralne okno monitoringu (jeśli jeszcze nie istnieje)
-    if (!monitorWindowId) {
-      try {
-        const monitorWindow = await chrome.windows.create({
-          url: chrome.runtime.getURL('process-monitor.html'),
-          type: 'popup',
-          width: 700,
-          height: 600,
-          focused: false
-        });
-        monitorWindowId = monitorWindow.id;
-        monitorTabId = monitorWindow.tabs[0].id;
-        
-        // Listener na zamknięcie okna
-        const windowListener = (closedId) => {
-          if (closedId === monitorWindowId) {
-            monitorWindowId = null;
-            monitorTabId = null;
-            chrome.windows.onRemoved.removeListener(windowListener);
-          }
-        };
-        chrome.windows.onRemoved.addListener(windowListener);
-        
-        console.log("✅ Otwarto okno monitora procesów:", monitorWindowId);
-      } catch (error) {
-        console.error("❌ Błąd otwierania monitora:", error);
-        // Fallback: otwórz jako kartę
-        const monitorTab = await chrome.tabs.create({
-          url: chrome.runtime.getURL('process-monitor.html'),
-          active: false
-        });
-        monitorTabId = monitorTab.id;
-        console.log("✅ Otwarto monitor jako kartę:", monitorTabId);
-      }
-    } else {
-      console.log("ℹ️ Monitor już otwarty, używam istniejącego:", monitorWindowId);
-    }
     
     // KROK 1: Sprawdź czy prompty są wczytane
     console.log("\n📝 Krok 1: Sprawdzanie promptów");
@@ -965,25 +855,6 @@ async function extractText() {
 
 // Funkcja wklejania do ChatGPT (content script)
 async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company') {
-  // Keep-alive mechanism - utrzymuj service worker przy życiu
-  let keepAliveInterval = null;
-  
-  function startKeepAlive() {
-    keepAliveInterval = setInterval(() => {
-      chrome.runtime.sendMessage({ type: 'KEEP_ALIVE' })
-        .catch(() => console.log('Service worker ping failed, ale kontynuujemy'));
-    }, 20000); // Co 20s
-    console.log('🔄 Keep-alive uruchomiony');
-  }
-  
-  function stopKeepAlive() {
-    if (keepAliveInterval) {
-      clearInterval(keepAliveInterval);
-      keepAliveInterval = null;
-      console.log('🛑 Keep-alive zatrzymany');
-    }
-  }
-  
   // Funkcja tworząca licznik promptów
   function createCounter() {
     const counter = document.createElement('div');
@@ -1043,90 +914,276 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Funkcja próbująca naprawić błąd przez Edit+Resend
   async function tryEditResend() {
     try {
-      console.log('🔧 Próbuję naprawić przez Edit+Resend...');
+      console.log('🔧 [tryEditResend] Próbuję naprawić przez Edit+Resend...');
       
-      // Znajdź ostatnią wiadomość użytkownika
-      const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+      // === 1. ZNAJDŹ OSTATNIĄ WIADOMOŚĆ UŻYTKOWNIKA ===
+      console.log('🔍 [tryEditResend] Szukam ostatniej wiadomości użytkownika...');
+      
+      // Próba 1: standardowy selektor
+      let userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+      console.log(`  Próba 1: [data-message-author-role="user"] → ${userMessages.length} wyników`);
+      
+      // Fallback 1: conversation-turn containers
       if (userMessages.length === 0) {
-        console.warn('⚠️ Brak wiadomości użytkownika');
+        console.log('  Próba 2: szukam w conversation-turn containers...');
+        const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+        console.log(`    Znaleziono ${turns.length} conversation turns`);
+        userMessages = Array.from(turns).filter(turn => 
+          turn.querySelector('[data-message-author-role="user"]')
+        );
+        console.log(`    Znaleziono ${userMessages.length} user turns`);
+      }
+      
+      // Fallback 2: szukaj przez article + klasy
+      if (userMessages.length === 0) {
+        console.log('  Próba 3: szukam przez article[class*="message"]...');
+        const allMessages = document.querySelectorAll('article, [class*="message"], [class*="Message"]');
+        console.log(`    Znaleziono ${allMessages.length} potencjalnych wiadomości`);
+        userMessages = Array.from(allMessages).filter(msg => {
+          const role = msg.getAttribute('data-message-author-role');
+          const hasUserIndicator = msg.querySelector('[data-message-author-role="user"]') ||
+                                   msg.textContent?.includes('You') ||
+                                   msg.classList.toString().includes('user');
+          return role === 'user' || hasUserIndicator;
+        });
+        console.log(`    Znaleziono ${userMessages.length} user messages`);
+      }
+      
+      if (userMessages.length === 0) {
+        console.warn('❌ [tryEditResend] Brak wiadomości użytkownika - nie mogę znaleźć Edit');
         return false;
       }
       
       const lastUserMessage = userMessages[userMessages.length - 1];
-      console.log('✓ Znaleziono ostatnią wiadomość użytkownika');
+      console.log(`✓ [tryEditResend] Znaleziono ostatnią wiadomość użytkownika (${userMessages.length} total)`);
       
-      // Znajdź przycisk Edit bezpośrednio w wiadomości (różne selektory)
-      let editButton = lastUserMessage.querySelector('button[aria-label="Edit message"]');
-      if (!editButton) {
-        editButton = lastUserMessage.querySelector('button.right-full[aria-label*="Edit"]');
+      // === 2. SYMULUJ HOVER ŻEBY POKAZAĆ EDIT ===
+      console.log('🖱️ [tryEditResend] Symuluję hover aby pokazać Edit...');
+      lastUserMessage.dispatchEvent(new MouseEvent('mouseenter', { 
+        view: window,
+        bubbles: true, 
+        cancelable: true 
+      }));
+      lastUserMessage.dispatchEvent(new MouseEvent('mouseover', { 
+        view: window,
+        bubbles: true, 
+        cancelable: true 
+      }));
+      await new Promise(resolve => setTimeout(resolve, 300));
+      
+      // === 3. ZNAJDŹ PRZYCISK EDIT ===
+      console.log('🔍 [tryEditResend] Szukam przycisku Edit...');
+      
+      let editButton = null;
+      const editSelectors = [
+        'button[aria-label="Edit message"]',
+        'button[aria-label*="Edit"]',
+        'button.right-full[aria-label*="Edit"]',
+        'button[aria-label*="Edytuj"]',  // Polska lokalizacja
+        'button[title*="Edit"]',
+        'button[title*="edit"]'
+      ];
+      
+      for (const selector of editSelectors) {
+        editButton = lastUserMessage.querySelector(selector);
+        if (editButton) {
+          console.log(`✓ [tryEditResend] Znaleziono Edit przez: ${selector}`);
+          break;
+        }
       }
+      
+      // Fallback 1: conversation-turn container
       if (!editButton) {
-        editButton = lastUserMessage.querySelector('button[aria-label*="Edit"]');
+        console.log('  Fallback 1: szukam w conversation-turn container...');
+        const turnContainer = lastUserMessage.closest('[data-testid^="conversation-turn-"]');
+        if (turnContainer) {
+          for (const selector of editSelectors) {
+            editButton = turnContainer.querySelector(selector);
+            if (editButton) {
+              console.log(`✓ [tryEditResend] Znaleziono Edit w turn container przez: ${selector}`);
+              break;
+            }
+          }
+        }
+      }
+      
+      // Fallback 2: toolbar
+      if (!editButton) {
+        console.log('  Fallback 2: szukam w toolbar...');
+        const toolbar = lastUserMessage.querySelector('[role="toolbar"]') ||
+                       lastUserMessage.querySelector('[class*="toolbar"]');
+        if (toolbar) {
+          for (const selector of editSelectors) {
+            editButton = toolbar.querySelector(selector);
+            if (editButton) {
+              console.log(`✓ [tryEditResend] Znaleziono Edit w toolbar przez: ${selector}`);
+              break;
+            }
+          }
+        }
       }
       
       if (!editButton) {
-        console.warn('⚠️ Nie znaleziono przycisku Edit');
+        console.warn('❌ [tryEditResend] Nie znaleziono przycisku Edit');
         return false;
       }
       
-      console.log('✓ Znaleziono przycisk Edit');
-      
-      // Usuń klasy ukrywające (invisible, hidden) i wymuś widoczność
+      // Usuń klasy ukrywające i wymuś widoczność
       if (editButton.classList.contains('invisible')) {
         editButton.classList.remove('invisible');
-        console.log('✓ Usunięto klasę invisible');
+        console.log('  ✓ Usunięto klasę invisible');
       }
       if (editButton.classList.contains('hidden')) {
         editButton.classList.remove('hidden');
-        console.log('✓ Usunięto klasę hidden');
+        console.log('  ✓ Usunięto klasę hidden');
       }
       
-      // Wymuś widoczność przez style (na wypadek CSS)
       const originalStyle = editButton.style.cssText;
       editButton.style.visibility = 'visible';
       editButton.style.display = 'block';
       
-      console.log('✓ Klikam przycisk Edit...');
+      console.log('👆 [tryEditResend] Klikam przycisk Edit...');
       editButton.click();
       
-      // Przywróć oryginalny styl po kliknięciu
       setTimeout(() => {
         editButton.style.cssText = originalStyle;
       }, 100);
       
-      // Czekaj na pojawienie się edytora
+      // === 4. CZEKAJ NA EDYTOR I ZNAJDŹ SEND W KONTEKŚCIE ===
+      console.log('⏳ [tryEditResend] Czekam na pojawienie się edytora po Edit...');
       await new Promise(resolve => setTimeout(resolve, 1000));
       
-      // Znajdź przycisk Send
-      let sendButton = document.querySelector('[data-testid="send-button"]');
-      if (!sendButton) {
-        sendButton = document.querySelector('button[aria-label*="Send"]');
-      }
-      if (!sendButton) {
-        sendButton = document.querySelector('#composer-submit-button');
+      // Znajdź conversation turn container dla kontekstu
+      const turnContainer = lastUserMessage.closest('[data-testid^="conversation-turn-"]') ||
+                           lastUserMessage.closest('[class*="turn"]') ||
+                           lastUserMessage.closest('article') ||
+                           lastUserMessage.parentElement;
+      
+      console.log('🔍 [tryEditResend] Szukam przycisku Send w kontekście edytowanej wiadomości...');
+      
+      const sendSelectors = [
+        '[data-testid="send-button"]',
+        'button[aria-label="Send"]',
+        'button[aria-label*="Send"]',
+        'button[name="Send"]',
+        'button[type="submit"]',
+        '#composer-submit-button',
+        'button[data-testid*="send"]'
+      ];
+      
+      // Aktywne czekanie na Send button (max 10s)
+      let sendButton = null;
+      const maxWaitForSend = 10000;
+      const checkInterval = 100;
+      const maxIterations = maxWaitForSend / checkInterval;
+      
+      for (let iteration = 0; iteration < maxIterations; iteration++) {
+        // Najpierw szukaj w turn container
+        for (const selector of sendSelectors) {
+          sendButton = turnContainer.querySelector(selector);
+          if (sendButton && !sendButton.disabled) {
+            console.log(`✓ [tryEditResend] Znaleziono Send w turn container po ${iteration * checkInterval}ms: ${selector}`);
+            break;
+          }
+        }
+        
+        // Jeśli nie znaleziono, szukaj w całym dokumencie
+        if (!sendButton) {
+          for (const selector of sendSelectors) {
+            sendButton = document.querySelector(selector);
+            if (sendButton && !sendButton.disabled) {
+              console.log(`✓ [tryEditResend] Znaleziono Send globalnie po ${iteration * checkInterval}ms: ${selector}`);
+              break;
+            }
+          }
+        }
+        
+        if (sendButton) break;
+        
+        if (iteration > 0 && iteration % 10 === 0) {
+          console.log(`  ⏳ Czekam na Send... ${iteration * checkInterval}ms / ${maxWaitForSend}ms`);
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, checkInterval));
       }
       
       if (!sendButton) {
-        console.warn('⚠️ Nie znaleziono przycisku Send po Edit');
+        console.warn('❌ [tryEditResend] Nie znaleziono przycisku Send po Edit');
         return false;
       }
       
       if (sendButton.disabled) {
-        console.warn('⚠️ Przycisk Send jest disabled');
+        console.warn('⚠️ [tryEditResend] Przycisk Send jest disabled');
         return false;
       }
       
-      console.log('✓ Znaleziono przycisk Send - klikam...');
+      console.log('👆 [tryEditResend] Klikam przycisk Send...');
       sendButton.click();
       
-      // Czekaj aby prompt się wysłał
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      // === 5. WERYFIKACJA WYSŁANIA ===
+      console.log('🔍 [tryEditResend] Weryfikuję czy prompt został wysłany...');
+      let verified = false;
+      const maxVerifyTime = 3000;
+      const verifyInterval = 100;
+      const maxVerifyIterations = maxVerifyTime / verifyInterval;
       
-      console.log('✅ Edit+Resend wykonane pomyślnie');
+      for (let iteration = 0; iteration < maxVerifyIterations; iteration++) {
+        const editor = document.querySelector('[role="textbox"]') || 
+                      document.querySelector('[contenteditable]');
+        
+        // Fallbacki dla stopButton
+        const stopBtn = document.querySelector('button[aria-label*="Stop"]') || 
+                       document.querySelector('[data-testid="stop-button"]') ||
+                       document.querySelector('button[aria-label*="stop"]') ||
+                       document.querySelector('button[aria-label="Zatrzymaj"]');
+        
+        const currentSendBtn = document.querySelector('[data-testid="send-button"]') ||
+                              document.querySelector('button[aria-label="Send"]');
+        
+        const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+        const editorEmpty = editor && (editor.textContent || '').trim().length === 0;
+        const sendDisabled = currentSendBtn && currentSendBtn.disabled;
+        
+        // Weryfikacja DOM
+        const messages = document.querySelectorAll('[data-message-author-role]');
+        const hasMessages = messages.length > 0;
+        
+        // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
+        const hasStopButton = !!stopBtn;
+        
+        // ALTERNATYWNY: interface zablokowany + wiadomości w DOM
+        const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
+        
+        if (hasStopButton || interfaceBlocked) {
+          verified = true;
+          console.log(`✅ [tryEditResend] Weryfikacja SUKCES po ${iteration * verifyInterval}ms:`, {
+            stopBtn: !!stopBtn,
+            editorDisabled,
+            editorEmpty,
+            sendDisabled,
+            hasMessages,
+            msgCount: messages.length
+          });
+          break;
+        }
+        
+        if (iteration > 0 && iteration % 5 === 0) {
+          console.log(`  ⏳ Weryfikacja... ${iteration * verifyInterval}ms / ${maxVerifyTime}ms`);
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, verifyInterval));
+      }
+      
+      if (!verified) {
+        console.warn(`⚠️ [tryEditResend] Weryfikacja FAILED - prompt może nie zostać wysłany po ${maxVerifyTime}ms`);
+        return false;
+      }
+      
+      console.log('✅ [tryEditResend] Edit+Resend wykonane pomyślnie i zweryfikowane');
       return true;
       
     } catch (error) {
-      console.error('❌ Błąd w tryEditResend:', error);
+      console.error('❌ [tryEditResend] Błąd:', error);
       return false;
     }
   }
@@ -1141,28 +1198,109 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     // Czekaj aż ChatGPT zacznie generować odpowiedź
     // Chain-of-thought model może myśleć 4-5 min przed startem
     let responseStarted = false;
+    let editAttemptedPhase1 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
+    const checkedFixedErrorsPhase1 = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
     const startTimeout = Math.min(maxWaitMs, 1200000); // Max 20 minut na start
     
     while (Date.now() - startTime < startTimeout) {
-      // Sprawdź czy pojawił się komunikat błędu i napraw przez Edit+Resend lub Retry
+      // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
       const errorMessages = document.querySelectorAll('[class*="text"]');
-      for (const msg of errorMessages) {
-        if (msg.textContent.includes('Something went wrong while generating the response')) {
-          console.log('⚠️ Znaleziono komunikat błędu - próbuję naprawić...');
+      
+      // Znajdź ostatni komunikat błędu (od końca)
+      let lastErrorMsg = null;
+      let lastErrorIndex = -1;
+      for (let i = errorMessages.length - 1; i >= 0; i--) {
+        const msg = errorMessages[i];
+        if (msg.textContent.includes('Something went wrong while generating the response') || 
+            msg.textContent.includes('Something went wrong')) {
+          lastErrorMsg = msg;
+          lastErrorIndex = i;
+          break; // Zatrzymaj się na pierwszym (ostatnim) znalezionym
+        }
+      }
+      
+      // Jeśli znaleziono błąd, sprawdź czy nie został już naprawiony
+      if (lastErrorMsg) {
+        // Unikalne ID błędu (pozycja + fragment tekstu)
+        const errorId = `${lastErrorIndex}_${lastErrorMsg.textContent.substring(0, 50)}`;
+        
+        // Jeśli już sprawdzaliśmy ten błąd i był naprawiony - pomiń bez logowania
+        if (checkedFixedErrorsPhase1.has(errorId)) {
+          // Ciche pominięcie - nie spamuj logów
+        } else {
+          // Pierwszy raz widzimy ten błąd - sprawdź go
+          console.log(`🔍 [FAZA 1] Znaleziono ostatni komunikat błędu (${lastErrorIndex + 1}/${errorMessages.length})`);
           
-          // Najpierw spróbuj Edit+Resend
-          const editSuccess = await tryEditResend();
-          if (editSuccess) {
-            console.log('✅ Naprawiono przez Edit+Resend - kontynuuję czekanie...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            continue; // Kontynuuj czekanie w tej samej pętli
+          // Znajdź kontener błędu w strukturze DOM
+          const errorContainer = lastErrorMsg.closest('article') || 
+                                lastErrorMsg.closest('[data-testid^="conversation-turn-"]') ||
+                                lastErrorMsg.closest('[class*="message"]') ||
+                                lastErrorMsg.parentElement;
+          
+          // Sprawdź czy po błędzie jest już nowa odpowiedź assistant
+          const allMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+          let errorAlreadyFixed = false;
+          
+          if (errorContainer && allMessages.length > 0) {
+            const lastAssistantMsg = allMessages[allMessages.length - 1];
+            
+            // Porównaj pozycję błędu z ostatnią odpowiedzią
+            try {
+              const errorPosition = errorContainer.compareDocumentPosition(lastAssistantMsg);
+              
+              // Jeśli ostatnia odpowiedź jest AFTER błędu (Node.DOCUMENT_POSITION_FOLLOWING = 4)
+              if (errorPosition & Node.DOCUMENT_POSITION_FOLLOWING) {
+                errorAlreadyFixed = true;
+                console.log('✓ [FAZA 1] Błąd już naprawiony - jest nowa odpowiedź po nim, pomijam');
+                // Dodaj do cache żeby nie sprawdzać ponownie
+                checkedFixedErrorsPhase1.add(errorId);
+              }
+            } catch (e) {
+              console.warn('⚠️ [FAZA 1] Nie udało się porównać pozycji błędu:', e);
+            }
           }
           
-          // Jeśli Edit nie zadziałał, spróbuj Retry
-          console.log('⚠️ Edit+Resend nie zadziałał - szukam przycisku Retry...');
-          let retryButton = msg.parentElement?.querySelector('button[aria-label="Retry"]');
+          // Jeśli błąd został naprawiony, pomiń całą logikę Edit/Retry
+          if (!errorAlreadyFixed) {
+          // Jeśli już próbowaliśmy Edit - NIE próbuj ponownie
+          if (editAttemptedPhase1) {
+            console.log('⚠️ [FAZA 1] Błąd wykryty ale editAttempted=true - pomijam Edit, szukam Retry...');
+          } else {
+            console.log('⚠️ [FAZA 1] Znaleziono komunikat błędu - uruchamiam retry loop Edit+Resend...');
+            editAttemptedPhase1 = true; // Oznacz że próbujemy
+            
+            // Retry loop: max 3 próby Edit+Resend
+            let editSuccess = false;
+            for (let attempt = 1; attempt <= 3 && !editSuccess; attempt++) {
+              console.log(`🔧 [FAZA 1] Próba ${attempt}/3 wywołania tryEditResend()...`);
+              editSuccess = await tryEditResend();
+              console.log(`📊 [FAZA 1] Próba ${attempt}/3: ${editSuccess ? '✅ SUKCES' : '❌ PORAŻKA'}`);
+              
+              if (editSuccess) {
+                console.log('✅ [FAZA 1] Edit+Resend SUKCES - przerywam retry loop');
+                break;
+              }
+              
+              if (!editSuccess && attempt < 3) {
+                console.log(`⏳ [FAZA 1] Próba ${attempt} nieudana, czekam 2s przed kolejną...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+            
+            if (editSuccess) {
+              console.log('✅ [FAZA 1] Naprawiono przez Edit+Resend - kontynuuję czekanie...');
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              continue; // Kontynuuj czekanie w tej samej pętli
+            }
+            
+            console.log('⚠️ [FAZA 1] Wszystkie 3 próby Edit+Resend nieudane, próbuję Retry button...');
+          }
+          
+          // Jeśli Edit nie zadziałał (lub już próbowaliśmy), spróbuj Retry
+          console.log('🔍 [FAZA 1] Szukam przycisku Retry...');
+          let retryButton = lastErrorMsg.parentElement?.querySelector('button[aria-label="Retry"]');
           if (!retryButton) {
-            retryButton = msg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
+            retryButton = lastErrorMsg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
           }
           if (!retryButton) {
             // Szukaj w całym dokumencie jako fallback
@@ -1170,13 +1308,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           }
           
           if (retryButton) {
-            console.log('🔄 Klikam przycisk Retry - wznawiam czekanie na odpowiedź...');
+            console.log('🔄 [FAZA 1] Klikam przycisk Retry - wznawiam czekanie na odpowiedź...');
             retryButton.click();
             await new Promise(resolve => setTimeout(resolve, 2000));
             // Zwróć false aby zewnętrzna pętla wywołała waitForResponse ponownie (jak Continue)
             return false;
           } else {
-            console.warn('⚠️ Nie znaleziono przycisku Retry');
+            console.warn('⚠️ [FAZA 1] Nie znaleziono przycisku Retry');
+          }
           }
         }
       }
@@ -1186,26 +1325,44 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
                         document.querySelector('[contenteditable]') ||
                         document.querySelector('[data-testid="composer-input"]');
       
+      // Fallbacki dla stopButton z dokumentacji
       const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
                         document.querySelector('[data-testid="stop-button"]') ||
-                        document.querySelector('button[aria-label*="stop"]');
+                        document.querySelector('button[aria-label*="stop"]') ||
+                        document.querySelector('button[aria-label="Zatrzymaj"]') || // PL
+                        document.querySelector('button[aria-label*="Zatrzymaj"]');
       
       const sendButton = document.querySelector('[data-testid="send-button"]') ||
                         document.querySelector('#composer-submit-button') ||
-                        document.querySelector('button[aria-label="Send"]');
+                        document.querySelector('button[aria-label="Send"]') ||
+                        document.querySelector('button[aria-label*="Send"]');
       
       // ChatGPT zaczął odpowiadać jeśli:
-      // 1. Jest stopButton (główny wskaźnik generowania)
-      // 2. LUB editor jest disabled (contenteditable="false")
-      // 3. LUB sendButton jest disabled (podczas generowania)
+      // 1. Jest stopButton (główny wskaźnik generowania) - najbardziej wiarygodny
+      // 2. LUB editor jest disabled (contenteditable="false") + sendButton disabled
+      // 3. LUB jest nowa wiadomość assistant (faktyczna odpowiedź w DOM)
+      
       const editorDisabled = editorAny && editorAny.getAttribute('contenteditable') === 'false';
       const sendDisabled = sendButton && sendButton.disabled;
       
-      if (stopButton || editorDisabled || sendDisabled) {
+      // Weryfikacja: Czy faktycznie jest nowa aktywność w DOM?
+      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const hasNewContent = assistantMessages.length > 0;
+      
+      // GŁÓWNY warunek: stopButton (najbardziej pewny)
+      const hasStopButton = !!stopButton;
+      
+      // ALTERNATYWNY warunek: interface zablokowany + nowa treść w DOM
+      const interfaceBlocked = (editorDisabled || sendDisabled) && hasNewContent;
+      
+      // Warunek spełniony jeśli KTÓRYKOLWIEK z głównych wskaźników jest obecny
+      if (hasStopButton || interfaceBlocked) {
         console.log("✓ ChatGPT zaczął odpowiadać", {
           stopButton: !!stopButton,
           editorDisabled: !!editorDisabled,
-          sendDisabled: !!sendDisabled
+          sendDisabled: !!sendDisabled,
+          hasNewContent: hasNewContent,
+          assistantMsgCount: assistantMessages.length
         });
         responseStarted = true;
         break;
@@ -1229,27 +1386,108 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     // Czekaj aż ChatGPT skończy i interface będzie gotowy na kolejny prompt
     let consecutiveReady = 0;
     let logInterval = 0;
+    let editAttemptedPhase2 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
+    const checkedFixedErrors = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
     
     while (Date.now() - startTime < maxWaitMs) {
-      // Sprawdź czy pojawił się komunikat błędu i napraw przez Edit+Resend lub Retry
+      // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
       const errorMessages = document.querySelectorAll('[class*="text"]');
-      for (const msg of errorMessages) {
-        if (msg.textContent.includes('Something went wrong while generating the response')) {
-          console.log('⚠️ Znaleziono komunikat błędu - próbuję naprawić...');
+      
+      // Znajdź ostatni komunikat błędu (od końca)
+      let lastErrorMsg = null;
+      let lastErrorIndex = -1;
+      for (let i = errorMessages.length - 1; i >= 0; i--) {
+        const msg = errorMessages[i];
+        if (msg.textContent.includes('Something went wrong while generating the response') || 
+            msg.textContent.includes('Something went wrong')) {
+          lastErrorMsg = msg;
+          lastErrorIndex = i;
+          break; // Zatrzymaj się na pierwszym (ostatnim) znalezionym
+        }
+      }
+      
+      // Jeśli znaleziono błąd, sprawdź czy nie został już naprawiony
+      if (lastErrorMsg) {
+        // Unikalne ID błędu (pozycja + fragment tekstu)
+        const errorId = `${lastErrorIndex}_${lastErrorMsg.textContent.substring(0, 50)}`;
+        
+        // Jeśli już sprawdzaliśmy ten błąd i był naprawiony - pomiń bez logowania
+        if (checkedFixedErrors.has(errorId)) {
+          // Ciche pominięcie - nie spamuj logów
+        } else {
+          // Pierwszy raz widzimy ten błąd - sprawdź go
+          console.log(`🔍 [FAZA 2] Znaleziono ostatni komunikat błędu (${lastErrorIndex + 1}/${errorMessages.length})`);
           
-          // Najpierw spróbuj Edit+Resend
-          const editSuccess = await tryEditResend();
-          if (editSuccess) {
-            console.log('✅ Naprawiono przez Edit+Resend - kontynuuję czekanie...');
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            continue; // Kontynuuj czekanie w tej samej pętli
+          // Znajdź kontener błędu w strukturze DOM
+          const errorContainer = lastErrorMsg.closest('article') || 
+                                lastErrorMsg.closest('[data-testid^="conversation-turn-"]') ||
+                                lastErrorMsg.closest('[class*="message"]') ||
+                                lastErrorMsg.parentElement;
+          
+          // Sprawdź czy po błędzie jest już nowa odpowiedź assistant
+          const allMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+          let errorAlreadyFixed = false;
+          
+          if (errorContainer && allMessages.length > 0) {
+            const lastAssistantMsg = allMessages[allMessages.length - 1];
+            
+            // Porównaj pozycję błędu z ostatnią odpowiedzią
+            try {
+              const errorPosition = errorContainer.compareDocumentPosition(lastAssistantMsg);
+              
+              // Jeśli ostatnia odpowiedź jest AFTER błędu (Node.DOCUMENT_POSITION_FOLLOWING = 4)
+              if (errorPosition & Node.DOCUMENT_POSITION_FOLLOWING) {
+                errorAlreadyFixed = true;
+                console.log('✓ [FAZA 2] Błąd już naprawiony - jest nowa odpowiedź po nim, pomijam');
+                // Dodaj do cache żeby nie sprawdzać ponownie
+                checkedFixedErrors.add(errorId);
+              }
+            } catch (e) {
+              console.warn('⚠️ [FAZA 2] Nie udało się porównać pozycji błędu:', e);
+            }
           }
           
-          // Jeśli Edit nie zadziałał, spróbuj Retry
-          console.log('⚠️ Edit+Resend nie zadziałał - szukam przycisku Retry...');
-          let retryButton = msg.parentElement?.querySelector('button[aria-label="Retry"]');
+          // Jeśli błąd został naprawiony, pomiń całą logikę Edit/Retry
+          if (!errorAlreadyFixed) {
+          // Jeśli już próbowaliśmy Edit - NIE próbuj ponownie
+          if (editAttemptedPhase2) {
+            console.log('⚠️ [FAZA 2] Błąd wykryty ale editAttempted=true - pomijam Edit, szukam Retry...');
+          } else {
+            console.log('⚠️ [FAZA 2] Znaleziono komunikat błędu - uruchamiam retry loop Edit+Resend...');
+            editAttemptedPhase2 = true; // Oznacz że próbujemy
+            
+            // Retry loop: max 3 próby Edit+Resend
+            let editSuccess = false;
+            for (let attempt = 1; attempt <= 3 && !editSuccess; attempt++) {
+              console.log(`🔧 [FAZA 2] Próba ${attempt}/3 wywołania tryEditResend()...`);
+              editSuccess = await tryEditResend();
+              console.log(`📊 [FAZA 2] Próba ${attempt}/3: ${editSuccess ? '✅ SUKCES' : '❌ PORAŻKA'}`);
+              
+              if (editSuccess) {
+                console.log('✅ [FAZA 2] Edit+Resend SUKCES - przerywam retry loop');
+                break;
+              }
+              
+              if (!editSuccess && attempt < 3) {
+                console.log(`⏳ [FAZA 2] Próba ${attempt} nieudana, czekam 2s przed kolejną...`);
+                await new Promise(resolve => setTimeout(resolve, 2000));
+              }
+            }
+            
+            if (editSuccess) {
+              console.log('✅ [FAZA 2] Naprawiono przez Edit+Resend - kontynuuję czekanie...');
+              await new Promise(resolve => setTimeout(resolve, 2000));
+              continue; // Kontynuuj czekanie w tej samej pętli
+            }
+            
+            console.log('⚠️ [FAZA 2] Wszystkie 3 próby Edit+Resend nieudane, próbuję Retry button...');
+          }
+          
+          // Jeśli Edit nie zadziałał (lub już próbowaliśmy), spróbuj Retry
+          console.log('🔍 [FAZA 2] Szukam przycisku Retry...');
+          let retryButton = lastErrorMsg.parentElement?.querySelector('button[aria-label="Retry"]');
           if (!retryButton) {
-            retryButton = msg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
+            retryButton = lastErrorMsg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
           }
           if (!retryButton) {
             // Szukaj w całym dokumencie jako fallback
@@ -1257,13 +1495,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           }
           
           if (retryButton) {
-            console.log('🔄 Klikam przycisk Retry - wznawiam czekanie na odpowiedź...');
+            console.log('🔄 [FAZA 2] Klikam przycisk Retry - wznawiam czekanie na odpowiedź...');
             retryButton.click();
             await new Promise(resolve => setTimeout(resolve, 2000));
             // Zwróć false aby zewnętrzna pętla wywołała waitForResponse ponownie (jak Continue)
             return false;
           } else {
-            console.warn('⚠️ Nie znaleziono przycisku Retry');
+            console.warn('⚠️ [FAZA 2] Nie znaleziono przycisku Retry');
+          }
           }
         }
       }
@@ -1359,7 +1598,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
 
   // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
-  function getLastResponseText() {
+  async function getLastResponseText() {
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
     
     // Funkcja pomocnicza - wyciąga tylko treść głównej odpowiedzi, pomija źródła/linki
@@ -1381,55 +1620,126 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         clone.querySelectorAll(selector).forEach(el => el.remove());
       });
       
-      // Wyciągnij tekst
-      const text = clone.textContent || clone.innerText || '';
+      // Wyciągnij tekst - użyj innerText aby zachować formatowanie (nowe linie)
+      const text = clone.innerText || clone.textContent || '';
       
-      // Oczyść z nadmiarowych białych znaków
-      return text.replace(/\s+/g, ' ').trim();
+      // Oczyść tylko z nadmiarowych spacji w liniach (zachowaj nowe linie)
+      return text
+        .split('\n')
+        .map(line => line.replace(/\s+/g, ' ').trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n') // Max 2 puste linie z rzędu
+        .trim();
     }
     
-    // Szukaj wszystkich odpowiedzi ChatGPT w konwersacji
-    const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-    console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM`);
+    // RETRY LOOP - React może asynchronicznie renderować treść
+    // Nawet jeśli interface jest gotowy, treść może jeszcze być w trakcie renderowania
+    const maxRetries = 15; // 15 prób
+    const retryDelay = 300; // 300ms między próbami = max 4.5s
     
-    if (messages.length > 0) {
-      const lastMessage = messages[messages.length - 1];
-      
-      // Sprawdź czy to nie jest tylko thinking indicator
-      const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
-      if (thinkingIndicators.length > 0) {
-        console.warn("⚠️ Ostatnia wiadomość zawiera thinking indicator - ChatGPT jeszcze nie zaczął odpowiedzi");
-        console.log(`   Thinking indicators: ${thinkingIndicators.length}`);
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (attempt > 0) {
+        console.log(`🔄 Retry ${attempt}/${maxRetries - 1} - czekam ${retryDelay}ms na renderowanie treści...`);
+        await new Promise(r => setTimeout(r, retryDelay));
       }
       
-      const text = extractMainContent(lastMessage);
-      console.log(`✓ Znaleziono odpowiedź: ${text.length} znaków`);
-      console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+      // Szukaj wszystkich odpowiedzi ChatGPT w konwersacji
+      const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM`);
       
-      // Dodatkowe logowanie jeśli odpowiedź jest pusta
-      if (text.length === 0) {
-        console.warn("⚠️ Wyekstrahowany tekst ma długość 0!");
-        console.log("   HTML preview:", lastMessage.innerHTML.substring(0, 300));
-        console.log("   textContent:", lastMessage.textContent.substring(0, 300));
+      if (messages.length > 0) {
+        const lastMessage = messages[messages.length - 1];
+        
+        // Sprawdź czy to nie jest tylko thinking indicator
+        const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
+        if (thinkingIndicators.length > 0) {
+          console.warn("⚠️ Ostatnia wiadomość zawiera thinking indicator - ChatGPT jeszcze nie zaczął odpowiedzi");
+          console.log(`   Thinking indicators: ${thinkingIndicators.length}`);
+          // Kontynuuj retry - może treść się pojawi
+          continue;
+        }
+        
+        const text = extractMainContent(lastMessage);
+        
+        // Jeśli znaleziono niepustą odpowiedź - sukces!
+        if (text.length > 0) {
+          console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków (attempt ${attempt + 1}/${maxRetries})`);
+          console.log(`📝 Preview (pierwsze 200 znaków): "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+          console.log(`📝 Preview (ostatnie 200 znaków): "...${text.substring(Math.max(0, text.length - 200))}"`);
+          const lineCount = text.split('\n').length;
+          console.log(`📊 Statystyki: ${lineCount} linii, ${text.split(/\s+/).length} słów`);
+          return text;
+        }
+        
+        // Jeśli pusta - loguj i kontynuuj retry (chyba że ostatnia próba)
+        if (attempt < maxRetries - 1) {
+          console.warn(`⚠️ Wyekstrahowany tekst ma długość 0 (attempt ${attempt + 1}/${maxRetries}) - retry...`);
+        } else {
+          // Ostatnia próba - pełne logowanie
+          console.warn("⚠️ Wyekstrahowany tekst ma długość 0 po wszystkich próbach!");
+          console.log("   HTML preview:", lastMessage.innerHTML.substring(0, 300));
+          console.log("   textContent:", lastMessage.textContent.substring(0, 300));
+          console.log("   Liczba children:", lastMessage.children.length);
+          console.log("   Klasy:", lastMessage.className);
+        }
+      } else if (attempt === maxRetries - 1) {
+        // Ostatnia próba i nadal brak wiadomości - pełne logowanie
+        console.warn(`⚠️ Brak wiadomości assistant w DOM po ${maxRetries} próbach`);
+      }
+    }
+    
+    // Fallback 2: szukaj przez conversation-turn containers (z retry)
+    console.log("🔍 Fallback 2: Szukam przez conversation-turn containers...");
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) {
+        console.log(`🔄 Fallback 2 retry ${attempt}/4 - czekam 300ms...`);
+        await new Promise(r => setTimeout(r, 300));
       }
       
-      return text;
+      const turnContainers = document.querySelectorAll('[data-testid^="conversation-turn-"]');
+      console.log(`🔍 Znaleziono ${turnContainers.length} conversation turns w DOM (fallback 2)`);
+      
+      if (turnContainers.length > 0) {
+        // Szukaj ostatniego turnu z assistant
+        for (let i = turnContainers.length - 1; i >= 0; i--) {
+          const turn = turnContainers[i];
+          const assistantMsg = turn.querySelector('[data-message-author-role="assistant"]');
+          if (assistantMsg) {
+            const text = extractMainContent(assistantMsg);
+            if (text.length > 0) {
+              console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2): ${text.length} znaków`);
+              console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+              return text;
+            }
+          }
+        }
+      }
     }
     
-    // Fallback - szukaj artykułów z odpowiedziami
-    const articles = document.querySelectorAll('article');
-    console.log(`🔍 Znaleziono ${articles.length} articles w DOM (fallback)`);
-    
-    if (articles.length > 0) {
-      const lastArticle = articles[articles.length - 1];
-      const text = extractMainContent(lastArticle);
-      console.log(`✓ Znaleziono odpowiedź (fallback): ${text.length} znaków`);
-      console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
-      return text;
+    // Fallback 3: szukaj artykułów z odpowiedziami (z retry)
+    console.log("🔍 Fallback 3: Szukam przez article tags...");
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) {
+        console.log(`🔄 Fallback 3 retry ${attempt}/4 - czekam 300ms...`);
+        await new Promise(r => setTimeout(r, 300));
+      }
+      
+      const articles = document.querySelectorAll('article');
+      console.log(`🔍 Znaleziono ${articles.length} articles w DOM (fallback 3)`);
+      
+      if (articles.length > 0) {
+        const lastArticle = articles[articles.length - 1];
+        const text = extractMainContent(lastArticle);
+        if (text.length > 0) {
+          console.log(`✅ Znaleziono odpowiedź przez article (fallback 3): ${text.length} znaków`);
+          console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+          return text;
+        }
+      }
     }
     
-    console.warn("⚠️ Nie znaleziono odpowiedzi ChatGPT w DOM");
-    console.log("   Wszystkie selektory zwróciły 0 wyników");
+    console.error("❌ Nie znaleziono odpowiedzi ChatGPT w DOM po wszystkich próbach");
+    console.log("   Wszystkie selektory (z retry) zwróciły puste wyniki");
     return '';
   }
   
@@ -1579,8 +1889,11 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const startTime = Date.now();
     
     while (Date.now() - startTime < maxWait) {
-      editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-               document.querySelector('div[contenteditable="true"]');
+      editor = document.querySelector('textarea#prompt-textarea') ||
+               document.querySelector('[role="textbox"][contenteditable="true"]') ||
+               document.querySelector('div[contenteditable="true"]') ||
+               document.querySelector('[data-testid="composer-input"]') ||
+               document.querySelector('[contenteditable]');
       if (editor) {
         break;
       }
@@ -1699,27 +2012,48 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     while (verifyTime < maxVerifyWait) {
       // Po wysłaniu prompta ChatGPT powinien:
-      // 1. Wyczyścić/disabled editor
-      // 2. Pokazać stopButton (zacząć generować)
-      // 3. Disabled sendButton
+      // 1. Pokazać stopButton (zacząć generować) - NAJBARDZIEJ PEWNY wskaźnik
+      // 2. LUB wyczyścić/disabled editor + disabled sendButton + nowa wiadomość w DOM
       
       const editorNow = document.querySelector('[role="textbox"]') ||
                         document.querySelector('[contenteditable]');
+      
+      // Fallbacki dla stopButton z dokumentacji
       const stopBtn = document.querySelector('button[aria-label*="Stop"]') || 
-                      document.querySelector('[data-testid="stop-button"]');
+                      document.querySelector('[data-testid="stop-button"]') ||
+                      document.querySelector('button[aria-label*="stop"]') ||
+                      document.querySelector('button[aria-label="Zatrzymaj"]') ||
+                      document.querySelector('button[aria-label*="Zatrzymaj"]');
+      
       const sendBtn = document.querySelector('[data-testid="send-button"]') ||
-                      document.querySelector('button[aria-label="Send"]');
+                      document.querySelector('#composer-submit-button') ||
+                      document.querySelector('button[aria-label="Send"]') ||
+                      document.querySelector('button[aria-label*="Send"]');
       
       const editorDisabled = editorNow && editorNow.getAttribute('contenteditable') === 'false';
       const editorEmpty = editorNow && (editorNow.textContent || '').trim().length === 0;
       const sendDisabled = sendBtn && sendBtn.disabled;
       
-      // Jeśli którykolwiek wskaźnik potwierdza wysłanie:
-      if (stopBtn || editorDisabled || (editorEmpty && sendDisabled)) {
+      // Weryfikacja: czy jest nowa aktywność w DOM?
+      const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const hasMessages = userMessages.length > 0 || assistantMessages.length > 0;
+      
+      // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
+      const hasStopButton = !!stopBtn;
+      
+      // ALTERNATYWNY wskaźnik: interface zablokowany + są jakieś wiadomości w DOM
+      const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
+      
+      // Jeśli którykolwiek z PEWNYCH wskaźników potwierdza wysłanie:
+      if (hasStopButton || interfaceBlocked) {
         console.log(`✅ Prompt faktycznie wysłany (${verifyTime}ms)`, {
           stopBtn: !!stopBtn,
           editorDisabled,
-          editorEmpty: editorEmpty && sendDisabled
+          editorEmpty,
+          sendDisabled,
+          userMsgCount: userMessages.length,
+          assistantMsgCount: assistantMessages.length
         });
         verified = true;
         break;
@@ -1739,9 +2073,6 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
   // Główna logika
   const startTime = Date.now();
-  
-  // Uruchom keep-alive na początku analizy
-  startKeepAlive();
   
   // Retry loop - czekaj na editor (contenteditable div, nie textarea!)
   while (Date.now() - startTime < textareaWaitMs) {
@@ -1858,7 +2189,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           let responseText = '';
           while (!responseValid) {
             console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
-            responseText = getLastResponseText();
+            responseText = await getLastResponseText();
             const isValid = validateResponse(responseText);
             
             if (!isValid) {
@@ -1894,11 +2225,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
-          if (isLastPrompt && responseText && responseText.length > 0) {
-            // Zmienna lastResponse będzie zwrócona na końcu funkcji
-            window._lastResponseToSave = responseText;
-            console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${responseText.length} znaków)`);
-          } else if (!isLastPrompt) {
+          if (isLastPrompt) {
+            // Zapisz ZAWSZE ostatnią odpowiedź, nawet jeśli pusta (dla debugowania)
+            window._lastResponseToSave = responseText || '';
+            if (responseText && responseText.length > 0) {
+              console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${responseText.length} znaków)`);
+            } else {
+              console.warn(`⚠️ Ostatnia odpowiedź z prompta ${i + 1}/${promptChain.length} jest pusta! Zapisuję pustą odpowiedź dla debugowania.`);
+            }
+          } else {
             console.log(`⏭️ Pomijam odpowiedź ${i + 1}/${promptChain.length} - nie jest to ostatni prompt`);
           }
           
@@ -1917,7 +2252,6 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
         console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
-        stopKeepAlive();
         return { success: true, lastResponse: lastResponse };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
@@ -1926,12 +2260,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         removeCounter(counter, true);
         
         // Brak prompt chain - nie ma odpowiedzi do zapisania
-        stopKeepAlive();
         return { success: true, lastResponse: '' };
       }
       
       // Ten return nigdy nie powinien zostać osiągnięty
-      stopKeepAlive();
       return { success: false };
     }
     
@@ -1940,7 +2272,6 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   console.error("Nie znaleziono textarea w ChatGPT po " + textareaWaitMs + "ms");
-  stopKeepAlive();
   return { success: false, error: 'Nie znaleziono textarea' };
 }
 
