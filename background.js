@@ -89,7 +89,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-// Funkcja zapisująca odpowiedź do storage
+// Funkcja zapisująca odpowiedź do storage (preferuj chrome.storage.local, fallback do session)
 async function saveResponse(responseText, source, analysisType = 'company') {
   try {
     console.log(`📝 [saveResponse] Rozpoczynam zapisywanie:`, {
@@ -97,25 +97,46 @@ async function saveResponse(responseText, source, analysisType = 'company') {
       source: source,
       analysisType: analysisType
     });
-    
-    const result = await chrome.storage.session.get(['responses']);
-    const responses = result.responses || [];
-    
-    console.log(`📦 [saveResponse] Obecny stan storage: ${responses.length} odpowiedzi`);
-    
+
+    // Czytaj równolegle local + session (dla migracji starych danych)
+    const [localResult, sessionResult] = await Promise.all([
+      chrome.storage.local.get(['responses']).catch(() => ({})),
+      chrome.storage.session.get(['responses']).catch(() => ({}))
+    ]);
+
+    // Preferuj local; jeśli puste/nieistnieje, użyj session
+    let responses = [];
+    if (Array.isArray(localResult?.responses) && localResult.responses.length > 0) {
+      responses = localResult.responses;
+      console.log(`📦 [saveResponse] Baza: chrome.storage.local (${responses.length})`);
+    } else if (Array.isArray(sessionResult?.responses) && sessionResult.responses.length > 0) {
+      responses = sessionResult.responses;
+      console.log(`📦 [saveResponse] Baza: chrome.storage.session (${responses.length})`);
+    } else {
+      responses = [];
+      console.log(`📦 [saveResponse] Baza: brak istniejących odpowiedzi (start od zera)`);
+    }
+
     const newResponse = {
       text: responseText,
       timestamp: Date.now(),
       source: source,
       analysisType: analysisType
     };
-    
+
     responses.push(newResponse);
-    
-    await chrome.storage.session.set({ responses });
-    console.log(`✅ [saveResponse] Zapisano odpowiedź do storage (${responses.length} łącznie, typ: ${analysisType})`);
+
+    // Zapisz do local (główny storage) i zmirroruj do session (kompatybilność)
+    await chrome.storage.local.set({ responses });
+    try {
+      await chrome.storage.session.set({ responses });
+    } catch (_) {
+      // Ignoruj jeśli session niedostępny
+    }
+
+    console.log(`✅ [saveResponse] Zapisano do local (${responses.length} łącznie, typ: ${analysisType})`);
     console.log(`📤 [saveResponse] Nowa odpowiedź:`, {
-      textPreview: responseText.substring(0, 100),
+      textPreview: (responseText || '').substring(0, 100),
       timestamp: newResponse.timestamp,
       source: source,
       analysisType: analysisType
