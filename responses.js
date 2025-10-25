@@ -1,5 +1,7 @@
 // responses.js - zarządzanie listą odpowiedzi z podziałem na analiza spółki i portfela
 
+console.log('🚀 responses.js LOADED - inicjalizacja...');
+
 const companyResponsesList = document.getElementById('companyResponsesList');
 const portfolioResponsesList = document.getElementById('portfolioResponsesList');
 const companyEmptyState = document.getElementById('companyEmptyState');
@@ -12,6 +14,7 @@ const copyAllCompanyBtn = document.getElementById('copyAllCompanyBtn');
 const copyAllPortfolioBtn = document.getElementById('copyAllPortfolioBtn');
 
 // Wczytaj i wyświetl odpowiedzi przy starcie
+console.log('📥 Wywołuję loadResponses() przy starcie...');
 loadResponses();
 
 // Obsługa przycisku "Wyczyść wszystkie"
@@ -76,11 +79,20 @@ async function copyAllByType(analysisType, button) {
 // Funkcja wczytująca odpowiedzi z storage
 async function loadResponses() {
   try {
-    console.log(`📥 [loadResponses] Wczytuję odpowiedzi z storage...`);
+    console.log(`📥 [loadResponses] WCZYTUJĘ ODPOWIEDZI Z STORAGE...`);
     const result = await chrome.storage.session.get(['responses']);
     const responses = result.responses || [];
     
-    console.log(`📦 [loadResponses] Wczytano ${responses.length} odpowiedzi:`, responses);
+    console.log(`📦 [loadResponses] Wczytano ${responses.length} odpowiedzi`);
+    if (responses.length > 0) {
+      console.log(`   Ostatnia odpowiedź:`, {
+        source: responses[responses.length - 1].source,
+        timestamp: responses[responses.length - 1].timestamp,
+        analysisType: responses[responses.length - 1].analysisType,
+        textLength: responses[responses.length - 1].text?.length,
+        textPreview: responses[responses.length - 1].text?.substring(0, 100)
+      });
+    }
     
     renderResponses(responses);
   } catch (error) {
@@ -92,14 +104,21 @@ async function loadResponses() {
 
 // Funkcja renderująca listę odpowiedzi
 function renderResponses(responses) {
-  console.log(`🎨 [renderResponses] Renderuję ${responses.length} odpowiedzi`);
+  console.log(`🎨 [renderResponses] RENDERUJĘ ${responses.length} ODPOWIEDZI`);
+  console.log(`   Wszystkie odpowiedzi:`, responses.map((r, i) => ({
+    index: i,
+    source: r.source,
+    analysisType: r.analysisType || 'company',
+    timestamp: r.timestamp,
+    textLength: r.text?.length
+  })));
   
   // Rozdziel odpowiedzi na dwa typy
   // Starsze odpowiedzi bez analysisType domyślnie 'company'
   const companyResponses = responses.filter(r => (r.analysisType || 'company') === 'company');
   const portfolioResponses = responses.filter(r => r.analysisType === 'portfolio');
   
-  console.log(`   Company: ${companyResponses.length}, Portfolio: ${portfolioResponses.length}`);
+  console.log(`   📊 Po podziale: Company=${companyResponses.length}, Portfolio=${portfolioResponses.length}`);
   
   // Aktualizuj liczniki
   const totalCount = responses.length;
@@ -277,11 +296,37 @@ function showEmptyStates() {
 
 // Nasłuchuj zmian w storage (gdy nowe odpowiedzi są dodawane)
 chrome.storage.onChanged.addListener((changes, namespace) => {
-  console.log(`🔔 [responses.js] Storage changed:`, { namespace, changes });
-  if (namespace === 'session' && changes.responses) {
-    console.log(`✅ [responses.js] Responses changed, reloading...`);
-    console.log(`   Old length: ${changes.responses.oldValue?.length || 0}`);
-    console.log(`   New length: ${changes.responses.newValue?.length || 0}`);
-    loadResponses();
+  console.log(`🔔 [responses.js] STORAGE CHANGED EVENT:`, { 
+    namespace, 
+    hasResponsesChange: !!changes.responses,
+    changeKeys: Object.keys(changes)
+  });
+  
+  if (namespace === 'session') {
+    console.log(`   ✓ Namespace = session`);
+    if (changes.responses) {
+      console.log(`   ✓ Responses changed!`);
+      console.log(`   Old length: ${changes.responses.oldValue?.length || 0}`);
+      console.log(`   New length: ${changes.responses.newValue?.length || 0}`);
+      
+      if (changes.responses.newValue) {
+        const newResponses = changes.responses.newValue;
+        console.log(`   Ostatnia odpowiedź w newValue:`, {
+          source: newResponses[newResponses.length - 1]?.source,
+          timestamp: newResponses[newResponses.length - 1]?.timestamp,
+          analysisType: newResponses[newResponses.length - 1]?.analysisType,
+          textLength: newResponses[newResponses.length - 1]?.text?.length
+        });
+      }
+      
+      console.log(`   ➡️ Wywołuję loadResponses()...`);
+      loadResponses();
+    } else {
+      console.log(`   ⚠️ Brak changes.responses`);
+    }
+  } else {
+    console.log(`   ⚠️ Namespace != session (${namespace})`);
   }
 });
+
+console.log('✅ Listener chrome.storage.onChanged zarejestrowany - responses.js gotowy');
