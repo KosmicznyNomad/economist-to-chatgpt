@@ -17,7 +17,11 @@ loadResponses();
 // Obsługa przycisku "Wyczyść wszystkie"
 clearBtn.addEventListener('click', async () => {
   if (confirm('Czy na pewno chcesz wyczyścić wszystkie zebrane odpowiedzi?')) {
-    await chrome.storage.session.set({ responses: [] });
+    // Czyść oba storage dla spójności
+    await Promise.all([
+      chrome.storage.local.set({ responses: [] }).catch(() => {}),
+      chrome.storage.session.set({ responses: [] }).catch(() => {})
+    ]);
     loadResponses();
   }
 });
@@ -76,12 +80,19 @@ async function copyAllByType(analysisType, button) {
 // Funkcja wczytująca odpowiedzi z storage
 async function loadResponses() {
   try {
-    console.log(`📥 [loadResponses] Wczytuję odpowiedzi z storage...`);
-    const result = await chrome.storage.session.get(['responses']);
-    const responses = result.responses || [];
-    
-    console.log(`📦 [loadResponses] Wczytano ${responses.length} odpowiedzi:`, responses);
-    
+    console.log(`📥 [loadResponses] Wczytuję odpowiedzi z storage (local → session fallback)...`);
+    const [localResult, sessionResult] = await Promise.all([
+      chrome.storage.local.get(['responses']).catch(() => ({})),
+      chrome.storage.session.get(['responses']).catch(() => ({}))
+    ]);
+    const localResponses = Array.isArray(localResult?.responses) ? localResult.responses : [];
+    const sessionResponses = Array.isArray(sessionResult?.responses) ? sessionResult.responses : [];
+
+    // Preferuj dane z local; jeśli puste, użyj session
+    const base = localResponses.length > 0 ? 'local' : 'session';
+    const responses = base === 'local' ? localResponses : sessionResponses;
+
+    console.log(`📦 [loadResponses] Źródło: ${base}, liczba: ${responses.length}`);
     renderResponses(responses);
   } catch (error) {
     console.error('❌ [loadResponses] Błąd wczytywania odpowiedzi:', error);
@@ -93,6 +104,11 @@ async function loadResponses() {
 // Funkcja renderująca listę odpowiedzi
 function renderResponses(responses) {
   console.log(`🎨 [renderResponses] Renderuję ${responses.length} odpowiedzi`);
+  if (!Array.isArray(responses)) {
+    console.warn('⚠️ [renderResponses] Niepoprawny format responses (oczekiwano tablicy)');
+    showEmptyStates();
+    return;
+  }
   
   // Rozdziel odpowiedzi na dwa typy
   // Starsze odpowiedzi bez analysisType domyślnie 'company'
@@ -277,11 +293,13 @@ function showEmptyStates() {
 
 // Nasłuchuj zmian w storage (gdy nowe odpowiedzi są dodawane)
 chrome.storage.onChanged.addListener((changes, namespace) => {
-  console.log(`🔔 [responses.js] Storage changed:`, { namespace, changes });
-  if (namespace === 'session' && changes.responses) {
-    console.log(`✅ [responses.js] Responses changed, reloading...`);
-    console.log(`   Old length: ${changes.responses.oldValue?.length || 0}`);
-    console.log(`   New length: ${changes.responses.newValue?.length || 0}`);
+  if (!changes.responses) return;
+  console.log(`🔔 [responses.js] Storage changed in ${namespace}:`, {
+    oldLen: changes.responses.oldValue?.length || 0,
+    newLen: changes.responses.newValue?.length || 0
+  });
+  // Reaguj na zmiany zarówno w local jak i session
+  if ((namespace === 'local' || namespace === 'session')) {
     loadResponses();
   }
 });
