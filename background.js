@@ -92,12 +92,14 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // Funkcja zapisująca odpowiedź do storage
 async function saveResponse(responseText, source, analysisType = 'company') {
   try {
-    console.log(`📝 [saveResponse] Rozpoczynam zapisywanie:`, {
+    console.log(`📝 [saveResponse] ROZPOCZYNAM ZAPISYWANIE:`, {
       textLength: responseText?.length || 0,
       source: source,
-      analysisType: analysisType
+      analysisType: analysisType,
+      textPreview: responseText?.substring(0, 150)
     });
     
+    console.log(`📦 [saveResponse] Pobieram obecny stan storage...`);
     const result = await chrome.storage.session.get(['responses']);
     const responses = result.responses || [];
     
@@ -110,19 +112,22 @@ async function saveResponse(responseText, source, analysisType = 'company') {
       analysisType: analysisType
     };
     
+    console.log(`➕ [saveResponse] Dodaję nową odpowiedź do tablicy (${responses.length} -> ${responses.length + 1})`);
     responses.push(newResponse);
     
+    console.log(`💾 [saveResponse] Zapisuję do chrome.storage.session...`);
     await chrome.storage.session.set({ responses });
-    console.log(`✅ [saveResponse] Zapisano odpowiedź do storage (${responses.length} łącznie, typ: ${analysisType})`);
-    console.log(`📤 [saveResponse] Nowa odpowiedź:`, {
-      textPreview: responseText.substring(0, 100),
-      timestamp: newResponse.timestamp,
-      source: source,
-      analysisType: analysisType
-    });
+    console.log(`✅ [saveResponse] ZAPISANO DO STORAGE (${responses.length} łącznie, typ: ${analysisType})`);
+    
+    // Weryfikacja zapisu
+    console.log(`🔍 [saveResponse] Weryfikuję zapis...`);
+    const verification = await chrome.storage.session.get(['responses']);
+    console.log(`✓ [saveResponse] Weryfikacja: storage zawiera ${verification.responses?.length || 0} odpowiedzi`);
+    
   } catch (error) {
-    console.error('❌ [saveResponse] Błąd zapisywania odpowiedzi:', error);
-    console.error('Stack trace:', error.stack);
+    console.error('❌ [saveResponse] BŁĄD ZAPISYWANIA:', error);
+    console.error('❌ [saveResponse] Stack trace:', error.stack);
+    throw error; // Rzuć błąd dalej aby go zauważyć
   }
 }
 
@@ -404,13 +409,24 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
       const result = results[0]?.result;
+      console.log(`🔍 [${analysisType}] [${index + 1}/${tabs.length}] Sprawdzam result:`, {
+        resultExists: !!result,
+        success: result?.success,
+        lastResponseType: typeof result?.lastResponse,
+        lastResponseLength: result?.lastResponse?.length,
+        lastResponseValue: result?.lastResponse?.substring(0, 100)
+      });
+      
       if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null) {
+        console.log(`✅ [${analysisType}] [${index + 1}/${tabs.length}] Warunek spełniony - wywołuję saveResponse`);
         await saveResponse(result.lastResponse, title, analysisType);
         console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Zapisano odpowiedź dla: ${title} (${result.lastResponse.length} znaków)`);
       } else if (result && !result.success) {
         console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces zakończony bez odpowiedzi: ${title}`);
       } else if (result && result.success && !result.lastResponse) {
         console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces udany ale brak lastResponse: ${title}`);
+      } else {
+        console.error(`❌ [${analysisType}] [${index + 1}/${tabs.length}] Nieoczekiwany stan result:`, result);
       }
 
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
