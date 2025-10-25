@@ -401,11 +401,15 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       await waitForTabComplete(chatTabId);
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
+      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] 🚀 Wywołuję executeScript dla: ${title}`);
       const results = await chrome.scripting.executeScript({
         target: { tabId: chatTabId },
         function: injectToChat,
         args: [payload, promptChain, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
       });
+      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ executeScript zakończone, sprawdzam results...`);
+      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] results:`, results);
+      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] results[0]:`, results[0]);
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
       const result = results[0]?.result;
