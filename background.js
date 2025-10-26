@@ -1,4 +1,4 @@
-const CHAT_URL = "https://chatgpt.com/g/g-68e628cb581c819192fc463204dba31a-iskierka-test";
+const CHAT_URL = "https://chatgpt.com/";
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global";
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
@@ -431,12 +431,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         }
       }
 
-      // Złóż payload z metadanymi źródła
-      let payload = `Źródło: ${sourceName}`;
-      if (transcriptLang) {
-        payload += `\nJęzyk transkrypcji: ${transcriptLang}`;
-      }
-      payload += `\nTytuł: ${title}\n\n${extractedText}`;
+      // Wyciągnij treść pierwszego prompta z promptChain
+      const firstPrompt = promptChain[0] || '';
+      
+      // Wstaw treść artykułu do pierwszego prompta (zamień {{articlecontent}})
+      let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+      
+      // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
+      const restOfPrompts = promptChain.slice(1);
 
       // Otwórz nowe okno ChatGPT
       const window = await chrome.windows.create({
@@ -453,7 +455,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: chatTabId },
         function: injectToChat,
-        args: [payload, promptChain, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
+        args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
       });
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
