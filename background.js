@@ -113,14 +113,37 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     };
     
     responses.push(newResponse);
-    
+
     console.log(`💾 Zapisuję do chrome.storage.session...`);
     await chrome.storage.session.set({ responses });
-    
+
+    // POPRAWKA: Weryfikacja że zapis faktycznie się udał
+    console.log(`🔍 Weryfikuję zapis...`);
+    const verification = await chrome.storage.session.get(['responses']);
+    const verifiedResponses = verification.responses || [];
+
+    if (verifiedResponses.length !== responses.length) {
+      console.error(`❌ KRYTYCZNY: Weryfikacja storage nieudana!`);
+      console.error(`   Oczekiwano: ${responses.length} odpowiedzi`);
+      console.error(`   Faktycznie: ${verifiedResponses.length} odpowiedzi`);
+      throw new Error('Storage verification failed - saved count does not match');
+    }
+
+    // Sprawdź czy ostatnia odpowiedź jest ta która właśnie zapisaliśmy
+    const lastSaved = verifiedResponses[verifiedResponses.length - 1];
+    if (lastSaved.text !== responseText) {
+      console.error(`❌ KRYTYCZNY: Ostatnia odpowiedź w storage nie pasuje!`);
+      console.error(`   Oczekiwano długość: ${responseText.length}`);
+      console.error(`   Faktycznie długość: ${lastSaved.text.length}`);
+      throw new Error('Storage verification failed - text mismatch');
+    }
+
+    console.log(`✅ Weryfikacja storage: OK`);
+
     console.log(`\n${'*'.repeat(80)}`);
-    console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO POMYŚLNIE ✅ ✅ ✅`);
+    console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO I ZWERYFIKOWANO POMYŚLNIE ✅ ✅ ✅`);
     console.log(`${'*'.repeat(80)}`);
-    console.log(`Nowy stan: ${responses.length} odpowiedzi w storage`);
+    console.log(`Nowy stan: ${responses.length} odpowiedzi w storage (zweryfikowano: ${verifiedResponses.length})`);
     console.log(`Preview: "${responseText.substring(0, 150)}..."`);
     console.log(`${'*'.repeat(80)}\n`);
   } catch (error) {
@@ -1534,11 +1557,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Wyciągnij tekst - użyj innerText aby zachować formatowanie (nowe linie)
       const text = clone.innerText || clone.textContent || '';
-      
-      // Oczyść tylko z nadmiarowych spacji w liniach (zachowaj nowe linie)
+
+      // Oczyść z nadmiarowych spacji, ale zachowaj formatowanie
+      // POPRAWKA: Nie kolapsuj CAŁEJ spacji - tylko trim края linii
       return text
         .split('\n')
-        .map(line => line.replace(/\s+/g, ' ').trim())
+        .map(line => line.trim())  // Tylko trim краї - zachowuj wewnętrzne spacje
         .join('\n')
         .replace(/\n{3,}/g, '\n\n') // Max 2 puste linie z rzędu
         .trim();
@@ -1546,8 +1570,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     // RETRY LOOP - React może asynchronicznie renderować treść
     // Nawet jeśli interface jest gotowy, treść może jeszcze być w trakcie renderowania
-    const maxRetries = 15; // 15 prób
-    const retryDelay = 300; // 300ms między próbami = max 4.5s
+    // POPRAWKA: Zwiększono z 15 prób × 300ms (4.5s) do 20 prób × 500ms (10s)
+    // Powód: ChatGPT React rendering może być wolny dla długich odpowiedzi
+    const maxRetries = 20; // Zwiększono z 15 do 20
+    const retryDelay = 500; // Zwiększono z 300ms do 500ms (total: 10s max)
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (attempt > 0) {
@@ -1556,8 +1582,25 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
       
       // Szukaj wszystkich odpowiedzi ChatGPT w konwersacji
+      // POPRAWKA: Dodano diagnostykę selektorów dla lepszego debugowania
       const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM`);
+      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM (selektor: [data-message-author-role="assistant"])`);
+
+      // Diagnostyka: sprawdź inne możliwe selektory jeśli primary nie zadziałał
+      if (messages.length === 0 && attempt === 0) {
+        console.warn(`⚠️ Primary selector nie znalazł wiadomości - diagnostyka:`);
+        const altSelectors = [
+          '[role="presentation"]',
+          '.agent-turn',
+          '.markdown',
+          '[data-testid*="conversation"]',
+          'article'
+        ];
+        for (const sel of altSelectors) {
+          const count = document.querySelectorAll(sel).length;
+          console.log(`   ${sel}: ${count} elementów`);
+        }
+      }
       
       if (messages.length > 0) {
         const lastMessage = messages[messages.length - 1];
@@ -1655,14 +1698,37 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     return '';
   }
   
-  // Funkcja walidująca odpowiedź (min 10 znaków - poluzowane zabezpieczenie)
+  // Funkcja walidująca odpowiedź
+  // POPRAWKA: Zwiększono minimalną długość z 10 do 50 znaków i dodano sprawdzanie błędów
   function validateResponse(text) {
-    const minLength = 10;
-    const isValid = text.length >= minLength;
-    
-    console.log(`📊 Walidacja: ${isValid ? '✅ OK' : '❌ ZA KRÓTKA'} (${text.length} ${isValid ? '>=' : '<'} ${minLength} znaków)`);
-    
-    return isValid;
+    const minLength = 50; // Zwiększono z 10 do 50
+
+    // Podstawowa walidacja długości
+    if (text.length < minLength) {
+      console.log(`📊 Walidacja: ❌ ZA KRÓTKA (${text.length} < ${minLength} znaków)`);
+      return false;
+    }
+
+    // Sprawdź czy odpowiedź nie zawiera typowych wzorców błędów
+    const errorPatterns = [
+      /I apologize.*error/i,
+      /something went wrong/i,
+      /please try again/i,
+      /I cannot.*at the moment/i,
+      /unable to.*right now/i
+    ];
+
+    for (const pattern of errorPatterns) {
+      if (pattern.test(text.substring(0, 200))) {
+        console.warn(`📊 Walidacja: ⚠️ Wykryto wzorzec błędu: ${pattern}`);
+        console.warn(`   Początek tekstu: "${text.substring(0, 100)}..."`);
+        // Nie odrzucaj całkowicie - może to być częściowa odpowiedź
+        // Tylko zaloguj ostrzeżenie
+      }
+    }
+
+    console.log(`📊 Walidacja: ✅ OK (${text.length} >= ${minLength} znaków)`);
+    return true;
   }
   
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
