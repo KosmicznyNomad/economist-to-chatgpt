@@ -5,6 +5,71 @@ const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 1200000; // 20 minut na odpowiedź ChatGPT
 const RETRY_INTERVAL_MS = 500;
 
+// ==================== SERVICE WORKER KEEPALIVE ====================
+// Manifest V3 service workery są wyłączane po ~30s nieaktywności
+// Ten mechanizm utrzymuje service worker aktywny, szczególnie przy wielu kartach
+console.log('🔄 [Keepalive] Inicjalizacja mechanizmu keepalive...');
+
+// Użyj Chrome Alarms API do regularnego budzenia service workera
+// Alarm co 25 sekund (przed timeoutem ~30s)
+const KEEPALIVE_ALARM_NAME = 'keepalive';
+const KEEPALIVE_INTERVAL = 25; // sekundy
+
+// Utwórz alarm przy starcie
+chrome.alarms.create(KEEPALIVE_ALARM_NAME, {
+  periodInMinutes: KEEPALIVE_INTERVAL / 60
+});
+
+console.log(`✅ [Keepalive] Alarm utworzony: co ${KEEPALIVE_INTERVAL}s`);
+
+// Listener na alarm
+chrome.alarms.onAlarm.addListener((alarm) => {
+  if (alarm.name === KEEPALIVE_ALARM_NAME) {
+    const timestamp = new Date().toLocaleTimeString('pl-PL');
+    console.log(`💓 [Keepalive] Heartbeat @ ${timestamp} - service worker aktywny`);
+
+    // Opcjonalnie: sprawdź czy są aktywne procesy i wyślij aktualizację
+    // To zapewni że monitor procesów pozostanie zsynchronizowany
+    if (typeof sendProcessesUpdate === 'function') {
+      try {
+        sendProcessesUpdate();
+      } catch (e) {
+        // Ignoruj błędy - to tylko keepalive
+      }
+    }
+  }
+});
+
+// Dodatkowy mechanizm: Port connection podczas długotrwałych operacji
+// Porty utrzymują service worker aktywny przez czas trwania połączenia
+let keepalivePort = null;
+
+function startKeepaliveConnection() {
+  if (keepalivePort) {
+    console.log('⚠️ [Keepalive] Port już istnieje');
+    return;
+  }
+
+  console.log('🔌 [Keepalive] Tworzę długotrwałe połączenie port...');
+  keepalivePort = chrome.runtime.connect({ name: 'keepalive' });
+
+  keepalivePort.onDisconnect.addListener(() => {
+    console.log('🔌 [Keepalive] Port rozłączony');
+    keepalivePort = null;
+  });
+}
+
+function stopKeepaliveConnection() {
+  if (keepalivePort) {
+    console.log('🔌 [Keepalive] Zamykam połączenie port');
+    keepalivePort.disconnect();
+    keepalivePort = null;
+  }
+}
+
+console.log('✅ [Keepalive] Mechanizm keepalive zainicjalizowany');
+// ==================== KONIEC SERVICE WORKER KEEPALIVE ====================
+
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
 let PROMPTS_PORTFOLIO = [];
@@ -529,7 +594,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 async function runAnalysis() {
   try {
     console.log("\n=== ROZPOCZYNAM KONFIGURACJĘ ANALIZY ===");
-    
+
+    // Aktywuj keepalive connection dla długotrwałej operacji
+    startKeepaliveConnection();
+
     // KROK 1: Sprawdź czy prompty są wczytane
     console.log("\n📝 Krok 1: Sprawdzanie promptów");
     if (PROMPTS_COMPANY.length === 0) {
@@ -611,11 +679,16 @@ async function runAnalysis() {
     
     // Poczekaj na uruchomienie obu procesów
     await Promise.allSettled(processingTasks);
-    
+
     console.log("\n✅ ZAKOŃCZONO URUCHAMIANIE WSZYSTKICH PROCESÓW");
+
+    // Wyłącz keepalive connection po zakończeniu
+    stopKeepaliveConnection();
 
   } catch (error) {
     console.error("❌ Błąd główny:", error);
+    // Wyłącz keepalive connection również przy błędzie
+    stopKeepaliveConnection();
   }
 }
 
@@ -626,7 +699,10 @@ async function runManualSourceAnalysis(text, title, instances) {
     console.log(`Tytuł: ${title}`);
     console.log(`Tekst: ${text.length} znaków`);
     console.log(`Instancje: ${instances}`);
-    
+
+    // Aktywuj keepalive connection dla długotrwałej operacji
+    startKeepaliveConnection();
+
     // Sprawdź czy prompty są wczytane
     if (PROMPTS_COMPANY.length === 0) {
       console.error("❌ Brak promptów dla analizy spółki");
@@ -653,11 +729,16 @@ async function runManualSourceAnalysis(text, title, instances) {
     
     // Uruchom proces analizy
     await processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company');
-    
+
     console.log("\n✅ ZAKOŃCZONO URUCHAMIANIE ANALIZY Z RĘCZNEGO ŹRÓDŁA");
-    
+
+    // Wyłącz keepalive connection po zakończeniu
+    stopKeepaliveConnection();
+
   } catch (error) {
     console.error("❌ Błąd w runManualSourceAnalysis:", error);
+    // Wyłącz keepalive connection również przy błędzie
+    stopKeepaliveConnection();
   }
 }
 
@@ -2139,10 +2220,24 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
           if (isLastPrompt) {
+            // Dla ostatniej odpowiedzi - dodatkowa stabilizacja
+            console.log(`🎯 To jest ostatni prompt - dodaję dodatkowy czas stabilizacji...`);
+            await new Promise(resolve => setTimeout(resolve, 2000)); // Dodatkowe 2s na pełne wyrenderowanie
+
+            // Ponowne wyciągnięcie odpowiedzi dla pewności (może się jeszcze renderować)
+            console.log(`🔄 Ponowne wyciąganie ostatniej odpowiedzi dla pewności...`);
+            const finalResponseText = await getLastResponseText();
+
+            // Użyj dłuższej odpowiedzi (jeśli ponowne wyciągnięcie dało więcej treści)
+            const textToSave = finalResponseText.length > responseText.length ? finalResponseText : responseText;
+
             // Zapisz ZAWSZE ostatnią odpowiedź, nawet jeśli pusta (dla debugowania)
-            window._lastResponseToSave = responseText || '';
-            if (responseText && responseText.length > 0) {
-              console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${responseText.length} znaków)`);
+            window._lastResponseToSave = textToSave || '';
+            if (textToSave && textToSave.length > 0) {
+              console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${textToSave.length} znaków)`);
+              if (finalResponseText.length > responseText.length) {
+                console.log(`✅ Ponowne wyciągnięcie dało więcej treści (+${finalResponseText.length - responseText.length} znaków)`);
+              }
             } else {
               console.warn(`⚠️ Ostatnia odpowiedź z prompta ${i + 1}/${promptChain.length} jest pusta! Zapisuję pustą odpowiedź dla debugowania.`);
             }
