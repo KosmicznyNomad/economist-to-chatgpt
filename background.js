@@ -483,21 +483,21 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         }
       }
       
-      if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null) {
+      if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null && result.lastResponse.length > 0) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
         console.log(`Zapisuję odpowiedź: ${result.lastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
         console.log(`Tytuł: ${title}`);
-        
+
         await saveResponse(result.lastResponse, title, analysisType);
-        
+
         console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
         console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
         console.log(`${'='.repeat(80)}\n`);
-      } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null)) {
-        console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse=${result.lastResponse} ⚠️ ⚠️ ⚠️`);
+      } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null || result.lastResponse.length === 0)) {
+        console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse=${result.lastResponse} (${result.lastResponse?.length || 0} znaków) ⚠️ ⚠️ ⚠️`);
         console.log(`${'='.repeat(80)}\n`);
       } else {
         console.error(`\n❌ ❌ ❌ NIEOCZEKIWANY STAN ❌ ❌ ❌`);
