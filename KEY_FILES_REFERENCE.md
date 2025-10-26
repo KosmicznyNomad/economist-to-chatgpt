@@ -72,11 +72,11 @@
 
 ### Prompt Files (Data)
 - **Company Analysis Prompts:** `/home/user/economist-to-chatgpt/prompts-company.txt`
-  - Prompts separated by `~` character
+  - Prompts separated by `◄PROMPT_SEPARATOR►` character
   - Loaded at extension startup
 
 - **Portfolio Analysis Prompts:** `/home/user/economist-to-chatgpt/prompts-portfolio.txt`
-  - Prompts separated by `~` character
+  - Prompts separated by `◄PROMPT_SEPARATOR►` character
   - Used only for portfolio analysis
 
 ### Documentation

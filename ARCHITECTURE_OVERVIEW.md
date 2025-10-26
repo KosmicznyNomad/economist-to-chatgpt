@@ -76,7 +76,7 @@ const PROMPTS_PORTFOLIO = []    // Loaded from prompts-portfolio.txt
 
 #### **loadPrompts()** (Lines 13-49)
 - Loads prompt chains from text files
-- Prompts are separated by `~` character
+- Prompts are separated by `◄PROMPT_SEPARATOR►` character
 - Runs on extension startup
 
 #### **runAnalysis()** (Lines 529-620)

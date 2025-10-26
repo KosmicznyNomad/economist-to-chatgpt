@@ -7,7 +7,7 @@
 ## Błąd #1: Naked Return w injectToChat ⚠️ KRYTYCZNY
 
 ### Lokalizacja
-`background.js`, linia ~2191
+`background.js`, linia ◄PROMPT_SEPARATOR►2191
 
 ### Problem
 ```javascript
@@ -47,7 +47,7 @@ if (!retried) {
 ## Ulepszenie #1: Rozbudowane Logowanie w processArticles
 
 ### Lokalizacja
-`background.js`, funkcja `processArticles`, po linii ~406
+`background.js`, funkcja `processArticles`, po linii ◄PROMPT_SEPARATOR►406
 
 ### Co Dodano
 Bardzo szczegółowe logowanie aby debugować przepływ danych:

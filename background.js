@@ -19,9 +19,9 @@ async function loadPrompts() {
     const companyResponse = await fetch(companyUrl);
     const companyText = await companyResponse.text();
     
-    // Parsuj prompty (oddzielone ~)
+    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
     PROMPTS_COMPANY = companyText
-      .split('~')
+      .split('◄PROMPT_SEPARATOR►')
       .map(p => p.trim())
       .filter(p => p.length > 0);
     
@@ -32,9 +32,9 @@ async function loadPrompts() {
     const portfolioResponse = await fetch(portfolioUrl);
     const portfolioText = await portfolioResponse.text();
     
-    // Parsuj prompty (oddzielone ~)
+    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
     PROMPTS_PORTFOLIO = portfolioText
-      .split('~')
+      .split('◄PROMPT_SEPARATOR►')
       .map(p => p.trim())
       .filter(p => p.length > 0);
     
@@ -1917,10 +1917,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     await new Promise(resolve => setTimeout(resolve, 300));
     
-    // Wstaw tekst - ulepszona wersja
-    // Najpierw jako textNode
-    const textNode = document.createTextNode(promptText);
-    editor.appendChild(textNode);
+    // Wstaw tekst - ulepszona wersja z zachowaniem formatowania
+    // Użyj innerHTML zamiast createTextNode aby zachować HTML i nowe linie
+    editor.innerHTML = promptText.replace(/\n/g, '<br>');
     
     // Przesuń kursor na koniec
     try {

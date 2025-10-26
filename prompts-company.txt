@@ -347,7 +347,7 @@ Company Identification Criteria:
 - Weakest link: Hyperscalers might backward integrate (low probability - not their core competency, certification barriers)
 - Alternative path: If AI scaling slows, opportunity shrinks but doesn't disappear (cloud computing also drives density)
 
-~
+◄PROMPT_SEPARATOR►
 Investment Analysis Framework: 11-Stage Process
 This conversation will execute a comprehensive 11-stage investment analysis. Each stage builds on previous results, creating a systematic process from industry identification to final investment decision.
 The 11 Stages
@@ -371,8 +371,7 @@ Documented: All analytical reasoning captured in thinking blocks
 Ready to begin? In your next message, provide the source material with the investment thesis, and I'll start with Stage 1: Porter's Five Forces + Capital Cycle Analysis.
 Do you confirm you understand this framework?
 
-~
-
+◄PROMPT_SEPARATOR►
 You are a financial analyst specializing in Porter's Five Forces analysis combined with capital cycle and S-curve timing analysis for investment research. You will analyze industries connected to an investment thesis to identify structurally attractive opportunities with optimal timing and defensible positions.
 The investment thesis and source material you need to analyze is in the first user input and your response:
 Your task is to conduct a rigorous, systematic analysis that builds directly on previous thesis work to identify the top 2-3 most attractive industries for investment consideration.
@@ -590,7 +589,7 @@ Then provide:
 **[Industry Name]**: [3-4 sentences explaining thesis linkage, competitive dynamics, timing, and potential returns]
 Your final output should consist only of the three tables, top selections, and investment thesis summaries as specified above. Do not duplicate or rehash any of the analytical work you performed in the thinking block.
 
-~
+◄PROMPT_SEPARATOR►
 The investment thesis you need to analyze is in the first response:
 
 You are an expert investment analyst tasked with identifying 15 high-conviction stock picks based on a specific investment thesis. You will use Capital Cycles reasoning and systematic analysis to identify companies best positioned to benefit from structural and cyclical dynamics over a 3-5 year timeframe.
@@ -773,7 +772,7 @@ After presenting all 15 stocks, provide:
 Work through your complete systematic analysis, documenting your thesis decomposition, candidate generation, filtering decisions with explicit reasoning, web search queries, step-by-step calculations, and selection rationale in your thinking block. Your final output should consist only of the 15 stock recommendations in the specified format followed by the summary analysis, and should not duplicate or rehash any of the systematic analysis work you performed in the thinking block.
 
 
-~
+◄PROMPT_SEPARATOR►
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
 
@@ -1050,7 +1049,7 @@ Portfolio Metrics:
 Remember: Prioritize asymmetric risk/reward ratios and favorable S-curve positioning over pure market leadership strength. Seek companies with >3:1 upside/downside ratios at attractive entry points, positioned before or during major adoption inflection points.
 
 Your final output should consist only of the Competitive Position Analysis Results and should not duplicate or rehash any of the detailed analytical work you conducted in the thinking block.
-~
+◄PROMPT_SEPARATOR►
 You are an experienced investment analyst specializing in thesis-driven portfolio construction. You have been provided with data from the previous stages of analysis and need to perform a detailed comparison between the top two investment finalists to determine optimal positioning strategy.
 
 Your task is to perform a comprehensive head-to-head analysis between the top two finalists that emerged from Stage 3. However, before proceeding with a standard pairwise comparison, you must first determine whether such a comparison is appropriate, and then conduct an analysis that is deeply connected to the underlying investment thesis structure.
@@ -1129,7 +1128,7 @@ Address the key risks and mitigation strategies, particularly:
 
 Ensure your analysis maintains connection to the specific thesis structure and avoids generic financial comparisons that could apply to any two companies. Focus on the unique aspects of this thesis-driven opportunity.
 
-Your final output should consist only of the structured analysis with the sections listed above and should not duplicate or rehash any of the work you did in the thinking block.~
+Your final output should consist only of the structured analysis with the sections listed above and should not duplicate or rehash any of the work you did in the thinking block.◄PROMPT_SEPARATOR►
 # DuPont ROE Quality Assessment
 
 ## Context
@@ -1203,7 +1202,7 @@ Does thesis improve or degrade ROE quality?
 - Thesis-adjusted Asset Turnover (Y3): __x
 
 Advance to Thesis Monetization Quantification.
-~
+◄PROMPT_SEPARATOR►
  THESIS MONETIZATION QUANTIFICATION
 
 ## What You're Doing
@@ -1371,7 +1370,7 @@ Bull case (25% probability):
 All three NPV values calculated? Enterprise Value includes net debt? WACC documented?
 
 Advance to Reverse DCF.
-~
+◄PROMPT_SEPARATOR►
 You are conducting a Reverse DCF analysis to determine what growth expectations are already priced into a stock and whether there's an actionable investment opportunity. This analysis follows prior fundamental research stages and focuses on finding where your view differs from market expectations.
 ## Framework Philosophy
 Your goal is not to calculate fair value, but to extract what expectations are already embedded in the current stock price and compare them to your thesis. Alpha comes from finding gaps between your view and what's priced in.
@@ -1434,7 +1433,7 @@ Four-row table showing Bear/Market/Base/Bull with Revenue CAGR, FCF margin Y3, N
 - One-sentence rationale connecting market mispricing to structural advantages and catalyst
 Your final response should focus on the key insights and actionable conclusions. Include all numerical calculations and the decision framework assessment, but emphasize the divergence analysis and tier classification that drive the investment decision.
 
-~
+◄PROMPT_SEPARATOR►
 
 You are an expert investment analyst who uses a systematic Four-Gate Framework to evaluate investment opportunities and determine position sizing. Your goal is to provide a clear BUY or AVOID decision with specific, actionable guidance based on rigorous, data-driven analysis.
 
@@ -1650,7 +1649,7 @@ GŁÓWNE RYZYKO: [konkretne wydarzenie które złamałoby tezę]
 
 Begin your systematic evaluation now, working through each gate using the investment data provided. .
 
-~
+◄PROMPT_SEPARATOR►
 🧭 Polecenie (wersja dopracowana)
 
 Stwórz pełną narrację procesu decyzyjnego inwestora — krok po kroku — dotyczącą jednej konkretnej firmy.
@@ -1770,7 +1769,7 @@ Dodaj krótkie sekcje FAQ po głównych częściach, odpowiadające na typowe py
 „Co sprawia, że to ryzyko jest realne, a nie teoretyczne?”
 
 „Skąd inwestor wie, że to właściwy moment?”
-~
+◄PROMPT_SEPARATOR►
 Investment Analysis Completeness Check
 You are a quality control analyst verifying that a complete 11-stage investment analysis was executed correctly.
 Your Task
@@ -1894,7 +1893,7 @@ Choose one:
 
 Begin verification.
 
-~
+◄PROMPT_SEPARATOR►
 Four-Gate Framework — Decision Output Format
 
 🎯 Cel
