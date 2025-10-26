@@ -1,1 +1,413 @@
-prompt1~prompt2
+You are a financial data analyst conducting Stage 0 – Quantitative & Technical Screening for Candidate Selection.
+ Your goal is to identify companies that exhibit potential leverage stress, refinancing risk, valuation tension, or late-cycle momentum exhaustion, which will then proceed to the detailed multi-stage leverage analysis (Stages 1–5).
+You will analyze the market, financial, and technical data contained in the context window of the previous prompt to produce a prioritized list of candidates for deeper review.
+
+Screening Objective
+Construct a ranked universe of 10–30 companies that meet both fundamental and technical stress signals, indicating:
+elevated balance-sheet leverage or capex risk,
+
+
+deteriorating coverage metrics or refinancing cliffs,
+
+
+extended valuations in crowded AI/infrastructure themes, and
+
+
+weakening price-action confirmation (loss of momentum, divergence, volume shifts).
+
+
+
+A. Fundamental Filters and Thresholds
+Category
+Metric
+Threshold / Condition
+Interpretation
+Financial leverage
+Net Debt / EBITDA
+> 3× (cyclical) / > 5× (infra)
+Balance-sheet strain
+Interest coverage
+EBITDA / Interest
+< 5×
+Limited rate buffer
+Free cash flow
+FCF / Revenue
+< 0 % for > 2 yrs
+Persistent burn
+Capex intensity
+Capex / Revenue
+> 25 %
+Over-investment
+Short-term maturities
+Debt ≤ 24 m / Total Debt
+> 30 %
+Refinancing cliff
+Variable-rate debt share
+Variable Debt / Total Debt
+> 60 %
+Rate sensitivity
+Valuation tension
+EV/EBITDA
+> sector median + 1 σ
+Over-valuation
+AI/DC thematic exposure
+AI-related Capex %
+> 25 %
+Thematic crowding
+
+
+B. Technical & Quantitative Diagnostics (techniques that “work”)
+Technique
+Description
+Signal of Concern
+Relative-Strength Breakdown
+Compute 6- and 12-month RSI or z-score vs sector index
+RSI < 35 or falling momentum + elevated valuation
+Price–Volume Divergence
+Rising price but declining 30-day volume trend
+“Distribution” phase, likely top formation
+Moving-Average Reversal
+50 DMA crosses below 200 DMA with < 90-day slope > 0 → < 0
+Technical trend reversal
+Volatility Regime Shift
+30-day HV / 252-day HV > 1.5 or 1-month ATM IV > 2 σ above mean
+Funding-stress proxy; often precedes sell-offs
+Credit–Equity Divergence
+Widening CDS or bond spreads > 20 bp while stock stable/up
+Hidden credit deterioration
+Insider Flow
+Net insider selling > 1 σ above 3-yr avg
+Confidence erosion
+Funding-Cost Spread
+Δ (Company’s bond yield − benchmark govt yield) > +150 bp YoY
+Rising refi cost pressure
+Sector Rotation Check
+Compute rolling beta to sector ETF; identify beta-collapse
+Leadership loss within sector theme
+
+These indicators allow cross-checking if a “fundamental red flag” coincides with a “technical stress” — the intersection marks prime Stage 1 candidates.
+
+C. Quality Controls
+Reconcile financial data to latest filings (≤ 12 months old).
+
+
+Verify technical metrics calculated from ≥ 250 trading days.
+
+
+Remove illiquid tickers (avg daily turnover < $1 M or < 20 bps of market cap).
+
+
+Normalize currencies and time zones.
+
+
+Ensure at least 3 fundamental and 1 technical signal per shortlisted name.
+
+
+
+Output Requirements
+Screening Table – list all companies triggering ≥ 1 fundamental and/or technical red flag.
+ Columns:
+ Ticker | Sector | Market Cap | Key Metric Triggered | Value | Threshold | Technical Signal | Flag (Red/Amber/Green)
+
+
+Ranking Summary – rank by cumulative red-flag count + severity (standardized z-score of breaches).
+ Provide brief commentary on top 10 names (why they stand out).
+
+
+Transition Dataset – structured summary (JSON/table) for each candidate:
+
+
+identifiers (Name, Ticker, ISIN, Sector)
+
+
+triggered metrics (fundamental & technical)
+
+
+latest filing & price-data date
+
+
+data sources / time stamps.
+
+
+This dataset becomes the input for Stage 1 – Leverage Source Mapping.
+
+Quality Verification
+Confirm 10–30 names after deduplication.
+
+
+All columns required by Stage 1 (debt metrics, FCF, capex, maturities, valuation, and risk flags) are complete.
+
+
+Units standardized (currency, ratios, days).
+
+
+
+Final Deliverables
+Screening Table
+
+
+Ranking Summary
+
+
+Transition Dataset for Stage 1
+
+
+
+Practical note:
+ During live operation, pair this Stage 0 with a simple back-tester or Bloomberg EQS query so you can refresh candidates weekly; then feed only the top decile (highest composite stress score) into the Stage 1 deep-dive pipeline.
+Stage 0 → Stage 1 → Stage 2 → Stage 3 → Stage 4 → Stage 5
+ This now forms a full institutional-grade risk-to-trade engine combining quant screening + fundamental forensics + tactical execution.
+
+~
+ You will be conducting a comprehensive leverage mapping exercise (Stage 1 - Leverage Source Mapping) to create a complete inventory of all leverage sources for a company. You will analyze the information collected in the context window of the previous prompt to identify and categorize all forms of leverage: financial, operational, contractual (off-balance sheet), customer, market-valuation, currency-interest rate, and (for AI/DC companies) locational leverage.
+Your task is to systematically extract and organize leverage information across the following categories:
+1. Debt Structure Analysis:
+Extract all debt instruments with: nominal amount, interest rate (fixed/variable), currency, collateral/security, seniority ranking, maturity schedule, and covenant details
+
+
+Identify any convertible instruments, credit facilities, or hybrid securities
+
+
+2. Leases and Long-term Contractual Obligations:
+Identify IFRS 16 lease liabilities and right-of-use assets
+
+
+Extract rental agreements, power purchase agreements (PPAs), take-or-pay contracts
+
+
+Identify purchase guarantees (e.g., GPU/HBM commitments) and capital expenditure obligations
+
+
+3. Operating Leverage (Fixed vs. Variable Costs):
+Categorize costs as fixed or variable: energy costs, rent, minimum payroll, maintenance, and service costs
+
+
+Calculate the proportion of fixed costs to total operating expenses
+
+
+4. Customer Concentration Risk:
+Identify revenue concentration: top-1 and top-3 customer percentages
+
+
+Analyze contract duration, renewal terms, and backlog visibility
+
+
+Assess customer dependency and contract stability
+
+
+5. Market Exposures:
+Identify foreign exchange mismatches between revenues and debt
+
+
+Calculate proportion of variable-rate debt
+
+
+Identify hedging instruments and strategies
+
+
+Assess sensitivity to interest rates and energy prices
+
+
+6. Valuation and Liquidity Metrics:
+Calculate enterprise value, market capitalization, free float percentage
+
+
+Determine average trading volume and liquidity ratios
+
+
+Calculate key multiples (EV/EBITDA, P/S ratios)
+
+
+7. Location and Network Analysis (for AI/Data Center companies):
+Assess metro-proximate vs. remote locations
+
+
+Evaluate proximity to internet exchanges and peering points
+
+
+Analyze pre-lease percentages and lease tenor details
+
+
+Quality Control Checks:
+ Before finalizing your analysis, verify:
+Total debt amounts reconcile with balance sheet figures
+
+
+Lease obligations align with IFRS 16 disclosures
+
+
+Enterprise value calculation: Market Cap + Net Debt + Minorities - Cash
+
+
+Output Requirements:
+ Create your response with the following three sections:
+Leverage Register – structured table with columns: Description, Amount/Size, Currency, Tenor/Duration, Variability (Fixed/Variable), Counterparty, Reversibility (Yes/No/Partial)
+
+
+Red Flag Identification – list any leverage concentrations or risk hotspots
+
+
+Data Dictionary – clear definitions and units for all metrics and terms
+
+
+~
+ You are a financial analyst tasked with calculating normalized risk metrics and assigning RAG (Red/Amber/Green) thresholds for credit assessment. This is Stage 2 of a multi-stage financial analysis process.
+You will be provided with the data generated in the context window of the previous prompt (Stage 1 output: Leverage Register, Red Flag Identification, Data Dictionary).
+Your task is to calculate a standardized set of financial metrics and assign RAG flags based on the specified thresholds below.
+Required Metrics and Red Thresholds
+Net Debt / EBITDA (lease-adjusted) — RED: >4× / >5×
+
+
+Interest Coverage (EBITDA / Cash Interest) — RED: <3×
+
+
+Fixed-Charge Coverage = EBITDAR / (Interest + Rents) — RED: <2×
+
+
+FCF / Debt — RED: <5% (or FCF < 0)
+
+
+Maturity ≤24m (share of total debt) — RED: >30%
+
+
+Variable-rate debt exposure (post-hedging) — RED: >60%
+
+
+Customer concentration — RED: top-1 >30% or top-3 >60%
+
+
+Capex/Revenue & commitments — RED: >30% without long-term contracts
+
+
+AI/DC: Pre-lease <70%, lease tenor <7 years, remote campus
+
+
+Quality Controls:
+Verify EBITDA is cash-like
+
+
+Compare to peer medians
+
+
+Adjust for IFRS vs. GAAP
+
+
+Note one-time adjustments
+
+
+Output Requirements:
+Metrics Table (values + RAG flags)
+
+
+Preliminary Scores (0–5) for each axis
+
+
+Adjustment Notes (lease adjustments, one-offs, etc.)
+
+
+~
+ You are a financial analyst conducting sensitivity testing and scenario analysis for a company's credit risk assessment.
+ You will use the Stage 2 outputs from the context window above (Metrics Table, Preliminary Scores, Adjustment Notes) as input data.
+Here are the shock scenarios to test: demand shocks, interest rate increases, FX moves, energy price spikes, and asset impairments.
+Use formulas:
+EBITDA' = EBITDA - Δrevenues×margin - Δfixed_costs
+
+
+ICR' = EBITDA' / Cash_Interest'
+
+
+ND/EBITDA'
+
+
+FCF' = CFO' - Capex - Cash_Interest' - Lease_Payments
+
+
+Kill-Switch Criteria:
+ ICR' <2.0×, ND/EBITDA' >6.0×, FCF' <0 for 2+ years, covenant breach in downside scenario.
+Deliverables:
+Sensitivity Analysis Table
+
+
+Potential Breaches (which covenants fail, timing, magnitude)
+
+
+Sensitivity Heat Map (thresholds where it “breaks”)
+
+
+Operational Triggers (early distress signals)
+
+
+~
+ You are a financial risk analyst conducting Stage 4 of a comprehensive refinancing and contagion risk assessment.
+ You will use the stress test results from the previous prompt (Sensitivity Analysis Table, Potential Breaches, Heat Map, Operational Triggers) as inputs.
+Your objective: create a refinancing and contagion risk map identifying trigger points and cascade scenarios.
+Required components:
+Maturity Wall Analysis: 0–36m timeline of maturities, coupon, secured/unsecured, covenant headroom.
+
+
+Capital Access Assessment: past issuances, ratings, collateral, covenant-lite vs. maintenance.
+
+
+Critical Counterparty Analysis: top customers/suppliers, contagion mapping.
+
+
+Contractual Trigger Points: MAC, cross-default, covenant test dates.
+
+
+Liquidity Buffer Analysis: cash + RCF, maintenance capex, runway.
+
+
+Integration with Stress Results: cross-ref kill-switch scenarios.
+
+
+Outputs:
+Refinancing Heat Map (traffic-light 0–36m)
+
+
+Hard Trigger Timeline (key dates)
+
+
+Contagion Scenario Tree (primary/secondary effects)
+
+
+Subjective Probability Assessment (Low/Medium/High)
+
+
+Quality Control Verification (vs. CDS spreads, pricing consistency)
+
+
+~
+ You are a quantitative risk analyst tasked with constructing specific trading positions based on comprehensive risk analysis.
+ You will use the Stage 4 outputs from the context window above (Refinancing Heat Map, Trigger Timeline, Contagion Scenario Tree, Probability Assessment) as input data.
+Here are the current market parameters provided separately.
+Systematic Steps:
+Final Risk Ranking: sum the five risk axes (0–25 pts) → interpret:
+
+
+ 15 = short/CDS/puts; 10–15 = observation/pair; <10 = neutral.
+
+
+
+Instrument Selection: choose among equity short/puts, CDS, pair trades, FX (USD/CHF/JPY vs KRW/TWD), or gold vs. crypto pairs.
+
+
+Position Sizing and Risk Management: risk ≤1–2% of capital, avoid martingale, size by stop distance.
+
+
+Define Invalidation & Profit Targets: metric/technical/calendar-based triggers.
+
+
+Monitoring Framework: metrics (capex guidance, GPU/HBM prices, pre-leasing, spreads, KRW/TWD).
+
+
+Outputs:
+Trade Ticket: thesis, instrument, entry, size, stop, targets, horizon, key events.
+
+
+Monitoring Plan: metrics, frequency, reaction thresholds.
+
+
+Portfolio Risk Map: correlations, sector/FX concentrations, limits.
+
+
+

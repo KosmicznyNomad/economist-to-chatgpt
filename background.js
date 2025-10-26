@@ -92,16 +92,18 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 // Funkcja zapisująca odpowiedź do storage
 async function saveResponse(responseText, source, analysisType = 'company') {
   try {
-    console.log(`📝 [saveResponse] Rozpoczynam zapisywanie:`, {
-      textLength: responseText?.length || 0,
-      source: source,
-      analysisType: analysisType
-    });
+    console.log(`\n${'*'.repeat(80)}`);
+    console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
+    console.log(`${'*'.repeat(80)}`);
+    console.log(`Długość tekstu: ${responseText?.length || 0} znaków`);
+    console.log(`Źródło: ${source}`);
+    console.log(`Typ analizy: ${analysisType}`);
+    console.log(`${'*'.repeat(80)}`);
     
     const result = await chrome.storage.session.get(['responses']);
     const responses = result.responses || [];
     
-    console.log(`📦 [saveResponse] Obecny stan storage: ${responses.length} odpowiedzi`);
+    console.log(`📦 Obecny stan storage: ${responses.length} odpowiedzi`);
     
     const newResponse = {
       text: responseText,
@@ -112,17 +114,22 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     
     responses.push(newResponse);
     
+    console.log(`💾 Zapisuję do chrome.storage.session...`);
     await chrome.storage.session.set({ responses });
-    console.log(`✅ [saveResponse] Zapisano odpowiedź do storage (${responses.length} łącznie, typ: ${analysisType})`);
-    console.log(`📤 [saveResponse] Nowa odpowiedź:`, {
-      textPreview: responseText.substring(0, 100),
-      timestamp: newResponse.timestamp,
-      source: source,
-      analysisType: analysisType
-    });
+    
+    console.log(`\n${'*'.repeat(80)}`);
+    console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO POMYŚLNIE ✅ ✅ ✅`);
+    console.log(`${'*'.repeat(80)}`);
+    console.log(`Nowy stan: ${responses.length} odpowiedzi w storage`);
+    console.log(`Preview: "${responseText.substring(0, 150)}..."`);
+    console.log(`${'*'.repeat(80)}\n`);
   } catch (error) {
-    console.error('❌ [saveResponse] Błąd zapisywania odpowiedzi:', error);
-    console.error('Stack trace:', error.stack);
+    console.error(`\n${'!'.repeat(80)}`);
+    console.error(`❌ ❌ ❌ [saveResponse] BŁĄD ZAPISYWANIA ❌ ❌ ❌`);
+    console.error(`${'!'.repeat(80)}`);
+    console.error('Error:', error);
+    console.error('Stack:', error.stack);
+    console.error(`${'!'.repeat(80)}\n`);
   }
 }
 
@@ -315,6 +322,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       // Sprawdź czy to pseudo-tab (ręcznie wklejone źródło)
       const isManualSource = tab.url === "manual://source";
       let extractedText;
+      let transcriptLang = null; // Może być ustawiony przez YouTube content script
       
       if (isManualSource) {
         // Użyj tekstu przekazanego bezpośrednio
@@ -327,13 +335,50 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
           return { success: false, reason: 'pusty tekst' };
         }
       } else {
-        // Ekstraktuj tekst z karty (bez aktywacji - nie przeszkadzamy użytkownikowi)
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          function: extractText
-        });
-        extractedText = results[0]?.result;
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
+        // Wykryj źródło najpierw, aby wiedzieć czy to YouTube
+        const url = new URL(tab.url);
+        const hostname = url.hostname;
+        let isYouTube = hostname.includes('youtube.com') || hostname.includes('youtu.be');
+        
+        if (isYouTube) {
+          // === YOUTUBE: Użyj content script przez sendMessage ===
+          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube wykryty - używam content script`);
+          
+          try {
+            const response = await chrome.tabs.sendMessage(tab.id, {
+              type: 'GET_TRANSCRIPT'
+            });
+            
+            console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Odpowiedź z content script:`, {
+              length: response.transcript?.length || 0,
+              method: response.method,
+              error: response.error
+            });
+            
+            if (!response.transcript) {
+              console.error(`[${analysisType}] [${index + 1}/${tabs.length}] Brak transkrypcji: ${response.error || 'unknown'}`);
+              return { success: false, reason: `YouTube: ${response.error || 'no transcript'}` };
+            }
+            
+            extractedText = response.transcript;
+            transcriptLang = response.lang || response.langName || 'unknown';
+            
+            console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✓ Transkrypcja: ${extractedText.length} znaków, język: ${transcriptLang}, metoda: ${response.method}`);
+            
+          } catch (e) {
+            console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd komunikacji z content script:`, e);
+            return { success: false, reason: 'YouTube: content script error' };
+          }
+          
+        } else {
+          // === NON-YOUTUBE: Użyj executeScript z extractText ===
+          const results = await chrome.scripting.executeScript({
+            target: { tabId: tab.id },
+            function: extractText
+          });
+          extractedText = results[0]?.result;
+          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
+        }
         
         // Dla automatycznych źródeł: walidacja minimum 50 znaków
         if (!extractedText || extractedText.length < 50) {
@@ -345,9 +390,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       // Pobierz tytuł
       const title = tab.title || "Bez tytułu";
       
-      // Wykryj źródło artykułu
+      // Wykryj źródło artykułu (dla non-YouTube lub dla payload metadata)
       let sourceName;
-      let transcriptLang = null;
+      
       if (isManualSource) {
         sourceName = "Manual Source";
       } else {
@@ -359,20 +404,6 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
           if (hostname.includes(domain)) {
             sourceName = source.name;
             break;
-          }
-        }
-        
-        // Dla YouTube - pobierz język transkrypcji z injected script
-        if (sourceName === "YouTube") {
-          try {
-            const langResults = await chrome.scripting.executeScript({
-              target: { tabId: tab.id },
-              function: () => window._ytTranscriptLang || null
-            });
-            transcriptLang = langResults[0]?.result;
-            console.log(`[${analysisType}] Język transkrypcji YouTube: ${transcriptLang || 'unknown'}`);
-          } catch (e) {
-            console.warn(`[${analysisType}] Nie udało się pobrać języka transkrypcji:`, e);
           }
         }
       }
@@ -403,14 +434,77 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       });
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] 🎯 ANALIZA WYNIKU Z executeScript`);
+      console.log(`Artykuł: ${title}`);
+      console.log(`${'='.repeat(80)}`);
+      
+      // Sprawdź co dokładnie zwróciło executeScript
+      console.log(`📦 results array:`, {
+        exists: !!results,
+        length: results?.length,
+        type: typeof results
+      });
+      
+      if (!results || results.length === 0) {
+        console.error(`❌ KRYTYCZNY: results jest puste lub undefined!`);
+        console.error(`  - results: ${results}`);
+        console.log(`${'='.repeat(80)}\n`);
+        // Ten return trafia do Promise.allSettled jako fulfilled z tą wartością
+        return { success: false, title, error: 'executeScript nie zwrócił wyników' };
+      }
+      
+      console.log(`📦 results[0]:`, {
+        exists: !!results[0],
+        type: typeof results[0],
+        keys: results[0] ? Object.keys(results[0]) : []
+      });
+      
       const result = results[0]?.result;
+      
+      if (result === undefined) {
+        console.error(`❌ KRYTYCZNY: results[0].result jest undefined!`);
+        console.error(`  - results[0]: ${JSON.stringify(results[0], null, 2)}`);
+      } else if (result === null) {
+        console.error(`❌ KRYTYCZNY: results[0].result jest null!`);
+      } else {
+        console.log(`✓ result istnieje i nie jest null/undefined`);
+        console.log(`  - type: ${typeof result}`);
+        console.log(`  - success: ${result.success}`);
+        console.log(`  - lastResponse type: ${typeof result.lastResponse}`);
+        console.log(`  - lastResponse defined: ${result.lastResponse !== undefined}`);
+        console.log(`  - lastResponse not null: ${result.lastResponse !== null}`);
+        if (result.lastResponse !== undefined && result.lastResponse !== null) {
+          console.log(`  - lastResponse length: ${result.lastResponse.length}`);
+          console.log(`  - lastResponse preview: "${result.lastResponse.substring(0, 100)}..."`);
+        }
+        if (result.error) {
+          console.log(`  - error: ${result.error}`);
+        }
+      }
+      
       if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null) {
+        console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
+        console.log(`Zapisuję odpowiedź: ${result.lastResponse.length} znaków`);
+        console.log(`Typ analizy: ${analysisType}`);
+        console.log(`Tytuł: ${title}`);
+        
         await saveResponse(result.lastResponse, title, analysisType);
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Zapisano odpowiedź dla: ${title} (${result.lastResponse.length} znaków)`);
+        
+        console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
+        console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
-        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces zakończony bez odpowiedzi: ${title}`);
-      } else if (result && result.success && !result.lastResponse) {
-        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] ⚠️ Proces udany ale brak lastResponse: ${title}`);
+        console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
+        console.log(`${'='.repeat(80)}\n`);
+      } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null)) {
+        console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse=${result.lastResponse} ⚠️ ⚠️ ⚠️`);
+        console.log(`${'='.repeat(80)}\n`);
+      } else {
+        console.error(`\n❌ ❌ ❌ NIEOCZEKIWANY STAN ❌ ❌ ❌`);
+        console.error(`hasResult: ${!!result}`);
+        console.error(`success: ${result?.success}`);
+        console.error(`lastResponse: ${result?.lastResponse}`);
+        console.log(`${'='.repeat(80)}\n`);
       }
 
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
@@ -570,193 +664,11 @@ async function runManualSourceAnalysis(text, title, instances) {
 // Uwaga: chrome.action.onClicked NIE działa gdy jest default_popup w manifest
 // Ikona uruchamia popup, a popup wysyła message RUN_ANALYSIS
 
-// Funkcja ekstrakcji tekstu (content script)
+// Funkcja ekstrakcji tekstu (content script) - tylko dla non-YouTube sources
+// YouTube używa dedykowanego content script (youtube-content.js)
 async function extractText() {
   const hostname = window.location.hostname;
   console.log(`Próbuję wyekstrahować tekst z: ${hostname}`);
-  
-  // === OBSŁUGA YOUTUBE ===
-  if (hostname.includes('youtube.com') || hostname.includes('youtu.be')) {
-    console.log('Wykryto YouTube - pobieram transkrypcję przez YouTube Internal API...');
-    
-    // === 3.1 WYCIĄGNIJ VIDEO ID Z URL ===
-    function extractVideoId(url) {
-      try {
-        const urlObj = new URL(url);
-        
-        // Format: youtube.com/watch?v=VIDEO_ID
-        if (urlObj.hostname.includes('youtube.com')) {
-          const videoId = urlObj.searchParams.get('v');
-          if (videoId) return videoId;
-        }
-        
-        // Format: youtu.be/VIDEO_ID
-        if (urlObj.hostname.includes('youtu.be')) {
-          const videoId = urlObj.pathname.slice(1); // Usuń pierwszy slash
-          if (videoId) return videoId;
-        }
-        
-        console.error('Nie udało się wyciągnąć Video ID z URL:', url);
-        return null;
-      } catch (e) {
-        console.error('Błąd parsowania URL:', e);
-        return null;
-      }
-    }
-    
-    const videoId = extractVideoId(window.location.href);
-    if (!videoId) {
-      console.error('❌ Brak Video ID - pomijam');
-      return '';
-    }
-    
-    console.log(`✓ Video ID: ${videoId}`);
-    
-     // === 3.2 WYCIĄGNIJ URL TRANSKRYPCJI Z ytInitialPlayerResponse ===
-     function getCaptionTracksFromPlayerResponse() {
-       try {
-         // YouTube zapisuje dane w <script> tagach w HTML (content script ma dostęp do DOM)
-         let ytInitialPlayerResponse = null;
-         
-         // Szukaj w script tagach
-         const scripts = document.querySelectorAll('script');
-         for (const script of scripts) {
-           const content = script.textContent || script.innerText || '';
-           
-           // Szukaj wzorca: var ytInitialPlayerResponse = {...};
-           const match = content.match(/var\s+ytInitialPlayerResponse\s*=\s*(\{.+?\});/s);
-           if (match && match[1]) {
-             try {
-               ytInitialPlayerResponse = JSON.parse(match[1]);
-               console.log('✓ Znaleziono ytInitialPlayerResponse w <script> tagu');
-               break;
-             } catch (e) {
-               console.warn('⚠️ Nie udało się sparsować ytInitialPlayerResponse:', e);
-               continue;
-             }
-           }
-         }
-         
-         if (!ytInitialPlayerResponse) {
-           console.error('❌ Nie znaleziono ytInitialPlayerResponse w HTML');
-           return null;
-         }
-         
-         const captions = ytInitialPlayerResponse.captions;
-         if (!captions) {
-           console.error('❌ Brak sekcji captions w ytInitialPlayerResponse');
-           return null;
-         }
-         
-         const captionTracks = captions.playerCaptionsTracklistRenderer?.captionTracks;
-         if (!captionTracks || captionTracks.length === 0) {
-           console.error('❌ Brak dostępnych napisów dla tego filmu');
-           console.error('💡 Film prawdopodobnie nie ma transkrypcji/napisów');
-           return null;
-         }
-         
-         console.log(`✓ Znaleziono ${captionTracks.length} dostępnych transkrypcji`);
-         
-         // Wybierz pierwszą dostępną transkrypcję (dowolny język)
-         const selectedTrack = captionTracks[0];
-         const langCode = selectedTrack.languageCode || 'unknown';
-         const langName = selectedTrack.name?.simpleText || langCode;
-         const baseUrl = selectedTrack.baseUrl;
-         
-         if (!baseUrl) {
-           console.error('❌ Brak baseUrl w wybranej transkrypcji');
-           return null;
-         }
-         
-         console.log(`✓ Wybrałem transkrypcję: ${langName} (${langCode})`);
-         console.log(`📍 URL transkrypcji: ${baseUrl.substring(0, 100)}...`);
-         
-         return {
-           url: baseUrl,
-           langCode: langCode,
-           langName: langName
-         };
-         
-       } catch (e) {
-         console.error('❌ Błąd wyciągania transkrypcji z ytInitialPlayerResponse:', e);
-         return null;
-       }
-     }
-    
-     const captionTrack = getCaptionTracksFromPlayerResponse();
-     if (!captionTrack) {
-       console.error('❌ Nie znaleziono transkrypcji dla tego filmu');
-       return '';
-     }
-     
-     // Zapisz język w zmiennej globalnej (do użycia w payload metadata)
-     window._ytTranscriptLang = captionTrack.langCode;
-     
-     console.log(`✓ Pobieram transkrypcję przez fetch (content script - bez CORS)...`);
-     
-     // Pobierz XML w content script (brak problemów CORS)
-     try {
-       // Dodaj format parametr - spróbuj różnych formatów
-       const urlWithFormat = captionTrack.url + '&fmt=srv3';
-       console.log(`🔗 Pełny URL: ${urlWithFormat}`);
-       
-       // Użyj XMLHttpRequest - czasami działa lepiej niż fetch dla YouTube API
-       const transcriptXml = await new Promise((resolve, reject) => {
-         const xhr = new XMLHttpRequest();
-         xhr.open('GET', urlWithFormat, true);
-         xhr.timeout = 10000;
-         
-         xhr.onload = () => {
-           console.log(`📡 XHR status: ${xhr.status} ${xhr.statusText}`);
-           console.log(`📡 XHR responseType: ${xhr.responseType}`);
-           console.log(`📡 XHR response length: ${xhr.responseText?.length || 0}`);
-           
-           if (xhr.status >= 200 && xhr.status < 300) {
-             resolve(xhr.responseText);
-           } else {
-             reject(new Error(`HTTP ${xhr.status}`));
-           }
-         };
-         
-         xhr.onerror = () => reject(new Error('Network error'));
-         xhr.ontimeout = () => reject(new Error('Timeout'));
-         
-         xhr.send();
-       });
-       
-       console.log(`✓ Transkrypcja pobrana: ${transcriptXml.length} znaków`);
-       console.log(`📝 Preview XML (pierwsze 500 znaków): ${transcriptXml.substring(0, 500)}...`);
-       
-       // Parsuj XML do tekstu (używamy DOMParser - dostępny w content script)
-       const parser = new DOMParser();
-       const doc = parser.parseFromString(transcriptXml, 'text/xml');
-       const textElements = doc.querySelectorAll('text');
-       
-       if (textElements.length === 0) {
-         console.error('❌ Brak elementów <text> w XML transkrypcji');
-         return '';
-       }
-       
-       // Wyciągnij tekst z każdego elementu
-       const texts = Array.from(textElements).map(element => {
-         const text = element.textContent || '';
-         // Dekoduj HTML entities
-         const textarea = document.createElement('textarea');
-         textarea.innerHTML = text;
-         return textarea.value.trim();
-       }).filter(text => text.length > 0);
-       
-       const fullText = texts.join(' ');
-       console.log(`✓ Sparsowano transkrypcję: ${textElements.length} segmentów → ${fullText.length} znaków`);
-       console.log(`📝 Preview: "${fullText.substring(0, 150)}..."`);
-       
-       return fullText;
-       
-     } catch (error) {
-       console.error('❌ Błąd pobierania/parsowania transkrypcji:', error);
-       return '';
-     }
-  }
   
   // Mapa selektorów specyficznych dla każdego źródła
   const sourceSelectors = {
@@ -1748,7 +1660,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const minLength = 10;
     const isValid = text.length >= minLength;
     
-    console.log(`📊 Walidacja: ${isValid ? '✅ OK' : '❌ ZA KRÓTKA'} (${text.length} < ${minLength} znaków)`);
+    console.log(`📊 Walidacja: ${isValid ? '✅ OK' : '❌ ZA KRÓTKA'} (${text.length} ${isValid ? '>=' : '<'} ${minLength} znaków)`);
     
     return isValid;
   }
@@ -2145,7 +2057,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               console.error(`❌ Ponowna próba nieudana - przerywam chain`);
               updateCounter(counter, i + 1, promptChain.length, `❌ Błąd krytyczny`);
               await new Promise(resolve => setTimeout(resolve, 10000));
-              return; // Zakończ bez usuwania licznika
+              // WAŻNE: Musimy zwrócić obiekt, nie undefined!
+              return { success: false, lastResponse: '', error: 'Nie udało się wysłać prompta po retry' };
             }
             
             console.log(`✅ Ponowne wysyłanie udane - kontynuuję chain`);

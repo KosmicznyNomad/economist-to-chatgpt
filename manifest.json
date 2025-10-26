@@ -26,6 +26,13 @@
   "background": {
     "service_worker": "background.js"
   },
+  "content_scripts": [
+    {
+      "matches": ["*://*.youtube.com/*", "*://youtu.be/*"],
+      "js": ["youtube-content.js"],
+      "run_at": "document_end"
+    }
+  ],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",
