@@ -1103,8 +1103,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
   async function waitForResponse(maxWaitMs) {
     const startTime = Date.now();
-    
-    console.log("⏳ Czekam na odpowiedź ChatGPT...");
+    const sessionId = `WAIT_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    console.log(`⏳ [${sessionId}] Czekam na odpowiedź ChatGPT... (maxWaitMs: ${maxWaitMs})`);
+    console.log(`⏱️ [${sessionId}] Start czasu: ${new Date(startTime).toISOString()}`);
     
     // ===== FAZA 1: Detekcja STARTU odpowiedzi =====
     // Czekaj aż ChatGPT zacznie generować odpowiedź
@@ -1269,12 +1271,17 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Warunek spełniony jeśli KTÓRYKOLWIEK z głównych wskaźników jest obecny
       if (hasStopButton || interfaceBlocked) {
-        console.log("✓ ChatGPT zaczął odpowiadać", {
+        const elapsedMs = Date.now() - startTime;
+        console.log(`✓ [${sessionId}] ChatGPT zaczął odpowiadać (po ${elapsedMs}ms)`, {
           stopButton: !!stopButton,
           editorDisabled: !!editorDisabled,
           sendDisabled: !!sendDisabled,
           hasNewContent: hasNewContent,
-          assistantMsgCount: assistantMessages.length
+          assistantMsgCount: assistantMessages.length,
+          selectors: {
+            stopButtonSelector: stopButton ? stopButton.getAttribute('aria-label') : 'null',
+            editorSelector: editorAny ? editorAny.id || editorAny.className : 'null'
+          }
         });
         responseStarted = true;
         break;
@@ -1290,9 +1297,17 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     }
     
     if (!responseStarted) {
-      console.error(`❌ ChatGPT nie zaczął odpowiadać po ${Math.round(startTimeout/1000)}s - prompt prawdopodobnie nie został wysłany!`);
+      const elapsedMs = Date.now() - startTime;
+      console.error(`❌ [${sessionId}] ChatGPT nie zaczął odpowiadać po ${Math.round(startTimeout/1000)}s (${elapsedMs}ms) - prompt prawdopodobnie nie został wysłany!`);
+      console.error(`❌ [${sessionId}] Stan DOM:`, {
+        assistantMessages: document.querySelectorAll('[data-message-author-role="assistant"]').length,
+        textareas: document.querySelectorAll('#prompt-textarea, [contenteditable="true"]').length,
+        stopButtons: document.querySelectorAll('button[aria-label*="Stop"], button[aria-label*="Zatrzymaj"]').length
+      });
       return false;
     }
+
+    console.log(`✅ [${sessionId}] FAZA 1 zakończona - odpowiedź rozpoczęta, przechodze do FAZY 2 (detekcja zakończenia)`);
     
     // ===== FAZA 2: Detekcja ZAKOŃCZENIA odpowiedzi =====
     // Czekaj aż ChatGPT skończy i interface będzie gotowy na kolejny prompt
@@ -1466,31 +1481,34 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         // Potwierdź stan przez 3 kolejnych sprawdzeń (1.5s)
         // To eliminuje false positives gdy UI migocze między stanami
         if (consecutiveReady >= 3) {
-          console.log("✅ ChatGPT zakończył odpowiedź - interface gotowy");
+          const totalElapsedMs = Date.now() - startTime;
+          console.log(`✅ [${sessionId}] ChatGPT zakończył odpowiedź - interface gotowy (czas całkowity: ${totalElapsedMs}ms)`);
           // Dodatkowe czekanie dla stabilizacji UI
           await new Promise(resolve => setTimeout(resolve, 1000));
-          
+
           // WERYFIKACJA: Sprawdź czy faktycznie jest jakaś odpowiedź w DOM (max 1 próba)
-          console.log("🔍 Weryfikuję obecność odpowiedzi w DOM...");
+          console.log(`🔍 [${sessionId}] Weryfikuję obecność odpowiedzi w DOM...`);
           let domCheckAttempts = 0;
           const MAX_DOM_CHECKS = 1;
-          
+
           while (domCheckAttempts < MAX_DOM_CHECKS) {
             const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
             const articles = document.querySelectorAll('article');
-            
+
             if (messages.length > 0 || articles.length > 0) {
-              console.log(`✓ Znaleziono ${messages.length} wiadomości assistant i ${articles.length} articles`);
+              console.log(`✓ [${sessionId}] Znaleziono ${messages.length} wiadomości assistant i ${articles.length} articles`);
+              console.log(`🎯 [${sessionId}] SUKCES - waitForResponse zwraca true (całkowity czas: ${Date.now() - startTime}ms)`);
               return true;
             }
-            
+
             domCheckAttempts++;
-            console.warn(`⚠️ DOM check ${domCheckAttempts}/${MAX_DOM_CHECKS} - brak odpowiedzi, czekam 1s...`);
+            console.warn(`⚠️ [${sessionId}] DOM check ${domCheckAttempts}/${MAX_DOM_CHECKS} - brak odpowiedzi, czekam 1s...`);
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
-          
+
           // Po 1 próbie (1s) - zakładamy że OK, walidacja później wyłapie błąd
-          console.warn("⚠️ DOM nie gotowy po 1 próbie (1s), ale kontynuuję - walidacja tekstu wyłapie jeśli faktyczny błąd");
+          console.warn(`⚠️ [${sessionId}] DOM nie gotowy po 1 próbie (1s), ale kontynuuję - walidacja tekstu wyłapie jeśli faktyczny błąd`);
+          console.log(`🎯 [${sessionId}] SUKCES (z ostrzeżeniem) - waitForResponse zwraca true (całkowity czas: ${Date.now() - startTime}ms)`);
           return true;
         }
       } else {
@@ -1511,7 +1529,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
   // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
   async function getLastResponseText() {
-    console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
+    const extractSessionId = `EXTRACT_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+    console.log(`🔍 [${extractSessionId}] Wyciągam ostatnią odpowiedź ChatGPT...`);
+    console.log(`🔍 [${extractSessionId}] Czas: ${new Date().toISOString()}`);
     
     // Funkcja pomocnicza - wyciąga tylko treść głównej odpowiedzi, pomija źródła/linki
     function extractMainContent(element) {
@@ -1557,29 +1577,30 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Szukaj wszystkich odpowiedzi ChatGPT w konwersacji
       const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM`);
-      
+      console.log(`🔍 [${extractSessionId}] Znaleziono ${messages.length} wiadomości assistant w DOM`);
+
       if (messages.length > 0) {
         const lastMessage = messages[messages.length - 1];
-        
+        console.log(`🔍 [${extractSessionId}] Ostatnia wiadomość - klasy: ${lastMessage.className}, children: ${lastMessage.children.length}`);
+
         // Sprawdź czy to nie jest tylko thinking indicator
         const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
         if (thinkingIndicators.length > 0) {
-          console.warn("⚠️ Ostatnia wiadomość zawiera thinking indicator - ChatGPT jeszcze nie zaczął odpowiedzi");
-          console.log(`   Thinking indicators: ${thinkingIndicators.length}`);
+          console.warn(`⚠️ [${extractSessionId}] Ostatnia wiadomość zawiera thinking indicator - ChatGPT jeszcze nie zaczął odpowiedzi`);
+          console.log(`   [${extractSessionId}] Thinking indicators: ${thinkingIndicators.length}`);
           // Kontynuuj retry - może treść się pojawi
           continue;
         }
-        
+
         const text = extractMainContent(lastMessage);
-        
+
         // Jeśli znaleziono niepustą odpowiedź - sukces!
         if (text.length > 0) {
-          console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków (attempt ${attempt + 1}/${maxRetries})`);
-          console.log(`📝 Preview (pierwsze 200 znaków): "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
-          console.log(`📝 Preview (ostatnie 200 znaków): "...${text.substring(Math.max(0, text.length - 200))}"`);
+          console.log(`✅ [${extractSessionId}] Znaleziono odpowiedź: ${text.length} znaków (attempt ${attempt + 1}/${maxRetries})`);
+          console.log(`📝 [${extractSessionId}] Preview (pierwsze 200 znaków): "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+          console.log(`📝 [${extractSessionId}] Preview (ostatnie 200 znaków): "...${text.substring(Math.max(0, text.length - 200))}"`);
           const lineCount = text.split('\n').length;
-          console.log(`📊 Statystyki: ${lineCount} linii, ${text.split(/\s+/).length} słów`);
+          console.log(`📊 [${extractSessionId}] Statystyki: ${lineCount} linii, ${text.split(/\s+/).length} słów`);
           return text;
         }
         
@@ -1656,12 +1677,20 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   // Funkcja walidująca odpowiedź (min 10 znaków - poluzowane zabezpieczenie)
-  function validateResponse(text) {
+  function validateResponse(text, promptIndex = null) {
     const minLength = 10;
     const isValid = text.length >= minLength;
-    
-    console.log(`📊 Walidacja: ${isValid ? '✅ OK' : '❌ ZA KRÓTKA'} (${text.length} ${isValid ? '>=' : '<'} ${minLength} znaków)`);
-    
+    const validationId = `VALIDATE_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+
+    const contextInfo = promptIndex !== null ? ` [Prompt ${promptIndex}]` : '';
+    console.log(`📊 [${validationId}]${contextInfo} Walidacja: ${isValid ? '✅ OK' : '❌ ZA KRÓTKA'} (${text.length} ${isValid ? '>=' : '<'} ${minLength} znaków)`);
+
+    if (!isValid) {
+      console.log(`📊 [${validationId}] Treść odpowiedzi (pierwsze 100 znaków): "${text.substring(0, 100)}"`);
+    } else {
+      console.log(`📊 [${validationId}] Preview: "${text.substring(0, 50)}..."`);
+    }
+
     return isValid;
   }
   
@@ -2016,28 +2045,33 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Teraz uruchom prompt chain
       if (promptChain && promptChain.length > 0) {
-        console.log(`\n=== PROMPT CHAIN: ${promptChain.length} promptów do wykonania ===`);
-        console.log(`Pełna lista promptów:`, promptChain);
-        
+        const chainSessionId = `CHAIN_${Date.now()}_${Math.random().toString(36).substr(2, 9)}`;
+        const chainStartTime = Date.now();
+        console.log(`\n=== [${chainSessionId}] PROMPT CHAIN: ${promptChain.length} promptów do wykonania ===`);
+        console.log(`[${chainSessionId}] Rozpoczęcie: ${new Date().toISOString()}`);
+        console.log(`[${chainSessionId}] Pełna lista promptów:`, promptChain.map((p, idx) => `${idx + 1}. ${p.substring(0, 50)}...`));
+
         for (let i = 0; i < promptChain.length; i++) {
           const prompt = promptChain[i];
           const remaining = promptChain.length - i - 1;
-          
+          const promptStartTime = Date.now();
+
           console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
-          console.log(`>>> PROMPT ${i + 1}/${promptChain.length} (pozostało: ${remaining})`);
-          console.log(`Długość: ${prompt.length} znaków, ${prompt.split('\n').length} linii`);
-          console.log(`Preview:\n${prompt.substring(0, 200)}${prompt.length > 200 ? '...' : ''}`);
+          console.log(`>>> [${chainSessionId}] PROMPT ${i + 1}/${promptChain.length} (pozostało: ${remaining})`);
+          console.log(`[${chainSessionId}] Czas rozpoczęcia: ${new Date(promptStartTime).toISOString()}`);
+          console.log(`[${chainSessionId}] Długość: ${prompt.length} znaków, ${prompt.split('\n').length} linii`);
+          console.log(`[${chainSessionId}] Preview:\n${prompt.substring(0, 200)}${prompt.length > 200 ? '...' : ''}`);
           console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
           
           // Aktualizuj licznik - wysyłanie
           updateCounter(counter, i + 1, promptChain.length, 'Wysyłam prompt...');
           
           // Wyślij prompt
-          console.log(`[${i + 1}/${promptChain.length}] Wywołuję sendPrompt()...`);
+          console.log(`[${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 1/3: Wysyłanie prompta...`);
           const sent = await sendPrompt(prompt);
-          
+
           if (!sent) {
-            console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
+            console.error(`❌ [${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] Nie udało się wysłać prompta`);
             console.log(`⏸️ Błąd wysyłania - czekam na interwencję użytkownika`);
             updateCounter(counter, i + 1, promptChain.length, `❌ Błąd wysyłania`);
             
@@ -2061,16 +2095,21 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               return { success: false, lastResponse: '', error: 'Nie udało się wysłać prompta po retry' };
             }
             
-            console.log(`✅ Ponowne wysyłanie udane - kontynuuję chain`);
+            console.log(`✅ [${chainSessionId}] Ponowne wysyłanie udane - kontynuuję chain`);
           }
-          
+
+          console.log(`✅ [${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 1/3 zakończona - prompt wysłany`);
+
           // Aktualizuj licznik - czekanie
           updateCounter(counter, i + 1, promptChain.length, 'Czekam na odpowiedź...');
-          
+
           // Pętla czekania na odpowiedź - powtarzaj aż się uda
+          console.log(`[${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 2/3: Czekanie na odpowiedź...`);
           let responseCompleted = false;
+          let waitAttempt = 0;
           while (!responseCompleted) {
-            console.log(`[${i + 1}/${promptChain.length}] Wywołuję waitForResponse()...`);
+            waitAttempt++;
+            console.log(`[${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 2/3 - Próba czekania ${waitAttempt}: Wywołuję waitForResponse()...`);
             const completed = await waitForResponse(responseWaitMs);
             
             if (!completed) {
@@ -2096,14 +2135,20 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             // Odpowiedź zakończona - wyjdź z pętli
             responseCompleted = true;
           }
-          
+
+          console.log(`✅ [${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 2/3 zakończona - odpowiedź otrzymana po ${waitAttempt} próbach`);
+
           // Pętla walidacji odpowiedzi - powtarzaj aż będzie poprawna
+          console.log(`[${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 3/3: Walidacja odpowiedzi...`);
           let responseValid = false;
           let responseText = '';
+          let validationAttempt = 0;
           while (!responseValid) {
-            console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
+            validationAttempt++;
+            console.log(`[${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 3/3 - Próba walidacji ${validationAttempt}: Wyciągam tekst odpowiedzi...`);
             responseText = await getLastResponseText();
-            const isValid = validateResponse(responseText);
+            console.log(`[${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 3/3 - Próba walidacji ${validationAttempt}: Tekst wyekstrahowany (${responseText.length} znaków), walidacja...`);
+            const isValid = validateResponse(responseText, `${i + 1}/${promptChain.length}`);
             
             if (!isValid) {
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
@@ -2133,8 +2178,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             // Odpowiedź poprawna - wyjdź z pętli
             responseValid = true;
           }
-          
-          console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
+
+          const promptElapsedMs = Date.now() - promptStartTime;
+          console.log(`✅ [${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] FAZA 3/3 zakończona - odpowiedź poprawna po ${validationAttempt} próbach`);
+          console.log(`✅ [${chainSessionId}] [PROMPT ${i + 1}/${promptChain.length}] WSZYSTKIE FAZY zakończone - czas całkowity: ${promptElapsedMs}ms (${Math.round(promptElapsedMs / 1000)}s)`);
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -2156,15 +2203,23 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         }
         
         // Sukces - pętla zakończona bez break
-        console.log(`\n🎉 ZAKOŃCZONO PROMPT CHAIN - wykonano wszystkie ${promptChain.length} promptów`);
-        
+        const chainTotalElapsedMs = Date.now() - chainStartTime;
+        console.log(`\n🎉 [${chainSessionId}] ZAKOŃCZONO PROMPT CHAIN - wykonano wszystkie ${promptChain.length} promptów`);
+        console.log(`🎉 [${chainSessionId}] Czas całkowity chain: ${chainTotalElapsedMs}ms (${Math.round(chainTotalElapsedMs / 1000)}s)`);
+        console.log(`🎉 [${chainSessionId}] Zakończenie: ${new Date().toISOString()}`);
+
         // Usuń licznik z animacją sukcesu
         removeCounter(counter, true);
-        
+
         // Zwróć ostatnią odpowiedź do zapisania
         const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
-        console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        console.log(`🔙 [${chainSessionId}] Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        if (lastResponse.length > 0) {
+          console.log(`🔙 [${chainSessionId}] Preview ostatniej odpowiedzi (pierwsze 200 znaków): "${lastResponse.substring(0, 200)}..."`);
+        } else {
+          console.warn(`⚠️ [${chainSessionId}] UWAGA: Ostatnia odpowiedź jest pusta!`);
+        }
         return { success: true, lastResponse: lastResponse };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
