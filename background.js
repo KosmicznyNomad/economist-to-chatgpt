@@ -51,6 +51,9 @@ async function loadPrompts() {
 // Wczytaj prompty przy starcie rozszerzenia
 loadPrompts();
 
+// Mutex dla saveResponse - zapobiega race condition gdy wiele procesów kończy się jednocześnie
+let saveResponseQueue = Promise.resolve();
+
 // Obsługiwane źródła artykułów
 const SUPPORTED_SOURCES = [
   { pattern: "https://*.economist.com/*", name: "The Economist" },
@@ -89,8 +92,8 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
   }
 });
 
-// Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company') {
+// Funkcja wewnętrzna zapisująca odpowiedź do storage (bez mutexa)
+async function _saveResponseInternal(responseText, source, analysisType = 'company') {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -99,24 +102,24 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     console.log(`Źródło: ${source}`);
     console.log(`Typ analizy: ${analysisType}`);
     console.log(`${'*'.repeat(80)}`);
-    
+
     const result = await chrome.storage.session.get(['responses']);
     const responses = result.responses || [];
-    
+
     console.log(`📦 Obecny stan storage: ${responses.length} odpowiedzi`);
-    
+
     const newResponse = {
       text: responseText,
       timestamp: Date.now(),
       source: source,
       analysisType: analysisType
     };
-    
+
     responses.push(newResponse);
-    
+
     console.log(`💾 Zapisuję do chrome.storage.session...`);
     await chrome.storage.session.set({ responses });
-    
+
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO POMYŚLNIE ✅ ✅ ✅`);
     console.log(`${'*'.repeat(80)}`);
@@ -130,7 +133,24 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     console.error('Error:', error);
     console.error('Stack:', error.stack);
     console.error(`${'!'.repeat(80)}\n`);
+    throw error; // Re-throw aby queue mógł obsłużyć błąd
   }
+}
+
+// Funkcja zapisująca odpowiedź do storage z zabezpieczeniem przed race condition
+async function saveResponse(responseText, source, analysisType = 'company') {
+  // Dodaj operację do kolejki - zapobiega race condition gdy wiele procesów
+  // kończy się jednocześnie i próbuje zapisać odpowiedzi równolegle
+  console.log(`🔒 [saveResponse] Czekam na kolejkę (źródło: ${source})...`);
+
+  saveResponseQueue = saveResponseQueue
+    .then(() => _saveResponseInternal(responseText, source, analysisType))
+    .catch((error) => {
+      console.error(`❌ [saveResponse] Błąd w kolejce (źródło: ${source}):`, error);
+    });
+
+  await saveResponseQueue;
+  console.log(`🔓 [saveResponse] Zakończono i zwolniono kolejkę (źródło: ${source})`);
 }
 
 // Listener na wiadomości z content scriptu i popup
