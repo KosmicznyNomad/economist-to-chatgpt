@@ -21,6 +21,7 @@
     "https://youtu.be/*",
     "https://*.wsj.com/*",
     "https://*.foreignaffairs.com/*",
+    "https://open.spotify.com/*",
     "https://chatgpt.com/*"
   ],
   "background": {

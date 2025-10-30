@@ -404,3 +404,4 @@ setInterval(() => {
 
 console.log('[YouTube Content Script] Setup complete - nasłuchuję na video load i nawigację');
 
+

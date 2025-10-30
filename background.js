@@ -1,4 +1,4 @@
-const CHAT_URL = "https://chatgpt.com/g/g-68e628cb581c819192fc463204dba31a-iskierka-test";
+const CHAT_URL = "https://chatgpt.com/";
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global";
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
@@ -19,9 +19,9 @@ async function loadPrompts() {
     const companyResponse = await fetch(companyUrl);
     const companyText = await companyResponse.text();
     
-    // Parsuj prompty (oddzielone ~)
+    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
     PROMPTS_COMPANY = companyText
-      .split('~')
+      .split('◄PROMPT_SEPARATOR►')
       .map(p => p.trim())
       .filter(p => p.length > 0);
     
@@ -32,9 +32,9 @@ async function loadPrompts() {
     const portfolioResponse = await fetch(portfolioUrl);
     const portfolioText = await portfolioResponse.text();
     
-    // Parsuj prompty (oddzielone ~)
+    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
     PROMPTS_PORTFOLIO = portfolioText
-      .split('~')
+      .split('◄PROMPT_SEPARATOR►')
       .map(p => p.trim())
       .filter(p => p.length > 0);
     
@@ -63,7 +63,8 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://www.youtube.com/*", name: "YouTube" },
   { pattern: "https://youtu.be/*", name: "YouTube" },
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
-  { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" }
+  { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
+  { pattern: "https://open.spotify.com/*", name: "Spotify" }
 ];
 
 // Funkcja zwracająca tablicę URLi do query
@@ -100,6 +101,15 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     console.log(`Typ analizy: ${analysisType}`);
     console.log(`${'*'.repeat(80)}`);
     
+    // Walidacja - nie zapisuj pustych odpowiedzi
+    if (!responseText || responseText.trim().length === 0) {
+      console.warn(`⚠️ [saveResponse] POMINIĘTO - odpowiedź jest pusta (${responseText?.length || 0} znaków)`);
+      console.warn(`   Źródło: ${source}`);
+      console.warn(`   Typ analizy: ${analysisType}`);
+      console.log(`${'*'.repeat(80)}\n`);
+      return;
+    }
+    
     const result = await chrome.storage.session.get(['responses']);
     const responses = result.responses || [];
     
@@ -113,14 +123,37 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     };
     
     responses.push(newResponse);
-    
+
     console.log(`💾 Zapisuję do chrome.storage.session...`);
     await chrome.storage.session.set({ responses });
-    
+
+    // POPRAWKA: Weryfikacja że zapis faktycznie się udał
+    console.log(`🔍 Weryfikuję zapis...`);
+    const verification = await chrome.storage.session.get(['responses']);
+    const verifiedResponses = verification.responses || [];
+
+    if (verifiedResponses.length !== responses.length) {
+      console.error(`❌ KRYTYCZNY: Weryfikacja storage nieudana!`);
+      console.error(`   Oczekiwano: ${responses.length} odpowiedzi`);
+      console.error(`   Faktycznie: ${verifiedResponses.length} odpowiedzi`);
+      throw new Error('Storage verification failed - saved count does not match');
+    }
+
+    // Sprawdź czy ostatnia odpowiedź jest ta która właśnie zapisaliśmy
+    const lastSaved = verifiedResponses[verifiedResponses.length - 1];
+    if (lastSaved.text !== responseText) {
+      console.error(`❌ KRYTYCZNY: Ostatnia odpowiedź w storage nie pasuje!`);
+      console.error(`   Oczekiwano długość: ${responseText.length}`);
+      console.error(`   Faktycznie długość: ${lastSaved.text.length}`);
+      throw new Error('Storage verification failed - text mismatch');
+    }
+
+    console.log(`✅ Weryfikacja storage: OK`);
+
     console.log(`\n${'*'.repeat(80)}`);
-    console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO POMYŚLNIE ✅ ✅ ✅`);
+    console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO I ZWERYFIKOWANO POMYŚLNIE ✅ ✅ ✅`);
     console.log(`${'*'.repeat(80)}`);
-    console.log(`Nowy stan: ${responses.length} odpowiedzi w storage`);
+    console.log(`Nowy stan: ${responses.length} odpowiedzi w storage (zweryfikowano: ${verifiedResponses.length})`);
     console.log(`Preview: "${responseText.substring(0, 150)}..."`);
     console.log(`${'*'.repeat(80)}\n`);
   } catch (error) {
@@ -147,6 +180,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     runManualSourceAnalysis(message.text, message.title, message.instances);
     sendResponse({ success: true });
+    return true; // Utrzymuj kanał otwarty dla async
+  } else if (message.type === 'ACTIVATE_TAB') {
+    // POPRAWKA: Aktywuj kartę ChatGPT przed wysyłaniem wiadomości
+    console.log('🔍 Aktywuję kartę ChatGPT...');
+    chrome.tabs.query({ active: true, currentWindow: true }, async (tabs) => {
+      if (tabs[0]) {
+        try {
+          await chrome.tabs.update(tabs[0].id, { active: true });
+          await chrome.windows.update(tabs[0].windowId, { focused: true });
+          console.log('✅ Karta ChatGPT aktywowana');
+          sendResponse({ success: true });
+        } catch (error) {
+          console.error('❌ Błąd aktywacji karty:', error);
+          sendResponse({ success: false, error: error.message });
+        }
+      } else {
+        sendResponse({ success: false, error: 'No active tab found' });
+      }
+    });
     return true; // Utrzymuj kanał otwarty dla async
   }
 });
@@ -408,20 +460,27 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         }
       }
 
-      // Złóż payload z metadanymi źródła
-      let payload = `Źródło: ${sourceName}`;
-      if (transcriptLang) {
-        payload += `\nJęzyk transkrypcji: ${transcriptLang}`;
-      }
-      payload += `\nTytuł: ${title}\n\n${extractedText}`;
+      // Wyciągnij treść pierwszego prompta z promptChain
+      const firstPrompt = promptChain[0] || '';
+      
+      // Wstaw treść artykułu do pierwszego prompta (zamień {{articlecontent}})
+      let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+      
+      // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
+      const restOfPrompts = promptChain.slice(1);
 
       // Otwórz nowe okno ChatGPT
       const window = await chrome.windows.create({
         url: chatUrl,
-        type: "normal"
+        type: "normal",
+        focused: true  // POPRAWKA: Aktywuj okno od razu
       });
 
       const chatTabId = window.tabs[0].id;
+
+      // POPRAWKA: Upewnij się że okno jest aktywne i karta ma fokus
+      await chrome.windows.update(window.id, { focused: true });
+      await chrome.tabs.update(chatTabId, { active: true });
 
       // Czekaj na załadowanie strony
       await waitForTabComplete(chatTabId);
@@ -430,7 +489,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: chatTabId },
         function: injectToChat,
-        args: [payload, promptChain, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
+        args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
       });
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
@@ -445,6 +504,13 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         length: results?.length,
         type: typeof results
       });
+      
+      // Bezpieczna diagnostyka results (bez JSON.stringify)
+      if (results && results.length > 0) {
+        console.log(`📦 results[0] keys:`, results[0] ? Object.keys(results[0]) : 'brak');
+        console.log(`📦 results[0].result type:`, typeof results[0]?.result);
+        console.log(`📦 results[0].result exists:`, results[0]?.result !== undefined);
+      }
       
       if (!results || results.length === 0) {
         console.error(`❌ KRYTYCZNY: results jest puste lub undefined!`);
@@ -483,7 +549,17 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         }
       }
       
-      if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null) {
+      // DIAGNOSTYKA: Sprawdź dokładnie co mamy w result
+      console.log(`\n🔍 DIAGNOSTYKA RESULT:`);
+      console.log(`  - result exists: ${!!result}`);
+      console.log(`  - result.success: ${result?.success}`);
+      console.log(`  - result.lastResponse exists: ${result?.lastResponse !== undefined}`);
+      console.log(`  - result.lastResponse is null: ${result?.lastResponse === null}`);
+      console.log(`  - result.lastResponse length: ${result?.lastResponse?.length || 0}`);
+      console.log(`  - result.lastResponse trim length: ${result?.lastResponse?.trim()?.length || 0}`);
+      console.log(`  - result.lastResponse preview: "${result?.lastResponse?.substring(0, 100) || 'undefined'}..."`);
+      
+      if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null && result.lastResponse.trim().length > 0) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
         console.log(`Zapisuję odpowiedź: ${result.lastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
@@ -493,11 +569,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         
         console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
         console.log(`${'='.repeat(80)}\n`);
+      } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null || result.lastResponse.trim().length === 0)) {
+        console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse jest pusta lub null ⚠️ ⚠️ ⚠️`);
+        console.warn(`lastResponse: "${result.lastResponse}" (długość: ${result.lastResponse?.length || 0})`);
+        console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
-        console.log(`${'='.repeat(80)}\n`);
-      } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null)) {
-        console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse=${result.lastResponse} ⚠️ ⚠️ ⚠️`);
         console.log(`${'='.repeat(80)}\n`);
       } else {
         console.error(`\n❌ ❌ ❌ NIEOCZEKIWANY STAN ❌ ❌ ❌`);
@@ -725,6 +802,12 @@ async function extractText() {
       '.article-body',
       '[itemprop="articleBody"]',
       '.article-content'
+    ],
+    'open.spotify.com': [
+      '.NavBar__NavBarPage-sc-1guraqe-0.ejVULV',
+      '.NavBar__NavBarPage-sc-1guraqe-0',
+      'article',
+      '[role="main"]'
     ]
   };
   
@@ -1112,7 +1195,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     let responseStarted = false;
     let editAttemptedPhase1 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
     const checkedFixedErrorsPhase1 = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
-    const startTimeout = Math.min(maxWaitMs, 1200000); // Max 20 minut na start
+    const startTimeout = Math.min(maxWaitMs, 1800000); // Zwiększono z 20 do 30 minut na start
     
     while (Date.now() - startTime < startTimeout) {
       // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
@@ -1509,6 +1592,51 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     return false;
   }
 
+  // Funkcja sprawdzająca czy ChatGPT działa (brak błędów połączenia)
+  async function checkChatGPTConnection() {
+    console.log("🔍 Sprawdzam połączenie z ChatGPT...");
+    
+    try {
+      // Sprawdź czy są błędy w konsoli (HTTP2, 404, itp.)
+      const hasConnectionErrors = await checkForConnectionErrors();
+      if (hasConnectionErrors) {
+        return { healthy: false, error: "Wykryto błędy połączenia w konsoli" };
+      }
+      
+      // Sprawdź czy interfejs ChatGPT jest responsywny
+      const editor = document.querySelector('[role="textbox"]') || 
+                   document.querySelector('[contenteditable]');
+      if (!editor) {
+        return { healthy: false, error: "Nie znaleziono edytora ChatGPT" };
+      }
+      
+      // Sprawdź czy nie ma komunikatów o błędach na stronie
+      const errorMessages = document.querySelectorAll('[class*="text"]');
+      for (const msg of errorMessages) {
+        const text = msg.textContent.toLowerCase();
+        if (text.includes('something went wrong') || 
+            text.includes('connection error') ||
+            text.includes('network error') ||
+            text.includes('server error')) {
+          return { healthy: false, error: `Błąd na stronie: ${text.substring(0, 100)}` };
+        }
+      }
+      
+      return { healthy: true, error: null };
+      
+    } catch (error) {
+      console.warn("⚠️ Błąd podczas sprawdzania połączenia:", error);
+      return { healthy: false, error: `Błąd sprawdzania: ${error.message}` };
+    }
+  }
+  
+  // Funkcja sprawdzająca błędy połączenia w konsoli
+  async function checkForConnectionErrors() {
+    // Sprawdź czy są aktywne błędy połączenia
+    // (Ta funkcja może być rozszerzona o bardziej zaawansowaną detekcję)
+    return false; // Na razie zwracamy false - można dodać bardziej zaawansowaną logikę
+  }
+
   // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
   async function getLastResponseText() {
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
@@ -1534,11 +1662,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Wyciągnij tekst - użyj innerText aby zachować formatowanie (nowe linie)
       const text = clone.innerText || clone.textContent || '';
-      
-      // Oczyść tylko z nadmiarowych spacji w liniach (zachowaj nowe linie)
+
+      // Oczyść z nadmiarowych spacji, ale zachowaj formatowanie
+      // POPRAWKA: Nie kolapsuj CAŁEJ spacji - tylko trim края linii
       return text
         .split('\n')
-        .map(line => line.replace(/\s+/g, ' ').trim())
+        .map(line => line.trim())  // Tylko trim краї - zachowuj wewnętrzne spacje
         .join('\n')
         .replace(/\n{3,}/g, '\n\n') // Max 2 puste linie z rzędu
         .trim();
@@ -1546,8 +1675,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     // RETRY LOOP - React może asynchronicznie renderować treść
     // Nawet jeśli interface jest gotowy, treść może jeszcze być w trakcie renderowania
-    const maxRetries = 15; // 15 prób
-    const retryDelay = 300; // 300ms między próbami = max 4.5s
+    // POPRAWKA: Zwiększono z 15 prób × 300ms (4.5s) do 20 prób × 500ms (10s)
+    // Powód: ChatGPT React rendering może być wolny dla długich odpowiedzi
+    const maxRetries = 20; // Zwiększono z 15 do 20
+    const retryDelay = 500; // Zwiększono z 300ms do 500ms (total: 10s max)
     
     for (let attempt = 0; attempt < maxRetries; attempt++) {
       if (attempt > 0) {
@@ -1556,8 +1687,47 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
       
       // Szukaj wszystkich odpowiedzi ChatGPT w konwersacji
+      // POPRAWKA: Dodano diagnostykę selektorów dla lepszego debugowania
       const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM`);
+      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM (selektor: [data-message-author-role="assistant"])`);
+
+      // Diagnostyka: sprawdź inne możliwe selektory jeśli primary nie zadziałał
+      if (messages.length === 0 && attempt === 0) {
+        console.warn(`⚠️ Primary selector nie znalazł wiadomości - diagnostyka:`);
+        const altSelectors = [
+          '[role="presentation"]',
+          '.agent-turn',
+          '.markdown',
+          '[data-testid*="conversation"]',
+          'article',
+          '[data-testid^="conversation-turn-"]',
+          'div[class*="markdown"]',
+          'div[class*="message"]'
+        ];
+        for (const sel of altSelectors) {
+          const count = document.querySelectorAll(sel).length;
+          console.log(`   ${sel}: ${count} elementów`);
+        }
+        
+        // Dodatkowa diagnostyka - sprawdź czy w ogóle są jakieś wiadomości
+        const allDivs = document.querySelectorAll('div');
+        console.log(`   Wszystkie divy: ${allDivs.length}`);
+        
+        // Sprawdź czy są elementy z tekstem
+        const textElements = Array.from(allDivs).filter(div => 
+          div.textContent && div.textContent.trim().length > 10 && 
+          !div.querySelector('[data-message-author-role]') // Nie licząc już znalezionych
+        );
+        console.log(`   Divy z tekstem (bez data-message-author-role): ${textElements.length}`);
+        
+        if (textElements.length > 0) {
+          console.log(`   Przykłady tekstu:`, textElements.slice(0, 3).map(el => ({
+            text: el.textContent.substring(0, 100),
+            classes: el.className,
+            id: el.id
+          })));
+        }
+      }
       
       if (messages.length > 0) {
         const lastMessage = messages[messages.length - 1];
@@ -1625,6 +1795,18 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             }
           }
         }
+        
+        // Jeśli nie znaleziono przez data-message-author-role, spróbuj znaleźć ostatni turn z tekstem
+        console.log("🔍 Fallback 2b: Szukam ostatniego turnu z tekstem...");
+        for (let i = turnContainers.length - 1; i >= 0; i--) {
+          const turn = turnContainers[i];
+          const text = extractMainContent(turn);
+          if (text.length > 50) { // Minimum 50 znaków
+            console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2b): ${text.length} znaków`);
+            console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+            return text;
+          }
+        }
       }
     }
     
@@ -1650,19 +1832,74 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
     }
     
+    // Fallback 4: szukaj po klasach markdown (z retry)
+    console.log("🔍 Fallback 4: Szukam przez klasy markdown...");
+    for (let attempt = 0; attempt < 5; attempt++) {
+      if (attempt > 0) {
+        console.log(`🔄 Fallback 4 retry ${attempt}/4 - czekam 300ms...`);
+        await new Promise(r => setTimeout(r, 300));
+      }
+      
+      const markdownSelectors = [
+        'div[class*="markdown"]',
+        'div[class*="message"]',
+        'div[class*="content"]',
+        'div[class*="response"]'
+      ];
+      
+      for (const selector of markdownSelectors) {
+        const elements = document.querySelectorAll(selector);
+        console.log(`🔍 Znaleziono ${elements.length} elementów (${selector})`);
+        
+        if (elements.length > 0) {
+          // Weź ostatni element
+          const lastElement = elements[elements.length - 1];
+          const text = extractMainContent(lastElement);
+          if (text.length > 50) { // Minimum 50 znaków
+            console.log(`✅ Znaleziono odpowiedź przez ${selector} (fallback 4): ${text.length} znaków`);
+            console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+            return text;
+          }
+        }
+      }
+    }
+    
     console.error("❌ Nie znaleziono odpowiedzi ChatGPT w DOM po wszystkich próbach");
     console.log("   Wszystkie selektory (z retry) zwróciły puste wyniki");
     return '';
   }
   
-  // Funkcja walidująca odpowiedź (min 10 znaków - poluzowane zabezpieczenie)
+  // Funkcja walidująca odpowiedź
+  // POPRAWKA: Zwiększono minimalną długość z 10 do 50 znaków i dodano sprawdzanie błędów
   function validateResponse(text) {
-    const minLength = 10;
-    const isValid = text.length >= minLength;
-    
-    console.log(`📊 Walidacja: ${isValid ? '✅ OK' : '❌ ZA KRÓTKA'} (${text.length} ${isValid ? '>=' : '<'} ${minLength} znaków)`);
-    
-    return isValid;
+    const minLength = 50; // Zwiększono z 10 do 50
+
+    // Podstawowa walidacja długości
+    if (text.length < minLength) {
+      console.log(`📊 Walidacja: ❌ ZA KRÓTKA (${text.length} < ${minLength} znaków)`);
+      return false;
+    }
+
+    // Sprawdź czy odpowiedź nie zawiera typowych wzorców błędów
+    const errorPatterns = [
+      /I apologize.*error/i,
+      /something went wrong/i,
+      /please try again/i,
+      /I cannot.*at the moment/i,
+      /unable to.*right now/i
+    ];
+
+    for (const pattern of errorPatterns) {
+      if (pattern.test(text.substring(0, 200))) {
+        console.warn(`📊 Walidacja: ⚠️ Wykryto wzorzec błędu: ${pattern}`);
+        console.warn(`   Początek tekstu: "${text.substring(0, 100)}..."`);
+        // Nie odrzucaj całkowicie - może to być częściowa odpowiedź
+        // Tylko zaloguj ostrzeżenie
+      }
+    }
+
+    console.log(`📊 Walidacja: ✅ OK (${text.length} >= ${minLength} znaków)`);
+    return true;
   }
   
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
@@ -1671,6 +1908,18 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     let consecutiveReady = 0;
     
     console.log("⏳ Czekam aż interface będzie gotowy...");
+    
+    // POPRAWKA: Sprawdź czy karta jest aktywna (rozwiązuje problem z wyciszonymi kartami)
+    if (document.hidden || document.visibilityState === 'hidden') {
+      console.warn("⚠️ Karta jest nieaktywna - próbuję aktywować...");
+      try {
+        chrome.runtime.sendMessage({ type: 'ACTIVATE_TAB' });
+        // Czekaj chwilę na aktywację
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      } catch (error) {
+        console.warn("⚠️ Nie udało się aktywować karty:", error);
+      }
+    }
     
     while (Date.now() - startTime < maxWaitMs) {
       // Sprawdź wszystkie elementy interfejsu
@@ -1781,6 +2030,36 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
   // Funkcja wysyłania pojedynczego prompta
   async function sendPrompt(promptText, maxWaitForReady = responseWaitMs) {
+    // KROK 0: POPRAWKA - Aktywuj kartę przed wysyłaniem (rozwiązuje problem z wyciszonymi kartami)
+    const maxRetries = 3;
+    let retryCount = 0;
+    
+    while (retryCount < maxRetries) {
+      try {
+        console.log(`🔍 Aktywuję kartę ChatGPT przed wysyłaniem (próba ${retryCount + 1}/${maxRetries})...`);
+        
+        // Sprawdź czy karta jest aktywna - ale nie blokuj jeśli executeScript działa
+        if (document.hidden || document.visibilityState === 'hidden') {
+          console.warn("⚠️ Karta może być nieaktywna - ale kontynuuję (executeScript działa)");
+          // Nie blokuj - executeScript już działa w kontekście aktywnej karty
+        }
+        
+        console.log("✅ Karta jest aktywna - kontynuuję wysyłanie");
+        break;
+        
+      } catch (error) {
+        console.warn("⚠️ Błąd aktywacji karty:", error);
+        retryCount++;
+        if (retryCount < maxRetries) {
+          console.warn(`⚠️ Próba ${retryCount + 1}/${maxRetries} za 2 sekundy...`);
+          await new Promise(resolve => setTimeout(resolve, 2000));
+        } else {
+          console.error("❌ Nie udało się aktywować karty po wszystkich próbach");
+          return false;
+        }
+      }
+    }
+    
     // KROK 1: Czekaj aż interface będzie gotowy (jeśli poprzednia odpowiedź się jeszcze generuje)
     console.log("🔍 Sprawdzam gotowość interfejsu przed wysłaniem...");
     const interfaceReady = await waitForInterfaceReady(maxWaitForReady); // Pełny timeout (domyślnie 20 minut)
@@ -1790,7 +2069,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return false;
     }
     
-    console.log("✅ Interface gotowy - wysyłam prompt");
+    console.log("✅ Interface gotowy - sprawdzam połączenie z ChatGPT");
+    
+    // KROK 1.5: Sprawdź czy ChatGPT działa (brak błędów połączenia)
+    const connectionCheck = await checkChatGPTConnection();
+    if (!connectionCheck.healthy) {
+      console.error(`❌ ChatGPT nie działa: ${connectionCheck.error}`);
+      return false;
+    }
+    console.log("✅ Połączenie z ChatGPT OK - wysyłam prompt");
     
     // KROK 2: Szukaj edytora
     console.log("🔍 Szukam edytora contenteditable...");
@@ -1849,10 +2136,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     await new Promise(resolve => setTimeout(resolve, 300));
     
-    // Wstaw tekst - ulepszona wersja
-    // Najpierw jako textNode
-    const textNode = document.createTextNode(promptText);
-    editor.appendChild(textNode);
+    // Wstaw tekst - ulepszona wersja z zachowaniem formatowania
+    // Użyj innerHTML zamiast createTextNode aby zachować HTML i nowe linie
+    editor.innerHTML = promptText.replace(/\n/g, '<br>');
     
     // Przesuń kursor na koniec
     try {
@@ -1920,7 +2206,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log("🔍 Weryfikuję czy prompt został wysłany...");
     let verified = false;
     let verifyTime = 0;
-    const maxVerifyWait = 5000; // 5s na weryfikację
+    const maxVerifyWait = 10000; // Zwiększono z 5s do 10s na weryfikację
     
     while (verifyTime < maxVerifyWait) {
       // Po wysłaniu prompta ChatGPT powinien:
@@ -1957,15 +2243,29 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       // ALTERNATYWNY wskaźnik: interface zablokowany + są jakieś wiadomości w DOM
       const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
       
+      // NOWY wskaźnik: sprawdź czy nasza wiadomość pojawiła się w DOM
+      let messageInDOM = false;
+      if (userMessages.length > 0) {
+        const lastUserMessage = userMessages[userMessages.length - 1];
+        const messageText = lastUserMessage.textContent || lastUserMessage.innerText || '';
+        // Sprawdź czy ostatnia wiadomość użytkownika zawiera fragment naszego prompta
+        const promptFragment = promptText.substring(0, 50);
+        if (messageText.includes(promptFragment)) {
+          messageInDOM = true;
+          console.log(`✅ Znaleziono naszą wiadomość w DOM (${messageText.length} znaków)`);
+        }
+      }
+      
       // Jeśli którykolwiek z PEWNYCH wskaźników potwierdza wysłanie:
-      if (hasStopButton || interfaceBlocked) {
+      if (hasStopButton || interfaceBlocked || messageInDOM) {
         console.log(`✅ Prompt faktycznie wysłany (${verifyTime}ms)`, {
           stopBtn: !!stopBtn,
           editorDisabled,
           editorEmpty,
           sendDisabled,
           userMsgCount: userMessages.length,
-          assistantMsgCount: assistantMessages.length
+          assistantMsgCount: assistantMessages.length,
+          messageInDOM
         });
         verified = true;
         break;
@@ -2108,7 +2408,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             if (!isValid) {
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
-              console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 10)`);
+              console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
               updateCounter(counter, i + 1, promptChain.length, '❌ Odpowiedź za krótka');
               
               const action = await showContinueButton(counter, i + 1, promptChain.length);

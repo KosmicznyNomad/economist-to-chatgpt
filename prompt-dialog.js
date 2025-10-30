@@ -10,7 +10,7 @@ function parsePrompts(text) {
   }
   
   return text
-    .split('~')
+    .split('◄PROMPT_SEPARATOR►')
     .map(p => p.trim())
     .filter(p => p.length > 0);
 }
