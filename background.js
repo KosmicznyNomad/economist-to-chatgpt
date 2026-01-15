@@ -2,7 +2,7 @@ const CHAT_URL = "https://chatgpt.com/";
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global";
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
-const WAIT_FOR_RESPONSE_MS = 1200000; // 20 minut na odpowiedź ChatGPT
+const WAIT_FOR_RESPONSE_MS = 5400000; // 90 minut na odpowiedź ChatGPT (zwiększono dla ChatGPT Pro deep thinking)
 const RETRY_INTERVAL_MS = 500;
 
 // Zmienne globalne dla promptów
@@ -1183,21 +1183,85 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     }
   }
   
+  // Funkcja sprawdzająca czy ChatGPT generuje odpowiedź (rozszerzona detekcja)
+  function isGenerating() {
+    // 1. Stop button (klasyczne selektory)
+    const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
+                       document.querySelector('[data-testid="stop-button"]') ||
+                       document.querySelector('button[aria-label*="stop"]') ||
+                       document.querySelector('button[aria-label="Zatrzymaj"]') ||
+                       document.querySelector('button[aria-label*="Zatrzymaj"]');
+    if (stopButton) {
+      return { generating: true, reason: 'stopButton', element: stopButton };
+    }
+    
+    // 2. Thinking indicators (nowy UI ChatGPT)
+    const thinkingIndicators = document.querySelector('[class*="thinking"]') ||
+                              document.querySelector('[class*="Thinking"]') ||
+                              document.querySelector('[data-testid*="thinking"]') ||
+                              document.querySelector('[aria-label*="Thinking"]') ||
+                              document.querySelector('[aria-label*="thinking"]');
+    if (thinkingIndicators) {
+      return { generating: true, reason: 'thinkingIndicator', element: thinkingIndicators };
+    }
+    
+    // 3. Update indicators
+    const updateIndicators = document.querySelector('[aria-label*="Update"]') ||
+                            document.querySelector('[aria-label*="update"]') ||
+                            document.querySelector('[class*="updating"]') ||
+                            document.querySelector('[class*="Updating"]') ||
+                            document.querySelector('[data-testid*="update"]');
+    if (updateIndicators) {
+      return { generating: true, reason: 'updateIndicator', element: updateIndicators };
+    }
+    
+    // 4. Streaming indicators
+    const streamingIndicators = document.querySelector('[class*="streaming"]') ||
+                               document.querySelector('[class*="Streaming"]') ||
+                               document.querySelector('[data-testid*="streaming"]') ||
+                               document.querySelector('[aria-label*="Streaming"]');
+    if (streamingIndicators) {
+      return { generating: true, reason: 'streamingIndicator', element: streamingIndicators };
+    }
+    
+    // 5. Typing/Loading indicators
+    const typingIndicators = document.querySelector('[class*="typing"]') ||
+                            document.querySelector('[class*="Typing"]') ||
+                            document.querySelector('[class*="loading"]') ||
+                            document.querySelector('[class*="Loading"]') ||
+                            document.querySelector('[aria-label*="typing"]') ||
+                            document.querySelector('[aria-label*="loading"]');
+    if (typingIndicators) {
+      return { generating: true, reason: 'typingIndicator', element: typingIndicators };
+    }
+    
+    // 6. Editor disabled (fallback - mniej pewny)
+    const editor = document.querySelector('[role="textbox"]') ||
+                  document.querySelector('[contenteditable]');
+    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+    if (editorDisabled) {
+      return { generating: true, reason: 'editorDisabled', element: editor };
+    }
+    
+    return { generating: false, reason: 'none', element: null };
+  }
+  
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
   async function waitForResponse(maxWaitMs) {
-    const startTime = Date.now();
-    
     console.log("⏳ Czekam na odpowiedź ChatGPT...");
     
     // ===== FAZA 1: Detekcja STARTU odpowiedzi =====
     // Czekaj aż ChatGPT zacznie generować odpowiedź
     // Chain-of-thought model może myśleć 4-5 min przed startem
+    const phase1StartTime = Date.now(); // ✅ OSOBNY timer dla FAZY 1
     let responseStarted = false;
     let editAttemptedPhase1 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
     const checkedFixedErrorsPhase1 = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
-    const startTimeout = Math.min(maxWaitMs, 1800000); // Zwiększono z 20 do 30 minut na start
+    const startTimeout = Math.min(maxWaitMs, 5400000); // 90 minut na start (zwiększono dla ChatGPT Pro deep thinking)
     
-    while (Date.now() - startTime < startTimeout) {
+    console.log(`📊 [FAZA 1] Timeout dla detekcji startu: ${Math.round(startTimeout/1000)}s (${Math.round(startTimeout/60000)} min)`);
+    
+    while (Date.now() - phase1StartTime < startTimeout) {
       // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
       const errorMessages = document.querySelectorAll('[class*="text"]');
       
@@ -1315,47 +1379,21 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         }
       }
       
-      // Szukaj edytora - może być w różnych stanach
-      const editorAny = document.querySelector('[role="textbox"]') ||
-                        document.querySelector('[contenteditable]') ||
-                        document.querySelector('[data-testid="composer-input"]');
-      
-      // Fallbacki dla stopButton z dokumentacji
-      const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
-                        document.querySelector('[data-testid="stop-button"]') ||
-                        document.querySelector('button[aria-label*="stop"]') ||
-                        document.querySelector('button[aria-label="Zatrzymaj"]') || // PL
-                        document.querySelector('button[aria-label*="Zatrzymaj"]');
-      
-      const sendButton = document.querySelector('[data-testid="send-button"]') ||
-                        document.querySelector('#composer-submit-button') ||
-                        document.querySelector('button[aria-label="Send"]') ||
-                        document.querySelector('button[aria-label*="Send"]');
-      
-      // ChatGPT zaczął odpowiadać jeśli:
-      // 1. Jest stopButton (główny wskaźnik generowania) - najbardziej wiarygodny
-      // 2. LUB editor jest disabled (contenteditable="false") + sendButton disabled
-      // 3. LUB jest nowa wiadomość assistant (faktyczna odpowiedź w DOM)
-      
-      const editorDisabled = editorAny && editorAny.getAttribute('contenteditable') === 'false';
-      const sendDisabled = sendButton && sendButton.disabled;
+      // Użyj rozszerzonej funkcji wykrywania generowania
+      const genStatus = isGenerating();
       
       // Weryfikacja: Czy faktycznie jest nowa aktywność w DOM?
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const hasNewContent = assistantMessages.length > 0;
       
-      // GŁÓWNY warunek: stopButton (najbardziej pewny)
-      const hasStopButton = !!stopButton;
+      // ChatGPT zaczął odpowiadać jeśli:
+      // 1. isGenerating() wykryło wskaźniki generowania (stop/thinking/update/streaming)
+      // 2. LUB jest nowa treść w DOM (faktyczna odpowiedź)
       
-      // ALTERNATYWNY warunek: interface zablokowany + nowa treść w DOM
-      const interfaceBlocked = (editorDisabled || sendDisabled) && hasNewContent;
-      
-      // Warunek spełniony jeśli KTÓRYKOLWIEK z głównych wskaźników jest obecny
-      if (hasStopButton || interfaceBlocked) {
+      if (genStatus.generating || hasNewContent) {
         console.log("✓ ChatGPT zaczął odpowiadać", {
-          stopButton: !!stopButton,
-          editorDisabled: !!editorDisabled,
-          sendDisabled: !!sendDisabled,
+          generating: genStatus.generating,
+          reason: genStatus.reason,
           hasNewContent: hasNewContent,
           assistantMsgCount: assistantMessages.length
         });
@@ -1363,28 +1401,41 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         break;
       }
       
-      // Loguj co 30s że czekamy
-      if ((Date.now() - startTime) % 30000 < 500) {
-        const elapsed = Math.round((Date.now() - startTime) / 1000);
-        console.log(`⏳ Czekam na start odpowiedzi... (${elapsed}s)`);
+      // Loguj co 30s że czekamy z rozszerzonym statusem
+      if ((Date.now() - phase1StartTime) % 30000 < 500) {
+        const elapsed = Math.round((Date.now() - phase1StartTime) / 1000);
+        const currentGenStatus = isGenerating();
+        console.log(`⏳ [FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`, {
+          generating: currentGenStatus.generating,
+          reason: currentGenStatus.reason,
+          hasNewContent: assistantMessages.length > 0,
+          assistantMsgCount: assistantMessages.length
+        });
       }
       
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     
+    const phase1Duration = Math.round((Date.now() - phase1StartTime) / 1000);
+    console.log(`📊 [FAZA 1] Zakończona po ${phase1Duration}s (${Math.round(phase1Duration/60)} min)`);
+    
     if (!responseStarted) {
-      console.error(`❌ ChatGPT nie zaczął odpowiadać po ${Math.round(startTimeout/1000)}s - prompt prawdopodobnie nie został wysłany!`);
+      console.error(`❌ [FAZA 1] ChatGPT nie zaczął odpowiadać po ${Math.round(startTimeout/1000)}s - prompt prawdopodobnie nie został wysłany!`);
       return false;
     }
     
     // ===== FAZA 2: Detekcja ZAKOŃCZENIA odpowiedzi =====
     // Czekaj aż ChatGPT skończy i interface będzie gotowy na kolejny prompt
+    const phase2StartTime = Date.now(); // ✅ NOWY timer dla FAZY 2 (niezależny od FAZY 1!)
+    const phase2Timeout = Math.min(maxWaitMs, 5400000); // 90 minut na zakończenie (zwiększono dla ChatGPT Pro deep thinking)
     let consecutiveReady = 0;
     let logInterval = 0;
     let editAttemptedPhase2 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
     const checkedFixedErrors = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
     
-    while (Date.now() - startTime < maxWaitMs) {
+    console.log(`📊 [FAZA 2] Timeout dla detekcji zakończenia: ${Math.round(phase2Timeout/1000)}s (${Math.round(phase2Timeout/60000)} min)`);
+    
+    while (Date.now() - phase2StartTime < phase2Timeout) {
       // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
       const errorMessages = document.querySelectorAll('[class*="text"]');
       
@@ -1507,48 +1558,55 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
                      document.querySelector('div[contenteditable="true"]') ||
                      document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
       
-      const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
-                        document.querySelector('[data-testid="stop-button"]') ||
-                        document.querySelector('button[aria-label*="stop"]');
-      
       const sendButton = document.querySelector('[data-testid="send-button"]') ||
                         document.querySelector('#composer-submit-button') ||
                         document.querySelector('button[aria-label="Send"]') ||
                         document.querySelector('button[aria-label*="Send"]');
       
+      // Użyj rozszerzonej funkcji wykrywania generowania
+      const genStatus = isGenerating();
+      
       // Co 10 iteracji (5s) loguj stan
       if (logInterval % 10 === 0) {
-        console.log(`🔍 Stan interfejsu:`, {
+        const phase2Elapsed = Math.round((Date.now() - phase2StartTime) / 1000);
+        console.log(`🔍 [FAZA 2] Stan interfejsu:`, {
           editor_exists: !!editor,
           editor_enabled: editor?.getAttribute('contenteditable') === 'true',
-          stopButton_exists: !!stopButton,
+          generating: genStatus.generating,
+          genReason: genStatus.reason,
           sendButton_exists: !!sendButton,
           sendButton_disabled: sendButton?.disabled,
           consecutiveReady: consecutiveReady,
-          elapsed: Math.round((Date.now() - startTime) / 1000) + 's'
+          elapsed: phase2Elapsed + 's'
         });
       }
       logInterval++;
       
       // ===== WARUNKI GOTOWOŚCI =====
       // Interface jest gotowy gdy ChatGPT skończył generować:
-      // 1. BRAK stopButton (ChatGPT przestał generować)
+      // 1. BRAK wskaźników generowania (isGenerating() == false)
       // 2. Editor ISTNIEJE i jest ENABLED (contenteditable="true")
+      // 3. BRAK wskaźników "thinking" w ostatniej wiadomości
       // 
       // UWAGA: SendButton może nie istnieć gdy editor jest pusty - sprawdzimy go dopiero w sendPrompt()
       
       const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
-      const noGeneration = !stopButton;
+      const noGeneration = !genStatus.generating;
       
-      const isReady = noGeneration && editorReady;
+      // Sprawdź czy nie ma wskaźników "thinking" w ostatniej wiadomości
+      const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const hasThinkingInMessage = lastMessages.length > 0 && 
+        lastMessages[lastMessages.length - 1].querySelector('[class*="thinking"]');
+      
+      const isReady = noGeneration && editorReady && !hasThinkingInMessage;
       
       if (isReady) {
         consecutiveReady++;
-        console.log(`✓ Interface ready (${consecutiveReady}/3) - warunki OK`);
+        console.log(`✓ [FAZA 2] Interface ready (${consecutiveReady}/1) - warunki OK`);
         
-        // Potwierdź stan przez 3 kolejnych sprawdzeń (1.5s)
-        // To eliminuje false positives gdy UI migocze między stanami
-        if (consecutiveReady >= 3) {
+        // Potwierdź stan przez 1 sprawdzenie (0.5s)
+        // Zmniejszono z 3 do 1 dla szybszej reakcji (oszczędza 1s na każdy prompt)
+        if (consecutiveReady >= 1) {
           console.log("✅ ChatGPT zakończył odpowiedź - interface gotowy");
           // Dodatkowe czekanie dla stabilizacji UI
           await new Promise(resolve => setTimeout(resolve, 1000));
@@ -1580,7 +1638,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         // Reset licznika jeśli którykolwiek warunek nie jest spełniony
         if (consecutiveReady > 0) {
           console.log(`⚠️ Interface NOT ready, resetuję licznik (był: ${consecutiveReady})`);
-          console.log(`  Powód: noGeneration=${noGeneration}, editorReady=${editorReady}`);
+          console.log(`  Powód: noGeneration=${noGeneration}, editorReady=${editorReady}, hasThinkingInMessage=${hasThinkingInMessage}`);
+          if (genStatus.generating) {
+            console.log(`  Detekcja generowania: ${genStatus.reason}`);
+          }
         }
         consecutiveReady = 0;
       }
@@ -1588,7 +1649,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       await new Promise(resolve => setTimeout(resolve, 500));
     }
     
-    console.error(`❌ TIMEOUT czekania na odpowiedź po ${Math.round(maxWaitMs/1000)}s`);
+    const phase2Duration = Math.round((Date.now() - phase2StartTime) / 1000);
+    console.error(`❌ [FAZA 2] TIMEOUT czekania na zakończenie odpowiedzi po ${phase2Duration}s (${Math.round(phase2Duration/60)} min)`);
+    console.error(`📊 Łączny czas (FAZA 1 + FAZA 2): ${phase1Duration + phase2Duration}s (${Math.round((phase1Duration + phase2Duration)/60)} min)`);
     return false;
   }
 
@@ -1745,11 +1808,35 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         
         // Jeśli znaleziono niepustą odpowiedź - sukces!
         if (text.length > 0) {
-          console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków (attempt ${attempt + 1}/${maxRetries})`);
+          // Oblicz szczegółowe statystyki odpowiedzi
+          const textSize = text.length;
+          const textSizeKB = (textSize / 1024).toFixed(2);
+          const wordCount = text.split(/\s+/).filter(w => w.length > 0).length;
+          const lineCount = text.split('\n').length;
+          const isLarge = textSize > 10000; // >10KB
+          const isVeryLarge = textSize > 50000; // >50KB
+          
+          console.log(`✅ Znaleziono odpowiedź (attempt ${attempt + 1}/${maxRetries})`);
+          console.log(`📊 Rozmiar odpowiedzi:`, {
+            characters: textSize,
+            sizeKB: textSizeKB,
+            words: wordCount,
+            lines: lineCount,
+            isLarge: isLarge,
+            isVeryLarge: isVeryLarge
+          });
+          
           console.log(`📝 Preview (pierwsze 200 znaków): "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
           console.log(`📝 Preview (ostatnie 200 znaków): "...${text.substring(Math.max(0, text.length - 200))}"`);
-          const lineCount = text.split('\n').length;
-          console.log(`📊 Statystyki: ${lineCount} linii, ${text.split(/\s+/).length} słów`);
+          
+          // Weryfikacja kompletności
+          if (textSize < 50) {
+            console.warn('⚠️ UWAGA: Odpowiedź bardzo krótka (<50 znaków) - może być niepełna lub błędna');
+          }
+          if (textSize < 10) {
+            console.warn('❌ KRYTYCZNE: Odpowiedź ekstremalnie krótka (<10 znaków) - prawdopodobnie błąd');
+          }
+          
           return text;
         }
         
@@ -1903,11 +1990,32 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
-  async function waitForInterfaceReady(maxWaitMs) {
+  async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     const startTime = Date.now();
     let consecutiveReady = 0;
     
     console.log("⏳ Czekam aż interface będzie gotowy...");
+    
+    // POPRAWKA: Sprawdź czy to jest nowa konwersacja (brak wiadomości)
+    const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    const isNewConversation = userMessages.length === 0 && assistantMessages.length === 0;
+    
+    if (isNewConversation) {
+      console.log("✅ Nowa konwersacja - pomijam czekanie na gotowość (nie powinno być generowania)");
+      // Sprawdź tylko czy editor istnieje i jest enabled
+      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                     document.querySelector('div[contenteditable="true"]');
+      if (editor) {
+        console.log("✅ Editor gotowy - kontynuuję natychmiast");
+        return true;
+      } else {
+        console.log("⏳ Editor nie istnieje - czekam max 5s...");
+        maxWaitMs = 5000; // Krótki timeout tylko na pojawienie się editora
+      }
+    } else {
+      console.log(`📊 Kontynuacja konwersacji (${userMessages.length} user, ${assistantMessages.length} assistant) - pełny timeout`);
+    }
     
     // POPRAWKA: Sprawdź czy karta jest aktywna (rozwiązuje problem z wyciszonymi kartami)
     if (document.hidden || document.visibilityState === 'hidden') {
@@ -1921,20 +2029,30 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
     }
     
+    // Mapowanie powodów na przyjazne opisy po polsku
+    const reasonDescriptions = {
+      'stopButton': 'generuje odpowiedź',
+      'thinkingIndicator': 'myśli (chain-of-thought)',
+      'updateIndicator': 'aktualizuje odpowiedź',
+      'streamingIndicator': 'streamuje odpowiedź',
+      'typingIndicator': 'pisze odpowiedź',
+      'editorDisabled': 'interface zablokowany',
+      'none': 'gotowy'
+    };
+    
     while (Date.now() - startTime < maxWaitMs) {
       // Sprawdź wszystkie elementy interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
                      document.querySelector('div[contenteditable="true"]');
       
-      const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
-                        document.querySelector('[data-testid="stop-button"]') ||
-                        document.querySelector('button[aria-label*="stop"]');
+      // POPRAWKA: Użyj isGenerating() zamiast tylko sprawdzania stopButton
+      const genStatus = isGenerating();
       
       // Interface jest gotowy gdy:
-      // 1. BRAK stopButton (ChatGPT nie generuje)
+      // 1. BRAK wskaźników generowania (isGenerating() == false)
       // 2. Editor ISTNIEJE i jest ENABLED
       const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
-      const noGeneration = !stopButton;
+      const noGeneration = !genStatus.generating;
       const isReady = noGeneration && editorReady;
       
       if (isReady) {
@@ -1945,7 +2063,33 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           return true;
         }
       } else {
+        // Resetowanie licznika - loguj powód
+        if (consecutiveReady > 0) {
+          const reason = reasonDescriptions[genStatus.reason] || genStatus.reason;
+          console.log(`🔄 Interface nie gotowy - reset licznika. Powód: ${reason}`);
+        }
         consecutiveReady = 0;
+        
+        // Aktualizuj licznik wizualny z powodem czekania
+        if (counter) {
+          const elapsed = Math.round((Date.now() - startTime) / 1000);
+          const reason = reasonDescriptions[genStatus.reason] || genStatus.reason;
+          const statusText = `⏳ Czekam na gotowość... (${elapsed}s)\nChatGPT: ${reason}`;
+          updateCounter(counter, promptIndex, promptTotal, statusText);
+        }
+      }
+      
+      // Loguj szczegółowy status co 5s
+      if ((Date.now() - startTime) % 5000 < 500) {
+        const elapsed = Math.round((Date.now() - startTime) / 1000);
+        const reason = reasonDescriptions[genStatus.reason] || genStatus.reason;
+        console.log(`⏳ Interface nie gotowy (${elapsed}s)`, {
+          generating: genStatus.generating,
+          reason: genStatus.reason,
+          reasonDesc: reason,
+          editorReady: editorReady,
+          consecutiveReady: consecutiveReady
+        });
       }
       
       await new Promise(resolve => setTimeout(resolve, 500));
@@ -2029,7 +2173,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
 
   // Funkcja wysyłania pojedynczego prompta
-  async function sendPrompt(promptText, maxWaitForReady = responseWaitMs) {
+  async function sendPrompt(promptText, maxWaitForReady = responseWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     // KROK 0: POPRAWKA - Aktywuj kartę przed wysyłaniem (rozwiązuje problem z wyciszonymi kartami)
     const maxRetries = 3;
     let retryCount = 0;
@@ -2062,7 +2206,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     // KROK 1: Czekaj aż interface będzie gotowy (jeśli poprzednia odpowiedź się jeszcze generuje)
     console.log("🔍 Sprawdzam gotowość interfejsu przed wysłaniem...");
-    const interfaceReady = await waitForInterfaceReady(maxWaitForReady); // Pełny timeout (domyślnie 20 minut)
+    const interfaceReady = await waitForInterfaceReady(maxWaitForReady, counter, promptIndex, promptTotal); // Pełny timeout (domyślnie 60 minut)
     
     if (!interfaceReady) {
       console.error(`❌ Interface nie stał się gotowy po ${Math.round(maxWaitForReady/1000)}s`);
@@ -2302,7 +2446,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Wyślij tekst Economist
       console.log("📤 Wysyłam artykuł do ChatGPT...");
-      await sendPrompt(payload);
+      await sendPrompt(payload, responseWaitMs, counter, 0, promptChain ? promptChain.length : 0);
       
       // Czekaj na odpowiedź ChatGPT
       updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Czekam na odpowiedź...');
@@ -2334,7 +2478,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           
           // Wyślij prompt
           console.log(`[${i + 1}/${promptChain.length}] Wywołuję sendPrompt()...`);
-          const sent = await sendPrompt(prompt);
+          const sent = await sendPrompt(prompt, responseWaitMs, counter, i + 1, promptChain.length);
           
           if (!sent) {
             console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
@@ -2351,7 +2495,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             
             // User naprawił, spróbuj wysłać ponownie ten sam prompt
             console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
-            const retried = await sendPrompt(prompt);
+            const retried = await sendPrompt(prompt, responseWaitMs, counter, i + 1, promptChain.length);
             
             if (!retried) {
               console.error(`❌ Ponowna próba nieudana - przerywam chain`);

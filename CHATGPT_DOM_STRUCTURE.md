@@ -282,6 +282,56 @@ const stopButton = document.querySelector('button[aria-label*="stop"]'); // lowe
 const isGenerating = !!stopButton;
 ```
 
+### 3a. Wskaźniki Generowania (Nowy UI - Styczeń 2026)
+
+ChatGPT może wyświetlać różne wskaźniki podczas generowania odpowiedzi, szczególnie w chain-of-thought modelach:
+
+```javascript
+// Funkcja sprawdzająca czy ChatGPT generuje (rozszerzona detekcja)
+function isGenerating() {
+  // 1. Stop button (klasyczny)
+  const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
+                     document.querySelector('[data-testid="stop-button"]');
+  if (stopButton) return { generating: true, reason: 'stopButton' };
+  
+  // 2. Thinking indicators (nowy UI)
+  const thinkingIndicators = document.querySelector('[class*="thinking"]') ||
+                            document.querySelector('[class*="Thinking"]') ||
+                            document.querySelector('[data-testid*="thinking"]') ||
+                            document.querySelector('[aria-label*="Thinking"]');
+  if (thinkingIndicators) return { generating: true, reason: 'thinking' };
+  
+  // 3. Update indicators
+  const updateIndicators = document.querySelector('[aria-label*="Update"]') ||
+                          document.querySelector('[aria-label*="update"]') ||
+                          document.querySelector('[class*="updating"]');
+  if (updateIndicators) return { generating: true, reason: 'update' };
+  
+  // 4. Streaming indicators
+  const streamingIndicators = document.querySelector('[class*="streaming"]') ||
+                             document.querySelector('[data-testid*="streaming"]');
+  if (streamingIndicators) return { generating: true, reason: 'streaming' };
+  
+  // 5. Typing/Loading indicators
+  const typingIndicators = document.querySelector('[class*="typing"]') ||
+                          document.querySelector('[class*="loading"]');
+  if (typingIndicators) return { generating: true, reason: 'typing' };
+  
+  return { generating: false, reason: 'none' };
+}
+
+// Sprawdź thinking indicators w ostatniej wiadomości
+const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+const hasThinkingInMessage = lastMessages.length > 0 && 
+  lastMessages[lastMessages.length - 1].querySelector('[class*="thinking"]');
+```
+
+**Kluczowe wskaźniki:**
+- `[class*="thinking"]` - Model myśli przed odpowiedzią (chain-of-thought)
+- `[class*="updating"]` - UI aktualizuje odpowiedź w locie
+- `[class*="streaming"]` - Streaming odpowiedzi w toku
+- `[aria-label*="Update"]` - Przycisk/wskaźnik aktualizacji
+
 ### 4. Przycisk Retry (Ponów)
 
 ```javascript
@@ -390,42 +440,62 @@ const text = extractMainContent(lastArticle);
 
 ### Sprawdzanie czy ChatGPT generuje odpowiedź
 
+**AKTUALIZACJA STYCZEŃ 2026**: Rozszerzona detekcja z nowymi wskaźnikami (thinking, update, streaming).
+
 ```javascript
 function isChatGPTGenerating() {
-  // 1. Sprawdź przycisk Stop (wszystkie fallbacki)
+  // 1. Sprawdź przycisk Stop (klasyczny)
   const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
                      document.querySelector('[data-testid="stop-button"]') ||
                      document.querySelector('button[aria-label*="stop"]') ||
-                     document.querySelector('button[aria-label="Zatrzymaj"]') ||
-                     document.querySelector('button[aria-label*="Zatrzymaj"]');
-  if (stopButton) return true;
+                     document.querySelector('button[aria-label="Zatrzymaj"]');
+  if (stopButton) return { generating: true, reason: 'stopButton' };
 
-  // 2. Sprawdź stan edytora
+  // 2. Thinking indicators (NOWY UI)
+  const thinkingIndicators = document.querySelector('[class*="thinking"]') ||
+                            document.querySelector('[class*="Thinking"]') ||
+                            document.querySelector('[data-testid*="thinking"]');
+  if (thinkingIndicators) return { generating: true, reason: 'thinking' };
+
+  // 3. Update indicators (NOWY UI)
+  const updateIndicators = document.querySelector('[aria-label*="Update"]') ||
+                          document.querySelector('[aria-label*="update"]') ||
+                          document.querySelector('[class*="updating"]');
+  if (updateIndicators) return { generating: true, reason: 'update' };
+
+  // 4. Streaming indicators
+  const streamingIndicators = document.querySelector('[class*="streaming"]') ||
+                             document.querySelector('[data-testid*="streaming"]');
+  if (streamingIndicators) return { generating: true, reason: 'streaming' };
+
+  // 5. Sprawdź stan edytora (fallback)
   const editor = document.querySelector('[role="textbox"]') ||
                  document.querySelector('[contenteditable]');
   const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
-  if (editorDisabled) return true;
+  if (editorDisabled) return { generating: true, reason: 'editorDisabled' };
 
-  // 3. Sprawdź przycisk Send
-  const sendButton = document.querySelector('[data-testid="send-button"]') ||
-                     document.querySelector('#composer-submit-button') ||
-                     document.querySelector('button[aria-label="Send"]');
-  if (sendButton && sendButton.disabled) return true;
+  return { generating: false, reason: 'none' };
+}
 
-  return false;
+// Użycie
+const status = isChatGPTGenerating();
+if (status.generating) {
+  console.log(`ChatGPT generuje: ${status.reason}`);
 }
 ```
 
 ### Czekanie na zakończenie odpowiedzi
 
+**AKTUALIZACJA STYCZEŃ 2026**: Timeout zwiększony do 60 minut, rozszerzona detekcja wskaźników.
+
 ```javascript
-async function waitForChatGPTResponse(maxWaitMs = 600000) { // 10 minut
+async function waitForChatGPTResponse(maxWaitMs = 3600000) { // 60 minut (zwiększono z 10 min)
   const startTime = Date.now();
   
   // FAZA 1: Czekaj aż ChatGPT ZACZNIE generować
   console.log('⏳ FAZA 1: Czekam na start odpowiedzi...');
   let responseStarted = false;
-  const startTimeout = Math.min(maxWaitMs, 300000); // Max 5 minut na start
+  const startTimeout = Math.min(maxWaitMs, 3600000); // Max 60 minut na start (zwiększono z 5 min)
   
   while (Date.now() - startTime < startTimeout) {
     // Fallbacki dla stopButton
@@ -711,21 +781,27 @@ if (checkForErrors()) {
 
 ### Problem 6: Timeout przy długich odpowiedziach (chain-of-thought)
 
-**Rozwiązanie**: Zwiększ timeout + detekcja dwufazowa (start + koniec)
+**AKTUALIZACJA STYCZEŃ 2026**: Timeout zwiększony do 60 minut dla bardzo długich odpowiedzi.
+
+**Rozwiązanie**: Zwiększ timeout + detekcja dwufazowa (start + koniec) + rozszerzone wskaźniki
 
 ```javascript
-// Faza 1: Czekaj na START generowania (może trwać 5+ minut)
-const MAX_START_WAIT = 1200000; // 20 minut
+// Faza 1: Czekaj na START generowania (może trwać nawet 20+ minut dla skomplikowanych pytań)
+const MAX_START_WAIT = 3600000; // 60 minut (zwiększono z 20 min)
 while (Date.now() - startTime < MAX_START_WAIT) {
-  if (isChatGPTGenerating()) {
+  const genStatus = isChatGPTGenerating();
+  if (genStatus.generating) {
+    console.log(`Generowanie rozpoczęte: ${genStatus.reason}`);
     break; // Zaczął!
   }
   await new Promise(r => setTimeout(r, 500));
 }
 
 // Faza 2: Czekaj na KONIEC generowania
-await waitForChatGPTResponse(1200000); // 20 minut
+await waitForChatGPTResponse(3600000); // 60 minut (zwiększono z 20 min)
 ```
+
+**UWAGA**: Chain-of-thought modele (o1, o1-pro) mogą myśleć nawet 10-20 minut przed rozpoczęciem odpowiedzi. Nowe wskaźniki (thinking, update) pomagają wykryć że model nadal pracuje.
 
 ### Problem 7: Wiadomości są puste po wyciągnięciu (length 0)
 
@@ -881,6 +957,42 @@ async function sendPromptToChatGPT(promptText) {
 ---
 
 ## Aktualizacje i zmiany
+
+### Styczeń 2026 (NOWA WERSJA)
+**Główne zmiany dla wsparcia długich odpowiedzi i nowego UI:**
+
+- **Timeout zwiększony do 60 minut** (z 20 minut) dla bardzo długich odpowiedzi chain-of-thought
+  - Faza 1 (start): 60 minut (z 30 minut)
+  - Faza 2 (koniec): 60 minut całkowity czas
+  - `WAIT_FOR_RESPONSE_MS = 3600000` (z 1200000)
+
+- **Nowa funkcja `isGenerating()`** z rozszerzoną detekcją wskaźników:
+  - Thinking indicators: `[class*="thinking"]`, `[data-testid*="thinking"]`
+  - Update indicators: `[aria-label*="Update"]`, `[class*="updating"]`
+  - Streaming indicators: `[class*="streaming"]`, `[data-testid*="streaming"]`
+  - Typing/Loading indicators: `[class*="typing"]`, `[class*="loading"]`
+  - Funkcja zwraca obiekt `{generating: bool, reason: string}` dla lepszego debugowania
+
+- **Wzmocniona detekcja w Fazie 2:**
+  - Sprawdzanie thinking indicators w ostatniej wiadomości
+  - Warunek: `noGeneration && editorReady && !hasThinkingInMessage`
+  - Eliminuje false positives gdy model jeszcze "myśli"
+
+- **Rozszerzone logowanie rozmiaru odpowiedzi:**
+  - Liczba znaków, KB, słów, linii
+  - Flagi `isLarge` (>10KB), `isVeryLarge` (>50KB)
+  - Ostrzeżenia dla bardzo krótkich odpowiedzi (<50 znaków)
+
+- **Ulepszona diagnostyka:**
+  - Logowanie co 30s w Fazie 1 z pełnym statusem generowania
+  - Logowanie co 5s w Fazie 2 z powodem detekcji (`genReason`)
+  - Szczegółowe logi przy resetowaniu licznika gotowości
+
+**Dlaczego te zmiany:**
+- Modele chain-of-thought (o1, o1-pro) mogą myśleć 10-20+ minut przed odpowiedzią
+- Nowy UI ChatGPT pokazuje wskaźniki "thinking", "updating" podczas generowania
+- Stary timeout (20 min) był zbyt krótki dla bardzo skomplikowanych analiz
+- Brak detekcji nowych wskaźników powodował przedwczesne wysyłanie kolejnych promptów
 
 ### Październik 2025
 - Naprawiono problem false positives w detekcji wysłania wiadomości
