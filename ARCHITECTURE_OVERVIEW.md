@@ -66,10 +66,13 @@ This 2,200+ line file is the heart of the extension. It coordinates the entire a
 
 ### 3.1 Key Global Variables:
 ```javascript
-const CHAT_URL = "https://chatgpt.com/g/g-68e628cb..."  // Company analysis GPT
-const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d..."  // Portfolio GPT
-const PROMPTS_COMPANY = []      // Loaded from prompts-company.txt
-const PROMPTS_PORTFOLIO = []    // Loaded from prompts-portfolio.txt
+const CHAT_URL = "https://chatgpt.com/"  // Company analysis GPT (default ChatGPT)
+const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global"
+let PROMPTS_COMPANY = []      // Loaded from prompts-company.txt
+let PROMPTS_PORTFOLIO = []    // Loaded from prompts-portfolio.txt
+const WAIT_FOR_RESPONSE_MS = 5400000  // 90 minutes default
+const WAIT_FOR_TEXTAREA_MS = 10000
+const RETRY_INTERVAL_MS = 500
 ```
 
 ### 3.2 Main Functions:
@@ -151,7 +154,7 @@ This massive function (1,400+ lines) handles:
    - Clears existing text
    - Injects article payload using DOM manipulation + keyboard events
    - Waits for Send button to be enabled
-   - Verifies text was actually inserted
+   - Verifies prompt was sent after clicking Send
 
 3. **Prompt Chain Execution Loop:**
    ```
@@ -167,30 +170,33 @@ This massive function (1,400+ lines) handles:
 4. **Sub-functions:**
 
    **sendPrompt():**
-   - Finds editor textarea
-   - Injects prompt text
-   - Clicks Send button
-   - Verifies prompt was sent (checks for stopButton or disabled editor)
-   - Waits for interface to be ready
+   - Waits for interface readiness (waitForInterfaceReady)
+   - Verifies ChatGPT connection state (basic DOM error scan)
+   - Finds contenteditable editor (15s max)
+   - Injects prompt text and dispatches input events
+   - Clicks Send and verifies send via stopButton OR blocked editor OR user message in DOM
 
    **waitForResponse():**
    - **PHASE 1:** Waits for ChatGPT to START responding
-     - Detects stopButton (most reliable)
-     - OR detects editor disabled + send button disabled + new assistant message
-     - Handles "Something went wrong" errors with retry logic
+     - Uses isGenerating() (stop/thinking/update/streaming/typing) OR any assistant message in DOM
+     - Handles "Something went wrong" with Edit+Resend (up to 3) then Retry button
    - **PHASE 2:** Waits for ChatGPT to FINISH responding
-     - Waits for stopButton to disappear
-     - Waits for editor to become enabled (contenteditable="true")
-     - Confirms 3 consecutive checks before considering response done
+     - Requires no generation, editor enabled, and no thinking indicator in last assistant message
+     - Single ready check, then one DOM presence check (assistant/article) before returning
 
    **getLastResponseText():**
-   - **RETRY LOOP:** Up to 15 retries with 300ms delays (React rendering)
+   - **RETRY LOOP:** Up to 20 retries with 500ms delays (React rendering)
    - Searches for `[data-message-author-role="assistant"]` elements
    - Removes non-content elements (citations, buttons, sources)
    - Extracts clean text using innerText
    - **FALLBACK 1:** Uses conversation-turn containers
    - **FALLBACK 2:** Uses article tags
+   - **FALLBACK 3:** Uses markdown/message/content/response class selectors
    - Returns empty string if no response found
+
+   **validateResponse():**
+   - Requires min length 50 (used for prompt chain responses)
+   - Logs common error patterns without hard-rejecting
 
    **Error Handling:**
    - Detects "Something went wrong" messages
@@ -423,7 +429,7 @@ User can view/copy responses in responses.html tab
 
 ### Critical Detail: Response Extraction from DOM
 
-**Three-level extraction strategy in getLastResponseText():**
+**Four-level extraction strategy in getLastResponseText():**
 
 **Level 1:** Primary selector `[data-message-author-role="assistant"]`
 ```javascript
@@ -442,6 +448,12 @@ const turnContainers = document.querySelectorAll('[data-testid^="conversation-tu
 ```javascript
 const articles = document.querySelectorAll('article');
 const lastArticle = articles[articles.length - 1];
+```
+
+**Level 4:** Fallback to markdown/message/content/response class selectors
+```javascript
+const elements = document.querySelectorAll('div[class*="markdown"], div[class*="message"], div[class*="content"], div[class*="response"]');
+const lastElement = elements[elements.length - 1];
 ```
 
 **Content Cleaning (extractMainContent):**
@@ -469,12 +481,12 @@ const lastArticle = articles[articles.length - 1];
 The extension supports TWO types of analyses:
 
 ### Company Analysis (`analysisType: 'company'`)
-- Single URL: `/g/g-68e628cb...`
+- Single URL: `https://chatgpt.com/`
 - All articles processed through this
 - Used when "Uruchom analizę" is clicked
 
 ### Portfolio Analysis (`analysisType: 'portfolio'`)
-- Single URL: `/g/g-68f71d...` (different GPT)
+- Single URL: `https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global` (different GPT)
 - Only runs if user selects articles in article-selector
 - User chooses which articles to include
 - Both analyses run in parallel
@@ -515,8 +527,9 @@ The extension supports TWO types of analyses:
 ### Common Failure Points:
 
 1. **Text not injected:**
-   - Retries up to 3 times every 500ms
-   - Waits max 10 seconds for Send button
+   - Waits up to 15s for a contenteditable editor
+   - Waits up to 10s for the Send button to enable
+   - Verifies send via stopButton OR blocked editor OR user message in DOM
 
 2. **ChatGPT error ("Something went wrong"):**
    - Attempts Edit+Resend up to 3 times
@@ -524,14 +537,14 @@ The extension supports TWO types of analyses:
    - Shows user intervention UI if all fails
 
 3. **Response timeout:**
-   - Max 20 minutes (1,200,000ms)
+   - Max 90 minutes (5,400,000ms) by default
    - Can be extended via responseWaitMs parameter
    - Shows user buttons to continue or skip
 
 4. **Response validation failure:**
-   - Min 10 characters for prompt chain responses
+   - Min 50 characters for prompt chain responses
    - No minimum for initial article response
-   - Retry extraction up to 15 times with delays
+   - Retry extraction up to 20 times with 500ms delays
 
 5. **YouTube transcript not found:**
    - Logs error, skips article
@@ -553,11 +566,15 @@ The extension supports TWO types of analyses:
 '[data-testid="send-button"]'
 '#composer-submit-button'
 'button[aria-label="Send"]'
+'button[aria-label*="Send"]'
+'button[data-testid*="send"]'
 
 // Stop button (generation in progress)
 'button[aria-label*="Stop"]'
 '[data-testid="stop-button"]'
 'button[aria-label*="stop"]'
+'button[aria-label="Zatrzymaj"]'
+'button[aria-label*="Zatrzymaj"]'
 
 // Messages
 '[data-message-author-role="assistant"]'
@@ -581,12 +598,12 @@ The extension supports TWO types of analyses:
 
 Key console.log areas in background.js:
 
-1. **Lines 95-125:** saveResponse() - shows what's being saved
-2. **Lines 437-508:** Response extraction analysis - shows result structure
-3. **Lines 1513-1656:** getLastResponseText() - shows DOM search process
-4. **Lines 1104-1310:** waitForResponse() Phase 1 - shows response start detection
-5. **Lines 1304-1505:** waitForResponse() Phase 2 - shows completion detection
-6. **Lines 2018-2156:** Prompt chain loop - shows prompt execution
+1. **Lines ~94-150:** saveResponse() - shows what's being saved
+2. **Lines ~480-520:** executeScript result logging - shows result structure
+3. **Lines ~1700-1890:** getLastResponseText() - shows DOM search process
+4. **Lines ~1250-1425:** waitForResponse() Phase 1 - shows response start detection
+5. **Lines ~1427-1645:** waitForResponse() Phase 2 - shows completion detection
+6. **Lines ~2460-2605:** Prompt chain loop - shows prompt execution
 
 ---
 
@@ -634,6 +651,7 @@ User can copy/view response
 'https://youtu.be/*'
 'https://*.wsj.com/*'
 'https://*.foreignaffairs.com/*'
+'https://open.spotify.com/*'
 ```
 
 Plus manual source input for any text.
