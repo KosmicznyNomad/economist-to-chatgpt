@@ -15,6 +15,12 @@ document.getElementById('manualSourceBtn').addEventListener('click', () => {
   window.close();
 });
 
+// Obsługa przycisku Resume from Stage
+document.getElementById('resumeStageBtn').addEventListener('click', () => {
+  chrome.runtime.sendMessage({ type: 'RESUME_STAGE_OPEN' });
+  window.close();
+});
+
 // Obsługa przycisku zobacz odpowiedzi
 document.getElementById('responsesBtn').addEventListener('click', () => {
   chrome.tabs.create({ url: chrome.runtime.getURL('responses.html') });

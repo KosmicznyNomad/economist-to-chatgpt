@@ -58,7 +58,7 @@
   },
   "web_accessible_resources": [
     {
-      "resources": ["prompt-dialog.html", "prompt-dialog.js", "article-selector.html", "article-selector.js", "manual-source.html", "manual-source.js", "responses.html", "responses.js", "prompts-company.txt", "prompts-portfolio.txt", "process-monitor.html", "process-monitor.js", "chatgpt-monitor.js"],
+      "resources": ["prompt-dialog.html", "prompt-dialog.js", "article-selector.html", "article-selector.js", "manual-source.html", "manual-source.js", "resume-stage.html", "resume-stage.js", "responses.html", "responses.js", "prompts-company.txt", "prompts-portfolio.txt", "process-monitor.html", "process-monitor.js", "chatgpt-monitor.js"],
       "matches": ["<all_urls>"]
     }
   ]

@@ -200,6 +200,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
     });
     return true; // Utrzymuj kanał otwarty dla async
+  } else if (message.type === 'GET_COMPANY_PROMPTS') {
+    // Zwróć załadowane prompty company
+    sendResponse({ prompts: PROMPTS_COMPANY });
+    return true;
+  } else if (message.type === 'RESUME_STAGE_OPEN') {
+    // Otwórz dialog wyboru etapu
+    chrome.windows.create({
+      url: chrome.runtime.getURL('resume-stage.html'),
+      type: 'popup',
+      width: 650,
+      height: 500
+    });
+    sendResponse({ success: true });
+    return true;
+  } else if (message.type === 'RESUME_STAGE_START') {
+    // Uruchom analizę od wybranego etapu
+    resumeFromStage(message.startIndex);
+    sendResponse({ success: true });
+    return true;
   }
 });
 
@@ -2440,7 +2459,39 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       console.log("=== ROZPOCZYNAM PRZETWARZANIE ===");
       console.log(`Artykuł: ${payload.substring(0, 100)}...`);
       
-      // Stwórz licznik
+      // KROK 0: Sprawdź czy jest aktywny poprzedni proces - jeśli tak, zabij go
+      console.log('🔍 Sprawdzam czy jest aktywny poprzedni proces...');
+      const existingCounter = document.getElementById('economist-prompt-counter');
+      
+      if (existingCounter) {
+        console.log('⚠️ Znaleziono aktywny proces - zatrzymuję go...');
+        
+        // WAŻNE: Ustaw flagę globalną do abortowania poprzedniego procesu
+        window._abortCurrentProcess = true;
+        
+        // Pokaż informację o zatrzymaniu
+        existingCounter.innerHTML = `
+          <div style="font-size: 16px; margin-bottom: 8px;">⏸️ Zatrzymano</div>
+          <div style="font-size: 14px; opacity: 0.9;">Uruchamianie nowego procesu...</div>
+        `;
+        
+        // Czekaj chwilę żeby użytkownik zobaczył komunikat
+        await new Promise(resolve => setTimeout(resolve, 1500));
+        
+        // Usuń poprzedni licznik (wraz z przyciskami jeśli były)
+        existingCounter.remove();
+        console.log('✅ Poprzedni proces zatrzymany (DOM i flaga abort)');
+        
+        // Czekaj chwilę przed uruchomieniem nowego
+        await new Promise(resolve => setTimeout(resolve, 500));
+      } else {
+        console.log('✅ Brak aktywnego procesu - kontynuuję');
+      }
+      
+      // Resetuj flagę abort dla nowego procesu
+      window._abortCurrentProcess = false;
+      
+      // Stwórz nowy licznik
       const counter = createCounter();
       updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Wysyłam artykuł...');
       
@@ -2464,6 +2515,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log(`Pełna lista promptów:`, promptChain);
         
         for (let i = 0; i < promptChain.length; i++) {
+          // SPRAWDŹ FLAGĘ ABORT - jeśli true, przerwij natychmiast
+          if (window._abortCurrentProcess) {
+            console.log('🛑 Proces abortowany przez nowy proces - kończę wykonywanie');
+            return { success: false, aborted: true };
+          }
+          
           const prompt = promptChain[i];
           const remaining = promptChain.length - i - 1;
           
@@ -2514,6 +2571,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           // Pętla czekania na odpowiedź - powtarzaj aż się uda
           let responseCompleted = false;
           while (!responseCompleted) {
+            // SPRAWDŹ FLAGĘ ABORT
+            if (window._abortCurrentProcess) {
+              console.log('🛑 Proces abortowany w pętli czekania na odpowiedź');
+              return { success: false, aborted: true };
+            }
+            
             console.log(`[${i + 1}/${promptChain.length}] Wywołuję waitForResponse()...`);
             const completed = await waitForResponse(responseWaitMs);
             
@@ -2524,6 +2587,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               updateCounter(counter, i + 1, promptChain.length, '⏱️ Timeout - czekam...');
               
               const action = await showContinueButton(counter, i + 1, promptChain.length);
+              
+              // showContinueButton może zwrócić 'aborted' jeśli proces został zabity
+              if (action === 'aborted') {
+                console.log('🛑 Proces abortowany podczas oczekiwania na user');
+                return { success: false, aborted: true };
+              }
               
               if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - zakładam że odpowiedź jest OK i idę dalej`);
@@ -2545,6 +2614,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           let responseValid = false;
           let responseText = '';
           while (!responseValid) {
+            // SPRAWDŹ FLAGĘ ABORT
+            if (window._abortCurrentProcess) {
+              console.log('🛑 Proces abortowany w pętli walidacji odpowiedzi');
+              return { success: false, aborted: true };
+            }
+            
             console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
             responseText = await getLastResponseText();
             const isValid = validateResponse(responseText);
@@ -2556,6 +2631,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               updateCounter(counter, i + 1, promptChain.length, '❌ Odpowiedź za krótka');
               
               const action = await showContinueButton(counter, i + 1, promptChain.length);
+              
+              // showContinueButton może zwrócić 'aborted' jeśli proces został zabity
+              if (action === 'aborted') {
+                console.log('🛑 Proces abortowany podczas oczekiwania na user');
+                return { success: false, aborted: true };
+              }
               
               if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - akceptuję krótką odpowiedź i idę dalej`);
@@ -2656,4 +2737,728 @@ function waitForTabComplete(tabId) {
       }
     });
   });
+}
+
+// Funkcja uruchamiająca analizę od wybranego etapu w istniejącym oknie ChatGPT
+async function resumeFromStage(startIndex) {
+  try {
+    console.log(`\n${'='.repeat(80)}`);
+    console.log(`🔄 RESUME FROM STAGE ${startIndex + 1}`);
+    console.log(`${'='.repeat(80)}\n`);
+    
+    // Sprawdź czy prompty są załadowane
+    if (!PROMPTS_COMPANY || PROMPTS_COMPANY.length === 0) {
+      console.error('❌ Prompty nie są załadowane');
+      return;
+    }
+    
+    // Walidacja indeksu
+    if (startIndex < 0 || startIndex >= PROMPTS_COMPANY.length) {
+      console.error(`❌ Nieprawidłowy indeks: ${startIndex}. Dostępne: 0-${PROMPTS_COMPANY.length - 1}`);
+      return;
+    }
+    
+    // Wyciągnij prompty od wybranego indeksu
+    const promptsToExecute = PROMPTS_COMPANY.slice(startIndex);
+    console.log(`📋 Będzie wykonanych ${promptsToExecute.length} promptów (${startIndex + 1}-${PROMPTS_COMPANY.length})`);
+    
+    // Znajdź aktywne okno z ChatGPT
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    
+    if (!tabs || tabs.length === 0) {
+      console.error('❌ Brak aktywnej karty');
+      return;
+    }
+    
+    const activeTab = tabs[0];
+    
+    // Sprawdź czy to ChatGPT
+    if (!activeTab.url || !activeTab.url.includes('chatgpt.com')) {
+      console.error('❌ Aktywna karta nie jest ChatGPT. URL:', activeTab.url);
+      alert('Proszę otworzyć i aktywować okno ChatGPT przed uruchomieniem Resume from Stage');
+      return;
+    }
+    
+    console.log(`✅ Znaleziono aktywne okno ChatGPT: ${activeTab.title}`);
+    console.log(`   URL: ${activeTab.url}`);
+    console.log(`   Tab ID: ${activeTab.id}`);
+    
+    // Wstrzyknij skrypt wykonujący prompty
+    await chrome.scripting.executeScript({
+      target: { tabId: activeTab.id },
+      function: injectPromptsToExistingChat,
+      args: [promptsToExecute, startIndex + 1, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS]
+    });
+    
+    console.log('✅ Resume from stage uruchomiony');
+    
+  } catch (error) {
+    console.error('❌ Błąd w resumeFromStage:', error);
+    alert(`Błąd uruchamiania Resume from Stage: ${error.message}`);
+  }
+}
+
+// Funkcja wstrzykiwana do ChatGPT - wykonuje prompty w istniejącym oknie
+// UWAGA: Ta funkcja jest kopiowana z większości logiki injectToChat, ale bez części wstawiania artykułu
+async function injectPromptsToExistingChat(prompts, startNumber, textareaWaitMs, responseWaitMs, retryIntervalMs) {
+  console.log(`\n${'='.repeat(80)}`);
+  console.log(`⏩ RESUME FROM STAGE ${startNumber}`);
+  console.log(`Promptów do wykonania: ${prompts.length}`);
+  console.log(`${'='.repeat(80)}\n`);
+  
+  // [Kopiuję funkcje pomocnicze z injectToChat - createCounter, updateCounter, itd.]
+  
+  // Funkcja tworząca licznik promptów
+  function createCounter() {
+    const counter = document.createElement('div');
+    counter.id = 'economist-prompt-counter';
+    counter.style.cssText = `
+      position: fixed;
+      top: 20px;
+      right: 20px;
+      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      color: white;
+      padding: 16px 24px;
+      border-radius: 12px;
+      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+      font-size: 14px;
+      font-weight: 600;
+      box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
+      z-index: 10000;
+      min-width: 200px;
+      text-align: center;
+    `;
+    document.body.appendChild(counter);
+    return counter;
+  }
+  
+  // Funkcja aktualizująca licznik
+  function updateCounter(counter, current, total, status = '') {
+    const currentNumber = startNumber + current - 1; // -1 bo pierwszy to 0
+    const totalNumber = startNumber + total - 1;
+    const percent = total > 0 ? Math.round((current / total) * 100) : 0;
+    
+    counter.innerHTML = `
+      <div style="font-size: 16px; margin-bottom: 4px;">Resume from Stage ${startNumber}</div>
+      <div style="font-size: 24px; margin-bottom: 4px;">${currentNumber} / ${totalNumber}</div>
+      <div style="background: rgba(255,255,255,0.3); height: 6px; border-radius: 3px; margin-bottom: 4px;">
+        <div style="background: white; height: 100%; border-radius: 3px; width: ${percent}%; transition: width 0.3s;"></div>
+      </div>
+      <div style="font-size: 12px; opacity: 0.9;">${status}</div>
+    `;
+  }
+  
+  // Funkcja usuwająca licznik
+  function removeCounter(counter, success = true) {
+    if (success) {
+      counter.innerHTML = `
+        <div style="font-size: 18px;">🎉 Zakończono!</div>
+      `;
+      setTimeout(() => counter.remove(), 3000);
+    } else {
+      counter.remove();
+    }
+  }
+  
+  // === POMOCNICZE FUNKCJE (skopiowane z injectToChat) ===
+  
+  // Funkcja sprawdzająca czy ChatGPT generuje odpowiedź
+  function isGenerating() {
+    const stopBtn = document.querySelector('button[aria-label*="Stop"]') ||
+                   document.querySelector('[data-testid="stop-button"]') ||
+                   document.querySelector('button[aria-label*="stop"]');
+    
+    if (stopBtn) return { generating: true, reason: 'stopButton' };
+    
+    const thinkingIndicator = document.querySelector('[class*="thinking"]') ||
+                             document.querySelector('[data-testid="thinking-indicator"]');
+    if (thinkingIndicator) return { generating: true, reason: 'thinkingIndicator' };
+    
+    const editor = document.querySelector('[role="textbox"]') ||
+                  document.querySelector('[contenteditable]');
+    if (editor && editor.getAttribute('contenteditable') === 'false') {
+      return { generating: true, reason: 'editorDisabled' };
+    }
+    
+    return { generating: false, reason: 'none' };
+  }
+  
+  // Funkcja czekająca aż interface będzie gotowy
+  async function waitForInterfaceReady(maxWaitMs) {
+    const startTime = Date.now();
+    let consecutiveReady = 0;
+    
+    console.log("⏳ Czekam aż interface będzie gotowy...");
+    
+    while (Date.now() - startTime < maxWaitMs) {
+      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                     document.querySelector('div[contenteditable="true"]');
+      
+      const genStatus = isGenerating();
+      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const noGeneration = !genStatus.generating;
+      const isReady = noGeneration && editorReady;
+      
+      if (isReady) {
+        consecutiveReady++;
+        if (consecutiveReady >= 2) {
+          console.log("✅ Interface gotowy");
+          await new Promise(resolve => setTimeout(resolve, 500));
+          return true;
+        }
+      } else {
+        consecutiveReady = 0;
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+    
+    console.error(`❌ Timeout czekania na gotowość interfejsu (${maxWaitMs}ms)`);
+    return false;
+  }
+  
+  // Funkcja wysyłania pojedynczego prompta
+  async function sendPrompt(promptText) {
+    // Czekaj aż interface będzie gotowy
+    console.log("🔍 Sprawdzam gotowość interfejsu przed wysłaniem...");
+    const interfaceReady = await waitForInterfaceReady(responseWaitMs);
+    
+    if (!interfaceReady) {
+      console.error(`❌ Interface nie stał się gotowy`);
+      return false;
+    }
+    
+    console.log("✅ Interface gotowy - wysyłam prompt");
+    
+    // Szukaj edytora
+    console.log("🔍 Szukam edytora contenteditable...");
+    
+    let editor = null;
+    const maxWait = 15000;
+    const startTime = Date.now();
+    
+    while (Date.now() - startTime < maxWait) {
+      editor = document.querySelector('textarea#prompt-textarea') ||
+               document.querySelector('[role="textbox"][contenteditable="true"]') ||
+               document.querySelector('div[contenteditable="true"]') ||
+               document.querySelector('[data-testid="composer-input"]') ||
+               document.querySelector('[contenteditable]');
+      if (editor) {
+        console.log("✅ Znaleziono edytor");
+        break;
+      }
+      await new Promise(resolve => setTimeout(resolve, 100));
+    }
+    
+    if (!editor) {
+      console.error("❌ Nie znaleziono edytora po timeout");
+      return false;
+    }
+    
+    // Wstaw tekst do edytora
+    console.log("📝 Wstawiam tekst...");
+    
+    if (editor.tagName === 'TEXTAREA') {
+      editor.value = promptText;
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      // contenteditable div
+      editor.focus();
+      await new Promise(resolve => setTimeout(resolve, 100));
+      
+      // Wyczyść zawartość
+      editor.textContent = '';
+      editor.innerHTML = '';
+      
+      // Wstaw tekst
+      const textNode = document.createTextNode(promptText);
+      editor.appendChild(textNode);
+      
+      // Dispatch events
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+      editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Space', bubbles: true }));
+      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'Space', bubbles: true }));
+    }
+    
+    console.log("✅ Tekst wstawiony - czekam 1s na aktywację przycisku Send...");
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Znajdź przycisk Send
+    console.log("🔍 Szukam przycisku Send...");
+    
+    const sendBtnSelectors = [
+      '[data-testid="send-button"]',
+      'button[aria-label="Send"]',
+      'button[aria-label*="Send"]',
+      '[data-testid="composer-send-button"]',
+      'button[type="submit"]'
+    ];
+    
+    let sendBtn = null;
+    for (const selector of sendBtnSelectors) {
+      sendBtn = document.querySelector(selector);
+      if (sendBtn && !sendBtn.disabled) {
+        console.log(`✅ Znaleziono przycisk Send: ${selector}`);
+        break;
+      }
+    }
+    
+    if (!sendBtn) {
+      console.error("❌ Nie znaleziono przycisku Send");
+      return false;
+    }
+    
+    if (sendBtn.disabled) {
+      console.warn("⚠️ Przycisk Send jest disabled - próbuję kliknąć mimo to...");
+    }
+    
+    console.log("👆 Klikam Send...");
+    sendBtn.click();
+    
+    // Weryfikacja wysłania
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    const genStatus = isGenerating();
+    if (genStatus.generating) {
+      console.log("✅ Prompt wysłany - ChatGPT generuje odpowiedź");
+      return true;
+    }
+    
+    const editorAfterSend = document.querySelector('[role="textbox"]') ||
+                           document.querySelector('[contenteditable]');
+    const editorEmpty = editorAfterSend && (editorAfterSend.textContent || '').trim().length === 0;
+    
+    if (editorEmpty) {
+      console.log("✅ Prompt wysłany - editor opróżniony");
+      return true;
+    }
+    
+    console.warn("⚠️ Nie można zweryfikować wysłania - przyjmuję sukces");
+    return true;
+  }
+  
+  // Funkcja czekająca na odpowiedź
+  async function waitForResponse() {
+    console.log("⏳ Czekam na odpowiedź ChatGPT...");
+    await new Promise(resolve => setTimeout(resolve, 2000));
+    
+    const maxWaitTime = responseWaitMs;
+    const checkInterval = 1000;
+    const maxChecks = Math.floor(maxWaitTime / checkInterval);
+    
+    for (let check = 0; check < maxChecks; check++) {
+      const genStatus = isGenerating();
+      
+      if (!genStatus.generating) {
+        const editor = document.querySelector('[role="textbox"]') ||
+                      document.querySelector('[contenteditable]');
+        
+        if (editor && editor.getAttribute('contenteditable') === 'true') {
+          console.log('✅ Odpowiedź zakończona (interface gotowy)');
+          return true;
+        }
+      }
+      
+      if (check % 10 === 0 && check > 0) {
+        console.log(`  Czekam na odpowiedź... ${check * checkInterval / 1000}s / ${maxWaitTime / 1000}s`);
+      }
+      
+      await new Promise(resolve => setTimeout(resolve, checkInterval));
+    }
+    
+    console.warn('⚠️ Timeout oczekiwania na odpowiedź');
+    return false; // Zwróć false przy timeout
+  }
+  
+  // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
+  async function getLastResponseText() {
+    console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
+    
+    function extractMainContent(element) {
+      const clone = element.cloneNode(true);
+      
+      const toRemove = [
+        'ol[data-block-id]',
+        'div[class*="citation"]',
+        'div[class*="source"]',
+        'a[target="_blank"]',
+        'button',
+        '[role="button"]'
+      ];
+      
+      toRemove.forEach(selector => {
+        clone.querySelectorAll(selector).forEach(el => el.remove());
+      });
+      
+      const text = clone.innerText || clone.textContent || '';
+      
+      return text
+        .split('\n')
+        .map(line => line.trim())
+        .join('\n')
+        .replace(/\n{3,}/g, '\n\n')
+        .trim();
+    }
+    
+    const maxRetries = 20;
+    const retryDelay = 500;
+    
+    for (let attempt = 0; attempt < maxRetries; attempt++) {
+      if (attempt > 0) {
+        console.log(`🔄 Retry ${attempt}/${maxRetries - 1} - czekam ${retryDelay}ms na renderowanie treści...`);
+        await new Promise(r => setTimeout(r, retryDelay));
+      }
+      
+      const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      console.log(`🔍 Znaleziono ${messages.length} wiadomości assistant w DOM`);
+      
+      if (messages.length > 0) {
+        const lastMessage = messages[messages.length - 1];
+        
+        const thinkingIndicators = lastMessage.querySelectorAll('[class*="thinking"]');
+        if (thinkingIndicators.length > 0) {
+          console.warn("⚠️ Ostatnia wiadomość zawiera thinking indicator");
+          continue;
+        }
+        
+        const text = extractMainContent(lastMessage);
+        
+        if (text.length > 0) {
+          console.log(`✅ Znaleziono odpowiedź: ${text.length} znaków`);
+          console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
+          return text;
+        }
+        
+        if (attempt < maxRetries - 1) {
+          console.warn(`⚠️ Tekst ma długość 0 (attempt ${attempt + 1}/${maxRetries})`);
+        }
+      }
+    }
+    
+    console.error("❌ Nie znaleziono odpowiedzi po wszystkich próbach");
+    return '';
+  }
+  
+  // Funkcja walidująca odpowiedź
+  function validateResponse(text) {
+    const minLength = 50;
+    
+    if (text.length < minLength) {
+      console.log(`📊 Walidacja: ❌ ZA KRÓTKA (${text.length} < ${minLength} znaków)`);
+      return false;
+    }
+    
+    const errorPatterns = [
+      /I apologize.*error/i,
+      /something went wrong/i,
+      /please try again/i,
+      /I cannot.*at the moment/i,
+      /unable to.*right now/i
+    ];
+    
+    for (const pattern of errorPatterns) {
+      if (pattern.test(text.substring(0, 200))) {
+        console.log(`📊 Walidacja: ❌ WYKRYTO BŁĄD (pattern: ${pattern})`);
+        return false;
+      }
+    }
+    
+    console.log(`📊 Walidacja: ✅ OK (${text.length} znaków)`);
+    return true;
+  }
+  
+  // Funkcja pokazująca przyciski "Kontynuuj"
+  function showContinueButton(counter, currentPrompt, totalPrompts) {
+    return new Promise((resolve) => {
+      console.log(`⏸️ Pokazuję przyciski Kontynuuj dla prompta ${currentPrompt}/${totalPrompts}`);
+      
+      counter.innerHTML = `
+        <div style="font-size: 16px; margin-bottom: 8px;">⚠️ Zatrzymano</div>
+        <div style="font-size: 14px; margin-bottom: 12px;">Prompt ${currentPrompt} / ${totalPrompts}</div>
+        <div style="font-size: 12px; opacity: 0.9; margin-bottom: 12px; line-height: 1.4;">
+          Odpowiedź niepoprawna lub timeout.<br>
+          Napraw sytuację w ChatGPT, potem wybierz:
+        </div>
+        <button id="continue-wait-btn" style="
+          background: white;
+          color: #667eea;
+          border: none;
+          padding: 10px 20px;
+          border-radius: 8px;
+          font-weight: 600;
+          cursor: pointer;
+          font-size: 14px;
+          width: 100%;
+          margin-bottom: 8px;
+          transition: transform 0.2s;
+        ">⏳ Czekaj na odpowiedź</button>
+        <button id="continue-skip-btn" style="
+          background: rgba(255,255,255,0.3);
+          color: white;
+          border: 1px solid white;
+          padding: 10px 20px;
+          border-radius: 8px;
+          font-weight: 600;
+          cursor: pointer;
+          font-size: 14px;
+          width: 100%;
+          transition: transform 0.2s;
+        ">⏭️ Wyślij następny prompt</button>
+      `;
+      
+      const waitBtn = document.getElementById('continue-wait-btn');
+      const skipBtn = document.getElementById('continue-skip-btn');
+      
+      // Polling: sprawdzaj co 500ms czy proces został abortowany
+      const abortCheckInterval = setInterval(() => {
+        if (window._abortCurrentProcess) {
+          console.log('🛑 Proces abortowany podczas oczekiwania na kliknięcie przycisku');
+          clearInterval(abortCheckInterval);
+          resolve('aborted');
+        }
+      }, 500);
+      
+      waitBtn.addEventListener('mouseover', () => {
+        waitBtn.style.transform = 'scale(1.05)';
+      });
+      
+      waitBtn.addEventListener('mouseout', () => {
+        waitBtn.style.transform = 'scale(1)';
+      });
+      
+      waitBtn.addEventListener('click', () => {
+        console.log('✅ Użytkownik kliknął "Czekaj na odpowiedź"');
+        clearInterval(abortCheckInterval);
+        resolve('wait');
+      });
+      
+      skipBtn.addEventListener('mouseover', () => {
+        skipBtn.style.transform = 'scale(1.05)';
+      });
+      
+      skipBtn.addEventListener('mouseout', () => {
+        skipBtn.style.transform = 'scale(1)';
+      });
+      
+      skipBtn.addEventListener('click', () => {
+        console.log('✅ Użytkownik kliknął "Wyślij następny prompt"');
+        clearInterval(abortCheckInterval);
+        resolve('skip');
+      });
+    });
+  }
+  
+  // === GŁÓWNA LOGIKA ===
+  
+  // KROK 0: Sprawdź czy jest aktywny poprzedni proces - jeśli tak, zabij go
+  console.log('🔍 Sprawdzam czy jest aktywny poprzedni proces...');
+  const existingCounter = document.getElementById('economist-prompt-counter');
+  
+  if (existingCounter) {
+    console.log('⚠️ Znaleziono aktywny proces - zatrzymuję go...');
+    
+    // WAŻNE: Ustaw flagę globalną do abortowania poprzedniego procesu
+    window._abortCurrentProcess = true;
+    
+    // Pokaż informację o zatrzymaniu
+    existingCounter.innerHTML = `
+      <div style="font-size: 16px; margin-bottom: 8px;">⏸️ Zatrzymano</div>
+      <div style="font-size: 14px; opacity: 0.9;">Uruchamianie nowego procesu...</div>
+    `;
+    
+    // Czekaj chwilę żeby użytkownik zobaczył komunikat
+    await new Promise(resolve => setTimeout(resolve, 1500));
+    
+    // Usuń poprzedni licznik (wraz z przyciskami jeśli były)
+    existingCounter.remove();
+    console.log('✅ Poprzedni proces zatrzymany (DOM i flaga abort)');
+    
+    // Czekaj chwilę przed uruchomieniem nowego
+    await new Promise(resolve => setTimeout(resolve, 500));
+  } else {
+    console.log('✅ Brak aktywnego procesu - kontynuuję');
+  }
+  
+  // Resetuj flagę abort dla nowego procesu
+  window._abortCurrentProcess = false;
+  
+  // Utwórz nowy licznik
+  const counter = createCounter();
+  updateCounter(counter, 1, prompts.length, 'Inicjalizacja...');
+  
+  try {
+    // Krótka pauza przed rozpoczęciem
+    await new Promise(resolve => setTimeout(resolve, 1000));
+    
+    // Wykonaj wszystkie prompty
+    for (let i = 0; i < prompts.length; i++) {
+      // SPRAWDŹ FLAGĘ ABORT - jeśli true, przerwij natychmiast
+      if (window._abortCurrentProcess) {
+        console.log('🛑 Proces abortowany przez nowy proces - kończę wykonywanie');
+        return { success: false, aborted: true };
+      }
+      
+      const prompt = prompts[i];
+      const currentNumber = startNumber + i;
+      const remaining = prompts.length - i - 1;
+      
+      console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      console.log(`>>> PROMPT ${currentNumber} (${i + 1}/${prompts.length}, pozostało: ${remaining})`);
+      console.log(`Długość: ${prompt.length} znaków, ${prompt.split('\n').length} linii`);
+      console.log(`Preview:\n${prompt.substring(0, 200)}${prompt.length > 200 ? '...' : ''}`);
+      console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+      
+      // Aktualizuj licznik - wysyłanie
+      updateCounter(counter, i + 1, prompts.length, 'Wysyłam prompt...');
+      
+      // Wyślij prompt
+      console.log(`[${i + 1}/${prompts.length}] Wywołuję sendPrompt()...`);
+      const sent = await sendPrompt(prompt);
+      
+      if (!sent) {
+        console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${prompts.length}`);
+        console.log(`⏸️ Błąd wysyłania - czekam na interwencję użytkownika`);
+        updateCounter(counter, i + 1, prompts.length, `❌ Błąd wysyłania`);
+        
+        // Pokaż przyciski i czekaj na user
+        const action = await showContinueButton(counter, i + 1, prompts.length);
+        
+        if (action === 'skip') {
+          console.log(`⏭️ User wybrał pominięcie - przechodzę do następnego prompta`);
+          continue;
+        }
+        
+        // User naprawił, spróbuj wysłać ponownie
+        console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
+        const retried = await sendPrompt(prompt);
+        
+        if (!retried) {
+          console.error(`❌ Ponowna próba nieudana - przerywam chain`);
+          updateCounter(counter, i + 1, prompts.length, `❌ Błąd krytyczny`);
+          await new Promise(resolve => setTimeout(resolve, 10000));
+          return { success: false, error: 'Nie udało się wysłać prompta po retry' };
+        }
+        
+        console.log(`✅ Ponowne wysyłanie udane - kontynuuję chain`);
+      }
+      
+      console.log(`✅ Prompt ${currentNumber} wysłany`);
+      
+      // Aktualizuj licznik - czekanie
+      updateCounter(counter, i + 1, prompts.length, 'Czekam na odpowiedź...');
+      
+      // Pętla czekania na odpowiedź - powtarzaj aż się uda
+      let responseCompleted = false;
+      while (!responseCompleted) {
+        // SPRAWDŹ FLAGĘ ABORT
+        if (window._abortCurrentProcess) {
+          console.log('🛑 Proces abortowany w pętli czekania na odpowiedź');
+          return { success: false, aborted: true };
+        }
+        
+        console.log(`[${i + 1}/${prompts.length}] Wywołuję waitForResponse()...`);
+        const completed = await waitForResponse();
+        
+        if (!completed) {
+          // Timeout - pokaż przyciski i czekaj na user
+          console.error(`❌ Timeout przy promptcie ${i + 1}/${prompts.length}`);
+          console.log(`⏸️ ChatGPT nie odpowiedział w czasie - czekam na interwencję użytkownika`);
+          updateCounter(counter, i + 1, prompts.length, '⏱️ Timeout - czekam...');
+          
+          const action = await showContinueButton(counter, i + 1, prompts.length);
+          
+          // showContinueButton może zwrócić 'aborted' jeśli proces został zabity
+          if (action === 'aborted') {
+            console.log('🛑 Proces abortowany podczas oczekiwania na user');
+            return { success: false, aborted: true };
+          }
+          
+          if (action === 'skip') {
+            console.log(`⏭️ User wybrał pominięcie - zakładam że odpowiedź jest OK`);
+            responseCompleted = true;
+            break;
+          }
+          
+          // User kliknął "Czekaj na odpowiedź" - czekaj ponownie
+          console.log(`🔄 Kontynuacja po timeout - ponowne czekanie na odpowiedź...`);
+          updateCounter(counter, i + 1, prompts.length, 'Czekam na odpowiedź...');
+          continue;
+        }
+        
+        // Odpowiedź zakończona - wyjdź z pętli
+        responseCompleted = true;
+      }
+      
+      // Pętla walidacji odpowiedzi - powtarzaj aż będzie poprawna
+      let responseValid = false;
+      let responseText = '';
+      while (!responseValid) {
+        // SPRAWDŹ FLAGĘ ABORT
+        if (window._abortCurrentProcess) {
+          console.log('🛑 Proces abortowany w pętli walidacji odpowiedzi');
+          return { success: false, aborted: true };
+        }
+        
+        console.log(`[${i + 1}/${prompts.length}] Walidacja odpowiedzi...`);
+        responseText = await getLastResponseText();
+        const isValid = validateResponse(responseText);
+        
+        if (!isValid) {
+          // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
+          console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${prompts.length}`);
+          console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
+          updateCounter(counter, i + 1, prompts.length, '❌ Odpowiedź za krótka');
+          
+          const action = await showContinueButton(counter, i + 1, prompts.length);
+          
+          // showContinueButton może zwrócić 'aborted' jeśli proces został zabity
+          if (action === 'aborted') {
+            console.log('🛑 Proces abortowany podczas oczekiwania na user');
+            return { success: false, aborted: true };
+          }
+          
+          if (action === 'skip') {
+            console.log(`⏭️ User wybrał pominięcie - akceptuję krótką odpowiedź`);
+            responseValid = true;
+            break;
+          }
+          
+          // User kliknął "Czekaj na odpowiedź" - może ChatGPT jeszcze generuje
+          console.log(`🔄 Kontynuacja po naprawie - czekam na zakończenie generowania...`);
+          updateCounter(counter, i + 1, prompts.length, 'Czekam na odpowiedź...');
+          
+          // Poczekaj na zakończenie odpowiedzi ChatGPT
+          await waitForResponse();
+          
+          // Powtórz walidację
+          continue;
+        }
+        
+        // Odpowiedź poprawna - wyjdź z pętli
+        responseValid = true;
+      }
+      
+      console.log(`✅ Prompt ${i + 1}/${prompts.length} zakończony - odpowiedź poprawna`);
+      
+      // Krótka pauza przed kolejnym promptem
+      if (i < prompts.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 1000));
+      }
+    }
+    
+    console.log(`\n${'='.repeat(80)}`);
+    console.log('🎉 WSZYSTKIE PROMPTY WYKONANE');
+    console.log(`${'='.repeat(80)}\n`);
+    
+    removeCounter(counter, true);
+    
+    return { success: true, completed: prompts.length };
+    
+  } catch (error) {
+    console.error('❌ Błąd podczas wykonywania promptów:', error);
+    removeCounter(counter, false);
+    return { success: false, error: error.message };
+  }
 }
