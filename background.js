@@ -5,9 +5,87 @@ const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 5400000; // 90 minut na odpowiedź ChatGPT (zwiększono dla ChatGPT Pro deep thinking)
 const RETRY_INTERVAL_MS = 500;
 
+// Optional cloud upload config (kept simple; safe to extend later).
+const CLOUD_UPLOAD = {
+  enabled: false,
+  url: "",
+  apiKey: "",
+  apiKeyHeader: "Authorization", // Use "Authorization" (Bearer) or custom header like "X-Api-Key".
+  timeoutMs: 20000,
+  retryCount: 2,
+  backoffMs: 1000
+};
+
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
 let PROMPTS_PORTFOLIO = [];
+
+async function uploadResponseToCloud(response) {
+  if (!CLOUD_UPLOAD.enabled) {
+    return { skipped: true, reason: "disabled" };
+  }
+  if (!CLOUD_UPLOAD.url) {
+    console.warn("[cloud] Upload enabled but URL is empty");
+    return { skipped: true, reason: "missing_url" };
+  }
+
+  const headers = {
+    "Content-Type": "application/json"
+  };
+
+  if (CLOUD_UPLOAD.apiKey) {
+    if ((CLOUD_UPLOAD.apiKeyHeader || "").toLowerCase() === "authorization") {
+      headers.Authorization = `Bearer ${CLOUD_UPLOAD.apiKey}`;
+    } else {
+      headers[CLOUD_UPLOAD.apiKeyHeader] = CLOUD_UPLOAD.apiKey;
+    }
+  }
+
+  const payload = {
+    text: response.text,
+    timestamp: response.timestamp,
+    source: response.source,
+    analysisType: response.analysisType,
+    savedAt: new Date().toISOString(),
+    extensionVersion: chrome.runtime.getManifest().version
+  };
+
+  const maxAttempts = Math.max(1, CLOUD_UPLOAD.retryCount + 1);
+  const body = JSON.stringify(payload);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), CLOUD_UPLOAD.timeoutMs);
+
+    try {
+      const response = await fetch(CLOUD_UPLOAD.url, {
+        method: "POST",
+        headers,
+        body,
+        signal: controller.signal
+      });
+
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        throw new Error(`HTTP ${response.status}`);
+      }
+
+      return { success: true, status: response.status };
+    } catch (error) {
+      clearTimeout(timeoutId);
+
+      if (attempt < maxAttempts) {
+        await sleep(CLOUD_UPLOAD.backoffMs * attempt);
+        continue;
+      }
+
+      return { success: false, error: error.message || String(error) };
+    }
+  }
+
+  return { success: false, error: "unknown" };
+}
 
 // Funkcja wczytująca prompty z plików txt
 async function loadPrompts() {
@@ -149,6 +227,15 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     }
 
     console.log(`✅ Weryfikacja storage: OK`);
+
+    const uploadResult = await uploadResponseToCloud({ ...newResponse });
+    if (uploadResult?.success) {
+      console.log(`[cloud] Upload OK (status ${uploadResult.status})`);
+    } else if (uploadResult?.skipped) {
+      console.log(`[cloud] Upload skipped (${uploadResult.reason || "unknown"})`);
+    } else {
+      console.warn(`[cloud] Upload failed: ${uploadResult?.error || "unknown"}`);
+    }
 
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO I ZWERYFIKOWANO POMYŚLNIE ✅ ✅ ✅`);
