@@ -112,6 +112,31 @@ async function uploadResponseToCloud(response) {
 }
 
 // Funkcja wczytująca prompty z plików txt
+// Funkcja parsująca prompty z dyrektywami MODEL
+function parsePromptsWithModels(text) {
+  const blocks = text.split('◄PROMPT_SEPARATOR►');
+  return blocks.map(block => {
+    const trimmedBlock = block.trim();
+    if (!trimmedBlock) return null;
+    
+    // Szukaj dyrektywy [MODEL:xxx] na początku bloku
+    const modelMatch = trimmedBlock.match(/^\[MODEL:(deep_research|thinking|pro|default)\]\s*/i);
+    
+    if (modelMatch) {
+      return {
+        model: modelMatch[1].toLowerCase(),
+        text: trimmedBlock.replace(modelMatch[0], '').trim()
+      };
+    }
+    
+    // Brak dyrektywy = domyślny model
+    return {
+      model: 'default',
+      text: trimmedBlock
+    };
+  }).filter(p => p !== null && p.text.length > 0);
+}
+
 async function loadPrompts() {
   try {
     console.log("📝 Wczytuję prompty z plików...");
@@ -121,26 +146,26 @@ async function loadPrompts() {
     const companyResponse = await fetch(companyUrl);
     const companyText = await companyResponse.text();
     
-    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
-    PROMPTS_COMPANY = companyText
-      .split('◄PROMPT_SEPARATOR►')
-      .map(p => p.trim())
-      .filter(p => p.length > 0);
+    // Parsuj prompty z dyrektywami MODEL
+    PROMPTS_COMPANY = parsePromptsWithModels(companyText);
     
     console.log(`✅ Wczytano ${PROMPTS_COMPANY.length} promptów dla analizy spółki`);
+    PROMPTS_COMPANY.forEach((p, i) => {
+      console.log(`   Prompt ${i+1}: model=${p.model}, długość=${p.text.length} znaków`);
+    });
     
     // Wczytaj prompts-portfolio.txt
     const portfolioUrl = chrome.runtime.getURL('prompts-portfolio.txt');
     const portfolioResponse = await fetch(portfolioUrl);
     const portfolioText = await portfolioResponse.text();
     
-    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
-    PROMPTS_PORTFOLIO = portfolioText
-      .split('◄PROMPT_SEPARATOR►')
-      .map(p => p.trim())
-      .filter(p => p.length > 0);
+    // Parsuj prompty z dyrektywami MODEL
+    PROMPTS_PORTFOLIO = parsePromptsWithModels(portfolioText);
     
     console.log(`✅ Wczytano ${PROMPTS_PORTFOLIO.length} promptów dla analizy portfela`);
+    PROMPTS_PORTFOLIO.forEach((p, i) => {
+      console.log(`   Prompt ${i+1}: model=${p.model}, długość=${p.text.length} znaków`);
+    });
     
   } catch (error) {
     console.error('❌ Błąd wczytywania promptów:', error);
@@ -409,7 +434,7 @@ async function resumeFromStage(startIndex) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: activeTab.id },
         function: injectToChat,
-        args: [emptyPayload, promptsToSend, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, `Resume from Stage ${startIndex + 1}`, 'company']
+        args: [emptyPayload, promptsToSend, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, `Resume from Stage ${startIndex + 1}`, 'company', 'default']
       });
       
       console.log("✅ Prompty wstrzyknięte pomyślnie");
@@ -678,11 +703,13 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         }
       }
 
-      // Wyciągnij treść pierwszego prompta z promptChain
-      const firstPrompt = promptChain[0] || '';
+      // Wyciągnij treść pierwszego prompta z promptChain (teraz to obiekt {model, text})
+      const firstPromptObj = promptChain[0] || { model: 'default', text: '' };
+      const firstPromptModel = firstPromptObj.model;
+      const firstPromptText = firstPromptObj.text;
       
       // Wstaw treść artykułu do pierwszego prompta (zamień {{articlecontent}})
-      let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+      let payload = firstPromptText.replace('{{articlecontent}}', extractedText);
       
       // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
       const restOfPrompts = promptChain.slice(1);
@@ -707,10 +734,20 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       let results;
       try {
         console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
+        console.log(`   Pierwszy prompt: model=${firstPromptModel}`);
+        console.log(`   Typ: ${typeof firstPromptModel}`);
+        console.log(`   Czy to 'deep_research'?: ${firstPromptModel === 'deep_research'}`);
+        console.log(`   Argumenty executeScript:`);
+        console.log(`   - payload: ${payload.substring(0, 100)}...`);
+        console.log(`   - restOfPrompts length: ${restOfPrompts.length}`);
+        console.log(`   - title: ${title}`);
+        console.log(`   - analysisType: ${analysisType}`);
+        console.log(`   - payloadModel: ${firstPromptModel}`);
+        
         results = await chrome.scripting.executeScript({
           target: { tabId: chatTabId },
           function: injectToChat,
-          args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
+          args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType, firstPromptModel]
         });
         console.log(`✅ executeScript zakończony pomyślnie`);
       } catch (executeError) {
@@ -1080,12 +1117,19 @@ async function extractText() {
 }
 
 // Funkcja wklejania do ChatGPT (content script)
-async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company') {
+async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company', payloadModel = 'default') {
+  // Stała dla Deep Research
+  const DEEP_RESEARCH_DEFAULT_ANSWER = "Tak, kontynuuj z pełną analizą. Przeanalizuj całą rozmowę powyżej, zidentyfikuj kluczową tezę inwestycyjną i określ dokładnie gdzie będzie przepływał kapitał (kto płaci, komu, za co, w jakiej kolejności). Skup się na konkretnych przepływach pieniędzy i mechanizmach wartości.";
+  
   try {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🚀 [injectToChat] START`);
     console.log(`  Article: ${articleTitle}`);
     console.log(`  Analysis: ${analysisType}`);
+    console.log(`  Payload model: ${payloadModel}`);
+    console.log(`  Payload model type: ${typeof payloadModel}`);
+    console.log(`  Payload model === 'default': ${payloadModel === 'default'}`);
+    console.log(`  Payload model !== 'default': ${payloadModel !== 'default'}`);
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
     
@@ -1143,6 +1187,217 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     } else {
       counter.remove();
     }
+  }
+  
+  // Funkcja przełączająca model ChatGPT
+  async function switchModel(modelType) {
+    console.log(`\n${'═'.repeat(80)}`);
+    console.log(`🔄 [switchModel] ROZPOCZYNAM PRZEŁĄCZANIE NA: ${modelType}`);
+    console.log(`${'═'.repeat(80)}`);
+    
+    try {
+      if (modelType === 'deep_research') {
+        // Deep Research: kliknij przycisk plus, potem wybierz Deep research
+        console.log('🔍 [DEEP_RESEARCH] Krok 1/4: Szukam przycisku plus...');
+        
+        const plusButton = document.querySelector('[data-testid="composer-plus-btn"]') ||
+                          document.querySelector('#composer-plus-btn') ||
+                          document.querySelector('button.composer-btn[aria-label*="Add"]');
+        
+        if (!plusButton) {
+          console.error('❌ [DEEP_RESEARCH] NIE ZNALEZIONO przycisku plus!');
+          console.error('   Sprawdzone selektory:');
+          console.error('   - [data-testid="composer-plus-btn"]');
+          console.error('   - #composer-plus-btn');
+          console.error('   - button.composer-btn[aria-label*="Add"]');
+          return false;
+        }
+        
+        console.log('✅ [DEEP_RESEARCH] Krok 1/4: Znaleziono przycisk plus:', plusButton);
+        console.log('🖱️ [DEEP_RESEARCH] Krok 2/4: Klikam przycisk plus...');
+        plusButton.click();
+        
+        // Poczekaj na menu
+        console.log('⏳ [DEEP_RESEARCH] Czekam 1s na menu...');
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Znajdź opcję Deep research
+        console.log('🔍 [DEEP_RESEARCH] Krok 3/4: Szukam opcji Deep research w menu...');
+        const menuItems = document.querySelectorAll('[role="menuitemradio"]');
+        console.log(`   Znaleziono ${menuItems.length} elementów menu`);
+        
+        let deepResearchItem = null;
+        
+        for (const item of menuItems) {
+          const itemText = item.textContent.toLowerCase();
+          console.log(`   - Sprawdzam: "${itemText}"`);
+          if (itemText.includes('deep research')) {
+            deepResearchItem = item;
+            console.log(`   ✓ To jest Deep Research!`);
+            break;
+          }
+        }
+        
+        if (!deepResearchItem) {
+          console.error('❌ [DEEP_RESEARCH] NIE ZNALEZIONO opcji Deep research w menu!');
+          console.error(`   Sprawdzono ${menuItems.length} elementów menu`);
+          return false;
+        }
+        
+        console.log('✅ [DEEP_RESEARCH] Krok 3/4: Znaleziono opcję Deep research');
+        console.log('🖱️ [DEEP_RESEARCH] Krok 4/4: Klikam Deep research...');
+        deepResearchItem.click();
+        
+        // Poczekaj na zmianę interfejsu
+        console.log('⏳ [DEEP_RESEARCH] Czekam 2s na zmianę interfejsu...');
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        console.log(`${'═'.repeat(80)}`);
+        console.log('✅✅✅ [DEEP_RESEARCH] POMYŚLNIE PRZEŁĄCZONO NA DEEP RESEARCH');
+        console.log(`${'═'.repeat(80)}\n`);
+        return true;
+        
+      } else if (modelType === 'thinking' || modelType === 'pro') {
+        // Thinking/Pro: kliknij selektor modelu, potem wybierz model
+        const modelName = modelType.toUpperCase();
+        console.log(`🔍 [${modelName}] Krok 1/4: Szukam selektora modelu...`);
+        
+        const modelButton = document.querySelector('[data-testid="model-switcher-dropdown-button"]') ||
+                           document.querySelector('[aria-label*="Model selector"]') ||
+                           document.querySelector('button[aria-haspopup="menu"]');
+        
+        if (!modelButton) {
+          console.error(`❌ [${modelName}] NIE ZNALEZIONO selektora modelu!`);
+          console.error('   Sprawdzone selektory:');
+          console.error('   - [data-testid="model-switcher-dropdown-button"]');
+          console.error('   - [aria-label*="Model selector"]');
+          console.error('   - button[aria-haspopup="menu"]');
+          return false;
+        }
+        
+        console.log(`✅ [${modelName}] Krok 1/4: Znaleziono selektor modelu:`, modelButton);
+        console.log(`🖱️ [${modelName}] Krok 2/4: Klikam selektor...`);
+        modelButton.click();
+        
+        // Poczekaj na menu
+        console.log(`⏳ [${modelName}] Czekam 1s na menu...`);
+        await new Promise(resolve => setTimeout(resolve, 1000));
+        
+        // Znajdź odpowiedni model w menu
+        console.log(`🔍 [${modelName}] Krok 3/4: Szukam opcji ${modelType}...`);
+        const menuItems = document.querySelectorAll('[role="menuitemradio"], [role="menuitem"]');
+        console.log(`   Znaleziono ${menuItems.length} elementów menu`);
+        
+        let targetItem = null;
+        
+        for (const item of menuItems) {
+          const text = item.textContent.toLowerCase();
+          console.log(`   - Sprawdzam: "${text}"`);
+          if (text.includes(modelType.toLowerCase())) {
+            targetItem = item;
+            console.log(`   ✓ To jest ${modelType}!`);
+            break;
+          }
+        }
+        
+        if (!targetItem) {
+          console.error(`❌ [${modelName}] NIE ZNALEZIONO opcji ${modelType} w menu!`);
+          console.error(`   Sprawdzono ${menuItems.length} elementów menu`);
+          return false;
+        }
+        
+        console.log(`✅ [${modelName}] Krok 3/4: Znaleziono opcję ${modelType}`);
+        console.log(`🖱️ [${modelName}] Krok 4/4: Klikam ${modelType}...`);
+        targetItem.click();
+        
+        // Poczekaj na zmianę modelu i sprawdź czy się udało
+        console.log(`⏳ [${modelName}] Czekam 2s na zmianę modelu...`);
+        await new Promise(resolve => setTimeout(resolve, 2000));
+        
+        const updatedButton = document.querySelector('[data-testid="model-switcher-dropdown-button"]');
+        if (updatedButton) {
+          const buttonText = updatedButton.textContent;
+          console.log(`📊 [${modelName}] Aktualny model w UI: "${buttonText}"`);
+        }
+        
+        console.log(`${'═'.repeat(80)}`);
+        console.log(`✅✅✅ [${modelName}] POMYŚLNIE PRZEŁĄCZONO NA ${modelName}`);
+        console.log(`${'═'.repeat(80)}\n`);
+        return true;
+        
+      } else {
+        // default - nie rób nic
+        console.log(`ℹ️ [DEFAULT] Model domyślny (${modelType}), nie przełączam`);
+        return true;
+      }
+      
+    } catch (error) {
+      console.log(`${'═'.repeat(80)}`);
+      console.error(`❌❌❌ [switchModel] BŁĄD podczas przełączania na ${modelType}!`);
+      console.error(`Error message: ${error.message}`);
+      console.error(`Error stack:`, error.stack);
+      console.log(`${'═'.repeat(80)}\n`);
+      return false;
+    }
+  }
+  
+  // Funkcja obsługująca pytania Deep Research
+  async function handleDeepResearchQuestions() {
+    console.log('🤔 [handleDeepResearchQuestions] Sprawdzam czy Deep Research zadaje pytania...');
+    
+    const maxQuestions = 3;
+    let questionCount = 0;
+    const maxWaitForQuestion = 10000; // 10 sekund na pytanie
+    
+    for (let i = 0; i < maxQuestions; i++) {
+      const startTime = Date.now();
+      let foundQuestion = false;
+      
+      // Czekaj na pytanie
+      while (Date.now() - startTime < maxWaitForQuestion) {
+        // Sprawdź ostatnią wiadomość asystenta
+        const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+        if (assistantMessages.length > 0) {
+          const lastMessage = assistantMessages[assistantMessages.length - 1];
+          const messageText = lastMessage.textContent || '';
+          
+          // Sprawdź czy zawiera pytanie (kończy się na ? lub zawiera charakterystyczne frazy)
+          if (messageText.includes('?') || 
+              messageText.toLowerCase().includes('would you like') ||
+              messageText.toLowerCase().includes('should i') ||
+              messageText.toLowerCase().includes('can i') ||
+              messageText.toLowerCase().includes('do you want')) {
+            foundQuestion = true;
+            console.log(`✓ Wykryto pytanie Deep Research (${i + 1}/${maxQuestions})`);
+            break;
+          }
+        }
+        
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
+      
+      if (!foundQuestion) {
+        console.log(`✓ Brak pytania po ${Math.round((Date.now() - startTime) / 1000)}s - kontynuuję`);
+        break;
+      }
+      
+      // Znaleziono pytanie - wyślij odpowiedź
+      questionCount++;
+      console.log(`📝 Wysyłam odpowiedź na pytanie ${questionCount}...`);
+      
+      // Użyj funkcji sendPrompt do wysłania odpowiedzi
+      const answerSent = await sendPrompt(DEEP_RESEARCH_DEFAULT_ANSWER, responseWaitMs, null, 0, 0);
+      
+      if (!answerSent) {
+        console.error('❌ Nie udało się wysłać odpowiedzi na pytanie Deep Research');
+        break;
+      }
+      
+      // Poczekaj na przetworzenie odpowiedzi
+      await new Promise(resolve => setTimeout(resolve, 2000));
+    }
+    
+    console.log(`✅ handleDeepResearchQuestions zakończone (${questionCount} pytań)`);
   }
   
   // Funkcja próbująca naprawić błąd przez Edit+Resend
@@ -2699,6 +2954,28 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       if (!isResume) {
         // Normalny tryb - wyślij payload (artykuł)
+        
+        // NOWE: Przełącz model dla payload jeśli potrzebne
+        if (payloadModel !== 'default') {
+          console.log(`\n${'='.repeat(60)}`);
+          console.log(`🔄 [PAYLOAD] ROZPOCZYNAM PRZEŁĄCZANIE MODELU: ${payloadModel}`);
+          console.log(`${'='.repeat(60)}\n`);
+          updateCounter(counter, 0, promptChain ? promptChain.length : 0, `Przełączam model na ${payloadModel}...`);
+          
+          const switched = await switchModel(payloadModel);
+          
+          console.log(`\n${'='.repeat(60)}`);
+          if (!switched) {
+            console.error(`❌ [PAYLOAD] NIE UDAŁO SIĘ PRZEŁĄCZYĆ na ${payloadModel}`);
+            console.error(`Kontynuuję z domyślnym modelem`);
+          } else {
+            console.log(`✅ [PAYLOAD] POMYŚLNIE PRZEŁĄCZONO na ${payloadModel}`);
+          }
+          console.log(`${'='.repeat(60)}\n`);
+        } else {
+          console.log(`ℹ️ [PAYLOAD] Używam domyślnego modelu (payloadModel=${payloadModel})`);
+        }
+        
         updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Wysyłam artykuł...');
         
         // Wyślij tekst Economist
@@ -2709,6 +2986,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Czekam na odpowiedź...');
         await waitForResponse(responseWaitMs);
         console.log("✅ Artykuł przetworzony");
+        
+        // NOWE: Obsłuż pytania Deep Research dla payload
+        if (payloadModel === 'deep_research') {
+          console.log(`🤔 Payload użył Deep Research - sprawdzam pytania...`);
+          updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Obsługuję pytania Deep Research...');
+          await handleDeepResearchQuestions();
+        }
         
         // NIE zapisujemy początkowej odpowiedzi - zapisujemy tylko ostatnią z prompt chain
         
@@ -2728,21 +3012,45 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log(`Pełna lista promptów:`, promptChain);
         
         for (let i = 0; i < promptChain.length; i++) {
-          const prompt = promptChain[i];
+          const promptObj = promptChain[i];
+          const promptModel = promptObj.model || 'default';
+          const promptText = promptObj.text || '';
           const remaining = promptChain.length - i - 1;
           
           console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
           console.log(`>>> PROMPT ${i + 1}/${promptChain.length} (pozostało: ${remaining})`);
-          console.log(`Długość: ${prompt.length} znaków, ${prompt.split('\n').length} linii`);
-          console.log(`Preview:\n${prompt.substring(0, 200)}${prompt.length > 200 ? '...' : ''}`);
+          console.log(`Model: ${promptModel}`);
+          console.log(`Długość: ${promptText.length} znaków, ${promptText.split('\n').length} linii`);
+          console.log(`Preview:\n${promptText.substring(0, 200)}${promptText.length > 200 ? '...' : ''}`);
           console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
+          
+          // NOWE: Przełącz model jeśli potrzebne
+          if (promptModel !== 'default') {
+            console.log(`\n${'='.repeat(60)}`);
+            console.log(`🔄 [PROMPT ${i + 1}] ROZPOCZYNAM PRZEŁĄCZANIE MODELU: ${promptModel}`);
+            console.log(`${'='.repeat(60)}\n`);
+            updateCounter(counter, i + 1, promptChain.length, `Przełączam model na ${promptModel}...`);
+            
+            const switched = await switchModel(promptModel);
+            
+            console.log(`\n${'='.repeat(60)}`);
+            if (!switched) {
+              console.error(`❌ [PROMPT ${i + 1}] NIE UDAŁO SIĘ PRZEŁĄCZYĆ na ${promptModel}`);
+              console.error(`Kontynuuję z aktualnym modelem`);
+            } else {
+              console.log(`✅ [PROMPT ${i + 1}] POMYŚLNIE PRZEŁĄCZONO na ${promptModel}`);
+            }
+            console.log(`${'='.repeat(60)}\n`);
+          } else {
+            console.log(`ℹ️ [PROMPT ${i + 1}] Używam aktualnego modelu (model=${promptModel})`);
+          }
           
           // Aktualizuj licznik - wysyłanie
           updateCounter(counter, i + 1, promptChain.length, 'Wysyłam prompt...');
           
           // Wyślij prompt
           console.log(`[${i + 1}/${promptChain.length}] Wywołuję sendPrompt()...`);
-          const sent = await sendPrompt(prompt, responseWaitMs, counter, i + 1, promptChain.length);
+          const sent = await sendPrompt(promptText, responseWaitMs, counter, i + 1, promptChain.length);
           
           if (!sent) {
             console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
@@ -2759,7 +3067,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             
             // User naprawił, spróbuj wysłać ponownie ten sam prompt
             console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
-            const retried = await sendPrompt(prompt, responseWaitMs, counter, i + 1, promptChain.length);
+            const retried = await sendPrompt(promptText, responseWaitMs, counter, i + 1, promptChain.length);
             
             if (!retried) {
               console.error(`❌ Ponowna próba nieudana - przerywam chain`);
@@ -2843,6 +3151,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           }
           
           console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
+          
+          // NOWE: Obsłuż pytania Deep Research
+          if (promptModel === 'deep_research') {
+            console.log(`🤔 Prompt użył Deep Research - sprawdzam pytania...`);
+            updateCounter(counter, i + 1, promptChain.length, 'Obsługuję pytania Deep Research...');
+            await handleDeepResearchQuestions();
+          }
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);

@@ -1,6 +1,7 @@
+[MODEL:deep_research]
 ROLE
-You are a PhD-level investment analyst and systems thinker. You excel at “conditional world-building”:
-treat the article’s core thesis as TRUE (an axiom), then deduce what MUST follow in the real economy, where capital MUST flow, and which Layer 3+ positions can capture disproportionate value.
+You are a PhD-level investment analyst and systems thinker. You excel at "conditional world-building":
+treat the article's core thesis as TRUE (an axiom), then deduce what MUST follow in the real economy, where capital MUST flow, and which Layer 3+ positions can capture disproportionate value.
 
 Do NOT debate whether the thesis is true. Assume it is true and run the consequences forward.
 No citations. No Porter. No generic MBA frameworks. Use first principles + your full prior knowledge (engineering, industrial organization, supply chains, procurement, energy, finance, history).
@@ -210,6 +211,8 @@ Why this matters now:
 [Concrete catalysts and timing logic.]
 
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 Investment Analysis Framework: 11-Stage Process
 This conversation will execute a comprehensive 11-stage investment analysis. Each stage builds on previous results, creating a systematic process from industry identification to final investment decision.
 The 11 Stages
@@ -234,6 +237,8 @@ Ready to begin? In your next message, provide the source material with the inves
 Do you confirm you understand this framework?
 
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 You are a financial analyst specializing in Porter's Five Forces analysis combined with capital cycle and S-curve timing analysis for investment research. Your job is to analyze industries connected to an established investment thesis to identify the top 2-3 structurally attractive industries with the best timing and defensible positions.
 
 The investment thesis and source material you need to analyze are in the first user input and your previous thesis response. You MUST inherit the thesis — do not start from scratch.
@@ -490,6 +495,8 @@ Then provide:
 Do not include anything else in the final output beyond these tables and the two short sections.
 
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 The investment thesis you need to analyze is in the first response:
 
 You are an expert investment analyst tasked with identifying 15 high-conviction stock picks based on a specific investment thesis. You will use Capital Cycles reasoning and systematic analysis to identify companies best positioned to benefit from structural and cyclical dynamics over a 3-5 year timeframe.
@@ -673,6 +680,8 @@ Work through your complete systematic analysis, documenting your thesis decompos
 
 
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
 
@@ -950,6 +959,8 @@ Remember: Prioritize asymmetric risk/reward ratios and favorable S-curve positio
 
 Your final output should consist only of the Competitive Position Analysis Results and should not duplicate or rehash any of the detailed analytical work you conducted in the thinking block.
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 You are an experienced investment analyst specializing in thesis-driven portfolio construction. You have been provided with data from the previous stages of analysis and need to perform a detailed comparison between the top two investment finalists to determine optimal positioning strategy.
 
 Your task is to perform a comprehensive head-to-head analysis between the top two finalists that emerged from Stage 3. However, before proceeding with a standard pairwise comparison, you must first determine whether such a comparison is appropriate, and then conduct an analysis that is deeply connected to the underlying investment thesis structure.
@@ -1029,6 +1040,8 @@ Address the key risks and mitigation strategies, particularly:
 Ensure your analysis maintains connection to the specific thesis structure and avoids generic financial comparisons that could apply to any two companies. Focus on the unique aspects of this thesis-driven opportunity.
 
 Your final output should consist only of the structured analysis with the sections listed above and should not duplicate or rehash any of the work you did in the thinking block.◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 # DuPont ROE Quality Assessment
 
 ## Context
@@ -1103,6 +1116,8 @@ Does thesis improve or degrade ROE quality?
 
 Advance to Thesis Monetization Quantification.
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
  THESIS MONETIZATION QUANTIFICATION
 
 ## What You're Doing
@@ -1271,6 +1286,8 @@ All three NPV values calculated? Enterprise Value includes net debt? WACC docume
 
 Advance to Reverse DCF.
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 You are conducting a Reverse DCF analysis to determine what growth expectations are already priced into a stock and whether there's an actionable investment opportunity. This analysis follows prior fundamental research stages and focuses on finding where your view differs from market expectations.
 ## Framework Philosophy
 Your goal is not to calculate fair value, but to extract what expectations are already embedded in the current stock price and compare them to your thesis. Alpha comes from finding gaps between your view and what's priced in.
@@ -1335,6 +1352,7 @@ Your final response should focus on the key insights and actionable conclusions.
 
 ◄PROMPT_SEPARATOR►
 
+[MODEL:thinking]
 You are an expert investment analyst who uses a systematic Four-Gate Framework to evaluate investment opportunities and determine position sizing. Your goal is to provide a clear BUY or AVOID decision with specific, actionable guidance based on rigorous, data-driven analysis.
 
 The investment analysis data you need to evaluate is above
@@ -1550,6 +1568,8 @@ GŁÓWNE RYZYKO: [konkretne wydarzenie które złamałoby tezę]
 Begin your systematic evaluation now, working through each gate using the investment data provided. .
 
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 🧭 Polecenie (wersja dopracowana)
 
 Stwórz pełną narrację procesu decyzyjnego inwestora — krok po kroku — dotyczącą jednej konkretnej firmy.
@@ -1668,8 +1688,10 @@ Dodaj krótkie sekcje FAQ po głównych częściach, odpowiadające na typowe py
 
 „Co sprawia, że to ryzyko jest realne, a nie teoretyczne?”
 
-„Skąd inwestor wie, że to właściwy moment?”
+„Skąd inwestor wie, że to właściwy moment?"
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 Investment Analysis Completeness Check
 You are a quality control analyst verifying that a complete 11-stage investment analysis was executed correctly.
 Your Task
@@ -1794,6 +1816,8 @@ Choose one:
 Begin verification.
 
 ◄PROMPT_SEPARATOR►
+
+[MODEL:thinking]
 Four-Gate Framework — Decision Output Format
 
 🎯 Cel
