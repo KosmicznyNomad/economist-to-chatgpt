@@ -20,6 +20,30 @@ const CLOUD_UPLOAD = {
 let PROMPTS_COMPANY = [];
 let PROMPTS_PORTFOLIO = [];
 
+// Nazwy etapów dla company analysis (synchronizowane z prompts-company.txt)
+const STAGE_NAMES_COMPANY = [
+  "Artykuł + Analiza Layer 3+",           // Etap 1: {{articlecontent}} + first principles
+  "Framework 11-Stage",                   // Etap 2: Investment Analysis Framework
+  "Porter's Five Forces",                 // Etap 3: Industry analysis
+  "Industry Scoring & Top 3",             // Etap 4: Industry scoring
+  "Competitive Positioning",              // Etap 5: Top 4 companies
+  "Top 2 Finalists Comparison",           // Etap 6: Deep dive comparison
+  "DuPont ROE Quality",                   // Etap 7: ROE decomposition
+  "Thesis Monetization",                  // Etap 8: Revenue/profit quantification
+  "Reverse DCF",                          // Etap 9: Valuation expectations
+  "Four-Gate Framework",                  // Etap 10: BUY/AVOID decision
+  "Katalog Trigerów",                     // Etap 11: Timing triggers
+  "Completeness Check",                   // Etap 12: Verification
+  "Final Output"                          // Etap 13: Formatted output
+];
+
+// Funkcja generująca losowe opóźnienie dla anti-automation
+function getRandomDelay() {
+  const minDelay = 3000;  // 3 sekundy
+  const maxDelay = 15000; // 15 sekund
+  return Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+}
+
 async function uploadResponseToCloud(response) {
   if (!CLOUD_UPLOAD.enabled) {
     return { skipped: true, reason: "disabled" };
@@ -268,6 +292,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     runManualSourceAnalysis(message.text, message.title, message.instances);
     sendResponse({ success: true });
     return true; // Utrzymuj kanał otwarty dla async
+  } else if (message.type === 'GET_COMPANY_PROMPTS') {
+    // Zwróć prompty dla company
+    sendResponse({ prompts: PROMPTS_COMPANY });
+    return false;
+  } else if (message.type === 'GET_STAGE_NAMES') {
+    // Zwróć nazwy etapów
+    sendResponse({ stageNames: STAGE_NAMES_COMPANY });
+    return false;
+  } else if (message.type === 'RESUME_STAGE_START') {
+    // Uruchom analizę od konkretnego etapu
+    console.log('📩 Otrzymano RESUME_STAGE_START:', { startIndex: message.startIndex });
+    resumeFromStage(message.startIndex);
+    sendResponse({ success: true });
+    return false;
+  } else if (message.type === 'RESUME_STAGE_OPEN') {
+    // Otwórz okno z wyborem etapu
+    console.log('📩 Otrzymano RESUME_STAGE_OPEN');
+    chrome.windows.create({
+      url: chrome.runtime.getURL('resume-stage.html'),
+      type: 'popup',
+      width: 600,
+      height: 400
+    });
+    sendResponse({ success: true });
+    return false;
   } else if (message.type === 'ACTIVATE_TAB') {
     // POPRAWKA: Aktywuj kartę ChatGPT przed wysyłaniem wiadomości
     console.log('🔍 Aktywuję kartę ChatGPT...');
@@ -296,6 +345,88 @@ chrome.commands.onCommand.addListener((command) => {
     chrome.tabs.create({ url: chrome.runtime.getURL('responses.html') });
   }
 });
+
+// Funkcja wznawiania od konkretnego etapu
+async function resumeFromStage(startIndex) {
+  console.log(`\n${'='.repeat(80)}`);
+  console.log(`🔄 RESUME FROM STAGE ${startIndex + 1}`);
+  console.log(`${'='.repeat(80)}\n`);
+  
+  try {
+    // KROK 1: Znajdź aktywne okno ChatGPT
+    console.log("🔍 Szukam aktywnego okna ChatGPT...");
+    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    
+    if (tabs.length === 0) {
+      console.error("❌ Brak aktywnego okna");
+      alert("Błąd: Brak aktywnego okna. Otwórz ChatGPT i spróbuj ponownie.");
+      return;
+    }
+    
+    const activeTab = tabs[0];
+    
+    if (!activeTab.url || !activeTab.url.includes('chatgpt.com')) {
+      console.error("❌ Aktywne okno to nie ChatGPT:", activeTab.url);
+      alert("Błąd: Aktywne okno nie jest ChatGPT. Przejdź do okna ChatGPT i spróbuj ponownie.");
+      return;
+    }
+    
+    console.log(`✅ Znaleziono aktywne okno ChatGPT: ${activeTab.id}`);
+    
+    // KROK 2: Sprawdź czy prompty są wczytane
+    if (PROMPTS_COMPANY.length === 0) {
+      console.error("❌ Brak promptów");
+      alert("Błąd: Brak promptów. Sprawdź plik prompts-company.txt");
+      return;
+    }
+    
+    if (startIndex >= PROMPTS_COMPANY.length) {
+      console.error(`❌ Nieprawidłowy indeks: ${startIndex} (max: ${PROMPTS_COMPANY.length - 1})`);
+      alert(`Błąd: Nieprawidłowy indeks etapu. Maksymalny: ${PROMPTS_COMPANY.length}`);
+      return;
+    }
+    
+    console.log(`✅ Prompty załadowane: ${PROMPTS_COMPANY.length}, start od: ${startIndex + 1}`);
+    
+    // KROK 3: Przygotuj prompty do wklejenia (od startIndex do końca)
+    const promptsToSend = PROMPTS_COMPANY.slice(startIndex);
+    console.log(`📝 Będę wklejać ${promptsToSend.length} promptów (${startIndex + 1}-${PROMPTS_COMPANY.length})`);
+    
+    // KROK 4: Aktywuj okno ChatGPT
+    console.log("\n🔍 Aktywuję okno ChatGPT...");
+    await chrome.windows.update(activeTab.windowId, { focused: true });
+    await chrome.tabs.update(activeTab.id, { active: true });
+    console.log("✅ Okno ChatGPT aktywowane");
+    
+    // KROK 5: Wstrzyknij prompty do ChatGPT
+    console.log("\n🚀 Wstrzykuję prompty do ChatGPT...");
+    
+    try {
+      // Używamy injectToChat z pustym payload - wszystkie prompty będą w promptChain
+      // Pusty payload sprawi że injectToChat pominie wysyłanie pierwszego promptu
+      const emptyPayload = '';
+      
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: activeTab.id },
+        function: injectToChat,
+        args: [emptyPayload, promptsToSend, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, `Resume from Stage ${startIndex + 1}`, 'company']
+      });
+      
+      console.log("✅ Prompty wstrzyknięte pomyślnie");
+      console.log(`\n${'='.repeat(80)}`);
+      console.log(`✅ RESUME FROM STAGE ZAKOŃCZONE`);
+      console.log(`${'='.repeat(80)}\n`);
+      
+    } catch (error) {
+      console.error("❌ Błąd wstrzykiwania promptów:", error);
+      alert(`Błąd wstrzykiwania promptów: ${error.message}`);
+    }
+    
+  } catch (error) {
+    console.error("❌ Błąd w resumeFromStage:", error);
+    alert(`Błąd wznawiania: ${error.message}`);
+  }
+}
 
 // Funkcja pobierania prompt chain od użytkownika
 async function getPromptChain() {
@@ -1303,14 +1434,21 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return { generating: true, reason: 'stopButton', element: stopButton };
     }
     
-    // 2. Thinking indicators (nowy UI ChatGPT)
-    const thinkingIndicators = document.querySelector('[class*="thinking"]') ||
-                              document.querySelector('[class*="Thinking"]') ||
-                              document.querySelector('[data-testid*="thinking"]') ||
-                              document.querySelector('[aria-label*="Thinking"]') ||
-                              document.querySelector('[aria-label*="thinking"]');
-    if (thinkingIndicators) {
-      return { generating: true, reason: 'thinkingIndicator', element: thinkingIndicators };
+    // 2. Thinking indicators - TYLKO w ostatniej wiadomości assistant!
+    // Znajdź ostatnią wiadomość assistant
+    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (assistantMessages.length > 0) {
+      const lastAssistantMsg = assistantMessages[assistantMessages.length - 1];
+      
+      // Sprawdź thinking indicator TYLKO w ostatniej wiadomości
+      const thinkingInLastMsg = lastAssistantMsg.querySelector('[class*="thinking"]') ||
+                                lastAssistantMsg.querySelector('[class*="Thinking"]') ||
+                                lastAssistantMsg.querySelector('[data-testid*="thinking"]') ||
+                                lastAssistantMsg.querySelector('[aria-label*="Thinking"]') ||
+                                lastAssistantMsg.querySelector('[aria-label*="thinking"]');
+      if (thinkingInLastMsg) {
+        return { generating: true, reason: 'thinkingIndicator', element: thinkingInLastMsg };
+      }
     }
     
     // 3. Update indicators
@@ -2546,25 +2684,43 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
     if (editor) {
       console.log("=== ROZPOCZYNAM PRZETWARZANIE ===");
-      console.log(`Artykuł: ${payload.substring(0, 100)}...`);
+      
+      // POPRAWKA: Sprawdź czy to resume (payload jest pusty lub zawiera marker)
+      const isResume = !payload || payload.trim() === '' || payload.includes('Resume from stage');
+      
+      if (isResume) {
+        console.log("🔄 TRYB RESUME - pomijam wysyłanie payload, zaczynam od prompt chain");
+      } else {
+        console.log(`Artykuł: ${payload.substring(0, 100)}...`);
+      }
       
       // Stwórz licznik
       const counter = createCounter();
-      updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Wysyłam artykuł...');
       
-      // Wyślij tekst Economist
-      console.log("📤 Wysyłam artykuł do ChatGPT...");
-      await sendPrompt(payload, responseWaitMs, counter, 0, promptChain ? promptChain.length : 0);
-      
-      // Czekaj na odpowiedź ChatGPT
-      updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Czekam na odpowiedź...');
-      await waitForResponse(responseWaitMs);
-      console.log("✅ Artykuł przetworzony");
-      
-      // NIE zapisujemy początkowej odpowiedzi - zapisujemy tylko ostatnią z prompt chain
-      
-      // Krótka pauza przed prompt chain - czekanie na gotowość jest w sendPrompt
-      await new Promise(resolve => setTimeout(resolve, 1000));
+      if (!isResume) {
+        // Normalny tryb - wyślij payload (artykuł)
+        updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Wysyłam artykuł...');
+        
+        // Wyślij tekst Economist
+        console.log("📤 Wysyłam artykuł do ChatGPT...");
+        await sendPrompt(payload, responseWaitMs, counter, 0, promptChain ? promptChain.length : 0);
+        
+        // Czekaj na odpowiedź ChatGPT
+        updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Czekam na odpowiedź...');
+        await waitForResponse(responseWaitMs);
+        console.log("✅ Artykuł przetworzony");
+        
+        // NIE zapisujemy początkowej odpowiedzi - zapisujemy tylko ostatnią z prompt chain
+        
+        // Anti-automation delay przed prompt chain - czekanie na gotowość jest w sendPrompt
+        const delay = getRandomDelay();
+        console.log(`⏸️ Anti-automation delay: ${(delay/1000).toFixed(1)}s przed rozpoczęciem prompt chain...`);
+        await new Promise(resolve => setTimeout(resolve, delay));
+      } else {
+        // Resume mode - zacznij od razu od prompt chain
+        updateCounter(counter, 0, promptChain ? promptChain.length : 0, '🔄 Resume from stage...');
+        console.log("⏭️ Pomijam payload - zaczynam od prompt chain");
+      }
       
       // Teraz uruchom prompt chain
       if (promptChain && promptChain.length > 0) {
@@ -2702,9 +2858,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             console.log(`⏭️ Pomijam odpowiedź ${i + 1}/${promptChain.length} - nie jest to ostatni prompt`);
           }
           
-          // Minimalna pauza przed następnym promptem - główne czekanie jest w sendPrompt
-          console.log(`⏸️ Krótka pauza przed kolejnym promptem...`);
-          await new Promise(resolve => setTimeout(resolve, 1000));
+          // Anti-automation delay przed następnym promptem
+          if (i < promptChain.length - 1) {
+            const delay = getRandomDelay();
+            console.log(`⏸️ Anti-automation delay: ${(delay/1000).toFixed(1)}s przed promptem ${i + 2}/${promptChain.length}...`);
+            updateCounter(counter, i + 1, promptChain.length, `⏸️ Czekam ${(delay/1000).toFixed(0)}s...`);
+            await new Promise(resolve => setTimeout(resolve, delay));
+          }
         }
         
         // Sukces - pętla zakończona bez break
@@ -2717,6 +2877,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
         console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        
         return { success: true, lastResponse: lastResponse };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");

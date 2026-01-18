@@ -4,6 +4,7 @@ const startBtn = document.getElementById('startBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 
 let prompts = [];
+let stageNames = [];
 
 // Funkcja skracania tekstu do preview
 function truncateText(text, maxLength = 60) {
@@ -13,7 +14,7 @@ function truncateText(text, maxLength = 60) {
   return text.substring(0, maxLength) + '...';
 }
 
-// Załaduj prompty
+// Załaduj prompty i nazwy etapów
 async function loadPrompts() {
   try {
     // Pobierz prompty z background script
@@ -21,6 +22,13 @@ async function loadPrompts() {
     
     if (response && response.prompts && response.prompts.length > 0) {
       prompts = response.prompts;
+      
+      // Pobierz nazwy etapów
+      const namesResponse = await chrome.runtime.sendMessage({ type: 'GET_STAGE_NAMES' });
+      if (namesResponse && namesResponse.stageNames) {
+        stageNames = namesResponse.stageNames;
+      }
+      
       populateDropdown();
     } else {
       throw new Error('Brak promptów');
@@ -50,9 +58,16 @@ function populateDropdown() {
     const option = document.createElement('option');
     option.value = i;
     
-    const promptPreview = truncateText(prompts[i]);
-    option.textContent = `${i + 1}: ${promptPreview}`;
+    // Użyj nazwy etapu jeśli dostępna, w przeciwnym razie preview promptu
+    let displayText;
+    if (stageNames && stageNames[i]) {
+      displayText = `${i + 1}: ${stageNames[i]}`;
+    } else {
+      const promptPreview = truncateText(prompts[i]);
+      displayText = `${i + 1}: ${promptPreview}`;
+    }
     
+    option.textContent = displayText;
     stageSelect.appendChild(option);
   }
   
@@ -73,7 +88,8 @@ function updateInfo() {
     startBtn.disabled = true;
   } else {
     const remaining = prompts.length - selectedIndex;
-    stageInfo.textContent = `Zostanie wykonanych ${remaining} prompt${remaining === 1 ? '' : remaining < 5 ? 'y' : 'ów'} (${selectedIndex + 1}-${prompts.length})`;
+    const stageName = stageNames && stageNames[selectedIndex] ? stageNames[selectedIndex] : `Etap ${selectedIndex + 1}`;
+    stageInfo.textContent = `Wybrano: "${stageName}" - zostanie wykonanych ${remaining} prompt${remaining === 1 ? '' : remaining < 5 ? 'y' : 'ów'} (${selectedIndex + 1}-${prompts.length})`;
     startBtn.disabled = false;
   }
 }
