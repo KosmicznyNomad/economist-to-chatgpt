@@ -23,18 +23,18 @@ let PROMPTS_PORTFOLIO = [];
 // Nazwy etapów dla company analysis (synchronizowane z prompts-company.txt)
 const STAGE_NAMES_COMPANY = [
   "Artykuł + Analiza Layer 3+",           // Etap 1: {{articlecontent}} + first principles
-  "Framework 11-Stage",                   // Etap 2: Investment Analysis Framework
+  "Investment Pipeline (Stage 1-10)",     // Etap 2: Process overview
   "Porter's Five Forces",                 // Etap 3: Industry analysis
-  "Industry Scoring & Top 3",             // Etap 4: Industry scoring
-  "Competitive Positioning",              // Etap 5: Top 4 companies
-  "Top 2 Finalists Comparison",           // Etap 6: Deep dive comparison
-  "DuPont ROE Quality",                   // Etap 7: ROE decomposition
-  "Thesis Monetization",                  // Etap 8: Revenue/profit quantification
-  "Reverse DCF",                          // Etap 9: Valuation expectations
-  "Four-Gate Framework",                  // Etap 10: BUY/AVOID decision
-  "Katalog Trigerów",                     // Etap 11: Timing triggers
-  "Completeness Check",                   // Etap 12: Verification
-  "Final Output"                          // Etap 13: Formatted output
+  "Stock Selection (15 Companies)",       // Etap 4: 15 stock picks
+  "Reverse DCF Lite + Driver Screen",     // Etap 5: Quick valuation filter
+  "Competitive Positioning (4 Companies)",// Etap 6: Top 4 companies
+  "Pairwise Flip-Gate (Top 2)",           // Etap 7: Head-to-head comparison
+  "DuPont ROE Quality",                   // Etap 8: ROE decomposition
+  "Thesis Monetization",                  // Etap 9: Revenue/profit quantification
+  "Reverse DCF (Full)",                   // Etap 10: Full valuation expectations
+  "Four-Gate Framework",                  // Etap 11: BUY/AVOID decision
+  "Simple Story (Polski)",                // Etap 12: Plain language summary
+  "Final Output"                          // Etap 13: Formatted decision output
 ];
 
 // Funkcja generująca losowe opóźnienie dla anti-automation
@@ -392,24 +392,100 @@ async function resumeFromStage(startIndex) {
     const promptsToSend = PROMPTS_COMPANY.slice(startIndex);
     console.log(`📝 Będę wklejać ${promptsToSend.length} promptów (${startIndex + 1}-${PROMPTS_COMPANY.length})`);
     
+    // POPRAWKA: Usuń {{articlecontent}} z pierwszego prompta (bo w resume nie mamy artykułu)
+    const cleanedPrompts = [...promptsToSend];
+    if (cleanedPrompts[0]) {
+      cleanedPrompts[0] = cleanedPrompts[0].replace('{{articlecontent}}', '').trim();
+      console.log(`📝 Pierwszy prompt (po usunięciu {{articlecontent}}): ${cleanedPrompts[0].substring(0, 100)}...`);
+    }
+    
+    // W trybie resume: pusty payload + wszystkie prompty w chain
+    const payload = '';  // Pusty payload oznacza tryb resume
+    const restOfPrompts = cleanedPrompts;  // Wszystkie prompty w chain
+    
+    console.log(`📝 Payload: pusty (tryb resume)`);
+    console.log(`📝 Prompty w chain: ${restOfPrompts.length}`);
+    
     // KROK 4: Aktywuj okno ChatGPT
     console.log("\n🔍 Aktywuję okno ChatGPT...");
     await chrome.windows.update(activeTab.windowId, { focused: true });
     await chrome.tabs.update(activeTab.id, { active: true });
     console.log("✅ Okno ChatGPT aktywowane");
     
+    // KROK 4.5: NOWE - Sprawdź i zatrzymaj aktywne generowanie
+    console.log("\n🔍 Sprawdzam stan ChatGPT przed rozpoczęciem...");
+    try {
+      const stateCheckResults = await chrome.scripting.executeScript({
+        target: { tabId: activeTab.id },
+        function: () => {
+          // Sprawdź czy ChatGPT generuje odpowiedź
+          const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
+                           document.querySelector('[data-testid="stop-button"]') ||
+                           document.querySelector('button[aria-label*="Zatrzymaj"]');
+          
+          if (stopButton) {
+            console.log('🛑 ChatGPT generuje odpowiedź - klikam Stop...');
+            stopButton.click();
+            return { wasGenerating: true, stopped: true };
+          }
+          
+          // Sprawdź czy editor jest zablokowany
+          const editor = document.querySelector('[role="textbox"]') || 
+                        document.querySelector('[contenteditable]');
+          const isBlocked = editor && editor.getAttribute('contenteditable') === 'false';
+          
+          if (isBlocked) {
+            console.log('⚠️ Editor jest zablokowany - czekam na odblokowanie...');
+            return { wasGenerating: true, stopped: false, editorBlocked: true };
+          }
+          
+          console.log('✅ ChatGPT jest gotowy - interface czysty');
+          return { wasGenerating: false, stopped: false };
+        }
+      });
+      
+      const stateCheck = stateCheckResults[0]?.result;
+      
+      if (stateCheck?.wasGenerating) {
+        console.log('⏸️ Wykryto aktywne generowanie - zatrzymano i czekam na stabilizację...');
+        // Czekaj 3 sekundy na stabilizację interfejsu po zatrzymaniu
+        await new Promise(resolve => setTimeout(resolve, 3000));
+        
+        // Sprawdź ponownie czy interface jest gotowy
+        const recheckResults = await chrome.scripting.executeScript({
+          target: { tabId: activeTab.id },
+          function: () => {
+            const editor = document.querySelector('[role="textbox"]') || 
+                          document.querySelector('[contenteditable]');
+            const isReady = editor && editor.getAttribute('contenteditable') === 'true';
+            return { ready: isReady };
+          }
+        });
+        
+        if (!recheckResults[0]?.result?.ready) {
+          console.error('❌ Interface nie jest gotowy po zatrzymaniu generowania');
+          alert('Błąd: ChatGPT nie jest gotowy. Zatrzymaj ręcznie generowanie i spróbuj ponownie.');
+          return;
+        }
+      }
+      
+      console.log('✅ ChatGPT gotowy do rozpoczęcia resume');
+      
+    } catch (error) {
+      console.warn('⚠️ Nie udało się sprawdzić stanu ChatGPT:', error);
+      // Kontynuuj mimo błędu - może to być problem z permissions
+    }
+    
     // KROK 5: Wstrzyknij prompty do ChatGPT
     console.log("\n🚀 Wstrzykuję prompty do ChatGPT...");
     
     try {
-      // Używamy injectToChat z pustym payload - wszystkie prompty będą w promptChain
-      // Pusty payload sprawi że injectToChat pominie wysyłanie pierwszego promptu
-      const emptyPayload = '';
-      
+      // POPRAWKA: Używamy pierwszego prompta jako payload, reszta jako promptChain
+      // To jest ANALOGICZNE do processArticles (linie 681-713)
       const results = await chrome.scripting.executeScript({
         target: { tabId: activeTab.id },
         function: injectToChat,
-        args: [emptyPayload, promptsToSend, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, `Resume from Stage ${startIndex + 1}`, 'company']
+        args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, `Resume from Stage ${startIndex + 1}`, 'company']
       });
       
       console.log("✅ Prompty wstrzyknięte pomyślnie");
@@ -1088,6 +1164,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`  Analysis: ${analysisType}`);
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
+    
+  // Funkcja generująca losowe opóźnienie dla anti-automation
+  function getRandomDelay() {
+    const minDelay = 3000;  // 3 sekundy
+    const maxDelay = 15000; // 15 sekund
+    return Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
+  }
     
   // Funkcja tworząca licznik promptów
   function createCounter() {
@@ -2720,6 +2803,23 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         // Resume mode - zacznij od razu od prompt chain
         updateCounter(counter, 0, promptChain ? promptChain.length : 0, '🔄 Resume from stage...');
         console.log("⏭️ Pomijam payload - zaczynam od prompt chain");
+        
+        // NOWE: Dodatkowe czekanie na gotowość interfejsu w trybie resume
+        console.log("🔍 Sprawdzam gotowość interfejsu przed rozpoczęciem resume chain...");
+        updateCounter(counter, 0, promptChain ? promptChain.length : 0, '⏳ Sprawdzam gotowość...');
+        
+        const resumeInterfaceReady = await waitForInterfaceReady(30000, counter, 0, promptChain ? promptChain.length : 0);
+        
+        if (!resumeInterfaceReady) {
+          console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
+          updateCounter(counter, 0, promptChain ? promptChain.length : 0, '❌ Interface nie gotowy');
+          await new Promise(resolve => setTimeout(resolve, 5000));
+          return { success: false, lastResponse: '', error: 'Interface nie gotowy w trybie resume' };
+        }
+        
+        console.log("✅ Interface gotowy - rozpoczynam resume chain");
+        updateCounter(counter, 0, promptChain ? promptChain.length : 0, '🔄 Rozpoczynam chain...');
+        await new Promise(resolve => setTimeout(resolve, 1000)); // Krótka stabilizacja
       }
       
       // Teraz uruchom prompt chain
