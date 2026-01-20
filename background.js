@@ -2,7 +2,7 @@ const CHAT_URL = "https://chatgpt.com/";
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global";
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
-const WAIT_FOR_RESPONSE_MS = 5400000; // 90 minut na odpowiedź ChatGPT (zwiększono dla ChatGPT Pro deep thinking)
+const WAIT_FOR_RESPONSE_MS = 7200000; // 120 minut na odpowiedź ChatGPT (zwiększono dla długich deep thinking sessions)
 const RETRY_INTERVAL_MS = 500;
 
 // Optional cloud upload config (kept simple; safe to extend later).
@@ -1586,7 +1586,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     let responseStarted = false;
     let editAttemptedPhase1 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
     const checkedFixedErrorsPhase1 = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
-    const startTimeout = Math.min(maxWaitMs, 5400000); // 90 minut na start (zwiększono dla ChatGPT Pro deep thinking)
+    const startTimeout = Math.min(maxWaitMs, 7200000); // 120 minut na start (zwiększono dla długich deep thinking sessions)
     
     console.log(`📊 [FAZA 1] Timeout dla detekcji startu: ${Math.round(startTimeout/1000)}s (${Math.round(startTimeout/60000)} min)`);
     
@@ -1756,7 +1756,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     // ===== FAZA 2: Detekcja ZAKOŃCZENIA odpowiedzi =====
     // Czekaj aż ChatGPT skończy i interface będzie gotowy na kolejny prompt
     const phase2StartTime = Date.now(); // ✅ NOWY timer dla FAZY 2 (niezależny od FAZY 1!)
-    const phase2Timeout = Math.min(maxWaitMs, 5400000); // 90 minut na zakończenie (zwiększono dla ChatGPT Pro deep thinking)
+    const phase2Timeout = Math.min(maxWaitMs, 7200000); // 120 minut na zakończenie (zwiększono dla długich deep thinking sessions)
     let consecutiveReady = 0;
     let logInterval = 0;
     let editAttemptedPhase2 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
@@ -2003,14 +2003,28 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
       
       // Sprawdź czy nie ma komunikatów o błędach na stronie
-      const errorMessages = document.querySelectorAll('[class*="text"]');
-      for (const msg of errorMessages) {
-        const text = msg.textContent.toLowerCase();
-        if (text.includes('something went wrong') || 
-            text.includes('connection error') ||
-            text.includes('network error') ||
-            text.includes('server error')) {
-          return { healthy: false, error: `Błąd na stronie: ${text.substring(0, 100)}` };
+      // Używamy bardziej precyzyjnych selektorów dla rzeczywistych błędów ChatGPT
+      const errorSelectors = [
+        '[class*="error"]',
+        '[class*="alert"]',
+        '[role="alert"]',
+        '.text-red-500',
+        '.text-red-600'
+      ];
+      
+      for (const selector of errorSelectors) {
+        const errorElements = document.querySelectorAll(selector);
+        for (const elem of errorElements) {
+          const text = elem.textContent.toLowerCase();
+          // Sprawdź tylko elementy zawierające znane frazy błędów
+          if (text.includes('something went wrong') || 
+              text.includes('connection error') ||
+              text.includes('network error') ||
+              text.includes('server error') ||
+              text.includes('unable to load') ||
+              text.includes('failed to')) {
+            return { healthy: false, error: `Błąd na stronie: ${text.substring(0, 100)}` };
+          }
         }
       }
       
@@ -2808,7 +2822,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log("🔍 Sprawdzam gotowość interfejsu przed rozpoczęciem resume chain...");
         updateCounter(counter, 0, promptChain ? promptChain.length : 0, '⏳ Sprawdzam gotowość...');
         
-        const resumeInterfaceReady = await waitForInterfaceReady(30000, counter, 0, promptChain ? promptChain.length : 0);
+        const resumeInterfaceReady = await waitForInterfaceReady(responseWaitMs, counter, 0, promptChain ? promptChain.length : 0);
         
         if (!resumeInterfaceReady) {
           console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
