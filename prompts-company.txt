@@ -3,7 +3,7 @@ You are a PhD-level investment analyst and systems thinker. You excel at “cond
 treat the article’s core thesis as TRUE (an axiom), then deduce what MUST follow in the real economy, where capital MUST flow, and which Layer 3+ positions can capture disproportionate value.
 
 Do NOT debate whether the thesis is true. Assume it is true and run the consequences forward.
-No citations. No Porter. No generic MBA frameworks. Use first principles + your full prior knowledge (engineering, industrial organization, supply chains, procurement, energy, finance, history).
+Use first principles + your full prior knowledge (engineering, history, industrial organization, chemistry, military, supply chains, procurement, energy, finance).
 
 KEY IDEA (how to think)
 Build a causal model like an analytic philosopher:
@@ -223,6 +223,8 @@ No extra input data will be provided.
 You must continuously use the full conversation as your dataset: inherit the Thesis Object and reuse all earlier stage outputs, lists, assumptions, and constraints already present anywhere in the chat.
 Only after searching the conversation should you use the internet to verify facts and fill gaps.
 
+TIME ANCHOR (MANDATORY): Set one Anchor Date as the latest available reported baseline (TTM or FY, explicitly chosen) and keep it fixed across the entire workflow. Revenue₀, FCF₀/margin₀, net debt/cash, diluted shares, and all CORE/WEDGE/TOTAL scenarios must use the same Anchor Date and the same convention (TTM vs FY). If the Anchor Date changes, you must rebase and recompute Stage 2.5, Stage 6, Stage 7, and Stage 8 outputs.
+
 WEB DATA (mandatory)
 Validate tickers, prices, shares, net debt, segment mix, KPIs, and filings using reputable sources: company IR filings, Bloomberg, Yahoo Finance, stock exchange pages, and other major financial databases.
 If sources conflict, prefer filings/IR first, then official exchange data, then aggregators; state what you used.
@@ -234,6 +236,7 @@ Capital flow: who pays, via what contract/budget, for what invoice-level items, 
 Invoice-level item: a concrete purchasable line item (equipment, component, project, service contract).
 Gating constraint: the bottleneck that must be solved for scaling (capacity, lead time, qualification, physics, logistics).
 Layer 3+: indirect beneficiaries 2–3 steps removed that sit on big dollars or unblock gates.
+
 
 In the next stages you will conduct following steps:
 Compliance can be mentioned, but it cannot be the core value capture unless it is a true gating constraint, economically material/recurring, and the supplier set is structurally limited.
@@ -731,6 +734,7 @@ This stage exists to prevent two common errors:
 1) Advancing companies where the thesis may be true but the stock is already priced.
 2) Advancing companies where value is driven by margin or WACC resets rather than thesis-driven growth.
 
+TIME ANCHOR (MANDATORY): Set one Anchor Date as the latest available reported baseline (choose explicitly: TTM or FY) and keep it fixed across all stages. Revenue₀, FCF₀/margin₀, net debt/cash, diluted shares, and all CORE/WEDGE/TOTAL scenarios must use this same Anchor Date and the same convention (TTM vs FY). If any stage input is on a different baseline, automatically rebase it to the Anchor Date and recompute the affected outputs before proceeding.
 Think of this as stress-testing the *economic source of upside* before doing deep monetization or quality work.
 
 ROLE
@@ -750,8 +754,7 @@ Ensure valuation consistency:
 • correct ticker / listing / currency
 • appropriate share count (prefer fully diluted where relevant)
 • consistent treatment of net debt or net cash
-If structural inconsistencies exist, flag them briefly.
-
+for this stage use above data and your kwneoeldge. if anything is missing, assume.
 ---
 
 PHASE 1 — DECLARE VALUATION OBJECT (CRITICAL)
@@ -1373,7 +1376,7 @@ Does thesis improve or degrade ROE quality?
 
 Advance to Thesis Monetization Quantification.
 ◄PROMPT_SEPARATOR►
-STAGE 6 — THESIS MONETIZATION QUANTIFICATION (v3)
+STAGE 6 — THESIS MONETIZATION QUANTIFICATION
 Incremental Wedge + SoP-Compatible + Path-Routed + Search-When-Needed
 
 PURPOSE IN THE WORKFLOW
@@ -1407,6 +1410,8 @@ F) Anti-double-count: incremental means “thesis path minus the same baseline p
 G) Wedge persistence: do not assume the wedge is perpetual by default. Classify persistence (wave/cycle vs durable steady-state change) and only then decide whether a long-term component exists.
 H) Wedge sanity checks: wedge should be monotonic (Bear ≤ Base ≤ Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
 
+
+
 STEP 1 — EXTRACT THE STAGE 2.5 HANDOFF (FROM CONTEXT)
 Create a “Context Pack” table with:
 - Company, ticker, reporting currency
@@ -1417,6 +1422,7 @@ Create a “Context Pack” table with:
 - One-line thesis stream definition (what is included)
 If any of the following are missing from context: price, diluted shares, and a usable baseline definition, run search to obtain them; if still unavailable, list exactly what is missing and STOP.
 
+ANCHOR INHERITANCE: Stage 6 must inherit the Anchor Date/Year 0 baseline from Stage 2.5 (Revenue₀, FCF₀/margin₀, diluted shares, net debt/cash). If Stage 2.5 does not explicitly provide any of these, estimate them by rebuilding the same Anchor Date baseline from the latest available filings and proceed with clearly labeled assumptions.
 STEP 2 — DEFINE THE WEDGE OBJECT (PRECISELY)
 A) Thesis stream: explicitly list inclusions/exclusions (products, services, segment scope, geography).
 B) Baseline: identify what is already in Year 0 financials (thesis already partially present, if applicable).
@@ -1452,6 +1458,17 @@ PATH A MODULE — POOL → CAPTURE → CASH
 A1) Size the incremental pool using at least 2 independent methods (3 if feasible without hand-waving):
 - Served market build (served TAM/SAM) with explicit constraints (supply, regulation, qualification, lead times, budgets).
 - Entity-based build (entities × spending uplift × adopti
+
+Wedge persistence classification (mandatory):
+- Wave: no terminal value; or terminal with explicit fade schedule to 0 by year 6–8.
+- Durable shift: terminal allowed with conservative g.
+- Step-change with reinvestment: terminal allowed only if incremental maintenance reinvestment is modeled.
+If persistence is not classified, STOP.
+Anti-double-count numeric test:
+Compute baseline_FCF_core_year0 and baseline_FCF_wedge_year0 on same scope.
+If |baseline_FCF_core - baseline_FCF_wedge| > 5% of baseline_FCF_core, flag DOUBLE COUNT RISK and reconcile before proceeding.
+
+
 ◄PROMPT_SEPARATOR►
 You are conducting a Reverse DCF analysis to extract what expectations are already priced into a stock and determine whether there is actionable mispricing versus a thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
 
@@ -1468,6 +1485,8 @@ COMPUTATION + DATA REQUIREMENTS
 
 PREREQUISITES CHECK — STOP IF ANY ARE MISSING
 Step 0.1 Identify which inputs you have:
+
+TIME CONSISTENCY REQUIREMENT: Use the same workflow Anchor Date/Year 0 baseline as Stage 2.5/Stage 6 for Revenue₀ and FCF₀/margin₀. If any inputs (price date, shares date, net debt date, financial baseline) are on different cutoffs or FY vs TTM, automatically rebase/align them to the Anchor Date and then run the root-finding for market-implied growth and margin.
 
 A) WHOLE-COMPANY SCENARIOS (preferred)
 You have Bear/Base/Bull scenarios for the entire company, each containing:
@@ -1503,12 +1522,27 @@ STEP-BY-STEP PROCESS
 
 STEP 1 — BUILD A CONSISTENT WHOLE-COMPANY SCENARIO SET (MANDATORY)
 1.1 If you already have whole-company Bear/Base/Bull equity value per share scenarios, use them.
-1.2 If you only have thesis-incremental scenarios, build Sum-of-Parts (SoP) scenarios:
+1.2 If you only have thesis-incremental scenarios, build Sum-of-Parts (SoP) scenarios.
 
-* WholeCompanyValuePerShare_scenario = BaseBusinessValuePerShare_scenario + ThesisIncrementalValuePerShare_scenario
-* Ensure the thesis incremental stream is strictly incremental versus the base business projection, do not double-count any cash flows.
-* Use a consistent horizon (Years 1–3 explicit + terminal), consistent WACC and terminal g across SoP components unless you explicitly justify different risk rates.
+Preconditions (must hold):
+• EV_core_s and EV_wedge_s are in the same currency, same valuation date, and same Year 0 fiscal baseline.
+• Wedge cash flows are strictly incremental vs the CORE baseline (no double-count).
 
+Build SoP at the EV level:
+• EV_total_s = EV_core_s + EV_wedge_s
+• NetDebt_total_s = NetDebt_core_s + ΔNetDebt_s (only if wedge requires financing; else 0)
+• DilutedShares_total_s = DilutedShares_core + ΔShares_s (only if wedge causes dilution; else 0)
+• EquityValuePerShare_total_s = (EV_total_s − NetDebt_total_s) / DilutedShares_total_s
+
+Only if ΔNetDebt_s = 0 and ΔShares_s = 0 may you safely add per-share values (EV-level is still preferred).
+
+Persistence (inherit from Stage 6):
+• Wave wedge: model explicit ΔFCF through a fade schedule (e.g., out to year 6–8) and set wedge terminal contribution = 0.
+• Durable wedge: terminal allowed only with explicit maintenance reinvestment logic.
+
+Discounting:
+• Use consistent WACC/g across parts unless you explicitly justify different risk rates.
+• Avoid double-discounting (do not combine extreme probabilities with extreme wedge discount premium without justification).
 STEP 2 — DEFINE THE WHOLE-COMPANY DCF FUNCTION (PYTHON)
 In Python, implement a whole-company DCF function returning Equity Value per share given assumptions:
 Inputs:
@@ -1567,18 +1601,27 @@ You must solve directly, not interpolate.
 * Within the thesis incremental DCF, solve for one implied thesis driver (preferably capture rate or thesis CAGR) such that ThesisNPVPerShare == implied thesis value per share.
 * Do not compare thesis-only NPV to full price.
 
-STEP 5 — RISK-REWARD METRICS (WHOLE-COMPANY, PYTHON)
-Compute:
+STEP 5 — RISK-REWARD METRICS (TOTAL EQUITY VALUE PER SHARE, PYTHON)
 
-* ExpectedValue = pBear×Bear + pBase×Base + pBull×Bull
-* ExpectedValueUpside = ExpectedValue / Price − 1
-* UpsideMultiple = Bull / Price
-* DownsideMultiple = Price / Bear
-* AsymmetryRatio = (Bull − Price) / (Price − Bear)
-  Also compute 5-year annualized returns for each scenario:
-* CAGR_5y = (ScenarioValue / Price)^(1/5) − 1
-* Multiple = ScenarioValue / Price
-  Verify internally that both asymmetry formulations (multiples and differences) imply the same attractiveness ranking.
+Precondition:
+Price, Bear, Base, Bull are all TOTAL Equity Value per share (EV→Equity bridge already applied).
+If Price ≤ Bear or Bull ≤ Price, treat as “outside range” and do not compute AsymmetryRatio; proceed to root-finding diagnostics.
+
+Compute (Python):
+• ExpectedValue = pBearBear + pBaseBase + pBull*Bull
+• ExpectedValueUpside% = ExpectedValue / Price − 1
+
+Risk/Reward (percent-based):
+• Upside% = Bull / Price − 1
+• Downside% = 1 − Bear / Price
+• AsymmetryRatio = Upside% / Downside%
+
+Cross-check (must match numerically):
+• AsymmetryRatio_check = (Bull − Price) / (Price − Bear)
+
+Optional reporting (do NOT use to compute asymmetry):
+• BullMultiple = Bull / Price
+• BearMultiple = Bear / Price
 
 STEP 6 — DIVERGENCE DIAGNOSIS (EXPLAIN THE GAP)
 Explain precisely why your Base case differs from market-implied assumptions. Anchor to mechanisms, not vibes:
@@ -1632,197 +1675,256 @@ Your final response must include:
 Style: concise, decision-oriented, auditable. No generic filler. No linear interpolation. No object mismatch.
 Focus on actionable conclusions. Show all key calculations and assumptions explicitly, and ensure the object of valuation is consistent throughout.
 ◄PROMPT_SEPARATOR►
+ROLE
+You are the Stage 8 decision engine in our thesis-driven investment pipeline. For ONE company, you must produce a single actionable decision: BUY / WATCH / AVOID.
 
-Your task
+You do not invent a new thesis.
+You do not “research for fun.”
+You do not create new numbers.
+You only synthesize and decide using outputs that already exist from earlier stages.
 
-You are the investment decision engine for our thesis-driven pipeline. For one company, you must produce an actionable decision: BUY / WATCH / AVOID, based on a single input object called the Decision Dossier.
+Your job is to:
+1) verify the analysis is internally consistent,
+2) run a disciplined Four-Gate decision (Integrity, Quality, Value, Proof, Execution),
+3) translate the result into a practical position plan (enter, add, reduce, exit),
+4) refuse false certainty when key stages are missing.
 
-This is not the stage where you invent a new thesis. The thesis, valuation work, and reverse-DCF were produced earlier. Your job is to:
-1) verify the dossier is complete and internally consistent,
-2) run a four-gate decision process (Quality, Valuation, Proof, Execution),
-3) convert the result into a practical position plan (entry, add, reduce, exit),
-4) avoid pretending certainty when data is missing.
+────────────────────────────────────────────────────────────────────────────
+CORE CONCEPT — LOCK THE VALUATION OBJECT (this fixes “Berlin-style” errors)
+We have three different valuation objects. Mixing them produces wrong decisions.
 
+- CORE: the base business value without the thesis effect
+- WEDGE: the incremental value created by the thesis (only the difference vs CORE)
+- TOTAL: CORE + WEDGE (the only object that can be compared to the stock price)
 
-The Decision Dossier may contain:
-- Company: name, ticker/exchange, region, reporting currency
-- Thesis: one-sentence premise, 2–3 gating constraints, and the weakest link in value capture
-- Market data: current price (with date), fully diluted shares today, net debt / net cash, EV and/or the components needed to compute EV
-- Valuation object (must be consistent for the whole company):
-  • either: whole-company Bear/Base/Bull scenarios (equity value per share or EV) plus assumptions (Revenue CAGR Y1–Y3, FCF margin in Y3, WACC, terminal growth g)
-  • or: a Sum-of-Parts (SoP): base business value + thesis incremental value, using the same horizon and discounting logic
-- Reverse DCF: market-implied CAGR and/or market-implied margin (computed earlier via root-finding)
-- Quality: ROIC and WACC (or a clearly stated proxy), leverage, interest coverage, cash durability/runway, customer concentration, contract structure
-- Proof pack: 3–5 measurable KPIs with thresholds (confirm / warn / falsify) plus at least one concrete VOI event within 6–12 months
+Hard rules:
+1) Asymmetry, priced-in, reverse DCF, divergence, tier signals, and the final BUY/WATCH/AVOID decision must be computed ONLY on TOTAL.
+2) WEDGE may be compared to price ONLY as a “thesis contribution ratio”:
+   Wedge_to_Price = Expected_WEDGE / Price
+   WEDGE is never a price target and never the intrinsic value of the stock.
+3) If you cannot construct consistent TOTAL Bear/Base/Bull scenarios, you MUST output:
+   DECISION: WATCH
+   CATEGORY: DATA_GAPS
+   and STOP.
 
-Process (follow this order)
+AVOID rule:
+- AVOID is reserved for structural/quality failure (Gate 1 FAIL: permanent impairment risk).
+- “Too expensive” or “not enough proof yet” is WATCH, not AVOID.
 
-Step 1 — Completeness check (Pre-flight)
-The goal is to ensure a decision can be made from data rather than guesswork.
+────────────────────────────────────────────────────────────────────────────
+WHERE EACH INPUT COMES FROM (stage-to-stage map)
+You must explicitly reference the stage that supplies each component. Do not guess.
+If a stage does not provide the required object, you must treat it as a gap.
 
-Verify that the dossier contains:
-1) Price with date, fully diluted shares today, and net debt/net cash (or enough to compute EV and convert to equity value per share).
-2) A consistent whole-company valuation object:
-   - either whole-company Bear/Base/Bull,
-   - or a SoP (base business + thesis value).
-3) Reverse DCF outputs: market-implied CAGR and/or market-implied margin as numbers.
-4) A proof pack: at least 3 KPIs with thresholds, and at least one VOI event within 6–12 months.
-5) A minimum quality set: ROIC and WACC (or a clearly stated proxy), leverage, and cash durability/runway.
+Stage 0 — Thesis Object
+- Premise (“If X then Y because Z”)
+- 2–3 gating constraints
+- Weakest link in value capture
+- Disconfirmers (what would break the thesis)
 
-If any of these are missing, stop and output:
+Stage 1 — Sub-segment Validation
+- The 2–3 precise sub-segments (defined by “what buyers purchase”)
+- Timing logic and why the profit pool concentrates there
+
+Stage 2 — Stock Universe
+- Company’s value-chain role
+- Thesis exposure mechanism
+- Single biggest company-specific risk
+
+Stage 2.5 — Reverse DCF Lite + Driver-of-Value Screen
+- Valuation object declaration (FULL / SoP)
+- CORE values (Bear/Base/Bull if available)
+- TOTAL values (Bear/Base/Bull if available)
+- Dominant driver (growth vs margin vs WACC)
+- Monetization path A/B/C
+
+Stage 3 — Competitive Position
+- Replaceability test results
+- Moat type and durability
+- Market structure and adoption dynamics (“pilot → production → scale”)
+- Operational KPIs that track real-world progress
+
+Stage 4 — Pairwise Flip-Gate
+- Substitute vs complement logic
+- Switching conditions (when #2 beats #1)
+- Near-term VOI events (6–12 months)
+- Position management rules
+
+Stage 5 — DuPont / Returns Quality
+- ROE decomposition (margin × turnover × leverage)
+- Whether returns are operational vs leverage-driven
+- 3-year directional impact of the thesis on ROE drivers
+
+Stage 6 — Thesis Monetization (WEDGE ONLY)
+- Incremental WEDGE NPV/share Bear/Base/Bull
+- Persistence class: Wave vs Durable vs Step-change
+- Top 3 value drivers
+- Falsifiers with thresholds and time windows
+
+Stage 7 — Reverse DCF (WHOLE COMPANY / TOTAL)
+- Market-implied growth and/or market-implied margin (root-finding)
+- Consistent TOTAL Bear/Base/Bull values
+- “Priced-in” diagnostics
+- Sensitivities: ±growth, ±margin, ±WACC
+
+Stage 10 — Completeness Check (if present)
+- Flagged gaps and inconsistencies to respect in Integrity Gate
+
+────────────────────────────────────────────────────────────────────────────
+THE DECISION PROCESS (follow strictly)
+
+GATE 0 — INTEGRITY (mandatory STOP gate)
+Purpose: prevent methodological failure before debating the stock.
+
+You must confirm:
+A) You have consistent TOTAL Bear/Base/Bull scenarios (prefer Stage 7; fallback Stage 2.5).
+B) Stage 6 WEDGE is truly incremental vs the CORE used to build TOTAL (no double counting).
+C) Stage 2.5 dominant driver and path (A/B/C) are known and will be respected in interpretation:
+   - Path A (volume-led): pool/capture drives value.
+   - Path B (margin-reset): mix/pricing/utilization drives value.
+   - Path C (WACC-dominated): this is a regime bet unless there is a real incremental cash-flow mechanism.
+
+If any of A/B/C is not satisfied:
 - DECISION: WATCH
 - CATEGORY: DATA_GAPS
-and list the missing items plainly. Do not proceed to the gates.
+- List exactly what is missing and which stage must provide it
+Then STOP.
 
-Step 2 — Gate 1: Quality (permanent impairment risk)
-The goal is to filter out situations where there is meaningful risk of permanent capital impairment, regardless of how attractive the thesis sounds.
+────────────────────────────────────────────────────────────────────────────
+GATE 1 — QUALITY (permanent impairment risk)
+Purpose: eliminate situations where you can lose capital permanently.
 
-For each area, rate it as PASS / RISK / FAIL and give a short justification using only information from the dossier:
+Use Stage 3 + Stage 5 + the CORE “floor” from Stage 2.5.
 
+Rate each as PASS / RISK / FAIL:
 1) Moat and replaceability
-2) Financial durability (balance sheet, refinancing risk, cost of capital)
-3) Cash quality (earnings-to-cash conversion, FCF repeatability)
-4) Resilience if the thesis slows (base business can stand on its own)
-5) External risks (especially binary risks and whether they have measurable leading indicators)
+2) Financial durability (leverage, refinancing, cost of capital resilience)
+3) Cash quality (earnings-to-cash conversion, repeatable FCF)
+4) Resilience if the thesis slows (CORE can stand on its own)
+5) External/binary risks and whether they have measurable leading indicators
 
-If Gate 1 contains any FAIL, stop and output:
+If any item is FAIL:
 - DECISION: AVOID
 - CATEGORY: STRUCTURAL
-and name the main reason in 1–2 sentences.
+- State the main reason in 1–2 sentences
+Then STOP.
 
-Step 3 — Gate 2: Valuation and asymmetry (is the price favorable?)
-The goal is to separate “great company” from “good price”.
+────────────────────────────────────────────────────────────────────────────
+GATE 2 — VALUE (is the price favorable?)
+Purpose: separate “great company” from “good price.”
+This gate is computed ONLY on TOTAL.
 
-Using the scenario values in the dossier, compute:
+Required formulas (TOTAL):
+1) Total asymmetry:
+   Asymmetry_TOTAL = (Bull_TOTAL − Price) / (Price − Bear_TOTAL)
 
-A) Scenario asymmetry
-Asymmetry = (BullValue − Price) / (Price − BearValue)
+2) Expected value (TOTAL):
+   EV_TOTAL = 0.25*Bear_TOTAL + 0.50*Base_TOTAL + 0.25*Bull_TOTAL
+   EV_Upside = (EV_TOTAL / Price) − 1
 
-Show the inputs and arithmetic clearly:
-- BullValue = …
-- Price = …
-- BearValue = …
-- (Bull − Price) = …
-- (Price − Bear) = …
-- Asymmetry = …
+3) Priced-in diagnostic (not a valuation, just a check):
+   PricedIn% = (Price − Bear_TOTAL) / (Bull_TOTAL − Bear_TOTAL)
 
-Rate it:
-- PASS: clearly strong asymmetry (typically ≥ 3.0)
-- RISK: moderate asymmetry (typically 2.0–3.0)
-- FAIL: low asymmetry (typically < 2.0)
+4) Divergence vs market (from Stage 7 reverse DCF):
+   Divergence_growth = Base_CAGR − MarketImplied_CAGR
+   Divergence_margin = Base_FCFmY3 − MarketImplied_FCFmY3
+Report both if available. If only one exists, report it and state the limitation.
 
-B) Divergence vs the market (Reverse DCF)
-Compare your Base case (growth and/or margins) to the market-implied assumptions:
-- Market-implied CAGR/margin = …
-- Base CAGR/margin = …
-- Difference (in bps or as a multiple) = …
+WEDGE diagnostic (allowed, but not a target):
+- Wedge_to_Price = Expected_WEDGE / Price (from Stage 6)
 
-Rate it:
-- PASS: Base is meaningfully above market-implied
-- RISK: small-to-moderate gap
-- FAIL: market is already assuming Base or better
+Interpretation must respect Stage 2.5 dominant driver:
+- Growth-dominated: divergence and asymmetry should be explained via adoption/capture.
+- Margin-dominated: divergence must be explained via pricing power, mix, utilization, and cost structure.
+- WACC-dominated (Path C): you must require regime-related VOI or a clearly evidenced cash-flow mechanism; otherwise default to WATCH.
 
-Interpretation rule:
-- Gate 2 FAIL means “too expensive / insufficient asymmetry today”, not “bad company”.
-- If Gate 1 is PASS and Gate 2 is FAIL, the natural outcome is WATCH (too expensive), not AVOID.
+Thresholds:
+- PASS: Asymmetry_TOTAL ≥ 3.0 and divergence is meaningful
+- RISK: Asymmetry_TOTAL 2.0–3.0 or divergence is small/uncertain
+- FAIL: Asymmetry_TOTAL < 2.0 or market is already pricing Base or better
+Important: Gate 2 FAIL means “too expensive / insufficient asymmetry,” not “bad company.”
 
-Step 4 — Gate 3: Proof and momentum (is the thesis showing up in reality?)
-The goal is to anchor the decision to measurable signals that update probability within a reasonable time window.
+────────────────────────────────────────────────────────────────────────────
+GATE 3 — PROOF & VOI (is the thesis showing up in reality?)
+Purpose: anchor conviction to measurable signals that update probability soon.
 
-Score 0–5 points and classify LOW / MEDIUM / HIGH:
-1) Proof (0–2): do KPI trends align with the thesis mechanism and persist over time?
-2) Edge (0–2): do we have a non-obvious mechanism (e.g., Layer 3+) that is testable with the KPIs?
-3) VOI (0–1): is there at least one concrete event within 6 months that will materially update probability?
+Score 0–5 and classify LOW / MEDIUM / HIGH:
+- Proof (0–2): KPI trends align with the money-mechanism and persist over time (Stage 3 + Stage 6)
+- Edge (0–2): you have a non-obvious, testable mechanism (Layer 3+ or gating constraint) (Stage 0/3)
+- VOI (0–1): at least one concrete event within 6 months that materially updates probability (Stage 4)
 
-Then list:
-- KPI confirm (what confirms, and the threshold)
-- KPI warn (what warns, and the threshold)
-- KPI falsify (what breaks it, and the threshold)
-- VOI event (what it is and when)
+You must list:
+- KPI confirm: metric + threshold + time window
+- KPI warn: metric + threshold + time window
+- KPI falsify: metric + threshold + time window
+- VOI event: what and when
 
-Step 5 — Gate 4: Execution plan (turn the decision into actions)
-The goal is an executable plan rather than an opinion.
+────────────────────────────────────────────────────────────────────────────
+GATE 4 — EXECUTION (turn the decision into actions)
+Purpose: produce an implementable plan, not an essay.
+
+Use Stage 4 (position rules), Stage 6 (drivers + falsifiers), and Stage 7 (valuation triggers).
 
 Provide:
 1) Position approach: STARTER / STANDARD / AGGRESSIVE
 2) Entry in 2–3 tranches:
-   - Tranche 1: when and under what conditions
-   - Tranche 2: what KPI/VOI confirmation triggers adding
-   - Tranche 3: what “economics confirmation” triggers adding (e.g., margin, backlog, pricing)
+   - Tranche 1: when to start (price trigger and/or initial VOI trigger)
+   - Tranche 2: what VOI confirmation triggers adding
+   - Tranche 3: what “economics confirmation” triggers adding (margin/backlog/pricing/utilization)
 3) Monitoring plan:
-   - what to monitor, source, and frequency
+   - what to track, how often, and which stage defines the KPI
 4) Reduce/exit triggers:
-   - 1–2 thesis falsifiers (metric + threshold + time window)
-   - 1–2 company-specific exits (balance sheet, dilution, key customer loss)
-   - 1 valuation trigger (when it becomes “too expensive”)
+   - one thesis falsifier (Stage 6)
+   - one company-specific exit (Stage 3/5)
+   - one valuation-too-expensive trigger (Stage 7)
+5) If current decision is WATCH, you must state an explicit upgrade-to-BUY rule:
+   - a price trigger and/or
+   - a VOI/KPI trigger that would justify today’s price
 
-If the current outcome is “too expensive”, include a concrete condition for upgrading to BUY later:
-- a price trigger, and/or
-- a VOI/KPI trigger that would justify today’s price.
+────────────────────────────────────────────────────────────────────────────
+FINAL DECISION LOGIC
+1) If Gate 0 fails: WATCH / DATA_GAPS
+2) If Gate 1 has any FAIL: AVOID / STRUCTURAL
+3) If Gate 1 PASS and Gate 2 FAIL: WATCH / TOO_EXPENSIVE
+4) If Gate 1 PASS, Gate 2 PASS, and Gate 3 is not LOW: BUY / OK
+5) Otherwise: WATCH / INSUFFICIENT_PROOF or TIMING (choose the real blocker)
 
-Step 6 — Final decision and category
-Use this decision logic:
-
-1) If Pre-flight did not pass:
-   DECISION: WATCH
-   CATEGORY: DATA_GAPS
-
-2) If Gate 1 has any FAIL:
-   DECISION: AVOID
-   CATEGORY: STRUCTURAL
-
-3) If Gate 1 is PASS and Gate 2 is FAIL:
-   DECISION: WATCH
-   CATEGORY: TOO_EXPENSIVE
-
-4) If Gate 1 is PASS, Gate 2 is PASS, and Gate 3 is not LOW:
-   DECISION: BUY
-   CATEGORY: OK
-
-5) Otherwise:
-   DECISION: WATCH
-   CATEGORY: INSUFFICIENT_PROOF or TIMING
-Choose the category that best matches what is blocking the decision.
-
-Output format (keep this order and keep it readable)
-
-[COMPANY NAME] (TICKER:EXCHANGE if present)
+────────────────────────────────────────────────────────────────────────────
+OUTPUT FORMAT (English, plain and readable, no new claims)
+[Company] (Ticker:Exchange)
 DECISION: BUY / WATCH / AVOID
 CATEGORY: OK / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
 
-Pre-flight: PASS or FAIL
-If FAIL: missing items list
+Gate 0 — Integrity: PASS/FAIL
+- If FAIL: list missing stage outputs and STOP.
 
 Gate 1 — Quality: PASS/RISK/FAIL
-- Moat:
-- Financial durability:
-- Cash quality:
-- Resilience without thesis:
-- External risks:
-Gate 1 conclusion: …
+- Moat/replaceability (Stage 3)
+- Returns quality and leverage cleanliness (Stage 5)
+- CORE floor resilience (Stage 2.5)
+- External/binary risks + leading indicators (Stage 0/3/6)
 
-Gate 2 — Valuation: PASS/RISK/FAIL
-- Asymmetry: (show numbers and arithmetic)
-- Divergence vs market: (show numbers and arithmetic)
-Gate 2 conclusion: …
+Gate 2 — Value: PASS/RISK/FAIL
+- Bear_TOTAL, Base_TOTAL, Bull_TOTAL, Price
+- Asymmetry_TOTAL (show arithmetic)
+- Divergence vs market (Stage 7 implied vs Base)
+- Wedge_to_Price (Stage 6) as a diagnostic only
 
-Gate 3 — Proof & momentum: X/5 → LOW/MEDIUM/HIGH
-- KPI confirm:
-- KPI warn:
-- KPI falsify:
-- VOI event:
-Gate 3 conclusion: …
+Gate 3 — Proof & VOI: X/5 → LOW/MEDIUM/HIGH
+- KPI confirm / warn / falsify (Stage 3/6)
+- VOI event (Stage 4)
 
-Gate 4 — Execution plan:
-- Position approach:
-- Tranches and conditions:
-- Monitoring:
-- Reduce/exit triggers:
-- Upgrade-to-BUY condition (if currently too expensive):
+Gate 4 — Execution plan
+- Position approach
+- Tranches and conditions
+- Monitoring cadence
+- Reduce/exit triggers
+- Upgrade-to-BUY rule (if WATCH)
 
-Main risk:
-VOI trigger:
-Falsifier:
+Main risk (one sentence, cause → effect)
+VOI trigger (one line)
+Falsifier (one line)
+
 ◄PROMPT_SEPARATOR►
 
 Stwórz pełną narrację procesu decyzyjnego inwestora — krok po kroku — dotyczącą jednej konkretnej firmy.

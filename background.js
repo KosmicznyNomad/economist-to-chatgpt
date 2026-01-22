@@ -1,5 +1,5 @@
-const CHAT_URL = "https://chatgpt.com/";
-const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-68f71d198ffc819191ccc108942c5a56-iskierka-test-global";
+const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
+const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 7200000; // 120 minut na odpowiedź ChatGPT (zwiększono dla długich deep thinking sessions)
