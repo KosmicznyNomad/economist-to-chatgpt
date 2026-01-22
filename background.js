@@ -28,13 +28,12 @@ const STAGE_NAMES_COMPANY = [
   "Stock Selection (15 Companies)",       // Etap 4: 15 stock picks
   "Reverse DCF Lite + Driver Screen",     // Etap 5: Quick valuation filter
   "Competitive Positioning (4 Companies)",// Etap 6: Top 4 companies
-  "Pairwise Flip-Gate (Top 2)",           // Etap 7: Head-to-head comparison
-  "DuPont ROE Quality",                   // Etap 8: ROE decomposition
-  "Thesis Monetization",                  // Etap 9: Revenue/profit quantification
-  "Reverse DCF (Full)",                   // Etap 10: Full valuation expectations
-  "Four-Gate Framework",                  // Etap 11: BUY/AVOID decision
-  "Simple Story (Polski)",                // Etap 12: Plain language summary
-  "Final Output"                          // Etap 13: Formatted decision output
+  "DuPont ROE Quality",                   // Etap 7: ROE decomposition
+  "Thesis Monetization",                  // Etap 8: Revenue/profit quantification
+  "Reverse DCF (Full)",                   // Etap 9: Full valuation expectations
+  "Four-Gate Framework",                  // Etap 10: BUY/AVOID decision
+  "Simple Story (Polski)",                // Etap 11: Plain language summary
+  "Final Output"                          // Etap 12: Formatted decision output
 ];
 
 // Funkcja generująca losowe opóźnienie dla anti-automation
@@ -1176,36 +1175,173 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   function createCounter() {
     const counter = document.createElement('div');
     counter.id = 'economist-prompt-counter';
+    
+    // Pobierz zapisaną pozycję i stan z localStorage
+    const savedPosition = JSON.parse(localStorage.getItem('economist-counter-position') || '{"top": "20px", "right": "20px"}');
+    const isMinimized = localStorage.getItem('economist-counter-minimized') === 'true';
+    
     counter.style.cssText = `
       position: fixed;
-      top: 20px;
-      right: 20px;
+      top: ${savedPosition.top};
+      ${savedPosition.right ? `right: ${savedPosition.right};` : ''}
+      ${savedPosition.left ? `left: ${savedPosition.left};` : ''}
       background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
       color: white;
-      padding: 16px 24px;
       border-radius: 12px;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
       font-size: 14px;
       font-weight: 600;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
       z-index: 10000;
-      min-width: 200px;
-      text-align: center;
+      min-width: ${isMinimized ? '60px' : '200px'};
+      cursor: ${isMinimized ? 'pointer' : 'default'};
+      transition: all 0.3s ease;
     `;
+    
+    // Utwórz kontener nagłówka (dla przeciągania)
+    const header = document.createElement('div');
+    header.style.cssText = `
+      padding: 8px 12px;
+      cursor: move;
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      border-bottom: ${isMinimized ? 'none' : '1px solid rgba(255,255,255,0.3)'};
+      user-select: none;
+    `;
+    
+    const dragHandle = document.createElement('span');
+    dragHandle.textContent = '⋮⋮';
+    dragHandle.style.cssText = 'opacity: 0.7; font-size: 16px;';
+    
+    const minimizeBtn = document.createElement('button');
+    minimizeBtn.textContent = isMinimized ? '□' : '−';
+    minimizeBtn.style.cssText = `
+      background: none;
+      border: none;
+      color: white;
+      font-size: 18px;
+      cursor: pointer;
+      padding: 0;
+      width: 20px;
+      height: 20px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.7;
+      transition: opacity 0.2s;
+    `;
+    minimizeBtn.onmouseover = () => minimizeBtn.style.opacity = '1';
+    minimizeBtn.onmouseout = () => minimizeBtn.style.opacity = '0.7';
+    
+    header.appendChild(dragHandle);
+    header.appendChild(minimizeBtn);
+    counter.appendChild(header);
+    
+    // Utwórz kontener zawartości
+    const content = document.createElement('div');
+    content.id = 'economist-counter-content';
+    content.style.cssText = `
+      padding: ${isMinimized ? '0' : '8px 24px 16px 24px'};
+      text-align: center;
+      display: ${isMinimized ? 'none' : 'block'};
+    `;
+    counter.appendChild(content);
+    
+    // Obsługa minimalizacji
+    minimizeBtn.addEventListener('click', (e) => {
+      e.stopPropagation();
+      const isCurrentlyMinimized = content.style.display === 'none';
+      
+      if (isCurrentlyMinimized) {
+        content.style.display = 'block';
+        counter.style.minWidth = '200px';
+        counter.style.cursor = 'default';
+        header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
+        content.style.padding = '8px 24px 16px 24px';
+        minimizeBtn.textContent = '−';
+        localStorage.setItem('economist-counter-minimized', 'false');
+      } else {
+        content.style.display = 'none';
+        counter.style.minWidth = '60px';
+        counter.style.cursor = 'pointer';
+        header.style.borderBottom = 'none';
+        content.style.padding = '0';
+        minimizeBtn.textContent = '□';
+        localStorage.setItem('economist-counter-minimized', 'true');
+      }
+    });
+    
+    // Obsługa przeciągania
+    let isDragging = false;
+    let startX, startY, startLeft, startTop;
+    
+    header.addEventListener('mousedown', (e) => {
+      if (e.target === minimizeBtn) return;
+      isDragging = true;
+      startX = e.clientX;
+      startY = e.clientY;
+      
+      const rect = counter.getBoundingClientRect();
+      startLeft = rect.left;
+      startTop = rect.top;
+      
+      counter.style.transition = 'none';
+      e.preventDefault();
+    });
+    
+    document.addEventListener('mousemove', (e) => {
+      if (!isDragging) return;
+      
+      const deltaX = e.clientX - startX;
+      const deltaY = e.clientY - startY;
+      
+      const newLeft = startLeft + deltaX;
+      const newTop = startTop + deltaY;
+      
+      counter.style.left = `${newLeft}px`;
+      counter.style.right = 'auto';
+      counter.style.top = `${newTop}px`;
+    });
+    
+    document.addEventListener('mouseup', () => {
+      if (isDragging) {
+        isDragging = false;
+        counter.style.transition = 'all 0.3s ease';
+        
+        // Zapisz pozycję do localStorage
+        const position = {
+          top: counter.style.top,
+          left: counter.style.left
+        };
+        localStorage.setItem('economist-counter-position', JSON.stringify(position));
+      }
+    });
+    
+    // Kliknięcie w zminimalizowany licznik rozwinięć
+    counter.addEventListener('click', () => {
+      if (content.style.display === 'none') {
+        minimizeBtn.click();
+      }
+    });
+    
     document.body.appendChild(counter);
     return counter;
   }
   
   // Funkcja aktualizująca licznik
   function updateCounter(counter, current, total, status = '') {
+    const content = document.getElementById('economist-counter-content');
+    if (!content) return;
+    
     if (current === 0) {
-      counter.innerHTML = `
+      content.innerHTML = `
         <div style="font-size: 16px; margin-bottom: 4px;">📝 Przetwarzanie artykułu</div>
         <div style="font-size: 12px; opacity: 0.9;">${status}</div>
       `;
     } else {
       const percent = Math.round((current / total) * 100);
-      counter.innerHTML = `
+      content.innerHTML = `
         <div style="font-size: 16px; margin-bottom: 4px;">Prompt Chain</div>
         <div style="font-size: 24px; margin-bottom: 4px;">${current} / ${total}</div>
         <div style="background: rgba(255,255,255,0.3); height: 6px; border-radius: 3px; margin-bottom: 4px;">
@@ -1219,9 +1355,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Funkcja usuwająca licznik
   function removeCounter(counter, success = true) {
     if (success) {
-      counter.innerHTML = `
-        <div style="font-size: 18px;">🎉 Zakończono!</div>
-      `;
+      const content = document.getElementById('economist-counter-content');
+      if (content) {
+        content.innerHTML = `
+          <div style="font-size: 18px;">🎉 Zakończono!</div>
+        `;
+        content.style.display = 'block';
+        content.style.padding = '8px 24px 16px 24px';
+        counter.style.minWidth = '200px';
+      }
       setTimeout(() => counter.remove(), 3000);
     } else {
       counter.remove();
