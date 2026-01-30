@@ -148,6 +148,29 @@
     .copy-btn.copied {
       background: #28a745;
     }
+
+    .response-actions {
+      display: flex;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .toggle-btn {
+      padding: 8px 12px;
+      background: #f1f3f4;
+      color: #444;
+      border: none;
+      border-radius: 4px;
+      font-size: 12px;
+      font-weight: 500;
+      cursor: pointer;
+      transition: background 0.2s;
+      white-space: nowrap;
+    }
+
+    .toggle-btn:hover {
+      background: #e8eaed;
+    }
     
     .response-text {
       font-size: 14px;
@@ -160,6 +183,54 @@
       padding: 12px;
       background: #f8f9fa;
       border-radius: 4px;
+    }
+
+    .response-text.formatted {
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      background: #f3f4f6;
+      border: 1px solid #e5e7eb;
+    }
+
+    .response-stage {
+      font-size: 12px;
+      color: #666;
+      margin-top: 6px;
+    }
+
+    .market-table {
+      width: 100%;
+      border-collapse: collapse;
+      font-size: 13px;
+      margin-top: 8px;
+    }
+
+    .market-table th,
+    .market-table td {
+      padding: 8px 10px;
+      text-align: left;
+      border-bottom: 1px solid #eee;
+    }
+
+    .market-table th {
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #666;
+    }
+
+    .market-change.positive {
+      color: #1b7f3a;
+      font-weight: 600;
+    }
+
+    .market-change.negative {
+      color: #b00020;
+      font-weight: 600;
+    }
+
+    .market-status {
+      font-size: 12px;
+      color: #888;
     }
     
     .empty-state {
@@ -221,6 +292,31 @@
         <button class="clear-btn" id="clearBtn">Wyczyść wszystkie</button>
       </div>
     </div>
+
+    <div class="section-header">
+      <h2 class="section-title">Zmiany dzienne spółek</h2>
+      <div class="section-actions">
+        <span class="section-count" id="marketCount">0 spółek</span>
+      </div>
+    </div>
+    <div class="responses-list">
+      <div class="response-item">
+        <div class="response-text" id="marketStatus">Brak danych rynkowych.</div>
+        <table class="market-table" id="marketTable" style="display: none;">
+          <thead>
+            <tr>
+              <th>Symbol</th>
+              <th>Spółka</th>
+              <th>Kurs</th>
+              <th>Zmiana</th>
+              <th>%</th>
+              <th>Status</th>
+            </tr>
+          </thead>
+          <tbody></tbody>
+        </table>
+      </div>
+    </div>
     
     <!-- Sekcja: Analiza spółki -->
     <div class="section-header">
@@ -261,4 +357,3 @@
   <script src="responses.js"></script>
 </body>
 </html>
-

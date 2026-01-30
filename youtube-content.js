@@ -313,6 +313,9 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
         }
         
         console.log(`[YouTube Content Script] Zwracam: ${result.transcript?.length || 0} znaków, metoda: ${result.method}`);
+        if (!result.title) {
+          result.title = document.title || '';
+        }
         sendResponse(result);
         
       } catch (error) {

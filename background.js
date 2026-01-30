@@ -2,7 +2,7 @@ const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/pro
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
-const WAIT_FOR_RESPONSE_MS = 7200000; // 120 minut na odpowiedź ChatGPT (zwiększono dla długich deep thinking sessions)
+const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
 const RETRY_INTERVAL_MS = 500;
 
 // Optional cloud upload config (kept simple; safe to extend later).
@@ -22,18 +22,20 @@ let PROMPTS_PORTFOLIO = [];
 
 // Nazwy etapów dla company analysis (synchronizowane z prompts-company.txt)
 const STAGE_NAMES_COMPANY = [
-  "Artykuł + Analiza Layer 3+",           // Etap 1: {{articlecontent}} + first principles
-  "Investment Pipeline (Stage 1-10)",     // Etap 2: Process overview
-  "Porter's Five Forces",                 // Etap 3: Industry analysis
-  "Stock Selection (15 Companies)",       // Etap 4: 15 stock picks
-  "Reverse DCF Lite + Driver Screen",     // Etap 5: Quick valuation filter
-  "Competitive Positioning (4 Companies)",// Etap 6: Top 4 companies
-  "DuPont ROE Quality",                   // Etap 7: ROE decomposition
-  "Thesis Monetization",                  // Etap 8: Revenue/profit quantification
-  "Reverse DCF (Full)",                   // Etap 9: Full valuation expectations
-  "Four-Gate Framework",                  // Etap 10: BUY/AVOID decision
-  "Simple Story (Polski)",                // Etap 11: Plain language summary
-  "Final Output"                          // Etap 12: Formatted decision output
+  "Stage 0: Evidence Ledger + Thesis",
+  "Pipeline Setup (Stages 0-9)",
+  "Stage 1: Sub-segment Validation (Porter + S-curve)",
+  "Stage 2: Stock Universe (15 names)",
+  "Thesis Definition (PL paste)",
+  "Stage 2.5: Reverse DCF Lite + Driver Screen",
+  "Stage 3: Competitive Position (4 finalists)",
+  "Stage 3.5: Revaluation Parameter (RP)",
+  "Stage 4: DuPont ROE Quality",
+  "Stage 6: Thesis Monetization Quantification",
+  "Reverse DCF (Full / TOTAL)",
+  "Stage 8: Four-Gate Decision",
+  "Simple Story (PL narrative)",
+  "Four-Gate Output (1 line)"
 ];
 
 // Funkcja generująca losowe opóźnienie dla anti-automation
@@ -350,6 +352,8 @@ async function resumeFromStage(startIndex) {
   console.log(`\n${'='.repeat(80)}`);
   console.log(`🔄 RESUME FROM STAGE ${startIndex + 1}`);
   console.log(`${'='.repeat(80)}\n`);
+
+
   
   try {
     // KROK 1: Znajdź aktywne okno ChatGPT
@@ -446,24 +450,109 @@ async function resumeFromStage(startIndex) {
       const stateCheck = stateCheckResults[0]?.result;
       
       if (stateCheck?.wasGenerating) {
-        console.log('⏸️ Wykryto aktywne generowanie - zatrzymano i czekam na stabilizację...');
-        // Czekaj 3 sekundy na stabilizację interfejsu po zatrzymaniu
-        await new Promise(resolve => setTimeout(resolve, 3000));
-        
-        // Sprawdź ponownie czy interface jest gotowy
-        const recheckResults = await chrome.scripting.executeScript({
+        console.log('⏳ Wykryto aktywne generowanie - czekam na zakończenie poprzedniej odpowiedzi...');
+        const waitResults = await chrome.scripting.executeScript({
           target: { tabId: activeTab.id },
-          function: () => {
-            const editor = document.querySelector('[role="textbox"]') || 
-                          document.querySelector('[contenteditable]');
-            const isReady = editor && editor.getAttribute('contenteditable') === 'true';
-            return { ready: isReady };
-          }
+          function: async (maxWaitMs) => {
+            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
+            const compactText = (text) => (text || '').replace(/\s+/g, ' ').trim();
+            const isVisible = (el) => {
+              if (!el) return false;
+              const rects = el.getClientRects?.();
+              if (!rects || rects.length === 0) return false;
+              const style = window.getComputedStyle?.(el);
+              if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
+              const rect = el.getBoundingClientRect?.();
+              return !!rect && rect.width > 0 && rect.height > 0;
+            };
+            const isGenerating = () => {
+              const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+              const lastAssistantMsg = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
+              const researchIndicators = Array.from(
+                document.querySelectorAll('[data-testid*="research"], [aria-label*="Research"], [aria-label*="research"], [class*="research"], [class*="Research"]')
+              ).filter(isVisible);
+              const researchStatus = researchIndicators.find((el) => {
+                const text = (el.innerText || '').toLowerCase();
+                return text.includes('researching') || text.includes('research in progress');
+              });
+              if (researchStatus) return { generating: true, reason: 'deepResearch' };
+              const progress = researchIndicators.find((el) => {
+                const bar = el.querySelector('[role="progressbar"], [class*="progress"]');
+                return bar && isVisible(bar);
+              });
+              if (progress) return { generating: true, reason: 'deepResearchProgress' };
+              const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
+                                 document.querySelector('[data-testid="stop-button"]') ||
+                                 document.querySelector('button[aria-label*="stop"]') ||
+                                 document.querySelector('button[aria-label="Zatrzymaj"]') ||
+                                 document.querySelector('button[aria-label*="Zatrzymaj"]');
+              if (stopButton && isVisible(stopButton)) return { generating: true, reason: 'stopButton' };
+              if (lastAssistantMsg) {
+                const thinking = lastAssistantMsg.querySelector('[class*="thinking"], [class*="Thinking"], [data-testid*="thinking"], [aria-label*="thinking"], [aria-label*="Thinking"]');
+                if (thinking && isVisible(thinking)) return { generating: true, reason: 'thinkingIndicator' };
+                const update = lastAssistantMsg.querySelector('[aria-label*="Update"], [aria-label*="update"], [class*="updating"], [class*="Updating"], [data-testid*="update"]');
+                if (update && isVisible(update)) return { generating: true, reason: 'updateIndicator' };
+                const streaming = lastAssistantMsg.querySelector('[class*="streaming"], [class*="Streaming"], [data-testid*="streaming"], [aria-label*="Streaming"]');
+                if (streaming && isVisible(streaming)) return { generating: true, reason: 'streamingIndicator' };
+                const typing = lastAssistantMsg.querySelector('[class*="typing"], [class*="Typing"], [class*="loading"], [class*="Loading"], [aria-label*="typing"], [aria-label*="loading"]');
+                if (typing && isVisible(typing)) return { generating: true, reason: 'typingIndicator' };
+              }
+              const editor = document.querySelector('[role="textbox"]') || document.querySelector('[contenteditable]');
+              const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+              if (editorDisabled) return { generating: true, reason: 'editorDisabled' };
+              return { generating: false, reason: 'none' };
+            };
+
+            const start = Date.now();
+            const MIN_STABLE_MS = 2500;
+            const MIN_LEN = 50;
+            const initialMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+            let lastAssistantText = '';
+            if (initialMessages.length > 0) {
+              const lastMsg = initialMessages[initialMessages.length - 1];
+              lastAssistantText = compactText(lastMsg.innerText || lastMsg.textContent || '');
+            }
+            let lastAssistantChangeAt = Date.now();
+
+            while (Date.now() - start < maxWaitMs) {
+              const genStatus = isGenerating();
+              const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                            document.querySelector('div[contenteditable="true"]');
+              const editorReady = !!editor && editor.getAttribute('contenteditable') === 'true';
+              const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+              const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
+              const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
+              if (currentLastText && currentLastText !== lastAssistantText) {
+                lastAssistantText = currentLastText;
+                lastAssistantChangeAt = Date.now();
+              }
+              const progressText = (currentLastText || '').toLowerCase();
+              const hasProgressText = progressText.includes('research in progress') ||
+                progressText.includes('deep research') ||
+                progressText.includes('researching') ||
+                progressText.includes('searching the web') ||
+                progressText.includes('searching for') ||
+                progressText.includes('gathering sources') ||
+                progressText.includes('collecting sources') ||
+                progressText.includes('checking sources') ||
+                progressText.includes('looking up');
+              const textStable = Date.now() - lastAssistantChangeAt >= MIN_STABLE_MS;
+              const minLenReached = currentLastText.length >= MIN_LEN;
+
+              if (!genStatus.generating && editorReady && textStable && minLenReached && !hasProgressText) {
+                return { ready: true };
+              }
+              await sleep(500);
+            }
+
+            return { ready: false, timeout: true };
+          },
+          args: [WAIT_FOR_RESPONSE_MS]
         });
-        
-        if (!recheckResults[0]?.result?.ready) {
-          console.error('❌ Interface nie jest gotowy po zatrzymaniu generowania');
-          alert('Błąd: ChatGPT nie jest gotowy. Zatrzymaj ręcznie generowanie i spróbuj ponownie.');
+
+        if (!waitResults[0]?.result?.ready) {
+          console.error('❌ Interface nie jest gotowy po oczekiwaniu na zakończenie odpowiedzi');
+          alert('Błąd: ChatGPT nadal generuje odpowiedź. Zatrzymaj ręcznie generowanie i spróbuj ponownie.');
           return;
         }
       }
@@ -491,7 +580,7 @@ async function resumeFromStage(startIndex) {
       console.log(`\n${'='.repeat(80)}`);
       console.log(`✅ RESUME FROM STAGE ZAKOŃCZONE`);
       console.log(`${'='.repeat(80)}\n`);
-      
+
     } catch (error) {
       console.error("❌ Błąd wstrzykiwania promptów:", error);
       alert(`Błąd wstrzykiwania promptów: ${error.message}`);
@@ -1163,6 +1252,22 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`  Analysis: ${analysisType}`);
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
+
+    // Shared helpers for injected context
+    function compactText(text) {
+      return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function getAssistantSnapshot() {
+      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const count = assistantMessages.length;
+      const lastMsg = count > 0 ? assistantMessages[count - 1] : null;
+      const lastText = lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
+      return { count, lastText };
+    }
+
+
+
     
   // Funkcja generująca losowe opóźnienie dla anti-automation
   function getRandomDelay() {
@@ -1718,7 +1823,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
+  // Snapshot ostatniej odpowiedzi assistant
+
   async function waitForResponse(maxWaitMs) {
+    const initialSnapshot = getAssistantSnapshot();
+    const initialAssistantCount = initialSnapshot.count;
+    const initialAssistantText = initialSnapshot.lastText || '';
+    const initialAssistantLength = initialAssistantText.length;
+    const MIN_RESPONSE_DELTA = 30;
+    let responseSeenInDOM = false;
     console.log("⏳ Czekam na odpowiedź ChatGPT...");
     
     // ===== FAZA 1: Detekcja STARTU odpowiedzi =====
@@ -1855,17 +1968,29 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Weryfikacja: Czy faktycznie jest nowa aktywność w DOM?
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const hasNewContent = assistantMessages.length > 0;
+      const hasNewContent = assistantMessages.length > initialAssistantCount;
+      const lastAssistantMsg = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
+      const lastAssistantText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
+      const lastTextChanged = lastAssistantText && lastAssistantText !== initialAssistantText;
+      const lengthDelta = Math.abs(lastAssistantText.length - initialAssistantLength);
+      const meaningfulTextChange = lastTextChanged && lengthDelta >= MIN_RESPONSE_DELTA;
+      if (hasNewContent || meaningfulTextChange) {
+        responseSeenInDOM = true;
+      }
       
       // ChatGPT zaczął odpowiadać jeśli:
       // 1. isGenerating() wykryło wskaźniki generowania (stop/thinking/update/streaming)
       // 2. LUB jest nowa treść w DOM (faktyczna odpowiedź)
       
-      if (genStatus.generating || hasNewContent) {
+      if (genStatus.generating || hasNewContent || meaningfulTextChange) {
         console.log("✓ ChatGPT zaczął odpowiadać", {
           generating: genStatus.generating,
           reason: genStatus.reason,
           hasNewContent: hasNewContent,
+          lastTextChanged: lastTextChanged,
+          lengthDelta: lengthDelta,
+          meaningfulTextChange: meaningfulTextChange,
+          initialAssistantCount: initialAssistantCount,
           assistantMsgCount: assistantMessages.length
         });
         responseStarted = true;
@@ -1879,8 +2004,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log(`⏳ [FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`, {
           generating: currentGenStatus.generating,
           reason: currentGenStatus.reason,
-          hasNewContent: assistantMessages.length > 0,
-          assistantMsgCount: assistantMessages.length
+          hasNewContent: hasNewContent,
+          lastTextChanged: lastTextChanged,
+          lengthDelta: lengthDelta,
+          meaningfulTextChange: meaningfulTextChange,
+          assistantMsgCount: assistantMessages.length,
+          initialAssistantCount: initialAssistantCount
         });
       }
       
@@ -1901,6 +2030,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const phase2Timeout = Math.min(maxWaitMs, 7200000); // 120 minut na zakończenie (zwiększono dla długich deep thinking sessions)
     let consecutiveReady = 0;
     let logInterval = 0;
+    let lastAssistantText = initialAssistantText;
+    let lastAssistantChangeAt = Date.now();
     let editAttemptedPhase2 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
     const checkedFixedErrors = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
     
@@ -2066,10 +2197,34 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       // Sprawdź czy nie ma wskaźników "thinking" w ostatniej wiadomości
       const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const hasThinkingInMessage = lastMessages.length > 0 && 
-        lastMessages[lastMessages.length - 1].querySelector('[class*="thinking"]');
+      const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
+      const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
+      if (currentLastText && currentLastText !== lastAssistantText) {
+        lastAssistantText = currentLastText;
+        lastAssistantChangeAt = Date.now();
+      }
+      const hasNewAssistantMessage = lastMessages.length > initialAssistantCount;
+      const lastTextChanged = currentLastText && currentLastText !== initialAssistantText;
+      const lengthDelta = Math.abs(currentLastText.length - initialAssistantLength);
+      const meaningfulTextChange = lastTextChanged && lengthDelta >= MIN_RESPONSE_DELTA;
+      if (hasNewAssistantMessage || meaningfulTextChange) {
+        responseSeenInDOM = true;
+      }
+      const textStable = Date.now() - lastAssistantChangeAt >= 2500;
+      const hasThinkingInMessage = lastAssistantMsg && lastAssistantMsg.querySelector('[class*="thinking"]');
+      const progressText = (currentLastText || '').toLowerCase();
+      const hasProgressText = progressText.includes('research in progress') ||
+        progressText.includes('deep research') ||
+        progressText.includes('researching') ||
+        progressText.includes('searching the web') ||
+        progressText.includes('searching for') ||
+        progressText.includes('gathering sources') ||
+        progressText.includes('collecting sources') ||
+        progressText.includes('checking sources') ||
+        progressText.includes('looking up');
+      const minResponseLengthReached = currentLastText.length >= 50;
       
-      const isReady = noGeneration && editorReady && !hasThinkingInMessage;
+      const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && minResponseLengthReached && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -2109,7 +2264,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         // Reset licznika jeśli którykolwiek warunek nie jest spełniony
         if (consecutiveReady > 0) {
           console.log(`⚠️ Interface NOT ready, resetuję licznik (był: ${consecutiveReady})`);
-          console.log(`  Powód: noGeneration=${noGeneration}, editorReady=${editorReady}, hasThinkingInMessage=${hasThinkingInMessage}`);
+          console.log(`  Powód: noGeneration=${noGeneration}, editorReady=${editorReady}, hasThinkingInMessage=${hasThinkingInMessage}, responseSeenInDOM=${responseSeenInDOM}, textStable=${textStable}, minResponseLengthReached=${minResponseLengthReached}, hasProgressText=${hasProgressText}`);
           if (genStatus.generating) {
             console.log(`  Detekcja generowania: ${genStatus.reason}`);
           }
@@ -2515,6 +2670,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     }
     
     // Mapowanie powodów na przyjazne opisy po polsku
+    let lastAssistantText = '';
+    let lastAssistantChangeAt = Date.now();
+    const initialAssistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (initialAssistantMessages.length > 0) {
+      const lastMsg = initialAssistantMessages[initialAssistantMessages.length - 1];
+      lastAssistantText = compactText(lastMsg.innerText || lastMsg.textContent || '');
+    }
     const reasonDescriptions = {
       'stopButton': 'generuje odpowiedź',
       'thinkingIndicator': 'myśli (chain-of-thought)',
@@ -2538,7 +2700,26 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       // 2. Editor ISTNIEJE i jest ENABLED
       const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
       const noGeneration = !genStatus.generating;
-      const isReady = noGeneration && editorReady;
+      const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
+      const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
+      if (currentLastText && currentLastText !== lastAssistantText) {
+        lastAssistantText = currentLastText;
+        lastAssistantChangeAt = Date.now();
+      }
+      const progressText = (currentLastText || '').toLowerCase();
+      const hasProgressText = progressText.includes('research in progress') ||
+        progressText.includes('deep research') ||
+        progressText.includes('researching') ||
+        progressText.includes('searching the web') ||
+        progressText.includes('searching for') ||
+        progressText.includes('gathering sources') ||
+        progressText.includes('collecting sources') ||
+        progressText.includes('checking sources') ||
+        progressText.includes('looking up');
+      const textStable = Date.now() - lastAssistantChangeAt >= 2500;
+      const minResponseLengthReached = currentLastText.length >= 50;
+      const isReady = noGeneration && editorReady && textStable && minResponseLengthReached && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -2573,6 +2754,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           reason: genStatus.reason,
           reasonDesc: reason,
           editorReady: editorReady,
+          textStable: textStable,
+          minResponseLengthReached: minResponseLengthReached,
+          hasProgressText: hasProgressText,
           consecutiveReady: consecutiveReady
         });
       }

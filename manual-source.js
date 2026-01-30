@@ -9,6 +9,12 @@ const submitBtn = document.getElementById('submitBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 
 let instances = 1;
+const urlParams = new URLSearchParams(window.location.search);
+const presetTitle = urlParams.get('title') || '';
+
+if (presetTitle && !titleInput.value) {
+  titleInput.value = presetTitle;
+}
 
 // Aktualizuj stan przycisku Submit
 function updateSubmitButton() {
