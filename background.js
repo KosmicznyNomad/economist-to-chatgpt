@@ -1646,6 +1646,67 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return false;
     }
   }
+
+  function getLastAssistantMessageElement() {
+    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+    if (assistantMessages.length > 0) {
+      return assistantMessages[assistantMessages.length - 1];
+    }
+
+    const articles = document.querySelectorAll('article');
+    for (let i = articles.length - 1; i >= 0; i -= 1) {
+      const article = articles[i];
+      if (article.querySelector('[data-message-author-role="assistant"]')) {
+        return article;
+      }
+    }
+
+    return null;
+  }
+
+  function getAssistantMessageText(element) {
+    if (!element) {
+      return '';
+    }
+    return (element.innerText || element.textContent || '').trim();
+  }
+
+  async function waitForStableAssistantResponse(stableMs, maxWaitMs) {
+    const startTime = Date.now();
+    let lastText = '';
+    let lastChangeTime = Date.now();
+
+    while (Date.now() - startTime < maxWaitMs) {
+      const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
+        document.querySelector('[data-testid="stop-button"]') ||
+        document.querySelector('button[aria-label*="stop"]') ||
+        document.querySelector('button[aria-label="Zatrzymaj"]') ||
+        document.querySelector('button[aria-label*="Zatrzymaj"]');
+
+      if (stopButton) {
+        lastChangeTime = Date.now();
+      }
+
+      const messageElement = getLastAssistantMessageElement();
+      const currentText = getAssistantMessageText(messageElement);
+
+      if (currentText.length > 0 && currentText !== lastText) {
+        lastText = currentText;
+        lastChangeTime = Date.now();
+      }
+
+      const stableForMs = Date.now() - lastChangeTime;
+      if (currentText.length > 0 && stableForMs >= stableMs) {
+        console.log(`✅ Odpowiedź stabilna przez ${stableForMs}ms`);
+        return true;
+      }
+
+      await new Promise(resolve => setTimeout(resolve, 500));
+    }
+
+    console.warn(`⚠️ Timeout stabilizacji odpowiedzi po ${Math.round(maxWaitMs / 1000)}s`);
+    return false;
+  }
   
   // Funkcja sprawdzająca czy ChatGPT generuje odpowiedź (rozszerzona detekcja)
   function isGenerating() {
@@ -2085,6 +2146,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           // WERYFIKACJA: Sprawdź czy faktycznie jest jakaś odpowiedź w DOM (max 1 próba)
           console.log("🔍 Weryfikuję obecność odpowiedzi w DOM...");
           let domCheckAttempts = 0;
+          let domHasAssistant = false;
           const MAX_DOM_CHECKS = 1;
           
           while (domCheckAttempts < MAX_DOM_CHECKS) {
@@ -2093,7 +2155,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             
             if (messages.length > 0 || articles.length > 0) {
               console.log(`✓ Znaleziono ${messages.length} wiadomości assistant i ${articles.length} articles`);
-              return true;
+              domHasAssistant = true;
+              break;
             }
             
             domCheckAttempts++;
@@ -2101,9 +2164,18 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             await new Promise(resolve => setTimeout(resolve, 1000));
           }
           
-          // Po 1 próbie (1s) - zakładamy że OK, walidacja później wyłapie błąd
-          console.warn("⚠️ DOM nie gotowy po 1 próbie (1s), ale kontynuuję - walidacja tekstu wyłapie jeśli faktyczny błąd");
-          return true;
+          if (!domHasAssistant) {
+            // Po 1 próbie (1s) - zakładamy że OK, walidacja później wyłapie błąd
+            console.warn("⚠️ DOM nie gotowy po 1 próbie (1s), ale kontynuuję - walidacja tekstu wyłapie jeśli faktyczny błąd");
+          }
+
+          const stable = await waitForStableAssistantResponse(2000, 60000);
+          if (stable) {
+            return true;
+          }
+          console.warn('⚠️ Odpowiedź nie ustabilizowała się - kontynuuję czekanie...');
+          consecutiveReady = 0;
+          continue;
         }
       } else {
         // Reset licznika jeśli którykolwiek warunek nie jest spełniony
