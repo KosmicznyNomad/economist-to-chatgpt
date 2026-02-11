@@ -16,6 +16,553 @@ const CLOUD_UPLOAD = {
   backoffMs: 1000
 };
 
+const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
+const PROCESS_HISTORY_LIMIT = 30;
+const CLOSED_PROCESS_STATUSES = new Set([
+  'completed',
+  'failed',
+  'closed',
+  'error',
+  'cancelled',
+  'canceled',
+  'aborted',
+  'stopped',
+  'interrupted'
+]);
+const processRegistry = new Map();
+let processRegistryReady = null;
+
+function isClosedProcessStatus(status) {
+  return CLOSED_PROCESS_STATUSES.has(String(status || '').toLowerCase());
+}
+
+function normalizeProcessStatus(status) {
+  if (typeof status !== 'string') return 'running';
+  const normalized = status.trim().toLowerCase();
+  return normalized || 'running';
+}
+
+function normalizePromptCounters(status, currentPrompt, totalPrompts, stageIndex) {
+  let total = Number.isInteger(totalPrompts) ? totalPrompts : 0;
+  let current = Number.isInteger(currentPrompt) ? currentPrompt : 0;
+  const stage = Number.isInteger(stageIndex) ? stageIndex : null;
+
+  if (total < 0) total = 0;
+  if (current < 0) current = 0;
+
+  if (total === 0 && Number.isInteger(stage) && stage >= 0) {
+    total = stage + 1;
+  }
+  if (current === 0 && Number.isInteger(stage) && stage >= 0) {
+    current = stage + 1;
+  }
+  if (total === 0 && current > 0) {
+    total = current;
+  }
+  if (total > 0 && current > total) {
+    current = total;
+  }
+  if (isClosedProcessStatus(status) && current === 0 && total > 0) {
+    current = total;
+  }
+  if (status === 'completed' && total > 0) {
+    current = total;
+  }
+
+  return { currentPrompt: current, totalPrompts: total };
+}
+
+function isFailedProcessStatus(status) {
+  const normalized = normalizeProcessStatus(status);
+  return normalized === 'failed' || normalized === 'error';
+}
+
+function collectProcessRecordAnomalies(record) {
+  if (!record || typeof record !== 'object') return [];
+  const anomalies = [];
+  const status = normalizeProcessStatus(record.status);
+  const currentPrompt = Number.isInteger(record.currentPrompt) ? record.currentPrompt : null;
+  const totalPrompts = Number.isInteger(record.totalPrompts) ? record.totalPrompts : null;
+  const hasTabOrWindow = Number.isInteger(record.tabId) || Number.isInteger(record.windowId);
+
+  if (Number.isInteger(currentPrompt) && Number.isInteger(totalPrompts) && currentPrompt > totalPrompts) {
+    anomalies.push('current_gt_total');
+  }
+  if (isClosedProcessStatus(status) && record.needsAction) {
+    anomalies.push('closed_with_needs_action');
+  }
+  if (!isClosedProcessStatus(status) && !hasTabOrWindow) {
+    anomalies.push('running_without_tab_or_window');
+  }
+  if (isFailedProcessStatus(status) && !record.reason && !record.error) {
+    anomalies.push('failed_without_reason');
+  }
+  return anomalies;
+}
+
+function collectNormalizationCorrections(next, patch) {
+  const corrections = [];
+  if (!next || !patch || typeof patch !== 'object') return corrections;
+
+  if (Number.isInteger(patch.currentPrompt) && patch.currentPrompt !== next.currentPrompt) {
+    corrections.push(`currentPrompt:${patch.currentPrompt}->${next.currentPrompt}`);
+  }
+  if (Number.isInteger(patch.totalPrompts) && patch.totalPrompts !== next.totalPrompts) {
+    corrections.push(`totalPrompts:${patch.totalPrompts}->${next.totalPrompts}`);
+  }
+  if (typeof patch.needsAction === 'boolean' && patch.needsAction !== next.needsAction) {
+    corrections.push(`needsAction:${patch.needsAction}->${next.needsAction}`);
+  }
+  if (Number.isInteger(patch.stageIndex)) {
+    const normalizedStage = Number.isInteger(next.stageIndex) ? next.stageIndex : null;
+    if (patch.stageIndex !== normalizedStage) {
+      corrections.push(`stageIndex:${patch.stageIndex}->${normalizedStage}`);
+    }
+  }
+  if (typeof patch.status === 'string') {
+    const patchStatus = normalizeProcessStatus(patch.status);
+    if (patchStatus !== next.status) {
+      corrections.push(`status:${patchStatus}->${next.status}`);
+    }
+  }
+  return corrections;
+}
+
+function logProcessTransition(runId, next, patch) {
+  const anomalies = collectProcessRecordAnomalies(next);
+  const corrections = collectNormalizationCorrections(next, patch);
+  if (anomalies.length === 0 && corrections.length === 0) return;
+
+  console.warn('[monitor] Skorygowano niespojne dane procesu', {
+    runId,
+    corrections,
+    anomalies,
+    status: next.status,
+    currentPrompt: next.currentPrompt,
+    totalPrompts: next.totalPrompts,
+    stageIndex: Number.isInteger(next.stageIndex) ? next.stageIndex : null
+  });
+}
+
+function normalizeProcessRecord(record) {
+  if (!record || typeof record !== 'object') return null;
+  const id = typeof record.id === 'string' ? record.id : String(record.id || '');
+  if (!id) return null;
+
+  const status = normalizeProcessStatus(record.status);
+  const normalizedCounters = normalizePromptCounters(
+    status,
+    record.currentPrompt,
+    record.totalPrompts,
+    record.stageIndex
+  );
+
+  const normalized = {
+    ...record,
+    id,
+    title: typeof record.title === 'string' && record.title.trim()
+      ? record.title
+      : 'Bez tytulu',
+    analysisType: typeof record.analysisType === 'string' && record.analysisType.trim()
+      ? record.analysisType
+      : 'company',
+    status,
+    currentPrompt: normalizedCounters.currentPrompt,
+    totalPrompts: normalizedCounters.totalPrompts,
+    timestamp: Number.isInteger(record.timestamp) ? record.timestamp : Date.now(),
+    startedAt: Number.isInteger(record.startedAt)
+      ? record.startedAt
+      : (Number.isInteger(record.timestamp) ? record.timestamp : Date.now()),
+    needsAction: isClosedProcessStatus(status) ? false : !!record.needsAction,
+    messages: Array.isArray(record.messages) ? record.messages : []
+  };
+
+  if (!Number.isInteger(normalized.windowId)) delete normalized.windowId;
+  if (!Number.isInteger(normalized.tabId)) delete normalized.tabId;
+  if (typeof normalized.reason !== 'string') delete normalized.reason;
+  if (typeof normalized.statusText !== 'string') delete normalized.statusText;
+  if (typeof normalized.stageName !== 'string') delete normalized.stageName;
+  if (!Number.isInteger(normalized.stageIndex)) delete normalized.stageIndex;
+  if (typeof normalized.chatUrl !== 'string') delete normalized.chatUrl;
+  if (typeof normalized.sourceUrl !== 'string') delete normalized.sourceUrl;
+  if (typeof normalized.error !== 'string') delete normalized.error;
+  if (!Number.isInteger(normalized.finishedAt)) delete normalized.finishedAt;
+  if (Number.isInteger(normalized.stageIndex) && normalized.totalPrompts > 0) {
+    if (normalized.stageIndex < 0) {
+      delete normalized.stageIndex;
+    } else if (normalized.stageIndex >= normalized.totalPrompts) {
+      normalized.stageIndex = normalized.totalPrompts - 1;
+    }
+  }
+  if (normalized.totalPrompts > 0 && normalized.currentPrompt === 0 && Number.isInteger(normalized.stageIndex)) {
+    normalized.currentPrompt = Math.min(normalized.stageIndex + 1, normalized.totalPrompts);
+  }
+  if (normalized.totalPrompts > 0 && normalized.currentPrompt > normalized.totalPrompts) {
+    normalized.currentPrompt = normalized.totalPrompts;
+  }
+  if (normalized.currentPrompt < 0) {
+    normalized.currentPrompt = 0;
+  }
+  if (normalized.startedAt > normalized.timestamp) {
+    normalized.startedAt = normalized.timestamp;
+  }
+  if (Number.isInteger(normalized.finishedAt) && normalized.finishedAt < normalized.startedAt) {
+    normalized.finishedAt = normalized.timestamp;
+  }
+
+  return normalized;
+}
+
+function pruneProcessRecords(records) {
+  const normalized = (Array.isArray(records) ? records : [])
+    .map(normalizeProcessRecord)
+    .filter(Boolean);
+
+  const byId = new Map();
+  normalized.forEach((record) => {
+    const existing = byId.get(record.id);
+    if (!existing) {
+      byId.set(record.id, record);
+      return;
+    }
+    const existingTs = Number.isInteger(existing.timestamp) ? existing.timestamp : 0;
+    const nextTs = Number.isInteger(record.timestamp) ? record.timestamp : 0;
+    if (nextTs >= existingTs) {
+      byId.set(record.id, record);
+    }
+  });
+
+  const deduped = Array.from(byId.values());
+  const active = [];
+  const closed = [];
+  for (const process of deduped) {
+    if (isClosedProcessStatus(process.status)) {
+      closed.push(process);
+    } else {
+      active.push(process);
+    }
+  }
+
+  active.sort((a, b) => (b.startedAt || b.timestamp || 0) - (a.startedAt || a.timestamp || 0));
+  closed.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  return active.concat(closed.slice(0, PROCESS_HISTORY_LIMIT));
+}
+
+async function ensureProcessRegistryReady() {
+  if (!processRegistryReady) {
+    processRegistryReady = (async () => {
+      try {
+        const stored = await chrome.storage.local.get([PROCESS_MONITOR_STORAGE_KEY]);
+        const records = pruneProcessRecords(stored?.[PROCESS_MONITOR_STORAGE_KEY]);
+        processRegistry.clear();
+        records.forEach((record) => {
+          processRegistry.set(record.id, record);
+        });
+      } catch (error) {
+        console.warn('[monitor] Failed to read process monitor state:', error);
+        processRegistry.clear();
+      }
+    })();
+  }
+  return processRegistryReady;
+}
+
+async function persistProcessRegistry() {
+  const records = pruneProcessRecords(Array.from(processRegistry.values()));
+  processRegistry.clear();
+  records.forEach((record) => {
+    processRegistry.set(record.id, record);
+  });
+  await chrome.storage.local.set({ [PROCESS_MONITOR_STORAGE_KEY]: records });
+  return records;
+}
+
+async function getProcessSnapshot() {
+  await ensureProcessRegistryReady();
+  return pruneProcessRecords(Array.from(processRegistry.values()));
+}
+
+async function broadcastProcessUpdate() {
+  const processes = await getProcessSnapshot();
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'PROCESSES_UPDATE',
+      processes
+    });
+  } catch (error) {
+    // Ignore: no listeners currently connected.
+  }
+  return processes;
+}
+
+async function upsertProcess(runId, patch = {}) {
+  if (!runId) return null;
+  await ensureProcessRegistryReady();
+
+  const existing = processRegistry.get(runId) || {
+    id: runId,
+    title: 'Bez tytulu',
+    analysisType: 'company',
+    status: 'starting',
+    currentPrompt: 0,
+    totalPrompts: 0,
+    startedAt: Date.now(),
+    timestamp: Date.now(),
+    needsAction: false,
+    messages: []
+  };
+
+  const next = normalizeProcessRecord({
+    ...existing,
+    ...patch,
+    id: runId,
+    startedAt: existing.startedAt || Date.now(),
+    timestamp: Number.isInteger(patch.timestamp) ? patch.timestamp : Date.now()
+  });
+
+  if (!next) return null;
+  processRegistry.set(runId, next);
+  logProcessTransition(runId, next, patch);
+  await persistProcessRegistry();
+  await broadcastProcessUpdate();
+  return next;
+}
+
+async function findProcessIdByTabId(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  await ensureProcessRegistryReady();
+
+  for (const process of processRegistry.values()) {
+    if (process.tabId === tabId && !isClosedProcessStatus(process.status)) {
+      return process.id;
+    }
+  }
+  for (const process of processRegistry.values()) {
+    if (process.tabId === tabId) {
+      return process.id;
+    }
+  }
+  return null;
+}
+
+async function resolveProcessId(message, sender) {
+  if (typeof message?.runId === 'string' && message.runId.trim()) {
+    return message.runId;
+  }
+  const messageTabId = Number.isInteger(message?.tabId) ? message.tabId : null;
+  const senderTabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null;
+  const tabId = messageTabId ?? senderTabId;
+  return findProcessIdByTabId(tabId);
+}
+
+function applyMonotonicProcessPatch(existing, patch, message = null) {
+  if (!patch || typeof patch !== 'object') return patch;
+  if (!existing || typeof existing !== 'object') return patch;
+
+  const next = { ...patch };
+  const incomingStatus = normalizeProcessStatus(next.status || existing.status);
+  const incomingClosed = isClosedProcessStatus(incomingStatus);
+  const existingClosed = isClosedProcessStatus(existing.status);
+  const allowLowerProgress = !!message?.allowLowerProgress || incomingClosed;
+
+  if (existingClosed && !incomingClosed) {
+    next.status = existing.status;
+    next.needsAction = false;
+  }
+
+  if (Number.isInteger(existing.totalPrompts) && Number.isInteger(next.totalPrompts)) {
+    if (next.totalPrompts < existing.totalPrompts && !incomingClosed) {
+      next.totalPrompts = existing.totalPrompts;
+    }
+  }
+
+  if (Number.isInteger(existing.currentPrompt) && Number.isInteger(next.currentPrompt)) {
+    if (next.currentPrompt < existing.currentPrompt && !allowLowerProgress) {
+      next.currentPrompt = existing.currentPrompt;
+    }
+  }
+
+  if (Number.isInteger(existing.stageIndex) && Number.isInteger(next.stageIndex)) {
+    if (next.stageIndex < existing.stageIndex && !allowLowerProgress) {
+      next.stageIndex = existing.stageIndex;
+    }
+  }
+
+  if (!Number.isInteger(next.stageIndex) && Number.isInteger(next.currentPrompt) && next.currentPrompt > 0) {
+    next.stageIndex = next.currentPrompt - 1;
+  }
+  if (Number.isInteger(next.currentPrompt) && next.currentPrompt > 0) {
+    const normalizedPromptStageName = `Prompt ${next.currentPrompt}`;
+    if (typeof next.stageName !== 'string' || /^Prompt\s+\d+/i.test(next.stageName.trim())) {
+      next.stageName = normalizedPromptStageName;
+    }
+  }
+
+  return next;
+}
+
+async function handleProcessProgressMessage(message, sender) {
+  const runId = await resolveProcessId(message, sender);
+  if (!runId) return false;
+
+  const patch = {
+    timestamp: Date.now(),
+    needsAction: !!message?.needsAction
+  };
+
+  if (typeof message?.status === 'string' && message.status.trim()) {
+    patch.status = message.status;
+  } else {
+    patch.status = 'running';
+  }
+  if (Number.isInteger(message?.currentPrompt)) patch.currentPrompt = message.currentPrompt;
+  if (Number.isInteger(message?.totalPrompts)) patch.totalPrompts = message.totalPrompts;
+  if (typeof message?.statusText === 'string') patch.statusText = message.statusText;
+  if (typeof message?.reason === 'string') patch.reason = message.reason;
+  if (Number.isInteger(message?.stageIndex)) patch.stageIndex = message.stageIndex;
+  if (typeof message?.stageName === 'string') patch.stageName = message.stageName;
+  if (typeof message?.chatUrl === 'string') patch.chatUrl = message.chatUrl;
+  if (typeof message?.sourceUrl === 'string') patch.sourceUrl = message.sourceUrl;
+  if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
+  if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
+  if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
+  if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+
+  await ensureProcessRegistryReady();
+  const existing = processRegistry.get(runId) || null;
+  const safePatch = applyMonotonicProcessPatch(existing, patch, message);
+  await upsertProcess(runId, safePatch);
+  return true;
+}
+
+async function handleProcessNeedsActionMessage(message, sender) {
+  const runId = await resolveProcessId(message, sender);
+  if (!runId) return false;
+  const patch = {
+    status: 'running',
+    needsAction: true,
+    timestamp: Date.now()
+  };
+  if (Number.isInteger(message?.currentPrompt)) patch.currentPrompt = message.currentPrompt;
+  if (Number.isInteger(message?.totalPrompts)) patch.totalPrompts = message.totalPrompts;
+  if (Number.isInteger(message?.stageIndex)) patch.stageIndex = message.stageIndex;
+  if (typeof message?.stageName === 'string') patch.stageName = message.stageName;
+  if (typeof message?.statusText === 'string') patch.statusText = message.statusText;
+  if (typeof message?.reason === 'string') patch.reason = message.reason;
+  if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
+  if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
+  if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
+  if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+  await ensureProcessRegistryReady();
+  const existing = processRegistry.get(runId) || null;
+  const safePatch = applyMonotonicProcessPatch(existing, patch, message);
+  await upsertProcess(runId, safePatch);
+  return true;
+}
+
+function getDecisionResolvedStatusText(decision) {
+  return decision === 'skip' ? 'Pominieto czekanie' : 'Wznowiono czekanie';
+}
+
+async function handleProcessActionResolvedMessage(message, sender) {
+  const runId = await resolveProcessId(message, sender);
+  if (!runId) return false;
+  const decision = message?.decision === 'skip' ? 'skip' : 'wait';
+  const patch = {
+    status: 'running',
+    needsAction: false,
+    reason: '',
+    statusText: getDecisionResolvedStatusText(decision),
+    timestamp: Date.now()
+  };
+  if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
+  if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
+  if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
+  if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+  await upsertProcess(runId, patch);
+  return true;
+}
+
+async function handleProcessDecisionMessage(message) {
+  const runId = await resolveProcessId(message, { tab: { id: message?.tabId } });
+  if (!runId) return false;
+
+  await ensureProcessRegistryReady();
+  const process = processRegistry.get(runId) || null;
+  const decision = message?.decision === 'skip' ? 'skip' : 'wait';
+
+  const targetTabId = Number.isInteger(message?.tabId)
+    ? message.tabId
+    : (Number.isInteger(process?.tabId) ? process.tabId : null);
+
+  let forwarded = false;
+  if (Number.isInteger(targetTabId)) {
+    try {
+      await chrome.tabs.sendMessage(targetTabId, {
+        type: 'PROCESS_DECISION',
+        runId,
+        decision,
+        origin: message?.origin || 'panel'
+      });
+      forwarded = true;
+    } catch (error) {
+      console.warn('[monitor] Unable to forward PROCESS_DECISION to tab:', targetTabId, error?.message || error);
+    }
+  }
+
+  if (forwarded) {
+    const patch = {
+      status: isClosedProcessStatus(process?.status) ? process.status : 'running',
+      needsAction: false,
+      reason: '',
+      statusText: getDecisionResolvedStatusText(decision),
+      timestamp: Date.now()
+    };
+    if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
+    if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
+    if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
+    if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+    await upsertProcess(runId, patch);
+    return true;
+  }
+
+  await upsertProcess(runId, {
+    status: isClosedProcessStatus(process?.status) ? process.status : 'running',
+    needsAction: true,
+    statusText: 'Panel: decyzja niedostarczona (brak aktywnej karty)',
+    timestamp: Date.now()
+  });
+  return false;
+}
+
+async function handleProcessDecisionAllMessage(message) {
+  await ensureProcessRegistryReady();
+  const decision = message?.decision === 'skip' ? 'skip' : 'wait';
+  const candidates = Array.from(processRegistry.values()).filter((process) => (
+    process &&
+    !isClosedProcessStatus(process.status) &&
+    !!process.needsAction
+  ));
+
+  let delivered = 0;
+  for (const process of candidates) {
+    const handled = await handleProcessDecisionMessage({
+      runId: process.id,
+      decision,
+      origin: message?.origin || 'panel-bulk',
+      tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+      windowId: Number.isInteger(process.windowId) ? process.windowId : null
+    });
+    if (handled) delivered += 1;
+  }
+
+  return {
+    matched: candidates.length,
+    delivered
+  };
+}
+
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
 let PROMPTS_PORTFOLIO = [];
@@ -153,6 +700,9 @@ async function loadPrompts() {
 
 // Wczytaj prompty przy starcie rozszerzenia
 loadPrompts();
+ensureProcessRegistryReady().catch((error) => {
+  console.warn('[monitor] Initial process registry load failed:', error);
+});
 
 // Obsługiwane źródła artykułów
 const SUPPORTED_SOURCES = [
@@ -194,7 +744,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company') {
+async function saveResponse(responseText, source, analysisType = 'company', runId = null) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -218,12 +768,19 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     
     console.log(`📦 Obecny stan storage: ${responses.length} odpowiedzi`);
     
+    const normalizedRunId = typeof runId === 'string' && runId.trim()
+      ? runId.trim()
+      : '';
+
     const newResponse = {
       text: responseText,
       timestamp: Date.now(),
       source: source,
       analysisType: analysisType
     };
+    if (normalizedRunId) {
+      newResponse.runId = normalizedRunId;
+    }
     
     responses.push(newResponse);
 
@@ -268,6 +825,7 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     console.log(`Nowy stan: ${responses.length} odpowiedzi w storage (zweryfikowano: ${verifiedResponses.length})`);
     console.log(`Preview: "${responseText.substring(0, 150)}..."`);
     console.log(`${'*'.repeat(80)}\n`);
+    return newResponse;
   } catch (error) {
     console.error(`\n${'!'.repeat(80)}`);
     console.error(`❌ ❌ ❌ [saveResponse] BŁĄD ZAPISYWANIA ❌ ❌ ❌`);
@@ -275,13 +833,14 @@ async function saveResponse(responseText, source, analysisType = 'company') {
     console.error('Error:', error);
     console.error('Stack:', error.stack);
     console.error(`${'!'.repeat(80)}\n`);
+    return null;
   }
 }
 
 // Listener na wiadomości z content scriptu i popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'SAVE_RESPONSE') {
-    saveResponse(message.text, message.source, message.analysisType);
+    saveResponse(message.text, message.source, message.analysisType, message.runId);
   } else if (message.type === 'RUN_ANALYSIS') {
     runAnalysis();
   } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
@@ -293,6 +852,59 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     runManualSourceAnalysis(message.text, message.title, message.instances);
     sendResponse({ success: true });
     return true; // Utrzymuj kanał otwarty dla async
+  } else if (message.type === 'GET_PROCESSES') {
+    (async () => {
+      const processes = await getProcessSnapshot();
+      sendResponse({ processes });
+    })().catch((error) => {
+      console.warn('[monitor] GET_PROCESSES failed:', error);
+      sendResponse({ processes: [] });
+    });
+    return true;
+  } else if (message.type === 'PROCESS_PROGRESS') {
+    handleProcessProgressMessage(message, sender)
+      .then((handled) => sendResponse({ success: !!handled }))
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_PROGRESS failed:', error);
+        sendResponse({ success: false });
+      });
+    return true;
+  } else if (message.type === 'PROCESS_NEEDS_ACTION') {
+    handleProcessNeedsActionMessage(message, sender)
+      .then((handled) => sendResponse({ success: !!handled }))
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_NEEDS_ACTION failed:', error);
+        sendResponse({ success: false });
+      });
+    return true;
+  } else if (message.type === 'PROCESS_ACTION_RESOLVED') {
+    handleProcessActionResolvedMessage(message, sender)
+      .then((handled) => sendResponse({ success: !!handled }))
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_ACTION_RESOLVED failed:', error);
+        sendResponse({ success: false });
+      });
+    return true;
+  } else if (message.type === 'PROCESS_DECISION') {
+    handleProcessDecisionMessage(message)
+      .then((handled) => sendResponse({ success: !!handled }))
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_DECISION failed:', error);
+        sendResponse({ success: false });
+      });
+    return true;
+  } else if (message.type === 'PROCESS_DECISION_ALL') {
+    handleProcessDecisionAllMessage(message)
+      .then((result) => sendResponse({
+        success: (result?.delivered || 0) > 0,
+        matched: result?.matched || 0,
+        delivered: result?.delivered || 0
+      }))
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_DECISION_ALL failed:', error);
+        sendResponse({ success: false, matched: 0, delivered: 0 });
+      });
+    return true;
   } else if (message.type === 'GET_COMPANY_PROMPTS') {
     // Zwróć prompty dla company
     sendResponse({ prompts: PROMPTS_COMPANY });
@@ -308,10 +920,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ success: true });
     return false;
   } else if (message.type === 'RESUME_STAGE_OPEN') {
-    // Otwórz okno z wyborem etapu
-    console.log('📩 Otrzymano RESUME_STAGE_OPEN');
+    // Otworz okno z wyborem etapu
+    const startIndex = Number.isInteger(message.startIndex) ? message.startIndex : null;
+    const title = typeof message.title === 'string' ? message.title.trim() : '';
+    const analysisType = typeof message.analysisType === 'string' ? message.analysisType.trim() : '';
+    const params = new URLSearchParams();
+    if (Number.isInteger(startIndex)) params.set('startIndex', String(startIndex));
+    if (title) params.set('title', title);
+    if (analysisType) params.set('analysisType', analysisType);
+    const query = params.toString();
+    const targetUrl = chrome.runtime.getURL('resume-stage.html' + (query ? ('?' + query) : ''));
+
+    console.log('[resume] Otrzymano RESUME_STAGE_OPEN', {
+      startIndex,
+      title,
+      analysisType
+    });
     chrome.windows.create({
-      url: chrome.runtime.getURL('resume-stage.html'),
+      url: targetUrl,
       type: 'popup',
       width: 600,
       height: 400
@@ -405,6 +1031,26 @@ async function resumeFromStage(startIndex) {
     // W trybie resume: pusty payload + wszystkie prompty w chain
     const payload = '';  // Pusty payload oznacza tryb resume
     const restOfPrompts = cleanedPrompts;  // Wszystkie prompty w chain
+
+    const processId = `resume-company-${Date.now()}-${startIndex}-${Math.random().toString(36).slice(2, 8)}`;
+    await upsertProcess(processId, {
+      title: `Resume from Stage ${startIndex + 1}`,
+      analysisType: 'company',
+      status: 'starting',
+      statusText: 'Przygotowanie wznowienia',
+      currentPrompt: startIndex,
+      totalPrompts: PROMPTS_COMPANY.length,
+      stageIndex: startIndex > 0 ? (startIndex - 1) : 0,
+      stageName: startIndex > 0 ? `Prompt ${startIndex}` : 'Start',
+      needsAction: false,
+      startedAt: Date.now(),
+      timestamp: Date.now(),
+      sourceUrl: activeTab.url || '',
+      chatUrl: activeTab.url || '',
+      tabId: activeTab.id,
+      windowId: activeTab.windowId,
+      messages: []
+    });
     
     console.log(`📝 Payload: pusty (tryb resume)`);
     console.log(`📝 Prompty w chain: ${restOfPrompts.length}`);
@@ -573,7 +1219,20 @@ async function resumeFromStage(startIndex) {
       const results = await chrome.scripting.executeScript({
         target: { tabId: activeTab.id },
         function: injectToChat,
-        args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, `Resume from Stage ${startIndex + 1}`, 'company']
+        args: [
+          payload,
+          restOfPrompts,
+          WAIT_FOR_TEXTAREA_MS,
+          WAIT_FOR_RESPONSE_MS,
+          RETRY_INTERVAL_MS,
+          `Resume from Stage ${startIndex + 1}`,
+          'company',
+          processId,
+          {
+            promptOffset: startIndex,
+            totalPromptsOverride: PROMPTS_COMPANY.length
+          }
+        ]
       });
       
       console.log("✅ Prompty wstrzyknięte pomyślnie");
@@ -746,6 +1405,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
   console.log(`[${analysisType}] Rozpoczynam przetwarzanie ${tabs.length} artykułów`);
   
   const processingPromises = tabs.map(async (tab, index) => {
+    const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+    let processTitle = tab?.title || 'Bez tytulu';
+    let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
     try {
       console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
       console.log(`URL: ${tab.url}`);
@@ -823,6 +1485,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 
       // Pobierz tytuł
       const title = tab.title || "Bez tytułu";
+      processTitle = title;
       
       // Wykryj źródło artykułu (dla non-YouTube lub dla payload metadata)
       let sourceName;
@@ -850,6 +1513,23 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       
       // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
       const restOfPrompts = promptChain.slice(1);
+      processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
+      const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
+
+      await upsertProcess(processId, {
+        title,
+        analysisType,
+        status: 'starting',
+        statusText: 'Przygotowanie procesu',
+        currentPrompt: 0,
+        totalPrompts: processTotalPrompts,
+        needsAction: false,
+        startedAt: Date.now(),
+        timestamp: Date.now(),
+        sourceUrl: isManualSource ? 'manual://source' : (tab.url || ''),
+        chatUrl,
+        messages: []
+      });
 
       // Otwórz nowe okno ChatGPT
       const window = await chrome.windows.create({
@@ -864,6 +1544,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       await chrome.windows.update(window.id, { focused: true });
       await chrome.tabs.update(chatTabId, { active: true });
 
+      await upsertProcess(processId, {
+        status: 'running',
+        statusText: 'Okno ChatGPT gotowe',
+        windowId: window.id,
+        tabId: chatTabId,
+        timestamp: Date.now()
+      });
+
       // Czekaj na załadowanie strony
       await waitForTabComplete(chatTabId);
 
@@ -874,7 +1562,20 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         results = await chrome.scripting.executeScript({
           target: { tabId: chatTabId },
           function: injectToChat,
-          args: [payload, restOfPrompts, WAIT_FOR_TEXTAREA_MS, WAIT_FOR_RESPONSE_MS, RETRY_INTERVAL_MS, title, analysisType]
+          args: [
+            payload,
+            restOfPrompts,
+            WAIT_FOR_TEXTAREA_MS,
+            WAIT_FOR_RESPONSE_MS,
+            RETRY_INTERVAL_MS,
+            title,
+            analysisType,
+            processId,
+            {
+              promptOffset: processPromptOffset,
+              totalPromptsOverride: processTotalPrompts
+            }
+          ]
         });
         console.log(`✅ executeScript zakończony pomyślnie`);
       } catch (executeError) {
@@ -884,6 +1585,17 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         console.error(`  Error: ${executeError.message}`);
         console.error(`  Stack: ${executeError.stack}`);
         console.error(`${'='.repeat(80)}\n`);
+        await upsertProcess(processId, {
+          title: processTitle,
+          analysisType,
+          status: 'failed',
+          needsAction: false,
+          statusText: 'Blad executeScript',
+          reason: 'execute_script_failed',
+          error: executeError.message || 'executeScript failed',
+          finishedAt: Date.now(),
+          timestamp: Date.now()
+        });
         return { success: false, title, error: `executeScript error: ${executeError.message}` };
       }
 
@@ -911,6 +1623,16 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         console.error(`❌ KRYTYCZNY: results jest puste lub undefined!`);
         console.error(`  - results: ${results}`);
         console.log(`${'='.repeat(80)}\n`);
+        await upsertProcess(processId, {
+          title: processTitle,
+          analysisType,
+          status: 'failed',
+          needsAction: false,
+          statusText: 'Brak wyniku executeScript',
+          reason: 'missing_execute_result',
+          finishedAt: Date.now(),
+          timestamp: Date.now()
+        });
         // Ten return trafia do Promise.allSettled jako fulfilled z tą wartością
         return { success: false, title, error: 'executeScript nie zwrócił wyników' };
       }
@@ -953,6 +1675,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       console.log(`  - result.lastResponse length: ${result?.lastResponse?.length || 0}`);
       console.log(`  - result.lastResponse trim length: ${result?.lastResponse?.trim()?.length || 0}`);
       console.log(`  - result.lastResponse preview: "${result?.lastResponse?.substring(0, 100) || 'undefined'}..."`);
+      let finalStatus = 'completed';
+      let finalStatusText = 'Zakonczono';
+      let finalReason = '';
+      let finalError = '';
       
       if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null && result.lastResponse.trim().length > 0) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
@@ -960,30 +1686,76 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         console.log(`Typ analizy: ${analysisType}`);
         console.log(`Tytuł: ${title}`);
         
-        await saveResponse(result.lastResponse, title, analysisType);
+        await saveResponse(result.lastResponse, title, analysisType, processId);
         
         console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
         console.log(`${'='.repeat(80)}\n`);
       } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null || result.lastResponse.trim().length === 0)) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse jest pusta lub null ⚠️ ⚠️ ⚠️`);
         console.warn(`lastResponse: "${result.lastResponse}" (długość: ${result.lastResponse?.length || 0})`);
+        finalStatusText = 'Zakonczono (pusta odpowiedz)';
+        finalReason = 'empty_response';
         console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
+        finalStatus = 'failed';
+        finalStatusText = 'Blad procesu';
+        finalReason = 'inject_failed';
+        finalError = result?.error || '';
         console.log(`${'='.repeat(80)}\n`);
       } else {
         console.error(`\n❌ ❌ ❌ NIEOCZEKIWANY STAN ❌ ❌ ❌`);
         console.error(`hasResult: ${!!result}`);
         console.error(`success: ${result?.success}`);
         console.error(`lastResponse: ${result?.lastResponse}`);
+        finalStatus = 'failed';
+        finalStatusText = 'Nieoczekiwany wynik';
+        finalReason = 'invalid_result';
         console.log(`${'='.repeat(80)}\n`);
       }
+
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType,
+        status: finalStatus,
+        needsAction: false,
+        statusText: finalStatusText,
+        reason: finalReason,
+        error: finalError,
+        ...(finalStatus === 'completed'
+          ? {
+            currentPrompt: processTotalPrompts,
+            totalPrompts: processTotalPrompts,
+            ...(processTotalPrompts > 0
+              ? {
+                stageIndex: processTotalPrompts - 1,
+                stageName: `Prompt ${processTotalPrompts}`
+              }
+              : {
+                stageName: 'Start'
+              })
+          }
+          : {}),
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
 
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
       return { success: true, title };
 
     } catch (error) {
       console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd:`, error);
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType,
+        status: 'failed',
+        needsAction: false,
+        statusText: 'Blad procesu',
+        reason: 'exception',
+        error: error?.message || String(error),
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
       return { success: false, error: error.message };
     }
   });
@@ -1244,7 +2016,7 @@ async function extractText() {
 }
 
 // Funkcja wklejania do ChatGPT (content script)
-async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company') {
+async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company', runId = null, progressContext = null) {
   try {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🚀 [injectToChat] START`);
@@ -1264,6 +2036,80 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       const lastMsg = count > 0 ? assistantMessages[count - 1] : null;
       const lastText = lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
       return { count, lastText };
+    }
+
+    const STAGE0_PLACEHOLDER_REGEX = /\[WSTAW TUTAJ PIERWSZA ODPOWIEDZ \(Stage 0\)\]|WSTAW TUTAJ PIERWSZA ODPOWIEDZ \(Stage 0\)/gi;
+
+    function injectStage0IntoPrompt(promptText, stage0Text) {
+      if (!promptText || !stage0Text) {
+        return { text: promptText, replaced: false };
+      }
+      const regex = new RegExp(STAGE0_PLACEHOLDER_REGEX.source, STAGE0_PLACEHOLDER_REGEX.flags);
+      if (!regex.test(promptText)) {
+        return { text: promptText, replaced: false };
+      }
+      return {
+        text: promptText.replace(regex, () => stage0Text),
+        replaced: true
+      };
+    }
+
+    function injectStage0IntoChain(chain, stage0Text) {
+      if (!Array.isArray(chain) || chain.length === 0) {
+        return { chain, replacedCount: 0 };
+      }
+
+      let replacedCount = 0;
+      const updatedChain = chain.map((promptText) => {
+        const result = injectStage0IntoPrompt(promptText, stage0Text);
+        if (result.replaced) {
+          replacedCount += 1;
+        }
+        return result.text;
+      });
+
+      return { chain: updatedChain, replacedCount };
+    }
+
+    const promptOffset = Number.isInteger(progressContext?.promptOffset) && progressContext.promptOffset > 0
+      ? progressContext.promptOffset
+      : 0;
+    const totalPromptsOverride = Number.isInteger(progressContext?.totalPromptsOverride) && progressContext.totalPromptsOverride >= 0
+      ? progressContext.totalPromptsOverride
+      : null;
+    const localPromptCount = Array.isArray(promptChain) ? promptChain.length : 0;
+    const totalPromptsForRun = Number.isInteger(totalPromptsOverride)
+      ? Math.max(totalPromptsOverride, promptOffset + localPromptCount)
+      : (promptOffset + localPromptCount);
+
+    function getAbsolutePromptIndex(localPromptNumber) {
+      if (!Number.isInteger(localPromptNumber) || localPromptNumber <= 0) return 0;
+      return promptOffset + localPromptNumber;
+    }
+
+    function getAbsoluteStageIndex(localStageIndex, localPromptNumber = null) {
+      if (Number.isInteger(localStageIndex) && localStageIndex >= 0) {
+        return promptOffset + localStageIndex;
+      }
+      if (Number.isInteger(localPromptNumber) && localPromptNumber > 0) {
+        return getAbsolutePromptIndex(localPromptNumber) - 1;
+      }
+      return null;
+    }
+
+    function notifyProcess(type, payload = {}) {
+      if (!runId || !chrome?.runtime?.sendMessage) return;
+      try {
+        chrome.runtime.sendMessage({
+          type,
+          runId,
+          analysisType,
+          title: articleTitle || '',
+          ...payload
+        }).catch(() => {});
+      } catch (error) {
+        // Ignore messaging errors in injected context.
+      }
     }
 
 
@@ -2607,8 +3453,29 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return false;
     }
 
-    // Sprawdź czy odpowiedź nie zawiera typowych wzorców błędów
-    const errorPatterns = [
+    // Twarde wzorce błędów - odpowiedź uznajemy za niepoprawną.
+    const hardErrorPatterns = [
+      /something went wrong/i,
+      /an error occurred/i,
+      /internal server error/i,
+      /network error/i,
+      /try again (later|in a few)/i,
+      /unable to.*(complete|process|generate)/i,
+      /conversation not found/i,
+      /at capacity/i
+    ];
+
+    const head = text.substring(0, 400);
+    for (const pattern of hardErrorPatterns) {
+      if (pattern.test(head)) {
+        console.warn(`📊 Walidacja: ❌ Wykryto błąd generacji (${pattern})`);
+        console.warn(`   Początek tekstu: "${head.substring(0, 120)}..."`);
+        return false;
+      }
+    }
+
+    // Miękkie wzorce ostrzegawcze (nie odrzucamy automatycznie).
+    const softWarningPatterns = [
       /I apologize.*error/i,
       /something went wrong/i,
       /please try again/i,
@@ -2616,12 +3483,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       /unable to.*right now/i
     ];
 
-    for (const pattern of errorPatterns) {
-      if (pattern.test(text.substring(0, 200))) {
+    for (const pattern of softWarningPatterns) {
+      if (pattern.test(head)) {
         console.warn(`📊 Walidacja: ⚠️ Wykryto wzorzec błędu: ${pattern}`);
-        console.warn(`   Początek tekstu: "${text.substring(0, 100)}..."`);
-        // Nie odrzucaj całkowicie - może to być częściowa odpowiedź
-        // Tylko zaloguj ostrzeżenie
+        console.warn(`   Początek tekstu: "${head.substring(0, 120)}..."`);
       }
     }
 
@@ -2770,18 +3635,68 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   
   // Funkcja pokazująca przyciski "Kontynuuj" i czekająca na kliknięcie
   // Zwraca: 'wait' - czekaj na odpowiedź, 'skip' - pomiń i wyślij następny prompt
-  function showContinueButton(counter, currentPrompt, totalPrompts) {
+  function showContinueButton(counter, currentPrompt, totalPrompts, reason = 'needs_action') {
     return new Promise((resolve) => {
       console.log(`⏸️ Pokazuję przyciski Kontynuuj dla prompta ${currentPrompt}/${totalPrompts}`);
-      
-      counter.innerHTML = `
+      notifyProcess('PROCESS_NEEDS_ACTION', {
+        status: 'running',
+        needsAction: true,
+        currentPrompt,
+        totalPrompts,
+        reason,
+        statusText: 'Wymaga decyzji'
+      });
+
+      let content = counter ? counter.querySelector('#economist-counter-content') : null;
+      if (!content) {
+        content = document.getElementById('economist-counter-content');
+      }
+      if (!content && counter) {
+        console.warn('⚠️ Brak #economist-counter-content - odtwarzam kontener');
+        content = document.createElement('div');
+        content.id = 'economist-counter-content';
+        counter.appendChild(content);
+      }
+
+      if (!content) {
+        console.error('❌ Nie mogę pokazać przycisków kontynuacji - brak kontenera licznika');
+        notifyProcess('PROCESS_ACTION_RESOLVED', {
+          currentPrompt,
+          totalPrompts,
+          decision: 'wait',
+          origin: 'fallback',
+          needsAction: false
+        });
+        resolve('wait');
+        return;
+      }
+
+      // Wymuś rozwinięcie panelu, aby przyciski były widoczne i licznik mógł wrócić po kliknięciu.
+      content.style.display = 'block';
+      content.style.padding = '8px 24px 16px 24px';
+      localStorage.setItem('economist-counter-minimized', 'false');
+      if (counter) {
+        counter.style.minWidth = '220px';
+        counter.style.cursor = 'default';
+      }
+
+      const header = counter && counter.firstElementChild;
+      if (header && header.style) {
+        header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
+        const minimizeBtn = header.querySelector('button');
+        if (minimizeBtn) {
+          minimizeBtn.textContent = '−';
+        }
+      }
+
+      content.innerHTML = `
         <div style="font-size: 16px; margin-bottom: 8px;">⚠️ Zatrzymano</div>
         <div style="font-size: 14px; margin-bottom: 12px;">Prompt ${currentPrompt} / ${totalPrompts}</div>
         <div style="font-size: 12px; opacity: 0.9; margin-bottom: 12px; line-height: 1.4;">
           Odpowiedź niepoprawna lub timeout.<br>
           Napraw sytuację w ChatGPT, potem wybierz:
         </div>
-        <button id="continue-wait-btn" style="
+        <button id="continue-wait-btn" data-continue-action="wait" style="
           background: white;
           color: #667eea;
           border: none;
@@ -2792,9 +3707,11 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           font-size: 14px;
           width: 100%;
           margin-bottom: 8px;
-          transition: transform 0.2s;
+          transform: translateY(0) scale(1);
+          transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.15);
         ">⏳ Czekaj na odpowiedź</button>
-        <button id="continue-skip-btn" style="
+        <button id="continue-skip-btn" data-continue-action="skip" style="
           background: rgba(255,255,255,0.3);
           color: white;
           border: 1px solid white;
@@ -2804,39 +3721,101 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           cursor: pointer;
           font-size: 14px;
           width: 100%;
-          transition: transform 0.2s;
+          transform: translateY(0) scale(1);
+          transition: transform 0.18s ease, box-shadow 0.18s ease, opacity 0.18s ease;
+          box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
         ">⏭️ Wyślij następny prompt</button>
       `;
-      
-      const waitBtn = document.getElementById('continue-wait-btn');
-      const skipBtn = document.getElementById('continue-skip-btn');
-      
-      // Event listeners dla waitBtn
-      waitBtn.addEventListener('mouseover', () => {
-        waitBtn.style.transform = 'scale(1.05)';
-      });
-      
-      waitBtn.addEventListener('mouseout', () => {
-        waitBtn.style.transform = 'scale(1)';
-      });
-      
-      waitBtn.addEventListener('click', () => {
-        console.log('✅ Użytkownik kliknął "Czekaj na odpowiedź" - wznawianie czekania...');
+
+      const waitBtn = content.querySelector('[data-continue-action="wait"]');
+      const skipBtn = content.querySelector('[data-continue-action="skip"]');
+      if (!waitBtn || !skipBtn) {
+        console.error('❌ Nie udało się zbudować przycisków kontynuacji');
+        notifyProcess('PROCESS_ACTION_RESOLVED', {
+          currentPrompt,
+          totalPrompts,
+          decision: 'wait',
+          origin: 'fallback',
+          needsAction: false
+        });
         resolve('wait');
+        return;
+      }
+
+      const setHoverState = (button, active) => {
+        button.style.transform = active ? 'translateY(-1px) scale(1.03)' : 'translateY(0) scale(1)';
+        button.style.boxShadow = active
+          ? '0 6px 16px rgba(0, 0, 0, 0.24)'
+          : '0 2px 8px rgba(0, 0, 0, 0.15)';
+      };
+
+      const setPressedState = (button, pressed) => {
+        button.style.transform = pressed ? 'translateY(0) scale(0.98)' : 'translateY(-1px) scale(1.03)';
+      };
+
+      let isResolved = false;
+      let decisionListener = null;
+
+      const cleanupDecisionListener = () => {
+        if (decisionListener && chrome?.runtime?.onMessage?.removeListener) {
+          try {
+            chrome.runtime.onMessage.removeListener(decisionListener);
+          } catch (error) {
+            // Ignore listener cleanup issues.
+          }
+        }
+      };
+
+      const finish = (action, origin = 'local') => {
+        if (isResolved) return;
+        isResolved = true;
+        cleanupDecisionListener();
+        waitBtn.disabled = true;
+        skipBtn.disabled = true;
+        waitBtn.style.opacity = '0.7';
+        skipBtn.style.opacity = '0.7';
+        notifyProcess('PROCESS_ACTION_RESOLVED', {
+          status: 'running',
+          needsAction: false,
+          currentPrompt,
+          totalPrompts,
+          decision: action,
+          origin,
+          statusText: action === 'skip' ? 'Pominieto czekanie' : 'Wznowiono czekanie'
+        });
+        resolve(action);
+      };
+
+      if (runId && chrome?.runtime?.onMessage?.addListener) {
+        decisionListener = (message) => {
+          if (!message || message.type !== 'PROCESS_DECISION') return;
+          if (message.runId && message.runId !== runId) return;
+          const forcedAction = message.decision === 'skip' ? 'skip' : 'wait';
+          console.log(`✅ Otrzymano decyzję z panelu (${forcedAction}) dla runId=${runId}`);
+          finish(forcedAction, message.origin || 'panel');
+        };
+        try {
+          chrome.runtime.onMessage.addListener(decisionListener);
+        } catch (error) {
+          decisionListener = null;
+        }
+      }
+
+      [waitBtn, skipBtn].forEach((button) => {
+        button.addEventListener('mouseenter', () => setHoverState(button, true));
+        button.addEventListener('mouseleave', () => setHoverState(button, false));
+        button.addEventListener('mousedown', () => setPressedState(button, true));
+        button.addEventListener('mouseup', () => setPressedState(button, false));
       });
-      
-      // Event listeners dla skipBtn
-      skipBtn.addEventListener('mouseover', () => {
-        skipBtn.style.transform = 'scale(1.05)';
+
+      waitBtn.addEventListener('click', () => {
+        console.log('✅ Użytkownik kliknął "Czekaj na odpowiedź" - wznawiam czekanie');
+        finish('wait', 'local');
       });
-      
-      skipBtn.addEventListener('mouseout', () => {
-        skipBtn.style.transform = 'scale(1)';
-      });
-      
+
       skipBtn.addEventListener('click', () => {
-        console.log('✅ Użytkownik kliknął "Wyślij następny prompt" - pomijam czekanie i idę dalej...');
-        resolve('skip');
+        console.log('✅ Użytkownik kliknął "Wyślij następny prompt" - pomijam czekanie');
+        finish('skip', 'local');
       });
     });
   }
@@ -3098,6 +4077,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
   // Główna logika
   const startTime = Date.now();
+  let stage0Response = '';
+  notifyProcess('PROCESS_PROGRESS', {
+    status: 'running',
+    currentPrompt: promptOffset,
+    totalPrompts: totalPromptsForRun,
+    statusText: 'Inicjalizacja procesu',
+    needsAction: false
+  });
   
   // Retry loop - czekaj na editor (contenteditable div, nie textarea!)
   while (Date.now() - startTime < textareaWaitMs) {
@@ -3122,16 +4109,25 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       
       if (!isResume) {
         // Normalny tryb - wyślij payload (artykuł)
-        updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Wysyłam artykuł...');
+        updateCounter(counter, promptOffset, totalPromptsForRun, 'Wysyłam artykuł...');
         
         // Wyślij tekst Economist
         console.log("📤 Wysyłam artykuł do ChatGPT...");
-        await sendPrompt(payload, responseWaitMs, counter, 0, promptChain ? promptChain.length : 0);
+        await sendPrompt(payload, responseWaitMs, counter, promptOffset, totalPromptsForRun);
         
         // Czekaj na odpowiedź ChatGPT
-        updateCounter(counter, 0, promptChain ? promptChain.length : 0, 'Czekam na odpowiedź...');
+        updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedź...');
         await waitForResponse(responseWaitMs);
         console.log("✅ Artykuł przetworzony");
+
+        // Pobierz odpowiedź Stage 0 do wstawienia w kolejne prompty
+        stage0Response = await getLastResponseText();
+        if (stage0Response && stage0Response.trim().length > 0) {
+          console.log(`🧩 Stage 0 captured (${stage0Response.length} znaków) - będzie wstawione w prompt chain`);
+        } else {
+          console.warn('⚠️ Nie udało się pobrać Stage 0 (pusty tekst) - prompt chain bez wstawienia');
+          stage0Response = '';
+        }
         
         // NIE zapisujemy początkowej odpowiedzi - zapisujemy tylko ostatnią z prompt chain
         
@@ -3141,35 +4137,56 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         await new Promise(resolve => setTimeout(resolve, delay));
       } else {
         // Resume mode - zacznij od razu od prompt chain
-        updateCounter(counter, 0, promptChain ? promptChain.length : 0, '🔄 Resume from stage...');
+        updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Resume from stage...');
         console.log("⏭️ Pomijam payload - zaczynam od prompt chain");
         
         // NOWE: Dodatkowe czekanie na gotowość interfejsu w trybie resume
         console.log("🔍 Sprawdzam gotowość interfejsu przed rozpoczęciem resume chain...");
-        updateCounter(counter, 0, promptChain ? promptChain.length : 0, '⏳ Sprawdzam gotowość...');
+        updateCounter(counter, promptOffset, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
         
-        const resumeInterfaceReady = await waitForInterfaceReady(responseWaitMs, counter, 0, promptChain ? promptChain.length : 0);
+        const resumeInterfaceReady = await waitForInterfaceReady(responseWaitMs, counter, promptOffset, totalPromptsForRun);
         
         if (!resumeInterfaceReady) {
           console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
-          updateCounter(counter, 0, promptChain ? promptChain.length : 0, '❌ Interface nie gotowy');
+          updateCounter(counter, promptOffset, totalPromptsForRun, '❌ Interface nie gotowy');
           await new Promise(resolve => setTimeout(resolve, 5000));
+          notifyProcess('PROCESS_PROGRESS', {
+            status: 'failed',
+            currentPrompt: promptOffset,
+            totalPrompts: totalPromptsForRun,
+            statusText: 'Interface nie gotowy (resume)',
+            reason: 'resume_interface_not_ready',
+            needsAction: false
+          });
           return { success: false, lastResponse: '', error: 'Interface nie gotowy w trybie resume' };
         }
         
         console.log("✅ Interface gotowy - rozpoczynam resume chain");
-        updateCounter(counter, 0, promptChain ? promptChain.length : 0, '🔄 Rozpoczynam chain...');
+        updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Rozpoczynam chain...');
         await new Promise(resolve => setTimeout(resolve, 1000)); // Krótka stabilizacja
       }
       
       // Teraz uruchom prompt chain
       if (promptChain && promptChain.length > 0) {
+        if (stage0Response) {
+          const preparedChain = injectStage0IntoChain(promptChain, stage0Response);
+          promptChain = preparedChain.chain;
+          if (preparedChain.replacedCount > 0) {
+            console.log(`✅ Wstawiono Stage 0 do ${preparedChain.replacedCount} prompt(ów)`);
+          } else {
+            console.warn('⚠️ Stage 0 zebrane, ale nie znaleziono placeholdera w prompt chain');
+          }
+        }
+
         console.log(`\n=== PROMPT CHAIN: ${promptChain.length} promptów do wykonania ===`);
         console.log(`Pełna lista promptów:`, promptChain);
         
         for (let i = 0; i < promptChain.length; i++) {
           const prompt = promptChain[i];
           const remaining = promptChain.length - i - 1;
+          const localPromptNumber = i + 1;
+          const absoluteCurrentPrompt = getAbsolutePromptIndex(localPromptNumber);
+          const absoluteStageIndex = getAbsoluteStageIndex(i, localPromptNumber);
           
           console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
           console.log(`>>> PROMPT ${i + 1}/${promptChain.length} (pozostało: ${remaining})`);
@@ -3178,19 +4195,28 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           console.log(`━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
           
           // Aktualizuj licznik - wysyłanie
-          updateCounter(counter, i + 1, promptChain.length, 'Wysyłam prompt...');
+          updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Wysyłam prompt...');
+          notifyProcess('PROCESS_PROGRESS', {
+            status: 'running',
+            currentPrompt: absoluteCurrentPrompt,
+            totalPrompts: totalPromptsForRun,
+            stageIndex: absoluteStageIndex,
+            stageName: `Prompt ${absoluteCurrentPrompt}`,
+            statusText: 'Wysylam prompt',
+            needsAction: false
+          });
           
           // Wyślij prompt
           console.log(`[${i + 1}/${promptChain.length}] Wywołuję sendPrompt()...`);
-          const sent = await sendPrompt(prompt, responseWaitMs, counter, i + 1, promptChain.length);
+          const sent = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
           
           if (!sent) {
             console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
             console.log(`⏸️ Błąd wysyłania - czekam na interwencję użytkownika`);
-            updateCounter(counter, i + 1, promptChain.length, `❌ Błąd wysyłania`);
+            updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd wysyłania`);
             
             // Pokaż przyciski i czekaj na user - może naprawić sytuację lub pominąć
-            const action = await showContinueButton(counter, i + 1, promptChain.length);
+            const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'send_failed');
             
             if (action === 'skip') {
               console.log(`⏭️ User wybrał pominięcie - przechodzę do następnego prompta`);
@@ -3199,12 +4225,22 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             
             // User naprawił, spróbuj wysłać ponownie ten sam prompt
             console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
-            const retried = await sendPrompt(prompt, responseWaitMs, counter, i + 1, promptChain.length);
+            const retried = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
             
             if (!retried) {
               console.error(`❌ Ponowna próba nieudana - przerywam chain`);
-              updateCounter(counter, i + 1, promptChain.length, `❌ Błąd krytyczny`);
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd krytyczny`);
               await new Promise(resolve => setTimeout(resolve, 10000));
+              notifyProcess('PROCESS_PROGRESS', {
+                status: 'failed',
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`,
+                statusText: 'Blad krytyczny po retry',
+                reason: 'send_retry_failed',
+                needsAction: false
+              });
               // WAŻNE: Musimy zwrócić obiekt, nie undefined!
               return { success: false, lastResponse: '', error: 'Nie udało się wysłać prompta po retry' };
             }
@@ -3213,7 +4249,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           }
           
           // Aktualizuj licznik - czekanie
-          updateCounter(counter, i + 1, promptChain.length, 'Czekam na odpowiedź...');
+          updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedź...');
           
           // Pętla czekania na odpowiedź - powtarzaj aż się uda
           let responseCompleted = false;
@@ -3225,9 +4261,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               // Timeout - pokaż przyciski i czekaj na user
               console.error(`❌ Timeout przy promptcie ${i + 1}/${promptChain.length}`);
               console.log(`⏸️ ChatGPT nie odpowiedział w czasie - czekam na interwencję użytkownika`);
-              updateCounter(counter, i + 1, promptChain.length, '⏱️ Timeout - czekam...');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '⏱️ Timeout - czekam...');
               
-              const action = await showContinueButton(counter, i + 1, promptChain.length);
+              const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'timeout');
               
               if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - zakładam że odpowiedź jest OK i idę dalej`);
@@ -3237,7 +4273,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               
               // User kliknął "Czekaj na odpowiedź" - czekaj ponownie
               console.log(`🔄 Kontynuacja po timeout - ponowne czekanie na odpowiedź...`);
-              updateCounter(counter, i + 1, promptChain.length, 'Czekam na odpowiedź...');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedź...');
               continue; // Powtórz pętlę waitForResponse
             }
             
@@ -3257,9 +4293,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
               console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
-              updateCounter(counter, i + 1, promptChain.length, '❌ Odpowiedź za krótka');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '❌ Odpowiedź za krótka');
               
-              const action = await showContinueButton(counter, i + 1, promptChain.length);
+              const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
               
               if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - akceptuję krótką odpowiedź i idę dalej`);
@@ -3269,7 +4305,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               
               // User kliknął "Czekaj na odpowiedź" - może ChatGPT jeszcze generuje
               console.log(`🔄 Kontynuacja po naprawie - czekam na zakończenie generowania...`);
-              updateCounter(counter, i + 1, promptChain.length, 'Czekam na odpowiedź...');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedź...');
               
               // Poczekaj na zakończenie odpowiedzi ChatGPT
               await waitForResponse(responseWaitMs);
@@ -3278,11 +4314,20 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               continue;
             }
             
-            // Odpowiedź poprawna - wyjdź z pętli
-            responseValid = true;
-          }
-          
-          console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
+          // Odpowiedź poprawna - wyjdź z pętli
+          responseValid = true;
+        }
+        
+        console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          currentPrompt: absoluteCurrentPrompt,
+          totalPrompts: totalPromptsForRun,
+          stageIndex: absoluteStageIndex,
+          stageName: `Prompt ${absoluteCurrentPrompt}`,
+          statusText: 'Prompt zakonczony',
+          needsAction: false
+        });
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -3302,7 +4347,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           if (i < promptChain.length - 1) {
             const delay = getRandomDelay();
             console.log(`⏸️ Anti-automation delay: ${(delay/1000).toFixed(1)}s przed promptem ${i + 2}/${promptChain.length}...`);
-            updateCounter(counter, i + 1, promptChain.length, `⏸️ Czekam ${(delay/1000).toFixed(0)}s...`);
+            updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `⏸️ Czekam ${(delay/1000).toFixed(0)}s...`);
             await new Promise(resolve => setTimeout(resolve, delay));
           }
         }
@@ -3317,6 +4362,16 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
         console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        const completedPrompt = getAbsolutePromptIndex(promptChain.length);
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'completed',
+          currentPrompt: completedPrompt,
+          totalPrompts: totalPromptsForRun,
+          stageIndex: completedPrompt > 0 ? (completedPrompt - 1) : null,
+          stageName: completedPrompt > 0 ? `Prompt ${completedPrompt}` : 'Start',
+          statusText: 'Zakonczono',
+          needsAction: false
+        });
         
         return { success: true, lastResponse: lastResponse };
       } else {
@@ -3324,6 +4379,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         
         // Usuń licznik
         removeCounter(counter, true);
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'completed',
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          stageIndex: promptOffset > 0 ? (promptOffset - 1) : null,
+          stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Start',
+          statusText: 'Brak prompt chain',
+          needsAction: false
+        });
         
         // Brak prompt chain - nie ma odpowiedzi do zapisania
         return { success: true, lastResponse: '' };
@@ -3338,6 +4402,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   }
   
   console.error("Nie znaleziono textarea w ChatGPT po " + textareaWaitMs + "ms");
+  notifyProcess('PROCESS_PROGRESS', {
+    status: 'failed',
+    currentPrompt: promptOffset,
+    totalPrompts: totalPromptsForRun,
+    statusText: 'Nie znaleziono textarea',
+    reason: 'textarea_not_found',
+    needsAction: false
+  });
   return { success: false, error: 'Nie znaleziono textarea' };
   
   } catch (error) {
@@ -3346,6 +4418,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.error(`  Error: ${error.message}`);
     console.error(`  Stack: ${error.stack}`);
     console.error(`${'='.repeat(80)}\n`);
+    notifyProcess('PROCESS_PROGRESS', {
+      status: 'failed',
+      currentPrompt: promptOffset,
+      totalPrompts: totalPromptsForRun,
+      statusText: 'Krytyczny blad injectToChat',
+      reason: 'inject_critical_error',
+      needsAction: false
+    });
     return { success: false, error: `Critical error: ${error.message}` };
   }
 }

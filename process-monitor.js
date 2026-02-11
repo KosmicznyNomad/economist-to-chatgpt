@@ -5,9 +5,12 @@ const detailsEmpty = document.getElementById('details-empty');
 const detailsContainer = document.getElementById('process-details');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
+const resumeAllBtn = document.getElementById('resume-all-btn');
+const processSummary = document.getElementById('process-summary');
 
 let selectedProcessId = null;
 let currentProcesses = [];
+let allProcessesCache = [];
 let lastSignature = '';
 let lastHistorySignature = '';
 let historyOpen = false;
@@ -36,16 +39,257 @@ if (historyToggle && historyList) {
   });
 }
 
+if (resumeAllBtn) {
+  resumeAllBtn.addEventListener('click', () => {
+    void resumeAllProcesses();
+  });
+}
+
 const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
   invalid_response: 'Za krotka odpowiedz'
 };
+const RESPONSE_STORAGE_KEY = 'responses';
+
+function getNormalizedStatus(process) {
+  if (!process || typeof process.status !== 'string') return '';
+  return process.status.trim().toLowerCase();
+}
+
+function isFailedStatus(status) {
+  return status === 'failed' || status === 'error';
+}
+
+function isCompletedStatus(status) {
+  return status === 'completed';
+}
+
+function buildStatusCounts(processes) {
+  const counts = {};
+  (Array.isArray(processes) ? processes : []).forEach((process) => {
+    const status = getNormalizedStatus(process) || 'unknown';
+    counts[status] = (counts[status] || 0) + 1;
+  });
+  return counts;
+}
+
+function dedupeProcessesById(processes) {
+  const items = Array.isArray(processes) ? processes : [];
+  const byId = new Map();
+
+  items.forEach((process) => {
+    if (!process || typeof process !== 'object') return;
+    const processId = process.id ? String(process.id) : '';
+    if (!processId) return;
+    const existing = byId.get(processId);
+    if (!existing) {
+      byId.set(processId, process);
+      return;
+    }
+    const existingTs = Number.isInteger(existing.timestamp) ? existing.timestamp : 0;
+    const nextTs = Number.isInteger(process.timestamp) ? process.timestamp : 0;
+    if (nextTs >= existingTs) {
+      byId.set(processId, process);
+    }
+  });
+
+  return Array.from(byId.values());
+}
+
+function ensureCountConsistency(allItems, activeItems, historyItems) {
+  const issues = [];
+  if ((activeItems.length + historyItems.length) !== allItems.length) {
+    issues.push('partition_mismatch');
+  }
+
+  const activeClosed = activeItems.filter((process) => isProcessClosed(process));
+  if (activeClosed.length > 0) {
+    issues.push('closed_in_active');
+  }
+
+  const activeNeedsAction = activeItems.filter((process) => !!process?.needsAction).length;
+  const allNeedsAction = allItems.filter((process) => !!process?.needsAction && !isProcessClosed(process)).length;
+  if (activeNeedsAction !== allNeedsAction) {
+    issues.push('needs_action_mismatch');
+  }
+
+  return issues;
+}
+
+function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
+  const allItems = Array.isArray(allProcesses) ? allProcesses : [];
+  const activeItems = Array.isArray(activeProcesses) ? activeProcesses : [];
+  const historyItems = Array.isArray(historyProcesses) ? historyProcesses : [];
+
+  const activeCount = activeItems.length;
+  const needsActionCount = activeItems.filter((process) => !!process?.needsAction).length;
+  const completedCount = allItems.filter((process) => isCompletedStatus(getNormalizedStatus(process))).length;
+  const failedCount = allItems.filter((process) => isFailedStatus(getNormalizedStatus(process))).length;
+  const totalCount = allItems.length;
+  const consistencyIssues = ensureCountConsistency(allItems, activeItems, historyItems);
+
+  if (processSummary) {
+    let summary = `Aktywne: ${activeCount} | Wymaga akcji: ${needsActionCount} | Zakonczone: ${completedCount} | Blad: ${failedCount} | Wszystkie: ${totalCount}`;
+    if (consistencyIssues.length > 0) {
+      summary += ` | Korekta: ${consistencyIssues.join(',')}`;
+      console.warn('[panel] Wykryto niespojnosc licznikow procesow', {
+        issues: consistencyIssues,
+        statusCounts: buildStatusCounts(allItems),
+        activeCount,
+        historyCount: historyItems.length,
+        totalCount
+      });
+    }
+    processSummary.textContent = summary;
+  }
+}
+
+function getStorageAreas() {
+  return {
+    local: chrome.storage?.local || null,
+    session: chrome.storage?.session || null
+  };
+}
+
+function makeResponseKey(response) {
+  if (!response || typeof response !== 'object') return '';
+  const timestamp = Number.isInteger(response.timestamp) ? response.timestamp : 0;
+  const runId = typeof response.runId === 'string' ? response.runId : '';
+  const analysisType = response.analysisType || '';
+  const source = response.source || '';
+  const text = response.text || '';
+  return `${timestamp}|${runId}|${analysisType}|${source}|${text.length}`;
+}
+
+function mergeResponses(primary, secondary) {
+  const merged = [];
+  const seen = new Set();
+
+  const add = (response) => {
+    const key = makeResponseKey(response);
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    merged.push(response);
+  };
+
+  (Array.isArray(primary) ? primary : []).forEach(add);
+  (Array.isArray(secondary) ? secondary : []).forEach(add);
+  return merged;
+}
+
+async function readResponsesFromStorage() {
+  const { local, session } = getStorageAreas();
+
+  if (local && session) {
+    const [localResult, sessionResult] = await Promise.all([
+      local.get([RESPONSE_STORAGE_KEY]),
+      session.get([RESPONSE_STORAGE_KEY])
+    ]);
+    return mergeResponses(localResult.responses || [], sessionResult.responses || []);
+  }
+
+  if (local) {
+    const result = await local.get([RESPONSE_STORAGE_KEY]);
+    return result.responses || [];
+  }
+
+  if (session) {
+    const result = await session.get([RESPONSE_STORAGE_KEY]);
+    return result.responses || [];
+  }
+
+  return [];
+}
+
+function isProcessCompleted(process) {
+  if (!process) return false;
+  return isCompletedStatus(getNormalizedStatus(process));
+}
+
+function findCompletedResponseForProcess(process, responses) {
+  if (!process || !Array.isArray(responses) || responses.length === 0) return null;
+
+  const sorted = responses
+    .filter((response) => response && typeof response === 'object')
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  const processId = typeof process.id === 'string' ? process.id : String(process.id || '');
+  if (processId) {
+    const byRunId = sorted.find((response) => typeof response.runId === 'string' && response.runId === processId);
+    if (byRunId) return byRunId;
+  }
+
+  // Fallback for older responses saved without runId.
+  const analysisType = process.analysisType || 'company';
+  const source = process.title || '';
+  const startedAt = Number.isInteger(process.startedAt) ? process.startedAt : null;
+  const finishedAt = Number.isInteger(process.finishedAt) ? process.finishedAt : null;
+
+  const byMetadata = sorted.filter((response) => {
+    if ((response.analysisType || 'company') !== analysisType) return false;
+    if (source && (response.source || '') !== source) return false;
+    const ts = Number.isInteger(response.timestamp) ? response.timestamp : 0;
+    if (startedAt && ts < startedAt - 10 * 60 * 1000) return false;
+    if (finishedAt && ts > finishedAt + 10 * 60 * 1000) return false;
+    return true;
+  });
+
+  if (byMetadata.length > 0) return byMetadata[0];
+  return null;
+}
+
+async function copyCompletedResponse(process, button) {
+  if (!process || !button) return;
+
+  const originalText = button.dataset.originalText || button.textContent || 'Skopiuj skonczona odpowiedz';
+  button.dataset.originalText = originalText;
+  button.disabled = true;
+
+  try {
+    const responses = await readResponsesFromStorage();
+    const match = findCompletedResponseForProcess(process, responses);
+    const text = (match?.formattedText || match?.formatted_text || match?.text || '').trim();
+
+    if (!text) {
+      throw new Error('Brak zapisanej skonczonej odpowiedzi dla tego procesu');
+    }
+
+    await navigator.clipboard.writeText(text);
+    button.textContent = '✓ Skopiowano';
+  } catch (error) {
+    console.warn('[panel] Nie udalo sie skopiowac skonczonej odpowiedzi:', error?.message || error);
+    button.textContent = '✕ Brak odpowiedzi';
+  }
+
+  setTimeout(() => {
+    button.textContent = originalText;
+    button.disabled = !isProcessCompleted(process);
+  }, 1800);
+}
 
 function resolveStageLabel(process) {
-  if (process?.stageName) return process.stageName;
-  if (Number.isInteger(process?.stageIndex)) return `Stage ${process.stageIndex + 1}`;
-  if (process?.currentPrompt) return `Prompt ${process.currentPrompt}`;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
+    ? process.currentPrompt
+    : null;
+  const promptFromStageIndex = Number.isInteger(process?.stageIndex) && process.stageIndex >= 0
+    ? (process.stageIndex + 1)
+    : null;
+  const normalizedPrompt = Math.max(currentPrompt || 0, promptFromStageIndex || 0);
+
+  const rawStageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
+  if (rawStageName) {
+    const promptMatch = rawStageName.match(/^Prompt\s+(\d+)$/i);
+    if (promptMatch && normalizedPrompt > 0) {
+      const stagePrompt = Number.parseInt(promptMatch[1], 10);
+      if (Number.isInteger(stagePrompt) && stagePrompt !== normalizedPrompt) {
+        return `Prompt ${normalizedPrompt}`;
+      }
+    }
+    return rawStageName;
+  }
+
+  if (normalizedPrompt > 0) return `Prompt ${normalizedPrompt}`;
   return 'Start';
 }
 
@@ -173,25 +417,29 @@ function buildProcessCard() {
       selectedProcessId = process.id;
       updateUI(currentProcesses, { force: true });
     }
-    void focusProcessWindow(process);
+    void openProcessWindow(process);
   });
 
-  waitBtn.addEventListener('click', (event) => {
+  const handleDecisionClick = async (event, decision) => {
     event.stopPropagation();
     const process = card.__process;
     if (!process) return;
     waitBtn.disabled = true;
     skipBtn.disabled = true;
-    sendDecision(process, 'wait');
+    const sent = await sendDecision(process, decision);
+    if (!sent) {
+      restoreDecisionButtons(waitBtn, skipBtn);
+      return;
+    }
+    scheduleDecisionButtonRecovery(process.id, waitBtn, skipBtn);
+  };
+
+  waitBtn.addEventListener('click', (event) => {
+    void handleDecisionClick(event, 'wait');
   });
 
   skipBtn.addEventListener('click', (event) => {
-    event.stopPropagation();
-    const process = card.__process;
-    if (!process) return;
-    waitBtn.disabled = true;
-    skipBtn.disabled = true;
-    sendDecision(process, 'skip');
+    void handleDecisionClick(event, 'skip');
   });
 
   return entry;
@@ -217,15 +465,16 @@ function updateProcessCard(entry, process, isSelected) {
 
   refs.statusLine.textContent = `Prompt ${currentPrompt} / ${totalPrompts}`;
 
+  const status = getNormalizedStatus(process);
   let statusBadgeText = 'W trakcie';
   let statusBadgeClass = 'status-running';
   if (process.needsAction) {
     statusBadgeText = 'WYMAGA AKCJI';
     statusBadgeClass = 'status-needs-action';
-  } else if (process.status === 'completed') {
+  } else if (isCompletedStatus(status)) {
     statusBadgeText = 'Zakonczono';
     statusBadgeClass = 'status-completed';
-  } else if (process.status === 'failed') {
+  } else if (isFailedStatus(status)) {
     statusBadgeText = 'Blad';
     statusBadgeClass = 'status-failed';
   }
@@ -253,7 +502,7 @@ function updateProcessCard(entry, process, isSelected) {
   let reasonText = null;
   if (process.reason) {
     reasonText = reasonLabels[process.reason] || process.reason;
-  } else if (process.status === 'failed' && process.error) {
+  } else if (isFailedStatus(status) && process.error) {
     reasonText = process.error;
   }
 
@@ -284,7 +533,18 @@ function openChatTab(process) {
   return true;
 }
 
-const CLOSED_STATUSES = new Set(['completed', 'failed', 'closed']);
+const CLOSED_STATUSES = new Set([
+  'completed',
+  'failed',
+  'closed',
+  'error',
+  'cancelled',
+  'canceled',
+  'aborted',
+  'stopped',
+  'interrupted'
+]);
+const MAX_ORPHAN_ACTIVE_AGE_MS = 45000;
 const STATUS_CACHE_TTL_MS = 2500;
 const tabStatusCache = new Map();
 const windowStatusCache = new Map();
@@ -292,7 +552,7 @@ let updateSequence = 0;
 
 function isProcessClosed(process) {
   if (!process) return true;
-  const status = typeof process.status === 'string' ? process.status.toLowerCase() : '';
+  const status = getNormalizedStatus(process);
   return CLOSED_STATUSES.has(status);
 }
 
@@ -337,27 +597,42 @@ async function filterActiveProcesses(processes) {
   const active = items.filter((process) => !isProcessClosed(process));
   if (active.length === 0) return [];
 
-  const checks = await Promise.all(active.map(async (process) => {
+  const decisions = await Promise.all(active.map(async (process) => {
     const tabId = Number.isInteger(process.tabId) ? process.tabId : null;
     const windowId = Number.isInteger(process.windowId) ? process.windowId : null;
 
-    if (!tabId && !windowId) return true;
+    if (!tabId && !windowId) {
+      const lastSeenAt = Number.isInteger(process.timestamp)
+        ? process.timestamp
+        : (Number.isInteger(process.startedAt) ? process.startedAt : null);
+      if (!Number.isInteger(lastSeenAt)) {
+        return { process, keep: false, reason: 'orphan_missing_timestamp' };
+      }
+      const keep = (Date.now() - lastSeenAt) <= MAX_ORPHAN_ACTIVE_AGE_MS;
+      return { process, keep, reason: keep ? 'orphan_recent' : 'orphan_expired' };
+    }
 
     if (tabId) {
       const tabExists = await checkTabExists(tabId);
-      if (tabExists !== false) return true; // true or unknown => keep
+      if (tabExists !== false) {
+        return { process, keep: true, reason: tabExists === true ? 'tab_exists' : 'tab_unknown' };
+      }
       if (windowId) {
         const windowExists = await checkWindowExists(windowId);
-        return windowExists !== false;
+        const keep = windowExists !== false;
+        return { process, keep, reason: keep ? (windowExists === true ? 'window_exists_tab_missing' : 'window_unknown_tab_missing') : 'tab_window_missing' };
       }
-      return false;
+      return { process, keep: false, reason: 'tab_missing' };
     }
 
     const windowExists = await checkWindowExists(windowId);
-    return windowExists !== false;
+    const keep = windowExists !== false;
+    return { process, keep, reason: keep ? (windowExists === true ? 'window_exists' : 'window_unknown') : 'window_missing' };
   }));
 
-  return active.filter((_, index) => checks[index]);
+  return decisions
+    .filter((decision) => decision.keep)
+    .map((decision) => decision.process);
 }
 
 function getTabExists(tabId) {
@@ -414,17 +689,20 @@ function getWindowExists(windowId) {
 
 async function applyProcessesUpdate(processes, options = {}) {
   const requestId = ++updateSequence;
-  const items = Array.isArray(processes) ? processes.slice() : [];
+  const items = dedupeProcessesById(Array.isArray(processes) ? processes.slice() : []);
+  allProcessesCache = items.slice();
   try {
     const active = await filterActiveProcesses(items);
     if (requestId !== updateSequence) return;
-    updateUI(active, options);
     const activeIds = new Set(active.map((process) => process.id));
     const history = items.filter((process) => !activeIds.has(process.id));
+    updateSummaryPanels(items, active, history);
+    updateUI(active, options);
     updateHistory(history);
   } catch (error) {
     console.warn('[panel] Nie udalo sie odswiezyc procesow:', error);
     if (requestId !== updateSequence) return;
+    updateSummaryPanels(items, items, []);
     updateUI(items, options);
     updateHistory([]);
   }
@@ -539,24 +817,87 @@ async function focusProcessWindow(process) {
   return windowFocused || tabFocused;
 }
 
+async function openProcessWindow(process) {
+  if (!process) return false;
+  const focused = await focusProcessWindow(process);
+  if (focused) return true;
+  if (openChatTab(process)) return true;
+  return false;
+}
+
 function refreshProcesses() {
-  chrome.runtime.sendMessage({ type: 'GET_PROCESSES' }, (response) => {
-    if (response && response.processes) {
-      applyProcessesUpdate(response.processes);
-    }
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'GET_PROCESSES' }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[panel] GET_PROCESSES failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+        resolve([]);
+        return;
+      }
+      const processes = Array.isArray(response?.processes) ? response.processes : [];
+      applyProcessesUpdate(processes);
+      resolve(processes);
+    });
   });
 }
 
 function sendDecision(process, decision) {
-  if (!process || !process.id) return;
-  chrome.runtime.sendMessage({
-    type: 'PROCESS_DECISION',
-    runId: process.id,
-    decision,
-    origin: 'panel',
-    tabId: Number.isInteger(process.tabId) ? process.tabId : null,
-    windowId: Number.isInteger(process.windowId) ? process.windowId : null
+  return new Promise((resolve) => {
+    if (!process || !process.id) {
+      resolve(false);
+      return;
+    }
+    chrome.runtime.sendMessage({
+      type: 'PROCESS_DECISION',
+      runId: process.id,
+      decision,
+      origin: 'panel',
+      tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+      windowId: Number.isInteger(process.windowId) ? process.windowId : null
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[panel] PROCESS_DECISION failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+        resolve(false);
+        return;
+      }
+      resolve(!!response?.success);
+    });
   });
+}
+
+function sendDecisionAll(decision) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      type: 'PROCESS_DECISION_ALL',
+      decision,
+      origin: 'panel'
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[panel] PROCESS_DECISION_ALL failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+        resolve({ success: false, matched: 0, delivered: 0 });
+        return;
+      }
+
+      resolve({
+        success: !!response?.success,
+        matched: Number.isInteger(response?.matched) ? response.matched : 0,
+        delivered: Number.isInteger(response?.delivered) ? response.delivered : 0
+      });
+    });
+  });
+}
+
+function restoreDecisionButtons(waitBtn, skipBtn) {
+  if (waitBtn) waitBtn.disabled = false;
+  if (skipBtn) skipBtn.disabled = false;
+}
+
+function scheduleDecisionButtonRecovery(processId, waitBtn, skipBtn, delayMs = 1800) {
+  setTimeout(() => {
+    const latest = currentProcesses.find((process) => process.id === processId);
+    if (latest?.needsAction) {
+      restoreDecisionButtons(waitBtn, skipBtn);
+    }
+  }, delayMs);
 }
 
 function updateUI(processes, options = {}) {
@@ -570,6 +911,7 @@ function updateUI(processes, options = {}) {
     processCardMap.clear();
     processSeenAt.clear();
     renderDetails();
+    updateResumeAllButtonState();
     return;
   }
   
@@ -608,8 +950,12 @@ function updateUI(processes, options = {}) {
       const reason = process.reason || '';
       const title = process.title || '';
       const analysisType = process.analysisType || '';
+      const tabId = Number.isInteger(process.tabId) ? process.tabId : '';
+      const windowId = Number.isInteger(process.windowId) ? process.windowId : '';
+      const chatUrl = process.chatUrl || '';
+      const sourceUrl = process.sourceUrl || '';
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}`;
+      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -643,6 +989,7 @@ function updateUI(processes, options = {}) {
 
   currentProcesses = orderedItems.slice();
   renderDetails();
+  updateResumeAllButtonState();
 }
 
 function updateHistory(processes) {
@@ -650,7 +997,7 @@ function updateHistory(processes) {
   items.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
   const signature = items
-    .map((process) => `${process.id}|${process.timestamp}|${process.status}|${process.currentPrompt}|${process.totalPrompts}|${process.stageIndex || ''}|${process.stageName || ''}|${process.chatUrl || ''}|${process.sourceUrl || ''}`)
+    .map((process) => `${process.id}|${process.timestamp}|${process.status}|${process.currentPrompt}|${process.totalPrompts}|${process.stageIndex || ''}|${process.stageName || ''}|${process.chatUrl || ''}|${process.sourceUrl || ''}|${process.tabId || ''}|${process.windowId || ''}`)
     .join(';');
 
   if (signature === lastHistorySignature) {
@@ -659,6 +1006,7 @@ function updateHistory(processes) {
         ? `Poprzednie procesy (${items.length})`
         : 'Poprzednie procesy';
     }
+    updateResumeAllButtonState();
     return;
   }
 
@@ -678,6 +1026,7 @@ function updateHistory(processes) {
     empty.className = 'details-empty';
     empty.textContent = 'Brak poprzednich procesow.';
     historyList.appendChild(empty);
+    updateResumeAllButtonState();
     return;
   }
 
@@ -697,14 +1046,10 @@ function updateHistory(processes) {
     title.className = 'history-title';
     title.textContent = process.title || 'Bez tytulu';
 
-    const stageLabel = process.stageName
-      ? process.stageName
-      : (Number.isInteger(process.stageIndex)
-        ? `Stage ${process.stageIndex + 1}`
-        : (process.currentPrompt ? `Prompt ${process.currentPrompt}${process.totalPrompts ? ` / ${process.totalPrompts}` : ''}` : 'Start'));
+    const stageLabel = resolveStageLabel(process);
 
     const statusLabel = isProcessClosed(process)
-      ? (process.status === 'failed' ? 'Blad' : 'Zakonczono')
+      ? (isFailedStatus(getNormalizedStatus(process)) ? 'Blad' : 'Zakonczono')
       : 'Przerwane';
 
     const meta = document.createElement('div');
@@ -733,11 +1078,23 @@ function updateHistory(processes) {
 
     actions.appendChild(openBtn);
 
+    const copyBtn = document.createElement('button');
+    copyBtn.className = 'history-open history-copy';
+    copyBtn.textContent = 'Skopiuj skonczona odpowiedz';
+    copyBtn.disabled = !isProcessCompleted(process);
+    copyBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      if (copyBtn.disabled) return;
+      void copyCompletedResponse(process, copyBtn);
+    });
+    actions.appendChild(copyBtn);
+
     card.appendChild(title);
     card.appendChild(meta);
     card.appendChild(actions);
     historyList.appendChild(card);
   });
+  updateResumeAllButtonState();
 }
 
 function getResumeStartIndex(process) {
@@ -745,6 +1102,56 @@ function getResumeStartIndex(process) {
   if (Number.isInteger(process.stageIndex)) return process.stageIndex;
   if (Number.isInteger(process.currentPrompt) && process.currentPrompt > 0) return process.currentPrompt;
   return null;
+}
+
+function getNeedsActionProcesses() {
+  const source = allProcessesCache.length > 0 ? allProcessesCache : currentProcesses;
+  return source.filter((process) => !!process?.needsAction && !isProcessClosed(process));
+}
+
+function updateResumeAllButtonState() {
+  if (!resumeAllBtn) return;
+
+  const needsActionCount = getNeedsActionProcesses().length;
+  if (needsActionCount > 0) {
+    resumeAllBtn.disabled = false;
+    resumeAllBtn.textContent = `Wyslij nastepny prompt we wszystkich (${needsActionCount})`;
+    return;
+  }
+
+  resumeAllBtn.disabled = true;
+  resumeAllBtn.textContent = 'Wyslij nastepny prompt we wszystkich';
+}
+
+async function resumeAllProcesses() {
+  if (!resumeAllBtn || resumeAllBtn.disabled) return;
+
+  const needsActionProcesses = getNeedsActionProcesses();
+  if (needsActionProcesses.length === 0) return;
+
+  resumeAllBtn.disabled = true;
+  // Globalne "wznow" = klikniecie "Wyslij nastepny prompt" (skip) dla kazdego zatrzymanego procesu.
+  const bulk = await sendDecisionAll('skip');
+
+  // Fallback: jesli bulk nie dostarczyl wszystkich decyzji, dopytaj stan i doslij selektywnie.
+  if (!bulk.success || bulk.delivered < needsActionProcesses.length) {
+    await new Promise((resolve) => setTimeout(resolve, 250));
+    await refreshProcesses();
+    const remaining = getNeedsActionProcesses();
+    if (remaining.length > 0) {
+      const fallbackResults = await Promise.all(remaining.map((process) => sendDecision(process, 'skip')));
+      if (fallbackResults.some((result) => !result)) {
+        console.warn('[panel] Nie wszystkie decyzje RESUME_ALL zostaly dostarczone (bulk+fallback)', {
+          bulk,
+          remaining: remaining.length
+        });
+      }
+    }
+  }
+
+  setTimeout(() => {
+    updateResumeAllButtonState();
+  }, 700);
 }
 
 function openResumeStage(process) {
@@ -761,10 +1168,8 @@ function openResumeStage(process) {
 }
 
 async function openHistoryProcess(process) {
-  const focused = await focusProcessWindow(process);
-  if (focused) return;
-
-  if (openChatTab(process)) return;
+  const opened = await openProcessWindow(process);
+  if (opened) return;
 
   chrome.runtime.sendMessage({ type: 'ACTIVATE_TAB', reason: 'history-open' }, () => {
     if (chrome.runtime.lastError) {
@@ -801,9 +1206,10 @@ function renderDetails() {
   title.textContent = selected.title || 'Bez tytulu';
   const subtitle = document.createElement('div');
   subtitle.className = 'details-subtitle';
-  const statusLabel = selected.status === 'completed'
+  const selectedStatus = getNormalizedStatus(selected);
+  const statusLabel = isCompletedStatus(selectedStatus)
     ? 'Zakonczono'
-    : selected.status === 'failed'
+    : isFailedStatus(selectedStatus)
       ? 'Blad'
       : selected.needsAction
         ? 'Wymaga akcji'
@@ -830,10 +1236,11 @@ function renderDetails() {
     openBtn.textContent = 'Otworz ChatGPT';
     openBtn.addEventListener('click', () => {
       openBtn.disabled = true;
-      openChatTab(selected);
-      setTimeout(() => {
-        openBtn.disabled = false;
-      }, 600);
+      void openProcessWindow(selected).finally(() => {
+        setTimeout(() => {
+          openBtn.disabled = false;
+        }, 600);
+      });
     });
     actions.appendChild(openBtn);
   }
@@ -852,6 +1259,16 @@ function renderDetails() {
     });
     actions.appendChild(focusBtn);
   }
+
+  const copyCompletedBtn = document.createElement('button');
+  copyCompletedBtn.className = 'details-copy';
+  copyCompletedBtn.textContent = 'Skopiuj skonczona odpowiedz';
+  copyCompletedBtn.disabled = !isProcessCompleted(selected);
+  copyCompletedBtn.addEventListener('click', () => {
+    if (copyCompletedBtn.disabled) return;
+    void copyCompletedResponse(selected, copyCompletedBtn);
+  });
+  actions.appendChild(copyCompletedBtn);
 
   if (actions.childNodes.length > 0) {
     header.appendChild(actions);
