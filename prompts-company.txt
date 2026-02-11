@@ -1351,18 +1351,6 @@ After completing your systematic analysis in your thinking block, present your f
 
 Your final output should consist only of the 15 stock recommendations in the format specified above, without duplicating or rehashing any of the systematic analysis work you did in your thinking block.◄PROMPT_SEPARATOR►
 
-Tezę inwestycyjną masz poniżej. Na jej podstawie znajdź i przeanalizuj spółki giełdowe, które najlepiej pasują do tej tezy. Skup się na dokładnej analizie ich modeli biznesowych, charakteru działalności, pozycji konkurencyjnej i potencjału zysku z realizacji tezy.
-
-UWAGA: skopiuj pierwsza odpowiedz (Stage 0) i wklej ja do ponizszego boksu. To jest definicja tezy (Winning Thesis + Why It Wins) i ma byc uzyta bez zmian jako twardy kontekst dla tej macierzy.
-
-<THESIS_DEFINITION>
-DEFINICJA: pelny tekst pierwszej odpowiedzi (Stage 0) zawierajacy "Winning Thesis" oraz "Why It Wins". Wklej w calosci, bez streszczania i bez zmian.
-[WSTAW TUTAJ PIERWSZA ODPOWIEDZ (Stage 0)]
-</THESIS_DEFINITION>
-
-This will help for the next stage: Stage 2.5 - Reverse DCF Lite + Driver-of-Value Screen.
-◄PROMPT_SEPARATOR►
-
 STAGE 2.5 — REVERSE DCF LITE + DRIVER-OF-VALUE SCREEN (Two-Layer Asymmetry)
 
 PURPOSE

@@ -21,6 +21,7 @@
     "https://youtu.be/*",
     "https://*.wsj.com/*",
     "https://*.foreignaffairs.com/*",
+    "https://*.barrons.com/*",
     "https://open.spotify.com/*",
     "http://localhost:8787/*",
     "https://chatgpt.com/*"

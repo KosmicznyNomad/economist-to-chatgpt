@@ -573,7 +573,6 @@ const STAGE_NAMES_COMPANY = [
   "Pipeline Setup (Stages 0-9)",
   "Stage 1: Sub-segment Validation (Porter + S-curve)",
   "Stage 2: Stock Universe (15 names)",
-  "Thesis Definition (PL paste)",
   "Stage 2.5: Reverse DCF Lite + Driver Screen",
   "Stage 3: Competitive Position (4 finalists)",
   "Stage 3.5: Revaluation Parameter (RP)",
@@ -716,6 +715,7 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://www.youtube.com/*", name: "YouTube" },
   { pattern: "https://youtu.be/*", name: "YouTube" },
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
+  { pattern: "https://*.barrons.com/*", name: "Barron's" },
   { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
   { pattern: "https://open.spotify.com/*", name: "Spotify" }
 ];
@@ -1679,18 +1679,42 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
       let finalStatusText = 'Zakonczono';
       let finalReason = '';
       let finalError = '';
+      const resultLastResponse = typeof result?.lastResponse === 'string'
+        ? result.lastResponse
+        : '';
+      const hasResultLastResponse = resultLastResponse.trim().length > 0;
+      const MAX_COMPLETED_RESPONSE_CHARS = 180000;
+      let completedResponsePatch = {};
+
+      if (typeof result?.lastResponse === 'string') {
+        const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+        const storedCompletedResponse = completedResponseTruncated
+          ? resultLastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+          : resultLastResponse;
+
+        completedResponsePatch = {
+          completedResponseText: storedCompletedResponse,
+          completedResponseLength: resultLastResponse.length,
+          completedResponseTruncated,
+          completedResponseCapturedAt: Date.now(),
+          completedResponseSaved: false
+        };
+      }
       
-      if (result && result.success && result.lastResponse !== undefined && result.lastResponse !== null && result.lastResponse.trim().length > 0) {
+      if (result && result.success && hasResultLastResponse) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
-        console.log(`Zapisuję odpowiedź: ${result.lastResponse.length} znaków`);
+        console.log(`Zapisuję odpowiedź: ${resultLastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
         console.log(`Tytuł: ${title}`);
         
-        await saveResponse(result.lastResponse, title, analysisType, processId);
+        const savedResponse = await saveResponse(resultLastResponse, title, analysisType, processId);
+        if (Object.keys(completedResponsePatch).length > 0) {
+          completedResponsePatch.completedResponseSaved = !!savedResponse;
+        }
         
         console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
         console.log(`${'='.repeat(80)}\n`);
-      } else if (result && result.success && (result.lastResponse === undefined || result.lastResponse === null || result.lastResponse.trim().length === 0)) {
+      } else if (result && result.success && !hasResultLastResponse) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse jest pusta lub null ⚠️ ⚠️ ⚠️`);
         console.warn(`lastResponse: "${result.lastResponse}" (długość: ${result.lastResponse?.length || 0})`);
         finalStatusText = 'Zakonczono (pusta odpowiedz)';
@@ -1722,6 +1746,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         statusText: finalStatusText,
         reason: finalReason,
         error: finalError,
+        ...(Object.keys(completedResponsePatch).length > 0
+          ? completedResponsePatch
+          : {}),
         ...(finalStatus === 'completed'
           ? {
             currentPrompt: processTotalPrompts,
@@ -1963,6 +1990,13 @@ async function extractText() {
       '[itemprop="articleBody"]',
       '.article-content',
       '.wsj-snippet-body'
+    ],
+    'barrons.com': [
+      'article',
+      '[itemprop="articleBody"]',
+      '.article-content',
+      '.snippet-promotion',
+      '[data-module="ArticleBody"]'
     ],
     'foreignaffairs.com': [
       'article',

@@ -239,6 +239,43 @@ function findCompletedResponseForProcess(process, responses) {
   return null;
 }
 
+function extractResponseText(response) {
+  if (!response || typeof response !== 'object') return '';
+  const candidates = [
+    response.text,
+    response.formattedText,
+    response.formatted_text
+  ];
+
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim().length > 0) {
+      return candidate;
+    }
+  }
+
+  return '';
+}
+
+function extractCompletedTextFromProcess(process) {
+  if (!process || typeof process !== 'object') return '';
+
+  if (typeof process.completedResponseText === 'string' && process.completedResponseText.trim().length > 0) {
+    return process.completedResponseText;
+  }
+
+  const messages = Array.isArray(process.messages) ? process.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'assistant') continue;
+    const text = typeof message.text === 'string' ? message.text : '';
+    if (text.trim().length > 0) {
+      return text;
+    }
+  }
+
+  return '';
+}
+
 async function copyCompletedResponse(process, button) {
   if (!process || !button) return;
 
@@ -249,13 +286,20 @@ async function copyCompletedResponse(process, button) {
   try {
     const responses = await readResponsesFromStorage();
     const match = findCompletedResponseForProcess(process, responses);
-    const text = (match?.formattedText || match?.formatted_text || match?.text || '').trim();
+    const textFromStorage = extractResponseText(match);
+    const textFromProcess = extractCompletedTextFromProcess(process);
+    const text = (textFromStorage || textFromProcess || '').trim();
 
     if (!text) {
       throw new Error('Brak zapisanej skonczonej odpowiedzi dla tego procesu');
     }
 
     await navigator.clipboard.writeText(text);
+    console.log('[panel] Copied completed response', {
+      processId: process?.id,
+      source: textFromStorage ? 'responses' : 'process_fallback',
+      length: text.length
+    });
     button.textContent = '✓ Skopiowano';
   } catch (error) {
     console.warn('[panel] Nie udalo sie skopiowac skonczonej odpowiedzi:', error?.message || error);
