@@ -12,10 +12,15 @@ setInterval(() => {
     
     if (waitBtn || skipBtn) {
       // Proces wymaga akcji
-      chrome.runtime.sendMessage({ 
+      const promptProgress = extractPromptProgress(counter);
+      const needsActionPayload = {
         type: 'PROCESS_NEEDS_ACTION',
-        currentPrompt: extractCurrentPrompt(counter)
-      }).catch(() => {});
+        source: 'dom-monitor'
+      };
+      if (promptProgress) {
+        Object.assign(needsActionPayload, promptProgress);
+      }
+      chrome.runtime.sendMessage(needsActionPayload).catch(() => {});
       
       // Nasłuchuj na kliknięcie
       if (waitBtn && !waitBtn.dataset.monitored) {
@@ -34,9 +39,26 @@ setInterval(() => {
   }
 }, 2000);
 
-function extractCurrentPrompt(counter) {
-  const match = counter.textContent.match(/Prompt (\d+)/);
-  return match ? parseInt(match[1]) : 0;
+function extractPromptProgress(counter) {
+  const text = (counter?.textContent || '').replace(/\s+/g, ' ').trim();
+  const match = text.match(/Prompt\s+(\d+)(?:\s*\/\s*(\d+))?/i);
+  if (!match) return null;
+
+  const currentPrompt = Number.parseInt(match[1], 10);
+  const totalPrompts = match[2] ? Number.parseInt(match[2], 10) : null;
+  if (!Number.isInteger(currentPrompt) || currentPrompt <= 0) return null;
+
+  const progress = {
+    currentPrompt,
+    stageIndex: currentPrompt - 1,
+    stageName: `Prompt ${currentPrompt}`
+  };
+
+  if (Number.isInteger(totalPrompts) && totalPrompts > 0) {
+    progress.totalPrompts = totalPrompts;
+  }
+
+  return progress;
 }
 
 

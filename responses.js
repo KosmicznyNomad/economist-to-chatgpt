@@ -29,11 +29,12 @@ function getStorageAreas() {
 function makeResponseKey(response) {
   if (!response) return '';
   const timestamp = response.timestamp || 0;
+  const runId = response.runId || '';
   const analysisType = response.analysisType || '';
   const source = response.source || '';
   const text = response.text || '';
   const head = text.slice(0, 64);
-  return `${timestamp}|${analysisType}|${source}|${text.length}|${head}`;
+  return `${timestamp}|${runId}|${analysisType}|${source}|${text.length}|${head}`;
 }
 
 function mergeResponses(primary, secondary) {

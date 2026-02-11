@@ -76,6 +76,39 @@
       overflow: auto;
       padding-right: 6px;
     }
+    .bulk-actions {
+      display: flex;
+      gap: 8px;
+    }
+    .summary-bar {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 11px;
+      line-height: 1.35;
+    }
+    .bulk-btn {
+      width: 100%;
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      cursor: pointer;
+      transition: transform 0.15s, box-shadow 0.15s;
+    }
+    .bulk-btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+    }
+    .bulk-btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     .history {
       display: flex;
       flex-direction: column;
@@ -297,7 +330,8 @@
       justify-content: flex-end;
     }
     .details-open,
-    .details-focus {
+    .details-focus,
+    .details-copy {
       border: 1px solid var(--border);
       background: var(--accent-soft);
       color: var(--text);
@@ -308,7 +342,8 @@
       cursor: pointer;
     }
     .details-open:disabled,
-    .details-focus:disabled {
+    .details-focus:disabled,
+    .details-copy:disabled {
       opacity: 0.6;
       cursor: not-allowed;
     }
@@ -393,6 +428,12 @@
   </div>
   <div class="layout">
     <div class="sidebar">
+      <div class="bulk-actions">
+        <button id="resume-all-btn" class="bulk-btn" disabled>Wyslij nastepny prompt we wszystkich</button>
+      </div>
+      <div id="process-summary" class="summary-bar">
+        Aktywne: 0 | Wymaga akcji: 0 | Zakonczone: 0 | Blad: 0 | Wszystkie: 0
+      </div>
       <div id="process-list" class="process-list"></div>
       <div id="empty-state" class="empty-state" style="display: none;">
         Brak aktywnych procesow
