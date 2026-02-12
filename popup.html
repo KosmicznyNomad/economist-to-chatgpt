@@ -43,6 +43,15 @@
     .btn:active {
       transform: translateY(0);
     }
+
+    .btn-stop {
+      background: #111827;
+      color: #ffffff;
+    }
+
+    .btn-stop:hover {
+      box-shadow: 0 4px 12px rgba(17, 24, 39, 0.35);
+    }
     
     .btn-icon {
       margin-right: 8px;
@@ -71,6 +80,11 @@
     <span class="btn-icon">🚀</span>
     Uruchom analizę
     <span class="shortcut">Ctrl+Shift+E</span>
+  </button>
+
+  <button class="btn btn-stop" id="stopBtn">
+    <span class="btn-icon">■</span>
+    Przerwij proces w tym oknie
   </button>
   
   <button class="btn" id="manualSourceBtn">

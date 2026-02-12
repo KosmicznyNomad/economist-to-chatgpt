@@ -1,9 +1,18 @@
 const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
+const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje";
+const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
 const RETRY_INTERVAL_MS = 500;
+// Auto-detect runner should pass through all tabs once and finish quickly.
+const DETECT_RESUME_MAX_PASSES = 1;
+const DETECT_RESUME_PASS_DELAY_MS = 0;
+const DETECT_RESUME_MAX_RUNTIME_MS = 45 * 1000;
+const AUTO_RECOVERY_MAX_ATTEMPTS = 4;
+const AUTO_RECOVERY_DELAY_MS = 8000;
+const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout', 'invalid_response'];
 
 // Optional cloud upload config (kept simple; safe to extend later).
 const CLOUD_UPLOAD = {
@@ -70,6 +79,39 @@ function normalizePromptCounters(status, currentPrompt, totalPrompts, stageIndex
   }
 
   return { currentPrompt: current, totalPrompts: total };
+}
+
+function normalizeAutoRecoveryState(rawState) {
+  if (!rawState || typeof rawState !== 'object') return null;
+
+  const normalized = {};
+  if (Number.isInteger(rawState.attempt) && rawState.attempt >= 0) {
+    normalized.attempt = rawState.attempt;
+  }
+  if (Number.isInteger(rawState.maxAttempts) && rawState.maxAttempts > 0) {
+    normalized.maxAttempts = rawState.maxAttempts;
+  }
+  if (Number.isInteger(rawState.delayMs) && rawState.delayMs >= 0) {
+    normalized.delayMs = rawState.delayMs;
+  }
+  if (typeof rawState.reason === 'string' && rawState.reason.trim()) {
+    normalized.reason = rawState.reason.trim();
+  }
+  if (Number.isInteger(rawState.currentPrompt) && rawState.currentPrompt >= 0) {
+    normalized.currentPrompt = rawState.currentPrompt;
+  }
+  if (Number.isInteger(rawState.stageIndex) && rawState.stageIndex >= 0) {
+    normalized.stageIndex = rawState.stageIndex;
+  }
+  if (Number.isInteger(rawState.updatedAt) && rawState.updatedAt > 0) {
+    normalized.updatedAt = rawState.updatedAt;
+  }
+
+  if (Object.keys(normalized).length === 0) return null;
+  if (!Number.isInteger(normalized.maxAttempts)) normalized.maxAttempts = AUTO_RECOVERY_MAX_ATTEMPTS;
+  if (!Number.isInteger(normalized.delayMs)) normalized.delayMs = AUTO_RECOVERY_DELAY_MS;
+  if (!Number.isInteger(normalized.attempt)) normalized.attempt = 0;
+  return normalized;
 }
 
 function isFailedProcessStatus(status) {
@@ -209,6 +251,16 @@ function normalizeProcessRecord(record) {
   if (Number.isInteger(normalized.finishedAt) && normalized.finishedAt < normalized.startedAt) {
     normalized.finishedAt = normalized.timestamp;
   }
+  if (isClosedProcessStatus(status)) {
+    delete normalized.autoRecovery;
+  } else {
+    const normalizedAutoRecovery = normalizeAutoRecoveryState(normalized.autoRecovery);
+    if (normalizedAutoRecovery) {
+      normalized.autoRecovery = normalizedAutoRecovery;
+    } else {
+      delete normalized.autoRecovery;
+    }
+  }
 
   return normalized;
 }
@@ -299,6 +351,9 @@ async function broadcastProcessUpdate() {
 async function upsertProcess(runId, patch = {}) {
   if (!runId) return null;
   await ensureProcessRegistryReady();
+  const patchData = (patch && typeof patch === 'object')
+    ? { ...patch }
+    : {};
 
   const existing = processRegistry.get(runId) || {
     id: runId,
@@ -313,17 +368,35 @@ async function upsertProcess(runId, patch = {}) {
     messages: []
   };
 
+  const existingStatus = normalizeProcessStatus(existing.status);
+  if (existingStatus === 'stopped' && !patchData.forceStatusOverride) {
+    const requestedStatus = typeof patchData.status === 'string'
+      ? normalizeProcessStatus(patchData.status)
+      : '';
+    if (!requestedStatus || requestedStatus !== 'stopped') {
+      patchData.status = 'stopped';
+    }
+    patchData.needsAction = false;
+    if (!patchData.reason && typeof existing.reason === 'string') {
+      patchData.reason = existing.reason;
+    }
+    if (!patchData.statusText && typeof existing.statusText === 'string') {
+      patchData.statusText = existing.statusText;
+    }
+  }
+  delete patchData.forceStatusOverride;
+
   const next = normalizeProcessRecord({
     ...existing,
-    ...patch,
+    ...patchData,
     id: runId,
     startedAt: existing.startedAt || Date.now(),
-    timestamp: Number.isInteger(patch.timestamp) ? patch.timestamp : Date.now()
+    timestamp: Number.isInteger(patchData.timestamp) ? patchData.timestamp : Date.now()
   });
 
   if (!next) return null;
   processRegistry.set(runId, next);
-  logProcessTransition(runId, next, patch);
+  logProcessTransition(runId, next, patchData);
   await persistProcessRegistry();
   await broadcastProcessUpdate();
   return next;
@@ -354,6 +427,163 @@ async function resolveProcessId(message, sender) {
   const senderTabId = Number.isInteger(sender?.tab?.id) ? sender.tab.id : null;
   const tabId = messageTabId ?? senderTabId;
   return findProcessIdByTabId(tabId);
+}
+
+async function hasActiveProcessForTab(tabId) {
+  if (!Number.isInteger(tabId)) return false;
+  const process = await getActiveProcessForTab(tabId);
+  return !!process;
+}
+
+async function getActiveProcessForTab(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  await ensureProcessRegistryReady();
+  let latest = null;
+  let latestTs = -1;
+  for (const process of processRegistry.values()) {
+    if (!process || process.tabId !== tabId) continue;
+    if (isClosedProcessStatus(process.status)) continue;
+    const ts = Number.isInteger(process.timestamp)
+      ? process.timestamp
+      : (Number.isInteger(process.startedAt) ? process.startedAt : 0);
+    if (ts >= latestTs) {
+      latestTs = ts;
+      latest = process;
+    }
+  }
+  return latest;
+}
+
+function removeWindowSafe(windowId) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(windowId)) {
+      resolve(false);
+      return;
+    }
+    try {
+      chrome.windows.remove(windowId, () => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+        resolve(true);
+      });
+    } catch (error) {
+      resolve(false);
+    }
+  });
+}
+
+function removeTabSafe(tabId) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve(false);
+      return;
+    }
+    try {
+      chrome.tabs.remove(tabId, () => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+        resolve(true);
+      });
+    } catch (error) {
+      resolve(false);
+    }
+  });
+}
+
+function matchesWindowScope(process, windowId) {
+  if (!Number.isInteger(windowId)) return true;
+  if (!process || typeof process !== 'object') return false;
+  return (
+    process.windowId === windowId ||
+    process.invocationWindowId === windowId ||
+    process.sourceWindowId === windowId
+  );
+}
+
+async function stopSingleProcess(process, options = {}) {
+  if (!process || isClosedProcessStatus(process.status)) return false;
+
+  const runId = process.id;
+  if (!runId) return false;
+
+  const reason = typeof options.reason === 'string' && options.reason.trim()
+    ? options.reason.trim()
+    : 'manual_stop';
+  const statusText = typeof options.statusText === 'string' && options.statusText.trim()
+    ? options.statusText.trim()
+    : 'Przerwano przez uzytkownika';
+  const now = Date.now();
+
+  const preserveWindowId = Number.isInteger(options.preserveWindowId)
+    ? options.preserveWindowId
+    : null;
+  const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
+  const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
+
+  if (processTabId !== null) {
+    try {
+      await chrome.tabs.sendMessage(processTabId, {
+        type: 'PROCESS_FORCE_STOP',
+        runId,
+        reason,
+        origin: options.origin || 'background'
+      });
+    } catch (error) {
+      // Best-effort only. Tab may already be closed.
+    }
+  }
+
+  let windowClosed = false;
+  if (processWindowId !== null && processWindowId !== preserveWindowId) {
+    windowClosed = await removeWindowSafe(processWindowId);
+  }
+
+  if (!windowClosed && processTabId !== null) {
+    await removeTabSafe(processTabId);
+  }
+
+  await upsertProcess(runId, {
+    status: 'stopped',
+    statusText,
+    reason,
+    needsAction: false,
+    finishedAt: now,
+    timestamp: now
+  });
+
+  return true;
+}
+
+async function stopActiveProcesses(options = {}) {
+  await ensureProcessRegistryReady();
+  const targetWindowId = Number.isInteger(options.windowId) ? options.windowId : null;
+  const preserveWindowId = Number.isInteger(options.preserveWindowId) ? options.preserveWindowId : null;
+
+  const candidates = Array.from(processRegistry.values()).filter((process) => {
+    if (!process || isClosedProcessStatus(process.status)) return false;
+    return matchesWindowScope(process, targetWindowId);
+  });
+
+  let stopped = 0;
+  for (const process of candidates) {
+    const didStop = await stopSingleProcess(process, {
+      reason: options.reason,
+      statusText: options.statusText,
+      origin: options.origin,
+      preserveWindowId
+    });
+    if (didStop) stopped += 1;
+  }
+
+  return {
+    matched: candidates.length,
+    stopped,
+    windowId: targetWindowId
+  };
 }
 
 function applyMonotonicProcessPatch(existing, patch, message = null) {
@@ -585,6 +815,1160 @@ const STAGE_NAMES_COMPANY = [
 ];
 
 // Funkcja generująca losowe opóźnienie dla anti-automation
+function extractLastTwoSentences(text) {
+  if (typeof text !== 'string') return '';
+
+  const cleaned = text
+    .replace(/\r/g, ' ')
+    .replace(/\n+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  if (!cleaned) return '';
+
+  const sentences = cleaned
+    .match(/[^.!?\n]+[.!?]+(?:["')\]]+)?|[^.!?\n]+$/g)
+    ?.map((sentence) => sentence.trim())
+    .filter(Boolean) || [];
+
+  if (sentences.length === 0) return '';
+  if (sentences.length === 1) return sentences[0];
+  return `${sentences[sentences.length - 2]} ${sentences[sentences.length - 1]}`.trim();
+}
+
+function normalizeSentenceSignature(text) {
+  if (typeof text !== 'string') return '';
+  let normalized = text;
+  if (typeof normalized.normalize === 'function') {
+    normalized = normalized.normalize('NFKC');
+  }
+
+  normalized = normalized
+    .toLowerCase()
+    .replace(/[\u2018\u2019\u201A\u201B`´]/g, "'")
+    .replace(/[\u201C\u201D\u201E\u201F]/g, '"')
+    .replace(/[\u2013\u2014]/g, '-')
+    .replace(/[^\p{L}\p{N}\s]/gu, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+
+  return normalized;
+}
+
+function buildPromptSignatureCatalog(prompts) {
+  if (!Array.isArray(prompts)) return [];
+
+  const catalog = [];
+  prompts.forEach((promptText, index) => {
+    if (typeof promptText !== 'string') return;
+    const signatureRaw = extractLastTwoSentences(promptText);
+    const signature = normalizeSentenceSignature(signatureRaw);
+    if (!signature) return;
+    const promptNumber = index + 1;
+    catalog.push({
+      index,
+      promptNumber,
+      stageName: STAGE_NAMES_COMPANY[index] || `Prompt ${promptNumber}`,
+      signature,
+      signatureRaw,
+      signatureLength: signature.length
+    });
+  });
+
+  return catalog;
+}
+
+function detectPromptIndexFromMessage(lastUserMessageText, catalog) {
+  const messageSignatureRaw = extractLastTwoSentences(lastUserMessageText || '');
+  const messageSignature = normalizeSentenceSignature(messageSignatureRaw);
+  if (!messageSignature) {
+    return {
+      matched: false,
+      reason: 'no_user_message',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const list = Array.isArray(catalog) ? catalog : [];
+  if (list.length === 0) {
+    return {
+      matched: false,
+      reason: 'catalog_empty',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const exactMatches = list.filter((entry) => entry.signature === messageSignature);
+  if (exactMatches.length > 0) {
+    const selected = exactMatches.sort((a, b) => b.index - a.index)[0];
+    return {
+      matched: true,
+      method: 'exact',
+      ...selected,
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const minComparableLen = 24;
+  if (messageSignature.length < minComparableLen) {
+    return {
+      matched: false,
+      reason: 'signature_too_short',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const includesMatches = list
+    .filter((entry) => {
+      const left = typeof entry?.signature === 'string' ? entry.signature : '';
+      if (left.length < minComparableLen) return false;
+      return messageSignature.includes(left) || left.includes(messageSignature);
+    })
+    .sort((a, b) => {
+      if (b.signatureLength !== a.signatureLength) {
+        return b.signatureLength - a.signatureLength;
+      }
+      return b.index - a.index;
+    });
+
+  if (includesMatches.length > 0) {
+    const selected = includesMatches[0];
+    return {
+      matched: true,
+      method: 'includes',
+      ...selected,
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  return {
+    matched: false,
+    reason: 'signature_not_found',
+    messageSignatureRaw,
+    messageSignature
+  };
+}
+
+async function extractLastUserMessageFromTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return { success: false, error: 'invalid_tab_id' };
+  }
+
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: () => {
+        const messages = document.querySelectorAll('[data-message-author-role="user"]');
+        const count = messages.length;
+        const last = count > 0 ? messages[count - 1] : null;
+        const text = last ? (last.innerText || last.textContent || '') : '';
+        return {
+          text: typeof text === 'string' ? text : '',
+          count,
+          title: document.title || '',
+          url: location.href || ''
+        };
+      }
+    });
+
+    const payload = result?.[0]?.result || {};
+    return {
+      success: true,
+      text: typeof payload.text === 'string' ? payload.text : '',
+      count: Number.isInteger(payload.count) ? payload.count : 0,
+      title: typeof payload.title === 'string' ? payload.title : '',
+      url: typeof payload.url === 'string' ? payload.url : ''
+    };
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) };
+  }
+}
+
+async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
+  const normalizedStartIndex = Number.isInteger(startIndex) ? startIndex : -1;
+  if (!Number.isInteger(tabId) || normalizedStartIndex < 0) {
+    return { success: false, error: 'invalid_resume_arguments' };
+  }
+
+  let targetTab = null;
+  try {
+    targetTab = await chrome.tabs.get(tabId);
+  } catch (error) {
+    return { success: false, error: 'tab_not_found' };
+  }
+
+  if (!targetTab?.url || !targetTab.url.includes('chatgpt.com')) {
+    return { success: false, error: 'tab_not_chatgpt' };
+  }
+
+  if (PROMPTS_COMPANY.length === 0) {
+    await loadPrompts();
+  }
+  if (PROMPTS_COMPANY.length === 0) {
+    return { success: false, error: 'prompts_empty' };
+  }
+  if (normalizedStartIndex >= PROMPTS_COMPANY.length) {
+    return { success: false, error: 'start_index_out_of_range' };
+  }
+
+  const promptsToSend = PROMPTS_COMPANY.slice(normalizedStartIndex);
+  const cleanedPrompts = [...promptsToSend];
+  if (cleanedPrompts[0]) {
+    cleanedPrompts[0] = cleanedPrompts[0].replace('{{articlecontent}}', '').trim();
+  }
+
+  const payload = '';
+  const restOfPrompts = cleanedPrompts;
+  const processTitle = typeof options.processTitle === 'string' && options.processTitle.trim()
+    ? options.processTitle.trim()
+    : `Auto Resume from Stage ${normalizedStartIndex + 1}`;
+  const processId = `resume-auto-company-${Date.now()}-${tabId}-${normalizedStartIndex}-${Math.random().toString(36).slice(2, 8)}`;
+
+  await upsertProcess(processId, {
+    title: processTitle,
+    analysisType: 'company',
+    status: 'starting',
+    statusText: 'Auto-resume przygotowanie',
+    currentPrompt: normalizedStartIndex,
+    totalPrompts: PROMPTS_COMPANY.length,
+    stageIndex: normalizedStartIndex > 0 ? (normalizedStartIndex - 1) : 0,
+    stageName: normalizedStartIndex > 0 ? `Prompt ${normalizedStartIndex}` : 'Start',
+    needsAction: false,
+    startedAt: Date.now(),
+    timestamp: Date.now(),
+    sourceUrl: targetTab.url || '',
+    chatUrl: targetTab.url || '',
+    tabId,
+    windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
+    messages: []
+  });
+
+  try {
+    const targetWindowId = Number.isInteger(windowId) ? windowId : targetTab.windowId;
+    if (Number.isInteger(targetWindowId)) {
+      await chrome.windows.update(targetWindowId, { focused: true });
+    }
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (error) {
+    console.warn('[auto-resume] Nie udalo sie aktywowac karty przed resume:', error?.message || error);
+  }
+
+  let results;
+  let result;
+  let executionPayload = payload;
+  let executionPromptChain = restOfPrompts;
+  let executionPromptOffset = normalizedStartIndex;
+  let autoRecoveryAttempt = 0;
+
+  while (true) {
+    try {
+      results = await chrome.scripting.executeScript({
+        target: { tabId },
+        function: injectToChat,
+        args: [
+          executionPayload,
+          executionPromptChain,
+          WAIT_FOR_TEXTAREA_MS,
+          WAIT_FOR_RESPONSE_MS,
+          RETRY_INTERVAL_MS,
+          processTitle,
+          'company',
+          processId,
+          {
+            promptOffset: executionPromptOffset,
+            totalPromptsOverride: PROMPTS_COMPANY.length
+          },
+          {
+            enabled: true,
+            attempt: autoRecoveryAttempt,
+            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+            delayMs: AUTO_RECOVERY_DELAY_MS,
+            reasons: [...AUTO_RECOVERY_REASONS]
+          }
+        ]
+      });
+    } catch (error) {
+      await upsertProcess(processId, {
+        status: 'failed',
+        needsAction: false,
+        statusText: 'Blad executeScript auto-resume',
+        reason: 'auto_resume_execute_script_failed',
+        error: error?.message || String(error),
+        autoRecovery: null,
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
+      return { success: false, error: 'inject_failed' };
+    }
+
+    if (!results || results.length === 0) {
+      await upsertProcess(processId, {
+        status: 'failed',
+        needsAction: false,
+        statusText: 'Brak wyniku executeScript auto-resume',
+        reason: 'missing_execute_result',
+        autoRecovery: null,
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
+      return { success: false, error: 'missing_execute_result' };
+    }
+
+    result = results?.[0]?.result;
+    const handoff = result?.error === 'auto_recovery_required' ? result?.autoRecovery : null;
+    if (!handoff || autoRecoveryAttempt >= AUTO_RECOVERY_MAX_ATTEMPTS) {
+      break;
+    }
+
+    autoRecoveryAttempt += 1;
+    const nextPromptOffset = Number.isInteger(handoff.promptOffset) && handoff.promptOffset >= 0
+      ? handoff.promptOffset
+      : executionPromptOffset;
+    const nextRemainingPrompts = Array.isArray(handoff.remainingPrompts)
+      ? handoff.remainingPrompts
+      : executionPromptChain;
+    const recoveryReasonBase = typeof handoff.reason === 'string' && handoff.reason.trim()
+      ? handoff.reason.trim()
+      : 'unknown';
+    const recoveryReason = `auto_recovery_${recoveryReasonBase}`;
+    const recoveryCurrentPrompt = Number.isInteger(handoff.currentPrompt) && handoff.currentPrompt >= 0
+      ? handoff.currentPrompt
+      : (nextPromptOffset > 0 ? nextPromptOffset : executionPromptOffset);
+    const recoveryStageIndex = Number.isInteger(handoff.stageIndex)
+      ? handoff.stageIndex
+      : (recoveryCurrentPrompt > 0 ? (recoveryCurrentPrompt - 1) : null);
+
+    const recoveryPatch = {
+      title: processTitle,
+      analysisType: 'company',
+      status: 'running',
+      needsAction: false,
+      currentPrompt: recoveryCurrentPrompt,
+      totalPrompts: PROMPTS_COMPANY.length,
+      statusText: `Auto-reload ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
+      reason: recoveryReason,
+      autoRecovery: {
+        attempt: autoRecoveryAttempt,
+        maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+        delayMs: AUTO_RECOVERY_DELAY_MS,
+        reason: recoveryReasonBase,
+        currentPrompt: recoveryCurrentPrompt,
+        ...(Number.isInteger(recoveryStageIndex) ? { stageIndex: recoveryStageIndex } : {}),
+        updatedAt: Date.now()
+      },
+      timestamp: Date.now()
+    };
+    if (Number.isInteger(recoveryStageIndex)) {
+      recoveryPatch.stageIndex = recoveryStageIndex;
+      recoveryPatch.stageName = `Prompt ${recoveryStageIndex + 1}`;
+    }
+    await upsertProcess(processId, recoveryPatch);
+
+    try {
+      await chrome.tabs.reload(tabId);
+    } catch (reloadError) {
+      console.warn('[auto-resume] Nie udalo sie przeladowac karty:', reloadError?.message || reloadError);
+    }
+    await waitForTabCompleteWithTimeout(tabId, 20000);
+    await sleep(AUTO_RECOVERY_DELAY_MS);
+
+    executionPayload = '';
+    executionPromptChain = nextRemainingPrompts;
+    executionPromptOffset = nextPromptOffset;
+  }
+
+  if (result?.success) {
+    return {
+      success: true,
+      processId
+    };
+  }
+
+  await upsertProcess(processId, {
+    status: 'failed',
+    needsAction: false,
+    statusText: 'Auto-resume nieudany',
+    reason: 'auto_resume_failed',
+    error: typeof result?.error === 'string' ? result.error : 'Unknown auto-resume error',
+    autoRecovery: null,
+    finishedAt: Date.now(),
+    timestamp: Date.now()
+  });
+  return { success: false, error: 'resume_failed' };
+}
+
+async function detectLastCompanyPromptAndResumeAllTabs() {
+  try {
+    if (PROMPTS_COMPANY.length === 0) {
+      await loadPrompts();
+    }
+    if (PROMPTS_COMPANY.length === 0) {
+      return {
+        success: false,
+        scannedTabs: 0,
+        matchedTabs: 0,
+        resumedTabs: 0,
+        results: [],
+        error: 'prompts_not_loaded'
+      };
+    }
+
+    const catalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
+    const tabsRaw = await chrome.tabs.query({});
+    const chatTabs = tabsRaw
+      .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
+      .sort(compareTabsByWindowAndIndex);
+    const resultsByTabId = new Map();
+    const matchedTabIds = new Set();
+    const resumedTabIds = new Set();
+    const pendingTabIds = new Set(
+      chatTabs
+        .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
+        .filter((id) => Number.isInteger(id))
+    );
+
+    const terminalActions = new Set(['resumed', 'final_stage_already_sent']);
+    const startedAt = Date.now();
+    let passCount = 0;
+
+    while (
+      pendingTabIds.size > 0 &&
+      passCount < DETECT_RESUME_MAX_PASSES &&
+      (Date.now() - startedAt) < DETECT_RESUME_MAX_RUNTIME_MS
+    ) {
+      passCount += 1;
+      console.log('[detect-resume] Pass start', {
+        pass: passCount,
+        pending: pendingTabIds.size,
+        scanned: chatTabs.length
+      });
+
+      for (const tab of chatTabs) {
+        if (!Number.isInteger(tab?.id) || !pendingTabIds.has(tab.id)) continue;
+
+        const previous = resultsByTabId.get(tab.id) || null;
+        const row = {
+          tabId: Number.isInteger(tab?.id) ? tab.id : null,
+          windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
+          title: typeof tab?.title === 'string' ? tab.title : '',
+          url: getTabEffectiveUrl(tab),
+          userMessageCount: null,
+          lastUserMessageLength: null,
+          detectedPromptIndex: null,
+          detectedPromptNumber: null,
+          detectedStageName: null,
+          detectedMethod: '',
+          detectedSignature: '',
+          progressPromptNumber: null,
+          progressStageName: '',
+          stageConsistency: '',
+          stageDelta: null,
+          nextStartIndex: null,
+          action: 'no_match',
+          reason: '',
+          attempts: previous?.attempts ? (previous.attempts + 1) : 1,
+          lastPass: passCount
+        };
+
+        if (!Number.isInteger(tab?.id)) {
+          row.action = 'inject_failed';
+          row.reason = 'invalid_tab_id';
+          resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
+          continue;
+        }
+
+        let currentTab = null;
+        try {
+          currentTab = await chrome.tabs.get(tab.id);
+        } catch (error) {
+          row.action = 'inject_failed';
+          row.reason = 'tab_not_found';
+          resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
+          continue;
+        }
+
+        row.title = typeof currentTab?.title === 'string' ? currentTab.title : row.title;
+        row.url = getTabEffectiveUrl(currentTab) || row.url;
+        row.windowId = Number.isInteger(currentTab?.windowId) ? currentTab.windowId : row.windowId;
+
+        if (!isInvestGptUrl(row.url)) {
+          row.action = 'no_match';
+          row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
+          resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
+          continue;
+        }
+
+        await prepareTabForDetection(tab.id, row.windowId);
+
+        let extraction = await extractLastUserMessageFromTab(tab.id);
+        if (!extraction.success) {
+          await sleep(350);
+          extraction = await extractLastUserMessageFromTab(tab.id);
+        }
+        if (!extraction.success) {
+          row.action = 'inject_failed';
+          row.reason = extraction.error || 'extract_last_user_message_failed';
+          resultsByTabId.set(tab.id, row);
+          await sleep(250);
+          continue;
+        }
+
+        row.userMessageCount = Number.isInteger(extraction.count) ? extraction.count : 0;
+        row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
+
+        const activeProcess = await getActiveProcessForTab(tab.id);
+        if (activeProcess) {
+          row.progressPromptNumber = Number.isInteger(activeProcess.currentPrompt) ? activeProcess.currentPrompt : null;
+          row.progressStageName = typeof activeProcess.stageName === 'string' ? activeProcess.stageName : '';
+        }
+
+        if (!extraction.text || extraction.text.trim().length === 0) {
+          row.action = 'no_user_message';
+          row.reason = 'empty_user_message';
+          resultsByTabId.set(tab.id, row);
+          await sleep(250);
+          continue;
+        }
+
+        const detection = detectPromptIndexFromMessage(extraction.text, catalog);
+        if (!detection.matched || !Number.isInteger(detection.index)) {
+          row.action = 'no_match';
+          row.reason = detection.reason || 'signature_not_found';
+          resultsByTabId.set(tab.id, row);
+          await sleep(250);
+          continue;
+        }
+
+        matchedTabIds.add(tab.id);
+        row.detectedPromptIndex = detection.index;
+        row.detectedPromptNumber = detection.promptNumber;
+        row.detectedStageName = detection.stageName;
+        row.detectedMethod = typeof detection.method === 'string' ? detection.method : '';
+        row.detectedSignature = typeof detection.messageSignature === 'string'
+          ? detection.messageSignature.slice(0, 180)
+          : '';
+        row.nextStartIndex = detection.index + 1;
+        if (Number.isInteger(row.progressPromptNumber) && Number.isInteger(row.detectedPromptNumber)) {
+          const delta = row.detectedPromptNumber - row.progressPromptNumber;
+          row.stageDelta = delta;
+          row.stageConsistency = Math.abs(delta) <= 1 ? 'ok' : 'drift';
+        }
+
+        if (row.nextStartIndex >= PROMPTS_COMPANY.length) {
+          row.action = 'final_stage_already_sent';
+          row.reason = 'already_at_last_stage';
+          resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
+          await sleep(250);
+          continue;
+        }
+
+        if (activeProcess) {
+          row.action = 'active_process_exists';
+          row.reason = 'active_process_on_tab';
+          resultsByTabId.set(tab.id, row);
+          await sleep(250);
+          continue;
+        }
+
+        const autoResumeTitle = `Auto Resume: Prompt ${row.nextStartIndex + 1}`;
+        let resumeResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
+          processTitle: autoResumeTitle
+        });
+        if (!resumeResult.success && resumeResult.error === 'inject_failed') {
+          await prepareTabForDetection(tab.id, row.windowId);
+          await sleep(350);
+          resumeResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
+            processTitle: autoResumeTitle
+          });
+        }
+
+        if (resumeResult.success) {
+          resumedTabIds.add(tab.id);
+          row.action = 'resumed';
+          row.reason = 'resume_started';
+          pendingTabIds.delete(tab.id);
+        } else {
+          row.action = resumeResult.error === 'inject_failed' ? 'inject_failed' : 'resume_failed';
+          row.reason = resumeResult.error || 'resume_failed';
+        }
+
+        resultsByTabId.set(tab.id, row);
+        if (terminalActions.has(row.action)) {
+          pendingTabIds.delete(tab.id);
+        }
+        await sleep(250);
+      }
+
+      if (
+        pendingTabIds.size > 0 &&
+        passCount < DETECT_RESUME_MAX_PASSES &&
+        (Date.now() - startedAt) < DETECT_RESUME_MAX_RUNTIME_MS
+      ) {
+        console.log('[detect-resume] Pass delay', {
+          pass: passCount,
+          pending: pendingTabIds.size,
+          delayMs: DETECT_RESUME_PASS_DELAY_MS
+        });
+        await sleep(DETECT_RESUME_PASS_DELAY_MS);
+      }
+    }
+
+    const runtimeLimitHit = (Date.now() - startedAt) >= DETECT_RESUME_MAX_RUNTIME_MS;
+    const passLimitHit = passCount >= DETECT_RESUME_MAX_PASSES;
+    if (pendingTabIds.size > 0) {
+      for (const tabId of pendingTabIds) {
+        const row = resultsByTabId.get(tabId);
+        if (!row) continue;
+        const suffix = runtimeLimitHit
+          ? 'runtime_limit_reached'
+          : (passLimitHit ? 'pass_limit_reached' : 'retry_budget_exhausted');
+        row.reason = row.reason ? `${row.reason}|${suffix}` : suffix;
+        row.retryExhausted = true;
+      }
+    }
+
+    const results = chatTabs.map((tab) => {
+      const row = Number.isInteger(tab?.id) ? resultsByTabId.get(tab.id) : null;
+      if (row) return row;
+      return {
+        tabId: Number.isInteger(tab?.id) ? tab.id : null,
+        windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
+        title: typeof tab?.title === 'string' ? tab.title : '',
+        url: typeof tab?.url === 'string' ? tab.url : '',
+        detectedPromptIndex: null,
+        detectedPromptNumber: null,
+        detectedStageName: null,
+        nextStartIndex: null,
+        action: 'no_match',
+        reason: runtimeLimitHit ? 'runtime_limit_reached_before_processing' : 'not_processed'
+      };
+    });
+
+    console.log('[detect-resume] Summary', {
+      targetUrlPrefix: INVEST_GPT_URL_PREFIX,
+      passCount,
+      pendingAfterLoop: pendingTabIds.size,
+      scannedTabs: chatTabs.length,
+      matchedTabs: matchedTabIds.size,
+      resumedTabs: resumedTabIds.size
+    });
+    results.forEach((item) => {
+      console.log('[detect-resume] Tab result', item);
+    });
+
+    return {
+      success: true,
+      scannedTabs: chatTabs.length,
+      matchedTabs: matchedTabIds.size,
+      resumedTabs: resumedTabIds.size,
+      passCount,
+      pendingAfterLoop: pendingTabIds.size,
+      results
+    };
+  } catch (error) {
+    return {
+      success: false,
+      scannedTabs: 0,
+      matchedTabs: 0,
+      resumedTabs: 0,
+      results: [],
+      error: error?.message || String(error)
+    };
+  }
+}
+
+const SIGNATURE_SENTENCE_LIMIT = 2;
+const SIGNATURE_MIN_LENGTH = 60;
+const SIGNATURE_COMPARE_LIMIT = 220;
+
+function safeAlert(message) {
+  if (typeof alert === 'function') {
+    try {
+      alert(message);
+      return;
+    } catch (error) {
+      // Ignore and fallback to console warning.
+    }
+  }
+  console.warn('[alert]', message);
+}
+
+function compactWhitespace(text) {
+  if (typeof text !== 'string') return '';
+  return text.replace(/\s+/g, ' ').trim();
+}
+
+function isChatGptUrl(url) {
+  if (typeof url !== 'string') return false;
+  return url.includes('chatgpt.com') || url.includes('chat.openai.com');
+}
+
+function isInvestGptUrl(url) {
+  if (typeof url !== 'string') return false;
+  const compactUrl = url.trim();
+  if (!compactUrl.startsWith(INVEST_GPT_URL_BASE)) return false;
+  if (compactUrl.length === INVEST_GPT_URL_BASE.length) return true;
+  const separator = compactUrl.charAt(INVEST_GPT_URL_BASE.length);
+  return separator === '/' || separator === '?' || separator === '#';
+}
+
+function getTabEffectiveUrl(tab) {
+  if (!tab || typeof tab !== 'object') return '';
+  const url = typeof tab.url === 'string' ? tab.url.trim() : '';
+  if (url) return url;
+  const pendingUrl = typeof tab.pendingUrl === 'string' ? tab.pendingUrl.trim() : '';
+  return pendingUrl;
+}
+
+function compareTabsByWindowAndIndex(left, right) {
+  const leftWindow = Number.isInteger(left?.windowId) ? left.windowId : Number.MAX_SAFE_INTEGER;
+  const rightWindow = Number.isInteger(right?.windowId) ? right.windowId : Number.MAX_SAFE_INTEGER;
+  if (leftWindow !== rightWindow) return leftWindow - rightWindow;
+  const leftIndex = Number.isInteger(left?.index) ? left.index : Number.MAX_SAFE_INTEGER;
+  const rightIndex = Number.isInteger(right?.index) ? right.index : Number.MAX_SAFE_INTEGER;
+  if (leftIndex !== rightIndex) return leftIndex - rightIndex;
+  const leftId = Number.isInteger(left?.id) ? left.id : Number.MAX_SAFE_INTEGER;
+  const rightId = Number.isInteger(right?.id) ? right.id : Number.MAX_SAFE_INTEGER;
+  return leftId - rightId;
+}
+
+function waitForTabCompleteWithTimeout(tabId, timeoutMs = 12000) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve(false);
+      return;
+    }
+    let settled = false;
+    const timeoutId = setTimeout(() => {
+      if (settled) return;
+      settled = true;
+      resolve(false);
+    }, timeoutMs);
+
+    waitForTabComplete(tabId)
+      .then(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(true);
+      })
+      .catch(() => {
+        if (settled) return;
+        settled = true;
+        clearTimeout(timeoutId);
+        resolve(false);
+      });
+  });
+}
+
+async function prepareTabForDetection(tabId, windowId = null) {
+  if (!Number.isInteger(tabId)) return false;
+  try {
+    if (Number.isInteger(windowId)) {
+      await chrome.windows.update(windowId, { focused: true });
+    }
+  } catch (error) {
+    // Best effort only.
+  }
+
+  try {
+    await chrome.tabs.update(tabId, { active: true });
+  } catch (error) {
+    // Best effort only.
+  }
+
+  try {
+    const tabInfo = await chrome.tabs.get(tabId);
+    if (tabInfo?.discarded) {
+      await chrome.tabs.reload(tabId);
+    }
+  } catch (error) {
+    // Ignore and continue.
+  }
+
+  await waitForTabCompleteWithTimeout(tabId, 12000);
+  await sleep(250);
+  return true;
+}
+
+function normalizeSignatureText(text) {
+  return compactWhitespace(text)
+    .toLowerCase()
+    .replace(/[`"'“”‘’]/g, '')
+    .replace(/[^a-z0-9 ]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function extractLeadingSentences(text, limit = SIGNATURE_SENTENCE_LIMIT) {
+  const compact = compactWhitespace(text);
+  if (!compact) return [];
+
+  const candidates = compact.match(/[^.!?\n]+[.!?]+|[^.!?\n]+$/g) || [];
+  const sentences = [];
+  for (const candidate of candidates) {
+    const sentence = compactWhitespace(candidate);
+    if (!sentence) continue;
+    sentences.push(sentence);
+    if (sentences.length >= limit) break;
+  }
+
+  if (sentences.length === 0) {
+    const fallback = compact.slice(0, 240);
+    return fallback ? [fallback] : [];
+  }
+  return sentences;
+}
+
+function buildTwoSentenceSignature(text) {
+  if (typeof extractLastTwoSentences === 'function' && typeof normalizeSentenceSignature === 'function') {
+    const raw = extractLastTwoSentences(text);
+    return normalizeSentenceSignature(raw);
+  }
+  const sentences = extractLeadingSentences(text, SIGNATURE_SENTENCE_LIMIT);
+  if (sentences.length === 0) return '';
+  return normalizeSignatureText(sentences.join(' '));
+}
+
+function buildPromptSignatureRecords(prompts) {
+  return (Array.isArray(prompts) ? prompts : [])
+    .map((promptText, index) => {
+      const signature = buildTwoSentenceSignature(promptText);
+      const normalizedPrefix = normalizeSignatureText(promptText).slice(0, 360);
+      return {
+        index,
+        promptNumber: index + 1,
+        signature,
+        normalizedPrefix
+      };
+    })
+    .filter((entry) => entry.signature.length > 0);
+}
+
+function sharedPrefixLength(left, right, maxLen = SIGNATURE_COMPARE_LIMIT) {
+  if (!left || !right) return 0;
+  const limit = Math.min(left.length, right.length, maxLen);
+  let i = 0;
+  while (i < limit && left[i] === right[i]) {
+    i += 1;
+  }
+  return i;
+}
+
+function matchPromptBySignature(signature, normalizedPromptText, promptRecords) {
+  if (!signature || signature.length < SIGNATURE_MIN_LENGTH) return null;
+
+  let best = null;
+  for (const prompt of promptRecords) {
+    if (!prompt || !prompt.signature) continue;
+    if (signature === prompt.signature) {
+      return {
+        index: prompt.index,
+        promptNumber: prompt.promptNumber,
+        method: 'exact_2_sentence',
+        score: 10000
+      };
+    }
+
+    const signaturePrefix = sharedPrefixLength(signature, prompt.signature, SIGNATURE_COMPARE_LIMIT);
+    let score = signaturePrefix >= SIGNATURE_MIN_LENGTH
+      ? (5000 + signaturePrefix)
+      : 0;
+
+    const textPrefix = sharedPrefixLength(normalizedPromptText, prompt.normalizedPrefix, 320);
+    if (textPrefix >= 120) {
+      score = Math.max(score, 2500 + textPrefix);
+    }
+
+    if (score > 0 && (!best || score > best.score)) {
+      best = {
+        index: prompt.index,
+        promptNumber: prompt.promptNumber,
+        method: score >= 5000 ? 'prefix_2_sentence' : 'prefix_prompt',
+        score
+      };
+    }
+  }
+
+  return best;
+}
+
+function getProgressPromptIndex(process) {
+  if (Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0) {
+    return process.currentPrompt - 1;
+  }
+  if (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0) {
+    return process.stageIndex;
+  }
+  return null;
+}
+
+async function ensureCompanyPromptsReady() {
+  if (Array.isArray(PROMPTS_COMPANY) && PROMPTS_COMPANY.length > 0) {
+    return true;
+  }
+  await loadPrompts();
+  return Array.isArray(PROMPTS_COMPANY) && PROMPTS_COMPANY.length > 0;
+}
+
+async function getTabByIdSafe(tabId) {
+  if (!Number.isInteger(tabId)) return null;
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    return tab || null;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function resolveChatTabForProcess(process, message = {}) {
+  const messageTabId = Number.isInteger(message?.tabId) ? message.tabId : null;
+  const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  const candidateTabIds = [messageTabId, processTabId].filter((tabId, index, arr) => (
+    Number.isInteger(tabId) && arr.indexOf(tabId) === index
+  ));
+
+  for (const tabId of candidateTabIds) {
+    const tab = await getTabByIdSafe(tabId);
+    if (tab && isChatGptUrl(tab.url || '')) {
+      return tab;
+    }
+  }
+
+  const chatUrlRaw = typeof message?.chatUrl === 'string' && message.chatUrl.trim()
+    ? message.chatUrl.trim()
+    : (typeof process?.chatUrl === 'string' ? process.chatUrl.trim() : '');
+
+  if (!chatUrlRaw || !isChatGptUrl(chatUrlRaw)) {
+    return null;
+  }
+
+  try {
+    const existingTabs = await chrome.tabs.query({ url: chatUrlRaw });
+    const candidate = Array.isArray(existingTabs) ? existingTabs[0] : null;
+    if (candidate && Number.isInteger(candidate.id)) {
+      return candidate;
+    }
+  } catch (error) {
+    // Ignore and fallback to opening a new tab.
+  }
+
+  try {
+    const createOptions = { url: chatUrlRaw, active: false };
+    if (Number.isInteger(process?.windowId)) {
+      createOptions.windowId = process.windowId;
+    }
+    const createdTab = await chrome.tabs.create(createOptions);
+    if (createdTab && Number.isInteger(createdTab.id)) {
+      await waitForTabComplete(createdTab.id);
+    }
+    return createdTab || null;
+  } catch (error) {
+    console.warn('[resume] Nie udalo sie otworzyc karty chat do detekcji:', error?.message || error);
+    return null;
+  }
+}
+
+async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
+  if (!Number.isInteger(tabId)) {
+    return { messages: [], url: '' };
+  }
+
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: async (waitMs) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
+
+        function readUserMessages() {
+          const nodes = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
+          return nodes
+            .map((node) => compact(node.innerText || node.textContent || ''))
+            .filter((text) => text.length > 0)
+            .slice(-14)
+            .map((text) => text.length > 24000 ? text.slice(0, 24000) : text);
+        }
+
+        const startedAt = Date.now();
+        let messages = readUserMessages();
+        while (messages.length === 0 && (Date.now() - startedAt) < waitMs) {
+          await sleep(300);
+          messages = readUserMessages();
+        }
+
+        return {
+          url: location.href,
+          messages
+        };
+      },
+      args: [maxWaitMs]
+    });
+
+    return results?.[0]?.result || { messages: [], url: '' };
+  } catch (error) {
+    console.warn('[resume] Nie udalo sie odczytac promptow usera z tab:', tabId, error?.message || error);
+    return { messages: [], url: '' };
+  }
+}
+
+function detectLastPromptMatch(userMessages, promptRecords) {
+  const messages = Array.isArray(userMessages) ? userMessages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const text = messages[i];
+    if (typeof text !== 'string' || text.trim().length === 0) continue;
+    const signature = buildTwoSentenceSignature(text);
+    const normalizedPromptText = normalizeSignatureText(text).slice(0, 360);
+    const matched = matchPromptBySignature(signature, normalizedPromptText, promptRecords);
+    if (matched) {
+      return {
+        ...matched,
+        messageIndex: i,
+        signature
+      };
+    }
+  }
+  return null;
+}
+
+function computeNextResumeIndex(lastPromptIndex, totalPrompts) {
+  if (!Number.isInteger(lastPromptIndex)) return null;
+  const promptCount = Number.isInteger(totalPrompts) ? totalPrompts : 0;
+  if (promptCount <= 0) return null;
+
+  const maxIndex = promptCount - 1;
+  const boundedCurrent = Math.min(Math.max(lastPromptIndex, 0), maxIndex);
+  const nextIndex = boundedCurrent + 1;
+  if (nextIndex > maxIndex) return null;
+
+  return Math.max(1, nextIndex);
+}
+
+function openResumeStagePopup(startIndex, title = '', analysisType = 'company') {
+  const params = new URLSearchParams();
+  if (Number.isInteger(startIndex)) params.set('startIndex', String(startIndex));
+  if (title) params.set('title', title);
+  if (analysisType) params.set('analysisType', analysisType);
+  const query = params.toString();
+  const targetUrl = chrome.runtime.getURL('resume-stage.html' + (query ? ('?' + query) : ''));
+
+  chrome.windows.create({
+    url: targetUrl,
+    type: 'popup',
+    width: 600,
+    height: 400
+  });
+}
+
+async function handleProcessResumeNextStageMessage(message) {
+  const runId = await resolveProcessId(message, { tab: { id: message?.tabId } });
+  if (!runId) {
+    return { success: false, error: 'run_not_found' };
+  }
+
+  await ensureProcessRegistryReady();
+  const process = processRegistry.get(runId) || null;
+  const analysisType = typeof message?.analysisType === 'string' && message.analysisType.trim()
+    ? message.analysisType.trim()
+    : (process?.analysisType || 'company');
+
+  if (analysisType !== 'company') {
+    return { success: false, error: 'analysis_not_supported' };
+  }
+
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady) {
+    return { success: false, error: 'prompts_not_loaded' };
+  }
+
+  const chatTab = await resolveChatTabForProcess(process, message);
+  if (!chatTab || !Number.isInteger(chatTab.id)) {
+    return { success: false, error: 'chat_tab_not_found' };
+  }
+
+  const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
+  const extracted = await extractRecentUserPromptsFromTab(chatTab.id);
+  const matched = detectLastPromptMatch(extracted.messages, promptRecords);
+
+  const detectedPromptIndex = matched
+    ? matched.index
+    : getProgressPromptIndex(process);
+  const detectedMethod = matched ? matched.method : 'progress_fallback';
+
+  const nextStartIndex = computeNextResumeIndex(detectedPromptIndex, PROMPTS_COMPANY.length);
+  if (!Number.isInteger(nextStartIndex)) {
+    return {
+      success: false,
+      error: 'already_at_last_prompt',
+      detectedPromptIndex,
+      detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+      detectedMethod
+    };
+  }
+
+  const title = typeof message?.title === 'string' && message.title.trim()
+    ? message.title.trim()
+    : (typeof process?.title === 'string' ? process.title : '');
+
+  if (message?.openDialogOnly) {
+    openResumeStagePopup(nextStartIndex, title, analysisType);
+    return {
+      success: true,
+      mode: 'dialog',
+      startIndex: nextStartIndex,
+      startPromptNumber: nextStartIndex + 1,
+      detectedPromptIndex,
+      detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+      detectedMethod
+    };
+  }
+
+  const resumeResult = await resumeFromStage(nextStartIndex, {
+    targetTabId: chatTab.id,
+    suppressAlerts: true
+  });
+
+  if (!resumeResult?.success) {
+    return {
+      success: false,
+      error: resumeResult?.error || 'resume_failed',
+      startIndex: nextStartIndex,
+      startPromptNumber: nextStartIndex + 1,
+      detectedPromptIndex,
+      detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+      detectedMethod
+    };
+  }
+
+  await upsertProcess(runId, {
+    status: 'stopped',
+    statusText: `Wznowiono od Prompt ${nextStartIndex + 1}`,
+    reason: 'resumed_from_decision_panel',
+    needsAction: false,
+    finishedAt: Date.now(),
+    timestamp: Date.now()
+  });
+
+  return {
+    success: true,
+    mode: 'direct',
+    startIndex: nextStartIndex,
+    startPromptNumber: nextStartIndex + 1,
+    detectedPromptIndex,
+    detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+    detectedMethod
+  };
+}
+
 function getRandomDelay() {
   const minDelay = 3000;  // 3 sekundy
   const maxDelay = 15000; // 15 sekund
@@ -842,7 +2226,49 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'SAVE_RESPONSE') {
     saveResponse(message.text, message.source, message.analysisType, message.runId);
   } else if (message.type === 'RUN_ANALYSIS') {
-    runAnalysis();
+    const invocationWindowId = Number.isInteger(message?.windowId)
+      ? message.windowId
+      : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
+    runAnalysis({
+      invocationWindowId,
+      stopExistingInWindow: true
+    }).catch((error) => {
+      console.error('[run] RUN_ANALYSIS failed:', error);
+    });
+  } else if (message.type === 'STOP_PROCESS') {
+    (async () => {
+      const targetWindowId = Number.isInteger(message?.windowId)
+        ? message.windowId
+        : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
+      if (!Number.isInteger(targetWindowId)) {
+        sendResponse({
+          success: false,
+          matched: 0,
+          stopped: 0
+        });
+        return;
+      }
+      const result = await stopActiveProcesses({
+        windowId: targetWindowId,
+        reason: 'manual_stop',
+        statusText: 'Przerwano z popup',
+        origin: message?.origin || 'popup-stop'
+      });
+      sendResponse({
+        success: true,
+        matched: result.matched,
+        stopped: result.stopped,
+        windowId: result.windowId
+      });
+    })().catch((error) => {
+      console.warn('[monitor] STOP_PROCESS failed:', error);
+      sendResponse({
+        success: false,
+        matched: 0,
+        stopped: 0
+      });
+    });
+    return true;
   } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
     console.log('📩 Otrzymano MANUAL_SOURCE_SUBMIT:', { 
       titleLength: message.title?.length, 
@@ -905,6 +2331,29 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, matched: 0, delivered: 0 });
       });
     return true;
+  } else if (message.type === 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME') {
+    detectLastCompanyPromptAndResumeAllTabs()
+      .then((result) => sendResponse(result))
+      .catch((error) => {
+        console.warn('[monitor] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', error);
+        sendResponse({
+          success: false,
+          scannedTabs: 0,
+          matchedTabs: 0,
+          resumedTabs: 0,
+          results: [],
+          error: error?.message || String(error)
+        });
+      });
+    return true;
+  } else if (message.type === 'PROCESS_RESUME_NEXT_STAGE') {
+    handleProcessResumeNextStageMessage(message)
+      .then((result) => sendResponse(result || { success: false, error: 'resume_result_missing' }))
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_RESUME_NEXT_STAGE failed:', error);
+        sendResponse({ success: false, error: error?.message || 'resume_exception' });
+      });
+    return true;
   } else if (message.type === 'GET_COMPANY_PROMPTS') {
     // Zwróć prompty dla company
     sendResponse({ prompts: PROMPTS_COMPANY });
@@ -916,32 +2365,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'RESUME_STAGE_START') {
     // Uruchom analizę od konkretnego etapu
     console.log('📩 Otrzymano RESUME_STAGE_START:', { startIndex: message.startIndex });
-    resumeFromStage(message.startIndex);
-    sendResponse({ success: true });
-    return false;
+    resumeFromStage(message.startIndex)
+      .then((result) => sendResponse(result || { success: false, error: 'resume_result_missing' }))
+      .catch((error) => {
+        console.warn('[resume] RESUME_STAGE_START failed:', error);
+        sendResponse({ success: false, error: error?.message || 'resume_exception' });
+      });
+    return true;
   } else if (message.type === 'RESUME_STAGE_OPEN') {
     // Otworz okno z wyborem etapu
     const startIndex = Number.isInteger(message.startIndex) ? message.startIndex : null;
     const title = typeof message.title === 'string' ? message.title.trim() : '';
     const analysisType = typeof message.analysisType === 'string' ? message.analysisType.trim() : '';
-    const params = new URLSearchParams();
-    if (Number.isInteger(startIndex)) params.set('startIndex', String(startIndex));
-    if (title) params.set('title', title);
-    if (analysisType) params.set('analysisType', analysisType);
-    const query = params.toString();
-    const targetUrl = chrome.runtime.getURL('resume-stage.html' + (query ? ('?' + query) : ''));
 
     console.log('[resume] Otrzymano RESUME_STAGE_OPEN', {
       startIndex,
       title,
       analysisType
     });
-    chrome.windows.create({
-      url: targetUrl,
-      type: 'popup',
-      width: 600,
-      height: 400
-    });
+    openResumeStagePopup(startIndex, title, analysisType);
     sendResponse({ success: true });
     return false;
   } else if (message.type === 'ACTIVATE_TAB') {
@@ -974,280 +2416,78 @@ chrome.commands.onCommand.addListener((command) => {
 });
 
 // Funkcja wznawiania od konkretnego etapu
-async function resumeFromStage(startIndex) {
+async function resumeFromStage(startIndex, options = {}) {
+  const suppressAlerts = !!options?.suppressAlerts;
+  const notifyAlert = (message) => {
+    if (!suppressAlerts) safeAlert(message);
+  };
+
   console.log(`\n${'='.repeat(80)}`);
-  console.log(`🔄 RESUME FROM STAGE ${startIndex + 1}`);
+  console.log(`[resume] Resume from stage ${Number.isInteger(startIndex) ? (startIndex + 1) : 'unknown'}`);
   console.log(`${'='.repeat(80)}\n`);
 
-
-  
   try {
-    // KROK 1: Znajdź aktywne okno ChatGPT
-    console.log("🔍 Szukam aktywnego okna ChatGPT...");
-    const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
-    
-    if (tabs.length === 0) {
-      console.error("❌ Brak aktywnego okna");
-      alert("Błąd: Brak aktywnego okna. Otwórz ChatGPT i spróbuj ponownie.");
-      return;
-    }
-    
-    const activeTab = tabs[0];
-    
-    if (!activeTab.url || !activeTab.url.includes('chatgpt.com')) {
-      console.error("❌ Aktywne okno to nie ChatGPT:", activeTab.url);
-      alert("Błąd: Aktywne okno nie jest ChatGPT. Przejdź do okna ChatGPT i spróbuj ponownie.");
-      return;
-    }
-    
-    console.log(`✅ Znaleziono aktywne okno ChatGPT: ${activeTab.id}`);
-    
-    // KROK 2: Sprawdź czy prompty są wczytane
-    if (PROMPTS_COMPANY.length === 0) {
-      console.error("❌ Brak promptów");
-      alert("Błąd: Brak promptów. Sprawdź plik prompts-company.txt");
-      return;
-    }
-    
-    if (startIndex >= PROMPTS_COMPANY.length) {
-      console.error(`❌ Nieprawidłowy indeks: ${startIndex} (max: ${PROMPTS_COMPANY.length - 1})`);
-      alert(`Błąd: Nieprawidłowy indeks etapu. Maksymalny: ${PROMPTS_COMPANY.length}`);
-      return;
-    }
-    
-    console.log(`✅ Prompty załadowane: ${PROMPTS_COMPANY.length}, start od: ${startIndex + 1}`);
-    
-    // KROK 3: Przygotuj prompty do wklejenia (od startIndex do końca)
-    const promptsToSend = PROMPTS_COMPANY.slice(startIndex);
-    console.log(`📝 Będę wklejać ${promptsToSend.length} promptów (${startIndex + 1}-${PROMPTS_COMPANY.length})`);
-    
-    // POPRAWKA: Usuń {{articlecontent}} z pierwszego prompta (bo w resume nie mamy artykułu)
-    const cleanedPrompts = [...promptsToSend];
-    if (cleanedPrompts[0]) {
-      cleanedPrompts[0] = cleanedPrompts[0].replace('{{articlecontent}}', '').trim();
-      console.log(`📝 Pierwszy prompt (po usunięciu {{articlecontent}}): ${cleanedPrompts[0].substring(0, 100)}...`);
-    }
-    
-    // W trybie resume: pusty payload + wszystkie prompty w chain
-    const payload = '';  // Pusty payload oznacza tryb resume
-    const restOfPrompts = cleanedPrompts;  // Wszystkie prompty w chain
+    let activeTab = null;
 
-    const processId = `resume-company-${Date.now()}-${startIndex}-${Math.random().toString(36).slice(2, 8)}`;
-    await upsertProcess(processId, {
-      title: `Resume from Stage ${startIndex + 1}`,
-      analysisType: 'company',
-      status: 'starting',
-      statusText: 'Przygotowanie wznowienia',
-      currentPrompt: startIndex,
-      totalPrompts: PROMPTS_COMPANY.length,
-      stageIndex: startIndex > 0 ? (startIndex - 1) : 0,
-      stageName: startIndex > 0 ? `Prompt ${startIndex}` : 'Start',
-      needsAction: false,
-      startedAt: Date.now(),
-      timestamp: Date.now(),
-      sourceUrl: activeTab.url || '',
-      chatUrl: activeTab.url || '',
-      tabId: activeTab.id,
-      windowId: activeTab.windowId,
-      messages: []
+    if (Number.isInteger(options?.targetTabId)) {
+      activeTab = await getTabByIdSafe(options.targetTabId);
+      if (!activeTab) {
+        notifyAlert('Blad: Nie znaleziono wskazanej karty ChatGPT.');
+        return { success: false, error: 'target_tab_not_found' };
+      }
+    } else {
+      const tabs = await chrome.tabs.query({ active: true, currentWindow: true });
+      activeTab = Array.isArray(tabs) && tabs.length > 0 ? tabs[0] : null;
+      if (!activeTab) {
+        notifyAlert('Blad: Brak aktywnej karty ChatGPT.');
+        return { success: false, error: 'no_active_tab' };
+      }
+    }
+
+    if (!isChatGptUrl(activeTab.url || '')) {
+      notifyAlert('Blad: Aktywna karta nie jest ChatGPT.');
+      return { success: false, error: 'active_tab_not_chatgpt' };
+    }
+
+    if (!Number.isInteger(startIndex) || startIndex < 0) {
+      notifyAlert('Blad: Nieprawidlowy indeks etapu.');
+      return { success: false, error: 'invalid_start_index' };
+    }
+
+    const processTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
+      ? options.processTitle.trim()
+      : `Resume from Stage ${startIndex + 1}`;
+
+    const resumed = await resumeFromStageOnTab(activeTab.id, activeTab.windowId, startIndex, {
+      processTitle
     });
-    
-    console.log(`📝 Payload: pusty (tryb resume)`);
-    console.log(`📝 Prompty w chain: ${restOfPrompts.length}`);
-    
-    // KROK 4: Aktywuj okno ChatGPT
-    console.log("\n🔍 Aktywuję okno ChatGPT...");
-    await chrome.windows.update(activeTab.windowId, { focused: true });
-    await chrome.tabs.update(activeTab.id, { active: true });
-    console.log("✅ Okno ChatGPT aktywowane");
-    
-    // KROK 4.5: NOWE - Sprawdź i zatrzymaj aktywne generowanie
-    console.log("\n🔍 Sprawdzam stan ChatGPT przed rozpoczęciem...");
-    try {
-      const stateCheckResults = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        function: () => {
-          // Sprawdź czy ChatGPT generuje odpowiedź
-          const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
-                           document.querySelector('[data-testid="stop-button"]') ||
-                           document.querySelector('button[aria-label*="Zatrzymaj"]');
-          
-          if (stopButton) {
-            console.log('🛑 ChatGPT generuje odpowiedź - klikam Stop...');
-            stopButton.click();
-            return { wasGenerating: true, stopped: true };
-          }
-          
-          // Sprawdź czy editor jest zablokowany
-          const editor = document.querySelector('[role="textbox"]') || 
-                        document.querySelector('[contenteditable]');
-          const isBlocked = editor && editor.getAttribute('contenteditable') === 'false';
-          
-          if (isBlocked) {
-            console.log('⚠️ Editor jest zablokowany - czekam na odblokowanie...');
-            return { wasGenerating: true, stopped: false, editorBlocked: true };
-          }
-          
-          console.log('✅ ChatGPT jest gotowy - interface czysty');
-          return { wasGenerating: false, stopped: false };
-        }
-      });
-      
-      const stateCheck = stateCheckResults[0]?.result;
-      
-      if (stateCheck?.wasGenerating) {
-        console.log('⏳ Wykryto aktywne generowanie - czekam na zakończenie poprzedniej odpowiedzi...');
-        const waitResults = await chrome.scripting.executeScript({
-          target: { tabId: activeTab.id },
-          function: async (maxWaitMs) => {
-            const sleep = (ms) => new Promise(resolve => setTimeout(resolve, ms));
-            const compactText = (text) => (text || '').replace(/\s+/g, ' ').trim();
-            const isVisible = (el) => {
-              if (!el) return false;
-              const rects = el.getClientRects?.();
-              if (!rects || rects.length === 0) return false;
-              const style = window.getComputedStyle?.(el);
-              if (!style || style.display === 'none' || style.visibility === 'hidden' || style.opacity === '0') return false;
-              const rect = el.getBoundingClientRect?.();
-              return !!rect && rect.width > 0 && rect.height > 0;
-            };
-            const isGenerating = () => {
-              const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-              const lastAssistantMsg = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
-              const researchIndicators = Array.from(
-                document.querySelectorAll('[data-testid*="research"], [aria-label*="Research"], [aria-label*="research"], [class*="research"], [class*="Research"]')
-              ).filter(isVisible);
-              const researchStatus = researchIndicators.find((el) => {
-                const text = (el.innerText || '').toLowerCase();
-                return text.includes('researching') || text.includes('research in progress');
-              });
-              if (researchStatus) return { generating: true, reason: 'deepResearch' };
-              const progress = researchIndicators.find((el) => {
-                const bar = el.querySelector('[role="progressbar"], [class*="progress"]');
-                return bar && isVisible(bar);
-              });
-              if (progress) return { generating: true, reason: 'deepResearchProgress' };
-              const stopButton = document.querySelector('button[aria-label*="Stop"]') ||
-                                 document.querySelector('[data-testid="stop-button"]') ||
-                                 document.querySelector('button[aria-label*="stop"]') ||
-                                 document.querySelector('button[aria-label="Zatrzymaj"]') ||
-                                 document.querySelector('button[aria-label*="Zatrzymaj"]');
-              if (stopButton && isVisible(stopButton)) return { generating: true, reason: 'stopButton' };
-              if (lastAssistantMsg) {
-                const thinking = lastAssistantMsg.querySelector('[class*="thinking"], [class*="Thinking"], [data-testid*="thinking"], [aria-label*="thinking"], [aria-label*="Thinking"]');
-                if (thinking && isVisible(thinking)) return { generating: true, reason: 'thinkingIndicator' };
-                const update = lastAssistantMsg.querySelector('[aria-label*="Update"], [aria-label*="update"], [class*="updating"], [class*="Updating"], [data-testid*="update"]');
-                if (update && isVisible(update)) return { generating: true, reason: 'updateIndicator' };
-                const streaming = lastAssistantMsg.querySelector('[class*="streaming"], [class*="Streaming"], [data-testid*="streaming"], [aria-label*="Streaming"]');
-                if (streaming && isVisible(streaming)) return { generating: true, reason: 'streamingIndicator' };
-                const typing = lastAssistantMsg.querySelector('[class*="typing"], [class*="Typing"], [class*="loading"], [class*="Loading"], [aria-label*="typing"], [aria-label*="loading"]');
-                if (typing && isVisible(typing)) return { generating: true, reason: 'typingIndicator' };
-              }
-              const editor = document.querySelector('[role="textbox"]') || document.querySelector('[contenteditable]');
-              const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
-              if (editorDisabled) return { generating: true, reason: 'editorDisabled' };
-              return { generating: false, reason: 'none' };
-            };
 
-            const start = Date.now();
-            const MIN_STABLE_MS = 2500;
-            const MIN_LEN = 50;
-            const initialMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-            let lastAssistantText = '';
-            if (initialMessages.length > 0) {
-              const lastMsg = initialMessages[initialMessages.length - 1];
-              lastAssistantText = compactText(lastMsg.innerText || lastMsg.textContent || '');
-            }
-            let lastAssistantChangeAt = Date.now();
-
-            while (Date.now() - start < maxWaitMs) {
-              const genStatus = isGenerating();
-              const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                            document.querySelector('div[contenteditable="true"]');
-              const editorReady = !!editor && editor.getAttribute('contenteditable') === 'true';
-              const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-              const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
-              const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
-              if (currentLastText && currentLastText !== lastAssistantText) {
-                lastAssistantText = currentLastText;
-                lastAssistantChangeAt = Date.now();
-              }
-              const progressText = (currentLastText || '').toLowerCase();
-              const hasProgressText = progressText.includes('research in progress') ||
-                progressText.includes('deep research') ||
-                progressText.includes('researching') ||
-                progressText.includes('searching the web') ||
-                progressText.includes('searching for') ||
-                progressText.includes('gathering sources') ||
-                progressText.includes('collecting sources') ||
-                progressText.includes('checking sources') ||
-                progressText.includes('looking up');
-              const textStable = Date.now() - lastAssistantChangeAt >= MIN_STABLE_MS;
-              const minLenReached = currentLastText.length >= MIN_LEN;
-
-              if (!genStatus.generating && editorReady && textStable && minLenReached && !hasProgressText) {
-                return { ready: true };
-              }
-              await sleep(500);
-            }
-
-            return { ready: false, timeout: true };
-          },
-          args: [WAIT_FOR_RESPONSE_MS]
-        });
-
-        if (!waitResults[0]?.result?.ready) {
-          console.error('❌ Interface nie jest gotowy po oczekiwaniu na zakończenie odpowiedzi');
-          alert('Błąd: ChatGPT nadal generuje odpowiedź. Zatrzymaj ręcznie generowanie i spróbuj ponownie.');
-          return;
+    if (!resumed?.success) {
+      const errorCode = resumed?.error || 'resume_failed';
+      if (!suppressAlerts) {
+        if (errorCode === 'prompts_empty') {
+          notifyAlert('Blad: Brak promptow. Sprawdz plik prompts-company.txt.');
+        } else if (errorCode === 'start_index_out_of_range') {
+          notifyAlert('Blad: Nieprawidlowy indeks etapu.');
+        } else if (errorCode === 'tab_not_chatgpt') {
+          notifyAlert('Blad: Docelowa karta nie jest ChatGPT.');
+        } else {
+          notifyAlert('Blad wznowienia procesu.');
         }
       }
-      
-      console.log('✅ ChatGPT gotowy do rozpoczęcia resume');
-      
-    } catch (error) {
-      console.warn('⚠️ Nie udało się sprawdzić stanu ChatGPT:', error);
-      // Kontynuuj mimo błędu - może to być problem z permissions
+      return { success: false, error: errorCode };
     }
-    
-    // KROK 5: Wstrzyknij prompty do ChatGPT
-    console.log("\n🚀 Wstrzykuję prompty do ChatGPT...");
-    
-    try {
-      // POPRAWKA: Używamy pierwszego prompta jako payload, reszta jako promptChain
-      // To jest ANALOGICZNE do processArticles (linie 681-713)
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: activeTab.id },
-        function: injectToChat,
-        args: [
-          payload,
-          restOfPrompts,
-          WAIT_FOR_TEXTAREA_MS,
-          WAIT_FOR_RESPONSE_MS,
-          RETRY_INTERVAL_MS,
-          `Resume from Stage ${startIndex + 1}`,
-          'company',
-          processId,
-          {
-            promptOffset: startIndex,
-            totalPromptsOverride: PROMPTS_COMPANY.length
-          }
-        ]
-      });
-      
-      console.log("✅ Prompty wstrzyknięte pomyślnie");
-      console.log(`\n${'='.repeat(80)}`);
-      console.log(`✅ RESUME FROM STAGE ZAKOŃCZONE`);
-      console.log(`${'='.repeat(80)}\n`);
 
-    } catch (error) {
-      console.error("❌ Błąd wstrzykiwania promptów:", error);
-      alert(`Błąd wstrzykiwania promptów: ${error.message}`);
-    }
-    
+    return {
+      success: true,
+      processId: resumed.processId,
+      startIndex,
+      startPromptNumber: startIndex + 1
+    };
   } catch (error) {
-    console.error("❌ Błąd w resumeFromStage:", error);
-    alert(`Błąd wznawiania: ${error.message}`);
+    console.error('Blad w resumeFromStage:', error);
+    notifyAlert('Blad wznowienia procesu.');
+    return { success: false, error: error?.message || String(error) };
   }
 }
 
@@ -1396,11 +2636,15 @@ async function getArticleSelection(articles) {
 }
 
 // Funkcja przetwarzająca artykuły z danym prompt chain i URL
-async function processArticles(tabs, promptChain, chatUrl, analysisType) {
+async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
     return [];
   }
+
+  const invocationWindowId = Number.isInteger(options?.invocationWindowId)
+    ? options.invocationWindowId
+    : null;
   
   console.log(`[${analysisType}] Rozpoczynam przetwarzanie ${tabs.length} artykułów`);
   
@@ -1408,6 +2652,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
     const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
     let processTitle = tab?.title || 'Bez tytulu';
     let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
+    const sourceWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
     try {
       console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
       console.log(`URL: ${tab.url}`);
@@ -1528,6 +2773,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         timestamp: Date.now(),
         sourceUrl: isManualSource ? 'manual://source' : (tab.url || ''),
         chatUrl,
+        ...(invocationWindowId !== null ? { invocationWindowId } : {}),
+        ...(sourceWindowId !== null ? { sourceWindowId } : {}),
         messages: []
       });
 
@@ -1557,14 +2804,21 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
       let results;
-      try {
+      let result;
+      let executionPayload = payload;
+      let executionPromptChain = restOfPrompts;
+      let executionPromptOffset = processPromptOffset;
+      let autoRecoveryAttempt = 0;
+      const autoRecoveryReasonsList = [...AUTO_RECOVERY_REASONS];
+      while (true) {
+        try {
         console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
         results = await chrome.scripting.executeScript({
           target: { tabId: chatTabId },
           function: injectToChat,
           args: [
-            payload,
-            restOfPrompts,
+            executionPayload,
+            executionPromptChain,
             WAIT_FOR_TEXTAREA_MS,
             WAIT_FOR_RESPONSE_MS,
             RETRY_INTERVAL_MS,
@@ -1572,8 +2826,15 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
             analysisType,
             processId,
             {
-              promptOffset: processPromptOffset,
+              promptOffset: executionPromptOffset,
               totalPromptsOverride: processTotalPrompts
+            },
+            {
+              enabled: true,
+              attempt: autoRecoveryAttempt,
+              maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+              delayMs: AUTO_RECOVERY_DELAY_MS,
+              reasons: autoRecoveryReasonsList
             }
           ]
         });
@@ -1593,10 +2854,91 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
           statusText: 'Blad executeScript',
           reason: 'execute_script_failed',
           error: executeError.message || 'executeScript failed',
+          autoRecovery: null,
           finishedAt: Date.now(),
           timestamp: Date.now()
         });
-        return { success: false, title, error: `executeScript error: ${executeError.message}` };
+          return { success: false, title, error: `executeScript error: ${executeError.message}` };
+        }
+
+        if (!results || results.length === 0) {
+          console.error(`❌ KRYTYCZNY: results jest puste lub undefined!`);
+          console.error(`  - results: ${results}`);
+          await upsertProcess(processId, {
+            title: processTitle,
+            analysisType,
+            status: 'failed',
+            needsAction: false,
+            statusText: 'Brak wyniku executeScript',
+            reason: 'missing_execute_result',
+            autoRecovery: null,
+            finishedAt: Date.now(),
+            timestamp: Date.now()
+          });
+          return { success: false, title, error: 'executeScript nie zwrocil wynikow' };
+        }
+
+        result = results[0]?.result;
+        const handoff = result?.error === 'auto_recovery_required' ? result?.autoRecovery : null;
+        if (!handoff || autoRecoveryAttempt >= AUTO_RECOVERY_MAX_ATTEMPTS) {
+          break;
+        }
+
+        autoRecoveryAttempt += 1;
+        const nextPromptOffset = Number.isInteger(handoff.promptOffset) && handoff.promptOffset >= 0
+          ? handoff.promptOffset
+          : executionPromptOffset;
+        const nextRemainingPrompts = Array.isArray(handoff.remainingPrompts)
+          ? handoff.remainingPrompts
+          : executionPromptChain;
+        const recoveryReasonBase = typeof handoff.reason === 'string' && handoff.reason.trim()
+          ? handoff.reason.trim()
+          : 'unknown';
+        const recoveryReason = `auto_recovery_${recoveryReasonBase}`;
+        const recoveryCurrentPrompt = Number.isInteger(handoff.currentPrompt) && handoff.currentPrompt >= 0
+          ? handoff.currentPrompt
+          : (nextPromptOffset > 0 ? nextPromptOffset : executionPromptOffset);
+        const recoveryStageIndex = Number.isInteger(handoff.stageIndex)
+          ? handoff.stageIndex
+          : (recoveryCurrentPrompt > 0 ? (recoveryCurrentPrompt - 1) : null);
+        const recoveryPatch = {
+          title: processTitle,
+          analysisType,
+          status: 'running',
+          needsAction: false,
+          currentPrompt: recoveryCurrentPrompt,
+          totalPrompts: processTotalPrompts,
+          statusText: `Auto-reload ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
+          reason: recoveryReason,
+          autoRecovery: {
+            attempt: autoRecoveryAttempt,
+            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+            delayMs: AUTO_RECOVERY_DELAY_MS,
+            reason: recoveryReasonBase,
+            currentPrompt: recoveryCurrentPrompt,
+            ...(Number.isInteger(recoveryStageIndex) ? { stageIndex: recoveryStageIndex } : {}),
+            updatedAt: Date.now()
+          },
+          timestamp: Date.now()
+        };
+        if (Number.isInteger(recoveryStageIndex)) {
+          recoveryPatch.stageIndex = recoveryStageIndex;
+          recoveryPatch.stageName = `Prompt ${recoveryStageIndex + 1}`;
+        }
+        await upsertProcess(processId, recoveryPatch);
+
+        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Auto-recovery ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS} (${recoveryReasonBase}) dla prompta ${recoveryCurrentPrompt}`);
+        try {
+          await chrome.tabs.reload(chatTabId);
+        } catch (reloadError) {
+          console.warn('[auto-recovery] Nie udalo sie przeladowac karty:', reloadError?.message || reloadError);
+        }
+        await waitForTabCompleteWithTimeout(chatTabId, 20000);
+        await sleep(AUTO_RECOVERY_DELAY_MS);
+
+        executionPayload = '';
+        executionPromptChain = nextRemainingPrompts;
+        executionPromptOffset = nextPromptOffset;
       }
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
@@ -1630,6 +2972,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
           needsAction: false,
           statusText: 'Brak wyniku executeScript',
           reason: 'missing_execute_result',
+          autoRecovery: null,
           finishedAt: Date.now(),
           timestamp: Date.now()
         });
@@ -1643,7 +2986,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         keys: results[0] ? Object.keys(results[0]) : []
       });
       
-      const result = results[0]?.result;
+      result = results[0]?.result;
       
       if (result === undefined) {
         console.error(`❌ KRYTYCZNY: results[0].result jest undefined!`);
@@ -1746,6 +3089,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         statusText: finalStatusText,
         reason: finalReason,
         error: finalError,
+        autoRecovery: null,
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
           : {}),
@@ -1780,6 +3124,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
         statusText: 'Blad procesu',
         reason: 'exception',
         error: error?.message || String(error),
+        autoRecovery: null,
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
@@ -1797,9 +3142,25 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType) {
 }
 
 // Główna funkcja uruchamiająca analizę
-async function runAnalysis() {
+async function runAnalysis(options = {}) {
   try {
     console.log("\n=== ROZPOCZYNAM KONFIGURACJĘ ANALIZY ===");
+
+    const invocationWindowId = Number.isInteger(options?.invocationWindowId)
+      ? options.invocationWindowId
+      : null;
+    if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId)) {
+      const stopResult = await stopActiveProcesses({
+        windowId: invocationWindowId,
+        reason: 'restarted_in_same_window',
+        statusText: 'Zatrzymano przez ponowne uruchomienie',
+        origin: 'run-analysis-restart'
+      });
+      if (stopResult.stopped > 0) {
+        console.log(`[run] Zatrzymano ${stopResult.stopped} aktywnych procesow w oknie ${invocationWindowId}`);
+        await sleep(250);
+      }
+    }
     
     // KROK 1: Sprawdź czy prompty są wczytane
     console.log("\n📝 Krok 1: Sprawdzanie promptów");
@@ -1870,13 +3231,17 @@ async function runAnalysis() {
     
     // Zawsze uruchamiaj analizę spółki
     processingTasks.push(
-      processArticles(allTabs, PROMPTS_COMPANY, CHAT_URL, 'company')
+      processArticles(allTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+        invocationWindowId
+      })
     );
     
     // Uruchom analizę portfela jeśli są zaznaczone artykuły i prompty
     if (selectedTabs.length > 0) {
       processingTasks.push(
-        processArticles(selectedTabs, PROMPTS_PORTFOLIO, CHAT_URL_PORTFOLIO, 'portfolio')
+        processArticles(selectedTabs, PROMPTS_PORTFOLIO, CHAT_URL_PORTFOLIO, 'portfolio', {
+          invocationWindowId
+        })
       );
     }
     
@@ -2050,7 +3415,7 @@ async function extractText() {
 }
 
 // Funkcja wklejania do ChatGPT (content script)
-async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company', runId = null, progressContext = null) {
+async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company', runId = null, progressContext = null, autoRecoveryContext = null) {
   try {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🚀 [injectToChat] START`);
@@ -2115,6 +3480,21 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const totalPromptsForRun = Number.isInteger(totalPromptsOverride)
       ? Math.max(totalPromptsOverride, promptOffset + localPromptCount)
       : (promptOffset + localPromptCount);
+    const autoRecoveryEnabled = autoRecoveryContext?.enabled === true;
+    const autoRecoveryAttempt = Number.isInteger(autoRecoveryContext?.attempt) && autoRecoveryContext.attempt >= 0
+      ? autoRecoveryContext.attempt
+      : 0;
+    const autoRecoveryMaxAttempts = Number.isInteger(autoRecoveryContext?.maxAttempts) && autoRecoveryContext.maxAttempts > 0
+      ? autoRecoveryContext.maxAttempts
+      : 0;
+    const autoRecoveryDelayMs = Number.isInteger(autoRecoveryContext?.delayMs) && autoRecoveryContext.delayMs >= 0
+      ? autoRecoveryContext.delayMs
+      : 0;
+    const autoRecoveryReasons = new Set(
+      Array.isArray(autoRecoveryContext?.reasons)
+        ? autoRecoveryContext.reasons.filter((reason) => typeof reason === 'string')
+        : []
+    );
 
     function getAbsolutePromptIndex(localPromptNumber) {
       if (!Number.isInteger(localPromptNumber) || localPromptNumber <= 0) return 0;
@@ -2129,6 +3509,261 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         return getAbsolutePromptIndex(localPromptNumber) - 1;
       }
       return null;
+    }
+
+    function normalizeForComparison(text) {
+      if (typeof text !== 'string') return '';
+      return text
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+    }
+
+    function looksLikeFourGatePrompt(promptText) {
+      const normalized = normalizeForComparison(promptText);
+      if (!normalized) return false;
+
+      const hasFourGate = normalized.includes('four-gate');
+      const hasOneLineInstruction = normalized.includes('jedna linia')
+        || normalized.includes('one line')
+        || normalized.includes('single line');
+      const hasSemicolonInstruction = normalized.includes('srednik')
+        || normalized.includes('semicolon')
+        || normalized.includes('15 pol');
+
+      return hasFourGate && (hasOneLineInstruction || hasSemicolonInstruction);
+    }
+
+    function looksLikeFourGateDecisionLine(text) {
+      if (typeof text !== 'string') return false;
+      const normalized = text.replace(/\r/g, '').trim();
+      if (!normalized) return false;
+
+      const nonEmptyLines = normalized
+        .split('\n')
+        .map((line) => line.trim())
+        .filter(Boolean);
+
+      if (nonEmptyLines.length !== 1) return false;
+
+      const parts = nonEmptyLines[0].split(';').map((part) => part.trim());
+      if (parts.length === 16 && parts[15] === '') {
+        parts.pop();
+      }
+      if (parts.length !== 15) return false;
+      return parts.every((part) => part.length > 0);
+    }
+
+    function buildAutoRecoveryHandoff(reason, localPromptIndex, promptChainSnapshot) {
+      const safeLocalIndex = Number.isInteger(localPromptIndex) && localPromptIndex >= 0
+        ? localPromptIndex
+        : 0;
+      const localPromptNumber = safeLocalIndex + 1;
+      const currentPrompt = getAbsolutePromptIndex(localPromptNumber);
+      const stageIndex = getAbsoluteStageIndex(safeLocalIndex, localPromptNumber);
+      const nextPromptOffset = Math.max(0, currentPrompt - 1);
+      const remainingPrompts = Array.isArray(promptChainSnapshot)
+        ? promptChainSnapshot.slice(safeLocalIndex)
+        : [];
+
+      return {
+        success: false,
+        lastResponse: '',
+        error: 'auto_recovery_required',
+        autoRecovery: {
+          reason,
+          currentPrompt,
+          stageIndex,
+          promptOffset: nextPromptOffset,
+          remainingPrompts
+        }
+      };
+    }
+
+    function maybeTriggerAutoRecovery(reason, localPromptIndex, promptChainSnapshot, absoluteCurrentPrompt, absoluteStageIndex, counterRef) {
+      if (!autoRecoveryEnabled) return null;
+      if (!autoRecoveryReasons.has(reason)) return null;
+      if (autoRecoveryAttempt >= autoRecoveryMaxAttempts) return null;
+
+      const nextAttempt = autoRecoveryAttempt + 1;
+      const safePrompt = Number.isInteger(absoluteCurrentPrompt) ? absoluteCurrentPrompt : 0;
+      const safeStageIndex = Number.isInteger(absoluteStageIndex)
+        ? absoluteStageIndex
+        : (safePrompt > 0 ? safePrompt - 1 : null);
+      const stageName = safePrompt > 0 ? `Prompt ${safePrompt}` : 'Start';
+      const delaySec = Math.max(0, Math.round(autoRecoveryDelayMs / 1000));
+
+      updateCounter(
+        counterRef,
+        safePrompt,
+        totalPromptsForRun,
+        `Auto-reload ${nextAttempt}/${autoRecoveryMaxAttempts} za ${delaySec}s...`
+      );
+      notifyProcess('PROCESS_PROGRESS', {
+        status: 'running',
+        currentPrompt: safePrompt,
+        totalPrompts: totalPromptsForRun,
+        stageIndex: safeStageIndex,
+        stageName,
+        statusText: `Auto-reload ${nextAttempt}/${autoRecoveryMaxAttempts}`,
+        reason: `auto_recovery_${reason}`,
+        needsAction: false
+      });
+
+      return buildAutoRecoveryHandoff(reason, localPromptIndex, promptChainSnapshot);
+    }
+
+    function getPromptProbeFragment(promptText) {
+      if (typeof promptText !== 'string') return '';
+      return compactText(promptText).slice(0, 60);
+    }
+
+    function getPromptDomSnapshot() {
+      const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const lastUser = userMessages.length > 0 ? userMessages[userMessages.length - 1] : null;
+      const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
+      return {
+        userCount: userMessages.length,
+        assistantCount: assistantMessages.length,
+        lastUserText: compactText(lastUser ? (lastUser.innerText || lastUser.textContent || '') : ''),
+        lastAssistantText: compactText(lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : '')
+      };
+    }
+
+    function hasAssistantAdvancedSince(snapshot, minDelta = 30) {
+      const base = snapshot && typeof snapshot === 'object' ? snapshot : {};
+      const current = getPromptDomSnapshot();
+      if (current.assistantCount > (Number.isInteger(base.assistantCount) ? base.assistantCount : 0)) {
+        return true;
+      }
+      const prevText = typeof base.lastAssistantText === 'string' ? base.lastAssistantText : '';
+      const nextText = typeof current.lastAssistantText === 'string' ? current.lastAssistantText : '';
+      if (!prevText && !nextText) return false;
+      if (prevText !== nextText && Math.abs(nextText.length - prevText.length) >= minDelta) {
+        return true;
+      }
+      return false;
+    }
+
+    function hasStreamingInterruptedState() {
+      const interruptedPhrase = 'streaming interrupted';
+      const waitingPhrase = 'waiting for the complete message';
+      const userCount = document.querySelectorAll('[data-message-author-role="user"]').length;
+      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const assistantCount = assistantMessages.length;
+      const turnLikelyCurrent = assistantCount >= userCount;
+
+      const lastAssistant = assistantCount > 0 ? assistantMessages[assistantCount - 1] : null;
+      const lastAssistantText = compactText(
+        lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : ''
+      ).toLowerCase();
+      const interruptedInLastAssistant =
+        lastAssistantText.includes(interruptedPhrase) &&
+        lastAssistantText.includes(waitingPhrase);
+
+      if (interruptedInLastAssistant && turnLikelyCurrent) {
+        return true;
+      }
+
+      const alerts = [
+        ...document.querySelectorAll('[role="alert"]'),
+        ...document.querySelectorAll('[role="status"]')
+      ];
+      const lastAlert = alerts.length > 0 ? alerts[alerts.length - 1] : null;
+      const lastAlertText = compactText(
+        lastAlert ? (lastAlert.innerText || lastAlert.textContent || '') : ''
+      ).toLowerCase();
+      const interruptedInAlert =
+        lastAlertText.includes(interruptedPhrase) &&
+        lastAlertText.includes(waitingPhrase);
+
+      return interruptedInAlert && turnLikelyCurrent;
+    }
+
+    function hasHardGenerationErrorMessage() {
+      if (hasStreamingInterruptedState()) {
+        return true;
+      }
+      const errorCandidates = [
+        ...document.querySelectorAll('[class*="text"]'),
+        ...document.querySelectorAll('[role="alert"]'),
+        ...document.querySelectorAll('[class*="error"]')
+      ];
+      for (const node of errorCandidates) {
+        const text = compactText(node?.textContent || '');
+        if (!text) continue;
+        const lowered = text.toLowerCase();
+        if (
+          lowered.includes('something went wrong while generating the response') ||
+          lowered === 'something went wrong' ||
+          lowered.includes('an error occurred while generating') ||
+          lowered.includes('network error') ||
+          (
+            lowered.includes('streaming interrupted') &&
+            lowered.includes('waiting for the complete message')
+          )
+        ) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    async function detectPromptSentDespiteFailure(snapshot, promptText, maxWaitMs = 6000) {
+      const start = Date.now();
+      const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
+      const promptFragment = getPromptProbeFragment(promptText);
+
+      while (Date.now() - start < maxWaitMs) {
+        const current = getPromptDomSnapshot();
+        const userAdvanced = current.userCount > (Number.isInteger(base.userCount) ? base.userCount : 0);
+        const userMatchesPrompt = !promptFragment || current.lastUserText.includes(promptFragment);
+        if (userAdvanced && userMatchesPrompt) {
+          return true;
+        }
+
+        if (hasAssistantAdvancedSince(base, 20)) {
+          return true;
+        }
+
+        const generation = isGenerating();
+        if (generation.generating) {
+          return true;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      return false;
+    }
+
+    async function classifyTimeoutOutcome(snapshot, promptText) {
+      const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
+      const promptFragment = getPromptProbeFragment(promptText);
+
+      if (hasHardGenerationErrorMessage()) {
+        return 'no_response_or_error';
+      }
+
+      if (hasAssistantAdvancedSince(base, 20)) {
+        const extracted = await getLastResponseText();
+        if (validateResponse(extracted) || compactText(extracted).length > 0) {
+          return 'response_ready';
+        }
+      }
+
+      const generation = isGenerating();
+      const current = getPromptDomSnapshot();
+      const userAdvanced = current.userCount > (Number.isInteger(base.userCount) ? base.userCount : 0);
+      const userMatchesPrompt = !promptFragment || current.lastUserText.includes(promptFragment);
+      if (generation.generating || (userAdvanced && userMatchesPrompt)) {
+        return 'still_generating';
+      }
+
+      return 'no_response_or_error';
     }
 
     function notifyProcess(type, payload = {}) {
@@ -2726,6 +4361,11 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`📊 [FAZA 1] Timeout dla detekcji startu: ${Math.round(startTimeout/1000)}s (${Math.round(startTimeout/60000)} min)`);
     
     while (Date.now() - phase1StartTime < startTimeout) {
+      if (hasStreamingInterruptedState()) {
+        console.error('❌ [FAZA 1] Wykryto przerwany stream odpowiedzi (Stopped thinking / Streaming interrupted).');
+        return false;
+      }
+
       // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
       const errorMessages = document.querySelectorAll('[class*="text"]');
       
@@ -2918,6 +4558,11 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`📊 [FAZA 2] Timeout dla detekcji zakończenia: ${Math.round(phase2Timeout/1000)}s (${Math.round(phase2Timeout/60000)} min)`);
     
     while (Date.now() - phase2StartTime < phase2Timeout) {
+      if (hasStreamingInterruptedState()) {
+        console.error('❌ [FAZA 2] Wykryto przerwany stream odpowiedzi (Stopped thinking / Streaming interrupted).');
+        return false;
+      }
+
       // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
       const errorMessages = document.querySelectorAll('[class*="text"]');
       
@@ -4214,6 +5859,10 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
         console.log(`\n=== PROMPT CHAIN: ${promptChain.length} promptów do wykonania ===`);
         console.log(`Pełna lista promptów:`, promptChain);
+        delete window._lastResponseToSave;
+        delete window._preferredResponseToSave;
+        delete window._preferredResponsePrompt;
+        delete window._preferredResponseReason;
         
         for (let i = 0; i < promptChain.length; i++) {
           const prompt = promptChain[i];
@@ -4221,6 +5870,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           const localPromptNumber = i + 1;
           const absoluteCurrentPrompt = getAbsolutePromptIndex(localPromptNumber);
           const absoluteStageIndex = getAbsoluteStageIndex(i, localPromptNumber);
+          const promptSnapshotBeforeSend = getPromptDomSnapshot();
           
           console.log(`\n━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━`);
           console.log(`>>> PROMPT ${i + 1}/${promptChain.length} (pozostało: ${remaining})`);
@@ -4248,38 +5898,55 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
             console.log(`⏸️ Błąd wysyłania - czekam na interwencję użytkownika`);
             updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd wysyłania`);
+            const sentDespiteFailure = await detectPromptSentDespiteFailure(promptSnapshotBeforeSend, prompt, 7000);
+            if (sentDespiteFailure) {
+              console.warn(`⚠️ sendPrompt zwrócił false, ale DOM pokazuje że prompt prawdopodobnie został wysłany - kontynuuję bez auto-reload`);
+            } else {
             
-            // Pokaż przyciski i czekaj na user - może naprawić sytuację lub pominąć
-            const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'send_failed');
+              // Pokaż przyciski i czekaj na user - może naprawić sytuację lub pominąć
+              const autoRecoveryHandoff = maybeTriggerAutoRecovery(
+                'send_failed',
+                i,
+                promptChain,
+                absoluteCurrentPrompt,
+                absoluteStageIndex,
+                counter
+              );
+              if (autoRecoveryHandoff) {
+                return autoRecoveryHandoff;
+              }
+
+              const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'send_failed');
             
-            if (action === 'skip') {
-              console.log(`⏭️ User wybrał pominięcie - przechodzę do następnego prompta`);
-              continue; // Pomiń resztę tego prompta, idź do następnego
+              if (action === 'skip') {
+                console.log(`⏭️ User wybrał pominięcie - przechodzę do następnego prompta`);
+                continue; // Pomiń resztę tego prompta, idź do następnego
+              }
+            
+              // User naprawił, spróbuj wysłać ponownie ten sam prompt
+              console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
+              const retried = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
+            
+              if (!retried) {
+                console.error(`❌ Ponowna próba nieudana - przerywam chain`);
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd krytyczny`);
+                await new Promise(resolve => setTimeout(resolve, 10000));
+                notifyProcess('PROCESS_PROGRESS', {
+                  status: 'failed',
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  stageName: `Prompt ${absoluteCurrentPrompt}`,
+                  statusText: 'Blad krytyczny po retry',
+                  reason: 'send_retry_failed',
+                  needsAction: false
+                });
+                // WAŻNE: Musimy zwrócić obiekt, nie undefined!
+                return { success: false, lastResponse: '', error: 'Nie udało się wysłać prompta po retry' };
+              }
+            
+              console.log(`✅ Ponowne wysyłanie udane - kontynuuję chain`);
             }
-            
-            // User naprawił, spróbuj wysłać ponownie ten sam prompt
-            console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
-            const retried = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
-            
-            if (!retried) {
-              console.error(`❌ Ponowna próba nieudana - przerywam chain`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd krytyczny`);
-              await new Promise(resolve => setTimeout(resolve, 10000));
-              notifyProcess('PROCESS_PROGRESS', {
-                status: 'failed',
-                currentPrompt: absoluteCurrentPrompt,
-                totalPrompts: totalPromptsForRun,
-                stageIndex: absoluteStageIndex,
-                stageName: `Prompt ${absoluteCurrentPrompt}`,
-                statusText: 'Blad krytyczny po retry',
-                reason: 'send_retry_failed',
-                needsAction: false
-              });
-              // WAŻNE: Musimy zwrócić obiekt, nie undefined!
-              return { success: false, lastResponse: '', error: 'Nie udało się wysłać prompta po retry' };
-            }
-            
-            console.log(`✅ Ponowne wysyłanie udane - kontynuuję chain`);
           }
           
           // Aktualizuj licznik - czekanie
@@ -4296,7 +5963,31 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               console.error(`❌ Timeout przy promptcie ${i + 1}/${promptChain.length}`);
               console.log(`⏸️ ChatGPT nie odpowiedział w czasie - czekam na interwencję użytkownika`);
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '⏱️ Timeout - czekam...');
+              const timeoutOutcome = await classifyTimeoutOutcome(promptSnapshotBeforeSend, prompt);
+              if (timeoutOutcome === 'response_ready') {
+                console.warn(`⚠️ Timeout heurystyki, ale wykryto odpowiedź - pomijam auto-reload dla prompta ${absoluteCurrentPrompt}`);
+                responseCompleted = true;
+                break;
+              }
+              if (timeoutOutcome === 'still_generating') {
+                console.warn(`⚠️ Timeout heurystyki, ale ChatGPT nadal generuje - kontynuuję czekanie bez auto-reload`);
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '⏳ ChatGPT nadal generuje...');
+                await new Promise((resolve) => setTimeout(resolve, 1500));
+                continue;
+              }
               
+              const autoRecoveryHandoff = maybeTriggerAutoRecovery(
+                'timeout',
+                i,
+                promptChain,
+                absoluteCurrentPrompt,
+                absoluteStageIndex,
+                counter
+              );
+              if (autoRecoveryHandoff) {
+                return autoRecoveryHandoff;
+              }
+
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'timeout');
               
               if (action === 'skip') {
@@ -4328,7 +6019,24 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
               console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '❌ Odpowiedź za krótka');
+              const trimmedResponse = compactText(responseText);
+              const assistantAdvanced = hasAssistantAdvancedSince(promptSnapshotBeforeSend, 10);
+              const allowAutoRecoveryForInvalid = hasHardGenerationErrorMessage() || (!assistantAdvanced && trimmedResponse.length === 0);
               
+              if (allowAutoRecoveryForInvalid) {
+                const autoRecoveryHandoff = maybeTriggerAutoRecovery(
+                  'invalid_response',
+                  i,
+                  promptChain,
+                  absoluteCurrentPrompt,
+                  absoluteStageIndex,
+                  counter
+                );
+                if (autoRecoveryHandoff) {
+                  return autoRecoveryHandoff;
+                }
+              }
+
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
               
               if (action === 'skip') {
@@ -4364,6 +6072,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         });
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
+          const preferByPrompt = analysisType === 'company' && looksLikeFourGatePrompt(prompt);
+          const preferByFormat = analysisType === 'company' && looksLikeFourGateDecisionLine(responseText);
+          if (preferByPrompt || preferByFormat) {
+            window._preferredResponseToSave = responseText || '';
+            window._preferredResponsePrompt = absoluteCurrentPrompt;
+            window._preferredResponseReason = preferByPrompt ? 'four_gate_prompt' : 'four_gate_format';
+            console.log(`🎯 Wybrano odpowiedź z prompta ${absoluteCurrentPrompt} jako docelową do zapisu (${window._preferredResponseReason})`);
+          }
           const isLastPrompt = (i === promptChain.length - 1);
           if (isLastPrompt) {
             // Zapisz ZAWSZE ostatnią odpowiedź, nawet jeśli pusta (dla debugowania)
@@ -4393,10 +6109,27 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         removeCounter(counter, true);
         
         // Zwróć ostatnią odpowiedź do zapisania
-        const lastResponse = window._lastResponseToSave || '';
+        const preferredResponse = typeof window._preferredResponseToSave === 'string'
+          ? window._preferredResponseToSave
+          : '';
+        const preferredPrompt = Number.isInteger(window._preferredResponsePrompt)
+          ? window._preferredResponsePrompt
+          : null;
+        const preferredReason = typeof window._preferredResponseReason === 'string'
+          ? window._preferredResponseReason
+          : '';
+        const lastResponse = preferredResponse || window._lastResponseToSave || '';
         delete window._lastResponseToSave;
-        console.log(`🔙 Zwracam ostatnią odpowiedź (${lastResponse.length} znaków)`);
+        delete window._preferredResponseToSave;
+        delete window._preferredResponsePrompt;
+        delete window._preferredResponseReason;
+        console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków)`);
+        if (preferredResponse) {
+          console.log(`🎯 Użyto odpowiedzi Four-Gate (${preferredReason || 'preferred'})`);
+        }
         const completedPrompt = getAbsolutePromptIndex(promptChain.length);
+        const selectedPrompt = preferredPrompt || completedPrompt;
+        const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
         notifyProcess('PROCESS_PROGRESS', {
           status: 'completed',
           currentPrompt: completedPrompt,
@@ -4407,7 +6140,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           needsAction: false
         });
         
-        return { success: true, lastResponse: lastResponse };
+        return {
+          success: true,
+          lastResponse: lastResponse,
+          selectedResponsePrompt: selectedPrompt,
+          selectedResponseStageIndex: selectedStageIndex,
+          selectedResponseReason: preferredReason
+        };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
         
@@ -4428,7 +6167,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       }
       
       // Ten return nigdy nie powinien zostać osiągnięty
-      return { success: false };
+      return { success: false, lastResponse: '', error: 'unexpected_code_path' };
     }
     
     // Czekaj przed następną próbą
@@ -4444,7 +6183,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     reason: 'textarea_not_found',
     needsAction: false
   });
-  return { success: false, error: 'Nie znaleziono textarea' };
+  return { success: false, lastResponse: '', error: 'Nie znaleziono textarea' };
   
   } catch (error) {
     console.error(`\n${'='.repeat(80)}`);
@@ -4489,3 +6228,4 @@ function waitForTabComplete(tabId) {
     });
   });
 }
+

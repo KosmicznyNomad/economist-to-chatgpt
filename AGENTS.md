@@ -1,36 +1,41 @@
 # AGENTS.md
 
 ## Project summary
-- Chrome extension that sends news articles and YouTube transcripts to ChatGPT using a prompt chain and saves the final response.
+- Chrome extension that sends news articles and YouTube transcripts to ChatGPT using prompt chains and saves responses.
 - Optional backend (Flask + SQLite) for remote storage and market data.
-- Stage-based prompt flow with resume-from-stage and in-ChatGPT progress overlay.
+- Dual analysis modes: company (`prompts-company.txt`) and portfolio (`prompts-portfolio.txt`).
+- Stage-based prompt flow with resume-from-stage (company flow) and in-ChatGPT progress overlay.
 
 ## Repo layout (top level)
 - `manifest.json` - extension config, permissions, shortcuts, web resources.
 - `background.js` - service worker and main orchestrator (prompt chain, ChatGPT UI automation, storage, cloud upload).
 - `popup.html` / `popup.js` - main entry UI (run, manual source, resume stage, decision panel, responses).
 - `prompt-dialog.html` / `prompt-dialog.js` - prompt chain selection UI.
+- `article-selector.html` / `article-selector.js` - choose which tabs also run portfolio analysis.
 - `manual-source.html` / `manual-source.js` - paste custom text and title.
 - `responses.html` / `responses.js` - response viewer + copy/clear + market table.
 - `process-monitor.html` / `process-monitor.js` - decision panel and run progress.
 - `resume-stage.html` / `resume-stage.js` - restart from a chosen prompt stage.
+- `chatgpt-monitor.js` - extra monitoring helpers for ChatGPT tabs.
 - `youtube-content.js` - extracts YouTube transcripts.
 - `content-script.js` - Google Sheets integration (separate from response storage).
-- `prompts-company.txt` - prompt chain (separator token inside file).
+- `prompts-company.txt` - company prompt chain (separator token inside file).
+- `prompts-portfolio.txt` - portfolio prompt chain.
 - `backend/` - optional Flask backend (remote storage + market data).
 - `ARCHITECTURE_OVERVIEW.md`, `KEY_FILES_REFERENCE.md`, `CHATGPT_DOM_STRUCTURE.md` - deeper technical docs.
 
 ## Core logic (high level flow)
 1. User opens popup and triggers analysis.
-2. `background.js` loads prompts, collects supported tabs, and starts processing.
+2. `background.js` loads both prompt files, collects supported tabs, and opens article selection.
 3. For each article:
    - Extract text from the page (site selectors) or YouTube transcript.
    - Build payload from prompt #1 by replacing `{{articlecontent}}` with article text.
    - Open ChatGPT tab/window and inject payload + prompt chain.
    - Run prompt chain (prompt #2..N) and advance stage-by-stage.
    - Only the LAST response from the chain is saved as the primary output.
-4. Company analysis only:
-   - Uses `prompts-company.txt` and `CHAT_URL`.
+4. Two parallel flows can run:
+   - Company flow always runs for supported tabs (`prompts-company.txt`, `CHAT_URL`).
+   - Portfolio flow runs only for tabs selected in article selector (`prompts-portfolio.txt`, `CHAT_URL_PORTFOLIO`).
 5. Responses are stored locally and optionally uploaded to backend.
 6. `responses.html` renders saved responses in real time.
 
@@ -41,14 +46,14 @@ Flow (short):
 - Responses live under `chrome.storage.local` key `responses` (with migration from session).
 - Response object fields: `text`, `timestamp`, `source`, `analysisType`, optional `runId`, `stage`.
 - Process monitoring state is stored in `chrome.storage.local` key `process_monitor_state`.
-- `analysisType` is effectively `company` in the current setup.
+- `analysisType` values used in practice: `company` and `portfolio`.
 
 ## Prompt chain & stages (core mechanics)
-- Prompts are loaded on extension start from `prompts-company.txt`.
-- Prompts are split by a separator token in the file (PROMPT_SEPARATOR wrapped in arrow markers).
+- Prompts are loaded on extension start from `prompts-company.txt` and `prompts-portfolio.txt`.
+- Prompts are split by the literal token `PROMPT_SEPARATOR` wrapped in arrow markers in prompt files.
 - `STAGE_NAMES_COMPANY` in `background.js` must match the order/count of prompts.
 - Prompt #1 is the payload template and includes `{{articlecontent}}`; the article text is inserted and sent first.
-- Prompt chain = prompts #2..N; stage index = global prompt index (0-based, aligned with `STAGE_NAMES_COMPANY`).
+- Prompt chain = prompts #2..N; stage index in company flow is aligned with `STAGE_NAMES_COMPANY`.
 - Stage history is tracked in `injectToChat`:
   - per-stage duration, word count, and label are computed.
   - summaries are shown in the floating counter's stage panel (toggle inside ChatGPT).
@@ -56,6 +61,7 @@ Flow (short):
   - stage responses are sent with `SAVE_STAGE_RESPONSE` (saved locally, upload skipped).
 
 ## Resume from stage (end-to-end flow)
+- Scope: company prompt chain only (`GET_COMPANY_PROMPTS` + `GET_STAGE_NAMES`).
 - Popup -> `RESUME_STAGE_OPEN` -> `resume-stage.html` (dropdown populated from `GET_COMPANY_PROMPTS` + `GET_STAGE_NAMES`).
 - UI lists prompts starting from #2 because prompt #1 contains `{{articlecontent}}`.
 - On Start, `RESUME_STAGE_START` sends the selected 0-based index to `background.js`.
@@ -133,7 +139,7 @@ Flow (short):
   - `TWELVEDATA_API_KEY` (for `/market/daily`)
 - Run local:
   - `python -m venv .venv`
-- `.\.venv\Scripts\Activate.ps1`
+  - `.\.venv\Scripts\Activate.ps1`
   - `pip install -r requirements.txt`
   - `python app.py`
 
@@ -142,10 +148,10 @@ Flow (short):
 - For new domains add extract selectors in `extractText()`.
 
 ## Common change points
-- Change GPT target: update `CHAT_URL` in `background.js`.
-- Edit prompt stages: update prompts files + `STAGE_NAMES_COMPANY`.
+- Change GPT target: update `CHAT_URL` and `CHAT_URL_PORTFOLIO` in `background.js`.
+- Edit prompt stages: update prompt files; when company stage count/order changes, update `STAGE_NAMES_COMPANY`.
 - Response storage behavior: `saveResponse()` and `responses.js`.
-- UI flows: `popup.js`, `prompt-dialog.js`, `manual-source.js`, `resume-stage.js`, `process-monitor.js`.
+- UI flows: `popup.js`, `prompt-dialog.js`, `article-selector.js`, `manual-source.js`, `resume-stage.js`, `process-monitor.js`.
 
 ## Generated/local data
 - `backend/data/responses.db` is local DB output.

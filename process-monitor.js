@@ -6,6 +6,8 @@ const detailsContainer = document.getElementById('process-details');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
 const resumeAllBtn = document.getElementById('resume-all-btn');
+const detectResumeBtn = document.getElementById('detect-resume-btn');
+const detectResults = document.getElementById('detect-results');
 const processSummary = document.getElementById('process-summary');
 
 let selectedProcessId = null;
@@ -16,11 +18,36 @@ let lastHistorySignature = '';
 let historyOpen = false;
 const processCardMap = new Map();
 const processSeenAt = new Map();
+let stageNamesCompany = [];
+let stageNamesLoaded = false;
 
 console.log('🔍 Monitor procesów uruchomiony');
 
+async function loadStageNames() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({ type: 'GET_STAGE_NAMES' }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[panel] GET_STAGE_NAMES failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+        resolve([]);
+        return;
+      }
+      const names = Array.isArray(response?.stageNames)
+        ? response.stageNames.filter((name) => typeof name === 'string')
+        : [];
+      stageNamesCompany = names;
+      stageNamesLoaded = true;
+      resolve(names);
+    });
+  });
+}
+
+async function initializeMonitor() {
+  await loadStageNames();
+  await refreshProcesses();
+}
+
 // Pobierz procesy przy starcie
-refreshProcesses();
+void initializeMonitor();
 
 // Nasłuchuj na aktualizacje
 chrome.runtime.onMessage.addListener((message) => {
@@ -45,10 +72,19 @@ if (resumeAllBtn) {
   });
 }
 
+if (detectResumeBtn) {
+  detectResumeBtn.addEventListener('click', () => {
+    void detectLastPromptAndResume();
+  });
+}
+
 const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
-  invalid_response: 'Za krotka odpowiedz'
+  invalid_response: 'Za krotka odpowiedz',
+  auto_recovery_send_failed: 'Auto-recovery po bledzie wysylania',
+  auto_recovery_timeout: 'Auto-recovery po timeout',
+  auto_recovery_invalid_response: 'Auto-recovery po niepoprawnej odpowiedzi'
 };
 const RESPONSE_STORAGE_KEY = 'responses';
 
@@ -63,6 +99,36 @@ function isFailedStatus(status) {
 
 function isCompletedStatus(status) {
   return status === 'completed';
+}
+
+function getProgressPercent(currentPrompt, totalPrompts) {
+  if (!Number.isInteger(totalPrompts) || totalPrompts <= 0) return 0;
+  const current = Number.isInteger(currentPrompt) ? currentPrompt : 0;
+  const bounded = Math.min(Math.max(current, 0), totalPrompts);
+  return Math.round((bounded / totalPrompts) * 100);
+}
+
+function formatRelativeTime(timestamp) {
+  if (!Number.isInteger(timestamp) || timestamp <= 0) return 'n/a';
+  const deltaMs = Date.now() - timestamp;
+  if (deltaMs < 1000) return 'teraz';
+  const sec = Math.floor(deltaMs / 1000);
+  if (sec < 60) return `${sec}s temu`;
+  const min = Math.floor(sec / 60);
+  if (min < 60) return `${min}m temu`;
+  const hrs = Math.floor(min / 60);
+  if (hrs < 24) return `${hrs}h temu`;
+  const days = Math.floor(hrs / 24);
+  return `${days}d temu`;
+}
+
+function formatClock(timestamp) {
+  if (!Number.isInteger(timestamp) || timestamp <= 0) return 'n/a';
+  const date = new Date(timestamp);
+  const hh = String(date.getHours()).padStart(2, '0');
+  const mm = String(date.getMinutes()).padStart(2, '0');
+  const ss = String(date.getSeconds()).padStart(2, '0');
+  return `${hh}:${mm}:${ss}`;
 }
 
 function buildStatusCounts(processes) {
@@ -103,14 +169,26 @@ function ensureCountConsistency(allItems, activeItems, historyItems) {
     issues.push('partition_mismatch');
   }
 
+  const activeIds = new Set(
+    activeItems
+      .map((process) => (process?.id ? String(process.id) : ''))
+      .filter(Boolean)
+  );
+
   const activeClosed = activeItems.filter((process) => isProcessClosed(process));
   if (activeClosed.length > 0) {
     issues.push('closed_in_active');
   }
 
   const activeNeedsAction = activeItems.filter((process) => !!process?.needsAction).length;
-  const allNeedsAction = allItems.filter((process) => !!process?.needsAction && !isProcessClosed(process)).length;
-  if (activeNeedsAction !== allNeedsAction) {
+  // Count needsAction only on the same active partition (by id),
+  // otherwise stale/non-visible items in history can cause false mismatches.
+  const partitionNeedsAction = allItems.filter((process) => {
+    if (!process?.needsAction) return false;
+    const processId = process?.id ? String(process.id) : '';
+    return !!processId && activeIds.has(processId);
+  }).length;
+  if (activeNeedsAction !== partitionNeedsAction) {
     issues.push('needs_action_mismatch');
   }
 
@@ -128,9 +206,27 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const failedCount = allItems.filter((process) => isFailedStatus(getNormalizedStatus(process))).length;
   const totalCount = allItems.length;
   const consistencyIssues = ensureCountConsistency(allItems, activeItems, historyItems);
+  const activeProgress = activeItems
+    .map((process) => getProgressPercent(process?.currentPrompt, process?.totalPrompts))
+    .filter((value) => Number.isInteger(value));
+  const avgProgress = activeProgress.length > 0
+    ? Math.round(activeProgress.reduce((sum, value) => sum + value, 0) / activeProgress.length)
+    : 0;
+  const oldestActiveTs = activeItems.reduce((oldest, process) => {
+    const ts = Number.isInteger(process?.startedAt)
+      ? process.startedAt
+      : (Number.isInteger(process?.timestamp) ? process.timestamp : null);
+    if (!Number.isInteger(ts)) return oldest;
+    if (!Number.isInteger(oldest)) return ts;
+    return Math.min(oldest, ts);
+  }, null);
+  const stageInfo = stageNamesLoaded ? `Etapy: ${stageNamesCompany.length}` : 'Etapy: ladowanie...';
 
   if (processSummary) {
     let summary = `Aktywne: ${activeCount} | Wymaga akcji: ${needsActionCount} | Zakonczone: ${completedCount} | Blad: ${failedCount} | Wszystkie: ${totalCount}`;
+    summary += ` | Sredni postep aktywnych: ${avgProgress}%`;
+    summary += ` | Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`;
+    summary += ` | ${stageInfo}`;
     if (consistencyIssues.length > 0) {
       summary += ` | Korekta: ${consistencyIssues.join(',')}`;
       console.warn('[panel] Wykryto niespojnosc licznikow procesow', {
@@ -322,18 +418,34 @@ function resolveStageLabel(process) {
   const normalizedPrompt = Math.max(currentPrompt || 0, promptFromStageIndex || 0);
 
   const rawStageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
+  const analysisType = (process?.analysisType || '').toLowerCase();
+  const companyStageName = normalizedPrompt > 0
+    ? stageNamesCompany[normalizedPrompt - 1]
+    : '';
+
   if (rawStageName) {
     const promptMatch = rawStageName.match(/^Prompt\s+(\d+)$/i);
     if (promptMatch && normalizedPrompt > 0) {
       const stagePrompt = Number.parseInt(promptMatch[1], 10);
       if (Number.isInteger(stagePrompt) && stagePrompt !== normalizedPrompt) {
+        if (analysisType === 'company' && companyStageName) {
+          return `${companyStageName} (Prompt ${normalizedPrompt})`;
+        }
         return `Prompt ${normalizedPrompt}`;
+      }
+      if (analysisType === 'company' && companyStageName) {
+        return `${companyStageName} (Prompt ${normalizedPrompt})`;
       }
     }
     return rawStageName;
   }
 
-  if (normalizedPrompt > 0) return `Prompt ${normalizedPrompt}`;
+  if (normalizedPrompt > 0) {
+    if (analysisType === 'company' && companyStageName) {
+      return `${companyStageName} (Prompt ${normalizedPrompt})`;
+    }
+    return `Prompt ${normalizedPrompt}`;
+  }
   return 'Start';
 }
 
@@ -405,6 +517,12 @@ function buildProcessCard() {
   const statusMeta = document.createElement('div');
   statusMeta.className = 'meta status-meta';
 
+  const timingMeta = document.createElement('div');
+  timingMeta.className = 'meta timing-meta';
+
+  const locationMeta = document.createElement('div');
+  locationMeta.className = 'meta location-meta';
+
   const reason = document.createElement('div');
   reason.className = 'reason';
 
@@ -432,6 +550,8 @@ function buildProcessCard() {
   card.appendChild(progressBar);
   card.appendChild(stageMeta);
   card.appendChild(statusMeta);
+  card.appendChild(timingMeta);
+  card.appendChild(locationMeta);
   card.appendChild(reason);
   card.appendChild(actions);
   card.appendChild(hint);
@@ -446,6 +566,8 @@ function buildProcessCard() {
       progressFill,
       stageMeta,
       statusMeta,
+      timingMeta,
+      locationMeta,
       reason,
       actions,
       waitBtn,
@@ -506,8 +628,13 @@ function updateProcessCard(entry, process, isSelected) {
 
   const currentPrompt = Number.isInteger(process.currentPrompt) ? process.currentPrompt : 0;
   const totalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : 0;
+  const progress = getProgressPercent(currentPrompt, totalPrompts);
+  const startedAt = Number.isInteger(process.startedAt) ? process.startedAt : null;
+  const updatedAt = Number.isInteger(process.timestamp) ? process.timestamp : startedAt;
+  const tabLabel = Number.isInteger(process.tabId) ? String(process.tabId) : '-';
+  const windowLabel = Number.isInteger(process.windowId) ? String(process.windowId) : '-';
 
-  refs.statusLine.textContent = `Prompt ${currentPrompt} / ${totalPrompts}`;
+  refs.statusLine.textContent = `Prompt ${currentPrompt} / ${totalPrompts} (${progress}%)`;
 
   const status = getNormalizedStatus(process);
   let statusBadgeText = 'W trakcie';
@@ -526,22 +653,23 @@ function updateProcessCard(entry, process, isSelected) {
   refs.statusBadge.textContent = statusBadgeText;
   refs.statusBadge.className = `status-badge ${statusBadgeClass}`;
 
-  const progress = totalPrompts > 0
-    ? Math.round((currentPrompt / totalPrompts) * 100)
-    : 0;
   refs.progressFill.style.width = `${progress}%`;
 
   const stageLabel = resolveStageLabel(process);
   refs.stageMeta.textContent = `Etap: ${stageLabel}`;
 
   const statusLine = process.statusText ? String(process.statusText) : '';
-  if (statusLine) {
-    refs.statusMeta.textContent = `Status: ${statusLine}`;
+  if (statusLine || updatedAt) {
+    const statusChunk = statusLine ? statusLine : 'brak statusText';
+    refs.statusMeta.textContent = `Status: ${statusChunk} | Aktualizacja: ${formatRelativeTime(updatedAt)}`;
     refs.statusMeta.style.display = 'block';
   } else {
     refs.statusMeta.textContent = '';
     refs.statusMeta.style.display = 'none';
   }
+
+  refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni update: ${formatClock(updatedAt)} (${formatRelativeTime(updatedAt)})`;
+  refs.locationMeta.textContent = `Tab: ${tabLabel} | Okno: ${windowLabel} | ID: ${process.id || '-'}`;
 
   let reasonText = null;
   if (process.reason) {
@@ -930,6 +1058,257 @@ function sendDecisionAll(decision) {
   });
 }
 
+function sendProcessResumeNextStage(process, options = {}) {
+  return new Promise((resolve) => {
+    if (!process || !process.id) {
+      resolve({ success: false, error: 'missing_process_id' });
+      return;
+    }
+
+    chrome.runtime.sendMessage({
+      type: 'PROCESS_RESUME_NEXT_STAGE',
+      runId: process.id,
+      tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+      windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+      chatUrl: resolveChatUrl(process),
+      title: process?.title || '',
+      analysisType: process?.analysisType || '',
+      openDialogOnly: !!options.openDialogOnly
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[panel] PROCESS_RESUME_NEXT_STAGE failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+        resolve({
+          success: false,
+          error: chrome.runtime.lastError.message || 'runtime_error'
+        });
+        return;
+      }
+
+      resolve({
+        success: !!response?.success,
+        error: typeof response?.error === 'string' ? response.error : '',
+        mode: typeof response?.mode === 'string' ? response.mode : '',
+        startIndex: Number.isInteger(response?.startIndex) ? response.startIndex : null,
+        startPromptNumber: Number.isInteger(response?.startPromptNumber) ? response.startPromptNumber : null,
+        detectedPromptNumber: Number.isInteger(response?.detectedPromptNumber) ? response.detectedPromptNumber : null,
+        detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : ''
+      });
+    });
+  });
+}
+
+async function resumeNextStageFromPanel(process, button, options = {}) {
+  if (!process) return false;
+  const openDialogOnly = !!options.openDialogOnly;
+  const originalText = (button?.dataset?.originalText || button?.textContent || (openDialogOnly ? 'Wznow od kolejnego etapu' : 'Resume next stage')).trim();
+  if (button) {
+    button.dataset.originalText = originalText;
+    button.disabled = true;
+    button.textContent = openDialogOnly ? 'Wykrywam etap...' : 'Wznawiam...';
+  }
+
+  try {
+    const response = await sendProcessResumeNextStage(process, { openDialogOnly });
+    if (response.success) {
+      if (button) {
+        if (openDialogOnly) {
+          const promptText = Number.isInteger(response.startPromptNumber) ? `Prompt ${response.startPromptNumber}` : 'wybrany prompt';
+          button.textContent = `Otwarto dialog (${promptText})`;
+        } else {
+          const promptText = Number.isInteger(response.startPromptNumber) ? `Prompt ${response.startPromptNumber}` : 'kolejny etap';
+          button.textContent = `Wznowiono: ${promptText}`;
+        }
+      }
+      await refreshProcesses();
+      return true;
+    }
+
+    console.warn('[panel] Resume next stage error', {
+      processId: process?.id,
+      error: response.error,
+      detectedPromptNumber: response.detectedPromptNumber,
+      detectedMethod: response.detectedMethod
+    });
+
+    if (button) {
+      if (response.error === 'already_at_last_prompt') {
+        button.textContent = 'Brak kolejnego etapu';
+      } else {
+        button.textContent = 'Nie udalo sie wznowic';
+      }
+    }
+    return false;
+  } catch (error) {
+    console.warn('[panel] Resume next stage exception:', error);
+    if (button) {
+      button.textContent = 'Blad wznowienia';
+    }
+    return false;
+  } finally {
+    if (button) {
+      setTimeout(() => {
+        button.textContent = originalText;
+        button.disabled = false;
+      }, 2200);
+    }
+  }
+}
+
+function sendDetectLastPromptAndResume() {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage({
+      type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME'
+    }, (response) => {
+      if (chrome.runtime.lastError) {
+        console.warn('[panel] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+        resolve({
+          success: false,
+          scannedTabs: 0,
+          matchedTabs: 0,
+          resumedTabs: 0,
+          passCount: 0,
+          pendingAfterLoop: 0,
+          results: [],
+          error: chrome.runtime.lastError.message || 'runtime_error'
+        });
+        return;
+      }
+
+      resolve({
+        success: !!response?.success,
+        scannedTabs: Number.isInteger(response?.scannedTabs) ? response.scannedTabs : 0,
+        matchedTabs: Number.isInteger(response?.matchedTabs) ? response.matchedTabs : 0,
+        resumedTabs: Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0,
+        passCount: Number.isInteger(response?.passCount) ? response.passCount : 0,
+        pendingAfterLoop: Number.isInteger(response?.pendingAfterLoop) ? response.pendingAfterLoop : 0,
+        results: Array.isArray(response?.results) ? response.results : [],
+        error: typeof response?.error === 'string' ? response.error : ''
+      });
+    });
+  });
+}
+
+function formatDetectAction(action) {
+  const map = {
+    resumed: 'wznowiono',
+    no_match: 'brak dopasowania',
+    no_user_message: 'brak wiadomosci usera',
+    final_stage_already_sent: 'ostatni etap juz wyslany',
+    active_process_exists: 'aktywny proces juz istnieje',
+    inject_failed: 'blad inject/odczytu',
+    resume_failed: 'blad wznowienia'
+  };
+  return map[action] || action || 'unknown';
+}
+
+function renderDetectResults(state = {}) {
+  if (!detectResults) return;
+
+  if (state.loading) {
+    detectResults.textContent = 'Przechodze po kartach GPT Inwestycje po kolei (1 pass, max 45s), wykrywam etap i uruchamiam wznowienie...';
+    return;
+  }
+
+  if (state.error) {
+    detectResults.textContent = `Blad: ${state.error}`;
+    return;
+  }
+
+  const response = state.response;
+  if (!response) {
+    detectResults.textContent = 'Wyniki auto-detekcji (GPT Inwestycje) pojawia sie tutaj.';
+    return;
+  }
+
+  const rows = Array.isArray(response.results) ? response.results : [];
+  const header = document.createElement('div');
+  header.className = 'detect-header';
+  header.textContent = `Skan: ${response.scannedTabs} | Dopasowane: ${response.matchedTabs} | Wznowione: ${response.resumedTabs} | Passy: ${response.passCount || 0} | Pozostale: ${response.pendingAfterLoop || 0}`;
+
+  detectResults.innerHTML = '';
+  detectResults.appendChild(header);
+
+  if (!response.success && response.error) {
+    const errorRow = document.createElement('div');
+    errorRow.className = 'detect-meta';
+    errorRow.textContent = `Blad wykonania: ${response.error}`;
+    detectResults.appendChild(errorRow);
+  }
+
+  if (rows.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'detect-meta';
+    empty.textContent = 'Brak kart do raportu.';
+    detectResults.appendChild(empty);
+    return;
+  }
+
+  rows.forEach((item) => {
+    const row = document.createElement('div');
+    row.className = 'detect-row';
+
+    const title = item?.title || item?.url || `Tab ${item?.tabId ?? '-'}`;
+    const actionLabel = formatDetectAction(item?.action);
+    const promptText = Number.isInteger(item?.detectedPromptNumber)
+      ? `Prompt ${item.detectedPromptNumber}`
+      : 'brak';
+    const nextText = Number.isInteger(item?.nextStartIndex)
+      ? `startIndex=${item.nextStartIndex}`
+      : 'startIndex=-';
+    const stageText = typeof item?.detectedStageName === 'string' && item.detectedStageName
+      ? item.detectedStageName
+      : '-';
+    const methodText = typeof item?.detectedMethod === 'string' && item.detectedMethod
+      ? item.detectedMethod
+      : '-';
+    const msgCount = Number.isInteger(item?.userMessageCount) ? item.userMessageCount : 0;
+    const msgLen = Number.isInteger(item?.lastUserMessageLength) ? item.lastUserMessageLength : 0;
+    const attempts = Number.isInteger(item?.attempts) ? item.attempts : 0;
+    const lastPass = Number.isInteger(item?.lastPass) ? item.lastPass : 0;
+    const retryExhausted = !!item?.retryExhausted;
+    const consistencyText = item?.stageConsistency
+      ? `${item.stageConsistency}${Number.isInteger(item?.stageDelta) ? ` (delta=${item.stageDelta})` : ''}`
+      : '-';
+    const progressText = Number.isInteger(item?.progressPromptNumber)
+      ? `Prompt ${item.progressPromptNumber}${item?.progressStageName ? ` (${item.progressStageName})` : ''}`
+      : '-';
+    const signaturePreview = typeof item?.detectedSignature === 'string' && item.detectedSignature
+      ? item.detectedSignature
+      : '';
+
+    row.innerHTML = `
+      <div><strong>${escapeHtml(title)}</strong></div>
+      <div class="detect-meta">akcja: ${escapeHtml(actionLabel)} (${escapeHtml(String(item?.action || 'unknown'))}), reason: ${escapeHtml(String(item?.reason || '-'))}</div>
+      <div class="detect-meta">detected: ${escapeHtml(promptText)} | stage: ${escapeHtml(stageText)} | method: ${escapeHtml(methodText)} | next: ${escapeHtml(nextText)}</div>
+      <div class="detect-meta">proby: ${escapeHtml(String(attempts))} | ostatni pass: ${escapeHtml(String(lastPass))} | retry_exhausted: ${escapeHtml(String(retryExhausted))}</div>
+      <div class="detect-meta">spojnosc etapu: ${escapeHtml(consistencyText)} | progress(process): ${escapeHtml(progressText)}</div>
+      <div class="detect-meta">wiadomosci usera: ${escapeHtml(String(msgCount))}, dlugosc ostatniej: ${escapeHtml(String(msgLen))} znakow, tabId: ${escapeHtml(String(item?.tabId ?? '-'))}</div>
+      ${signaturePreview ? `<div class="detect-meta">sygnatura: ${escapeHtml(signaturePreview)}</div>` : ''}
+    `;
+    detectResults.appendChild(row);
+  });
+}
+
+async function detectLastPromptAndResume() {
+  if (!detectResumeBtn) return;
+
+  const originalText = detectResumeBtn.textContent || 'Wykryj ostatni prompt i wznow';
+  detectResumeBtn.disabled = true;
+  detectResumeBtn.textContent = 'Skanuje...';
+  renderDetectResults({ loading: true });
+
+  try {
+    const response = await sendDetectLastPromptAndResume();
+    renderDetectResults({ response });
+    await refreshProcesses();
+  } catch (error) {
+    renderDetectResults({ error: error?.message || String(error) });
+  } finally {
+    detectResumeBtn.disabled = false;
+    detectResumeBtn.textContent = originalText;
+  }
+}
+
 function restoreDecisionButtons(waitBtn, skipBtn) {
   if (waitBtn) waitBtn.disabled = false;
   if (skipBtn) skipBtn.disabled = false;
@@ -998,8 +1377,15 @@ function updateUI(processes, options = {}) {
       const windowId = Number.isInteger(process.windowId) ? process.windowId : '';
       const chatUrl = process.chatUrl || '';
       const sourceUrl = process.sourceUrl || '';
+      const autoRecovery = process?.autoRecovery && typeof process.autoRecovery === 'object'
+        ? process.autoRecovery
+        : null;
+      const autoAttempt = Number.isInteger(autoRecovery?.attempt) ? autoRecovery.attempt : '';
+      const autoMax = Number.isInteger(autoRecovery?.maxAttempts) ? autoRecovery.maxAttempts : '';
+      const autoReason = typeof autoRecovery?.reason === 'string' ? autoRecovery.reason : '';
+      const autoPrompt = Number.isInteger(autoRecovery?.currentPrompt) ? autoRecovery.currentPrompt : '';
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}`;
+      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -1080,7 +1466,8 @@ function updateHistory(processes) {
     card.addEventListener('click', () => {
       const analysisType = process.analysisType || 'company';
       const closed = isProcessClosed(process);
-      if (analysisType === 'company' && closed && openResumeStage(process)) {
+      if (analysisType === 'company' && closed) {
+        void openResumeStageWithAutoDetect(process);
         return;
       }
       void openHistoryProcess(process);
@@ -1133,6 +1520,17 @@ function updateHistory(processes) {
     });
     actions.appendChild(copyBtn);
 
+    if ((process.analysisType || 'company') === 'company') {
+      const resumeBtn = document.createElement('button');
+      resumeBtn.className = 'history-open history-resume-next';
+      resumeBtn.textContent = 'Wznow od kolejnego etapu';
+      resumeBtn.addEventListener('click', (event) => {
+        event.stopPropagation();
+        void openResumeStageWithAutoDetect(process, resumeBtn);
+      });
+      actions.appendChild(resumeBtn);
+    }
+
     card.appendChild(title);
     card.appendChild(meta);
     card.appendChild(actions);
@@ -1143,8 +1541,8 @@ function updateHistory(processes) {
 
 function getResumeStartIndex(process) {
   if (!process) return null;
-  if (Number.isInteger(process.stageIndex)) return process.stageIndex;
   if (Number.isInteger(process.currentPrompt) && process.currentPrompt > 0) return process.currentPrompt;
+  if (Number.isInteger(process.stageIndex) && process.stageIndex >= 0) return process.stageIndex + 1;
   return null;
 }
 
@@ -1211,6 +1609,19 @@ function openResumeStage(process) {
   return true;
 }
 
+async function openResumeStageWithAutoDetect(process, button = null) {
+  if (!process || (process.analysisType || 'company') !== 'company') {
+    return false;
+  }
+
+  const autoOpened = await resumeNextStageFromPanel(process, button, { openDialogOnly: true });
+  if (autoOpened) {
+    return true;
+  }
+
+  return openResumeStage(process);
+}
+
 async function openHistoryProcess(process) {
   const opened = await openProcessWindow(process);
   if (opened) return;
@@ -1264,10 +1675,30 @@ function renderDetails() {
 
   const metaWrap = document.createElement('div');
   metaWrap.className = 'details-subtitle';
-  metaWrap.textContent = `Prompt ${selected.currentPrompt || 0} / ${selected.totalPrompts || 0}`;
+  const detailsProgress = getProgressPercent(selected.currentPrompt, selected.totalPrompts);
+  const detailsStage = resolveStageLabel(selected);
+  const detailsUpdatedAt = Number.isInteger(selected.timestamp) ? selected.timestamp : selected.startedAt;
+  metaWrap.textContent = `Etap: ${detailsStage} | Prompt ${selected.currentPrompt || 0} / ${selected.totalPrompts || 0} (${detailsProgress}%) | Aktualizacja: ${formatRelativeTime(detailsUpdatedAt)}`;
 
   header.appendChild(titleWrap);
   header.appendChild(metaWrap);
+
+  const autoRecovery = selected?.autoRecovery && typeof selected.autoRecovery === 'object'
+    ? selected.autoRecovery
+    : null;
+  if (autoRecovery) {
+    const autoAttempt = Number.isInteger(autoRecovery.attempt) ? autoRecovery.attempt : 0;
+    const autoMaxAttempts = Number.isInteger(autoRecovery.maxAttempts) ? autoRecovery.maxAttempts : 0;
+    const autoDelaySec = Number.isInteger(autoRecovery.delayMs) ? Math.round(autoRecovery.delayMs / 1000) : 0;
+    const autoReason = typeof autoRecovery.reason === 'string' && autoRecovery.reason.trim()
+      ? autoRecovery.reason
+      : 'unknown';
+    const autoCurrentPrompt = Number.isInteger(autoRecovery.currentPrompt) ? autoRecovery.currentPrompt : null;
+    const autoLine = document.createElement('div');
+    autoLine.className = 'details-subtitle';
+    autoLine.textContent = `Auto-recovery: ${autoAttempt}/${autoMaxAttempts}, reason=${autoReason}, delay=${autoDelaySec}s${autoCurrentPrompt !== null ? `, prompt=${autoCurrentPrompt}` : ''}`;
+    header.appendChild(autoLine);
+  }
 
   const actions = document.createElement('div');
   actions.className = 'details-actions';
@@ -1302,6 +1733,18 @@ function renderDetails() {
       });
     });
     actions.appendChild(focusBtn);
+  }
+
+  const canResumeNextFromDetails = (selected.analysisType || 'company') === 'company'
+    && (selected.needsAction || isProcessClosed(selected));
+  if (canResumeNextFromDetails) {
+    const resumeNextBtn = document.createElement('button');
+    resumeNextBtn.className = 'details-open details-resume-next';
+    resumeNextBtn.textContent = 'Resume next stage';
+    resumeNextBtn.addEventListener('click', () => {
+      void resumeNextStageFromPanel(selected, resumeNextBtn);
+    });
+    actions.appendChild(resumeNextBtn);
   }
 
   const copyCompletedBtn = document.createElement('button');
