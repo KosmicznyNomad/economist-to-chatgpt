@@ -4,115 +4,203 @@
   <meta charset="utf-8">
   <style>
     body {
-      width: 280px;
-      padding: 16px;
+      width: 320px;
+      padding: 14px;
       margin: 0;
       font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+      background: linear-gradient(165deg, #f6f7fb 0%, #eef1f8 100%);
+      color: #121826;
     }
-    
+
     .title {
-      color: white;
-      font-size: 18px;
-      font-weight: 600;
-      margin-bottom: 16px;
+      color: #1f2937;
+      font-size: 17px;
+      font-weight: 700;
+      margin-bottom: 12px;
       text-align: center;
     }
-    
+
+    .section {
+      background: #ffffff;
+      border: 1px solid #e5e7eb;
+      border-radius: 10px;
+      padding: 10px;
+      margin-bottom: 10px;
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
+    }
+
+    .section-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+
     .btn {
       display: block;
       width: 100%;
-      padding: 12px 16px;
-      margin-bottom: 10px;
-      background: white;
-      color: #667eea;
-      border: none;
+      padding: 10px 12px;
+      margin-bottom: 8px;
+      background: #ffffff;
+      color: #111827;
+      border: 1px solid #d1d5db;
       border-radius: 8px;
       font-size: 14px;
       font-weight: 600;
       cursor: pointer;
-      transition: transform 0.2s, box-shadow 0.2s;
+      transition: background 0.15s, border-color 0.15s;
       text-align: left;
+      line-height: 1.2;
     }
-    
+
+    .btn:last-child {
+      margin-bottom: 0;
+    }
+
     .btn:hover {
-      transform: translateY(-2px);
-      box-shadow: 0 4px 12px rgba(0,0,0,0.15);
+      background: #f9fafb;
+      border-color: #9ca3af;
     }
-    
+
     .btn:active {
       transform: translateY(0);
     }
 
-    .btn-stop {
+    .btn:disabled {
+      opacity: 0.7;
+      cursor: wait;
+      transform: none;
+      box-shadow: none;
+    }
+
+    .btn-primary {
       background: #111827;
       color: #ffffff;
+      border-color: #111827;
+    }
+
+    .btn-primary:hover {
+      background: #0b1220;
+      border-color: #0b1220;
+    }
+
+    .btn-stop {
+      background: #b91c1c;
+      color: #ffffff;
+      border-color: #b91c1c;
     }
 
     .btn-stop:hover {
-      box-shadow: 0 4px 12px rgba(17, 24, 39, 0.35);
+      background: #991b1b;
+      border-color: #991b1b;
     }
-    
+
     .btn-icon {
       margin-right: 8px;
     }
-    
+
     .shortcut {
-      float: right;
       font-size: 11px;
-      opacity: 0.6;
-      font-weight: 400;
+      opacity: 0.7;
+      font-weight: 500;
+      margin-left: 8px;
     }
-    
-    .info {
-      color: rgba(255,255,255,0.9);
-      font-size: 12px;
-      text-align: center;
+
+    .btn-row {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+    }
+
+    .detect-status {
+      margin: 0;
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: #f3f4f6;
+      color: #374151;
+      font-size: 11px;
+      line-height: 1.35;
+      white-space: pre-line;
+      border: 1px solid #e5e7eb;
+    }
+
+    .advanced {
       margin-top: 8px;
-      line-height: 1.4;
+    }
+
+    .advanced summary {
+      cursor: pointer;
+      color: #374151;
+      font-size: 12px;
+      font-weight: 600;
+      user-select: none;
+      list-style: none;
+    }
+
+    .advanced summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .advanced .advanced-content {
+      margin-top: 8px;
     }
   </style>
 </head>
 <body>
-  <div class="title">News → ChatGPT</div>
-  
-  <button class="btn" id="runBtn">
-    <span class="btn-icon">🚀</span>
-    Uruchom analizę
-    <span class="shortcut">Ctrl+Shift+E</span>
-  </button>
+  <div class="title">News â†’ ChatGPT</div>
 
-  <button class="btn btn-stop" id="stopBtn">
-    <span class="btn-icon">■</span>
-    Przerwij proces w tym oknie
-  </button>
-  
-  <button class="btn" id="manualSourceBtn">
-    <span class="btn-icon">📝</span>
-    Wklej źródło
-  </button>
-  
-  <button class="btn" id="resumeStageBtn">
-    <span class="btn-icon">⏩</span>
-    Resume from Stage
-  </button>
+  <div class="section">
+    <div class="section-title">Akcje gĹ‚Ăłwne</div>
+    <button class="btn btn-primary" id="runBtn">
+      <div class="btn-row">
+        <span><span class="btn-icon">â–¶</span>Reset i uruchom</span>
+        <span class="shortcut">Ctrl+Shift+E</span>
+      </div>
+    </button>
 
-  <button class="btn" id="decisionPanelBtn">
-    <span class="btn-icon">🧭</span>
-    Panel decyzyjny
-  </button>
-  
-  <button class="btn" id="responsesBtn">
-    <span class="btn-icon">📋</span>
-    Zobacz odpowiedzi
-    <span class="shortcut">Ctrl+Shift+R</span>
-  </button>
-  
-  <div class="info">
-    Otwórz artykuły z obsługiwanych źródeł i kliknij "Uruchom analizę"
+    <button class="btn btn-stop" id="stopBtn">
+      <span class="btn-icon">â– </span>
+      Przerwij w tym oknie
+    </button>
+
+    <button class="btn" id="responsesBtn">
+      <div class="btn-row">
+        <span><span class="btn-icon">đź“‹</span>Zobacz odpowiedzi</span>
+        <span class="shortcut">Ctrl+Shift+R</span>
+      </div>
+    </button>
+
+    <div class="detect-status" id="resetScanStatus" aria-live="polite">
+      Gotowe.
+    </div>
   </div>
-  
+
+  <div class="section">
+    <details class="advanced">
+      <summary>WiÄ™cej narzÄ™dzi</summary>
+      <div class="advanced-content">
+        <button class="btn" id="manualSourceBtn">
+          <span class="btn-icon">đź“ť</span>
+          Wklej ĹşrĂłdĹ‚o
+        </button>
+        <button class="btn" id="resumeStageBtn">
+          <span class="btn-icon">âŹ©</span>
+          Resume from Stage
+        </button>
+        <button class="btn" id="decisionPanelBtn">
+          <span class="btn-icon">đź§­</span>
+          Panel decyzyjny
+        </button>
+      </div>
+    </details>
+  </div>
+
   <script src="popup.js"></script>
 </body>
 </html>
+
+
 

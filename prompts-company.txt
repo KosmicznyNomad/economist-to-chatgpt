@@ -529,7 +529,7 @@ No extra input data will be provided.
 You must continuously use the full conversation as your dataset: inherit the Thesis Object and reuse all earlier stage outputs, lists, assumptions, and constraints already present anywhere in the chat.
 Only after searching the conversation should you use the internet to verify facts and fill gaps.
 
-TIME ANCHOR (MANDATORY): Set one Anchor Date as the latest available reported baseline (TTM or FY, explicitly chosen) and keep it fixed across the entire workflow. Revenue₀, FCF₀/margin₀, net debt/cash, diluted shares, and all CORE/WEDGE/TOTAL scenarios must use the same Anchor Date and the same convention (TTM vs FY). If the Anchor Date changes, you must rebase and recompute Stage 2.5, Stage 6, Stage 7, and Stage 8 outputs.
+TIME ANCHOR (MANDATORY): Set one Anchor Date as the latest available reported baseline (TTM or FY, explicitly chosen) and keep it fixed across the entire workflow. Revenue₀, FCF₀/margin₀, net debt/cash, diluted shares, and all CORE/WEDGE/TOTAL scenarios must use the same Anchor Date and the same convention (TTM vs FY). If the Anchor Date changes, you must rebase and recompute Stage 2.5, Stage 6, and Stage 8 outputs (and Stage 7 if present).
 
 WEB DATA (mandatory)
 Validate tickers, prices, shares, net debt, segment mix, KPIs, and filings using reputable sources: company IR filings, Bloomberg, Yahoo Finance, stock exchange pages, and other major financial databases.
@@ -573,14 +573,17 @@ We care about quantifying only incremental thesis cash flows (Bear/Base/Bull) an
 Stage 6 — Reverse DCF (whole company, consistent valuation object)
 We care about solving market-implied growth/margins via root-finding on a whole-company valuation (or consistent SoP) and measuring divergence versus your Base case.
 
-Stage 7 — Four-Gate Decision (final BUY/WATCH/AVOID)
+Stage 7 — Completeness Check (optional)
+We care about verifying stage coverage and internal consistency before the final decision; if missing, explicitly list gaps and proceed conservatively.
+
+Stage 8 — Four-Gate Decision (final BUY/WATCH/AVOID)
 We care about producing the only allowed final decision using Quality, Value, Proof, and Execution gates, plus an executable entry/add/reduce/exit plan.
 
-Stage 8 — Simple Story (plain language)
-We care about translating the Stage 8 decision into plain language without new claims, numbers, or additional analysis.
+Stage 9 — Decision Handoff (optional)
+We care about carrying forward the Stage 8 decision object (entry logic, targets, KPI gates, falsifier, VOI) without changing assumptions.
 
-Stage 9 — Completeness Check
-We care about verifying Stage 0–9 (including Stage 2.5) are internally consistent, listing missing items, and stating whether the decision remains defensible despite any gaps.
+Stage 10 — Position State Machine (final)
+We care about managing an open position mechanically (profit protection, spike handling, exits, cooldown, and re-entry) using explicit observable triggers.
 
 START RULE
 Don't execute them. just remmeber this fact, think about it, and starting from the next stage follow.
@@ -591,7 +594,6 @@ This will help for the next stage: Stage 1 - Sub-segment Validation (thesis-deri
 You are an investment research engineer working within a multi-stage investment analysis pipeline. Your task is to transform an inherited investment thesis into an operational "market map in invoice form," then generate and evaluate candidate sub-segments to identify the top 2–3 for downstream company selection.
 
 **Important framing**: This is a strictly engineering stage. You are NOT creating new investment narratives or validating whether the thesis is true. Your role is to translate the thesis into concrete specifications—what is purchased, by whom, under what contract structure, what blocks it, and when it materializes—so that the next stage can select companies by their exposure to specific invoice line items rather than by broad industry labels.
-]
 **What each input represents**:
 - `winning_thesis`: A single conditional statement in "If X then Y because Z" format
 - `thesis_rationale`: An explanation of why this thesis was selected and which mechanisms are "core"
@@ -2806,361 +2808,171 @@ Main risk (one sentence, cause → effect)
 VOI trigger (one line)
 Falsifier (one line)
 
-This will help for the next stage: Simple Story (plain language narrative).
+This will help for the next stage: Stage 10 - Position State Machine.
 ◄PROMPT_SEPARATOR►
 
-Stwórz pełną narrację procesu decyzyjnego inwestora — krok po kroku — dotyczącą jednej konkretnej firmy.
-Celem jest, by czytelnik mógł zrozumieć tok myślenia inwestora, przepływy kapitału i logikę inwestycyjną: jak analizuje rynek, wycenia ryzyko, szuka asymetrii i podejmuje decyzję o inwestycji lub jej braku.
-
-🔹 Struktura (każdy etap obowiązkowy)
-1. Kontekst rynkowy i strategiczny
-
-Opisz co dzieje się w otoczeniu rynkowym: trendy, napięcia, zmiany w podaży/popycie.
-
-Wskaż główne siły napędowe sektora: popyt, podaż, regulacje, technologie, koszt kapitału.
-
-Pokaż skąd i dokąd płynie kapitał – czyli kto dziś zarabia, a kto traci w tym ekosystemie.
-
-Zaznacz, jakie są dominujące motywacje inwestorów w tym segmencie (bezpieczny zysk, ekspansja, arbitrage, reindustrializacja itp.).
-
-2. Model biznesowy i pozycja spółki
-
-Jak firma zarabia pieniądze — kto płaci, za co, i dlaczego właśnie jej.
-
-Co ją wyróżnia lub ogranicza na tle branży (technologia, kontrakty, dostęp do kapitału, relacje z klientami).
-
-Jaką część wartości przechwytuje w łańcuchu kapitałowym – czyli jak duża część zysków sektora zostaje u niej.
-
-Jak firma reaguje na zmiany w otoczeniu: czy potrafi bronić marż i przenosić koszty na klientów.
-
-3. Wycena i jakość finansów (Valuation & Fundamentals)
-
-Jak wygląda wycena spółki w kontekście sektora — czy rynek przecenia, czy nie doszacowuje jej potencjału.
-
-Nie koncentruj się na liczbach – pokaż co one znaczą: czy wskazują na zdrowy biznes, nadmierne zadłużenie, lub uzależnienie od jednego źródła przychodów.
-
-Oceń jakość zysków: czy wynik jest powtarzalny, czy oparty na zdarzeniach jednorazowych.
-
-4. Teza inwestycyjna (Market Thesis)
-
-Wyjaśnij, dlaczego inwestor mógłby ulokować kapitał właśnie tutaj.
-
-Jakie mechanizmy rynkowe i przepływy pieniężne wspierają tę decyzję.
-
-Co musi się wydarzyć, żeby teza „zadziałała” – np. wzrost popytu, ekspansja marż, redukcja kosztów, nowe kontrakty.
-
-Wskaż, czy to teza defensywna (ochrona kapitału), czy ofensywna (polowanie na wzrost).
-
-5. Proces myślowy inwestora — krok po kroku
-
-Odtwórz logiczny tok rozumowania:
-
-Jak inwestor identyfikuje szansę.
-
-Jak ocenia trwałość przepływów pieniężnych i źródła zysków.
-
-Jak waży ryzyka vs. potencjalny zysk.
-
-Jak definiuje asymetrię – czy potencjalny zysk jest wielokrotnie większy od ryzyka utraty kapitału.
-
-Jak weryfikuje hipotezy: jakie dane lub sygnały śledzi, zanim zainwestuje więcej.
-
-6. Ryzyka i zagrożenia (Key Concerns / Risks)
-
-Co może pójść nie tak – i dlaczego to realne, nie hipotetyczne.
-
-Opisz konkretne punkty awarii: spadek marż, ograniczenie finansowania, zmiana regulacji, utrata kontraktów.
-
-Pokaż, jak te ryzyka wpływają na przepływy pieniężne, płynność, lub zdolność do inwestycji.
-
-7. Katalizatory wzrostu (Opportunities / Catalysts)
-
-Co może wywołać wzrost wartości spółki — np. wejście w nowy segment, decyzja regulatora, przejęcie, nowa technologia.
-
-Jakie zmiany w przepływach kapitału mogą ją wzmocnić.
-
-Kiedy i dlaczego mogłoby to się zmaterializować (timing, warunki rynkowe).
-
-8. Wnioski końcowe i decyzja inwestycyjna
-
-Jasno określ: czy to dobra inwestycja i dlaczego / dlaczego nie.
-
-Jeśli NIE: opisz, dlaczego warto jej unikać – co w strukturze rynku lub modelu firmy sprawia, że ryzyko przewyższa potencjał.
-
-Uzasadnij z perspektywy alokacji kapitału, ryzyka i timingu.
-
-Wskaż, co musiałoby się zmienić, żeby inwestor zmienił zdanie.
-
-9. Kluczowe pojęcia do zrozumienia rynku
-
-Wypunktuj krótko najważniejsze pojęcia i mechanizmy, które pomagają zrozumieć ten rynek:
-
-bariery wejścia
-
-rotacja kapitału
-
-efekt dźwigni
-
-poziom kontraktacji
-
-struktura kosztów i marż
-
-intensywność kapitałowa
-
-pułapka płynności
-
-🔹 Styl i format
-
-Pisz po polsku, w stylu czytelnym, narracyjnym, nieakademickim.
-
-Pogrubiaj kluczowe informacje i pojęcia.
-
-Zachowaj równowagę – unikaj przesadnej techniczności, ale też nie spłycaj sensu.
-
-Nie streszczaj – wyjaśniaj tok myślenia.
-
-Dodaj krótkie sekcje FAQ po głównych częściach, odpowiadające na typowe pytania czytelnika, np.:
-
-„Dlaczego inwestor nie wybrał innej firmy?”
-
-„Co sprawia, że to ryzyko jest realne, a nie teoretyczne?”
-
-„Skąd inwestor wie, że to właściwy moment?”
-
-This will help for the next stage: Four-Gate Framework - Decision Output Format.
-◄PROMPT_SEPARATOR►
-Four-Gate Framework — Decision Output Format
-
-🎯 Cel
-Wygeneruj jedną linię tekstu — standardowy rekord decyzyjny według metodologii Four-Gate Framework. To nie jest podsumowanie analizy, lecz logiczny zapis decyzji inwestycyjnej — z uzasadnieniem, asymetrią i kluczowymi ryzykami — w języku strategicznym, nadającym się do briefingów najwyższego szczebla (rząd, fundusz, zarząd).
-
-🚨 KRYTYCZNA ZASADA — separator średnik (;)
-✅ Średnik TYLKO pomiędzy polami (kolumnami)
-❌ NIGDY wewnątrz pola — nawet w długich opisach
-
-Wewnątrz pola używaj:
-• Przecinków (,)
-• Myślników (–)
-• Dwukropków (:)
-• Kropek (.)
-
-Przykłady:
-✅ VOI: wzrost NRR, Fals: brak kontraktów, Primary risk: konkurencja
-❌ VOI: wzrost NRR; Fals: brak kontraktów; Primary risk: konkurencja ← BŁĄD
-
-📋 STRUKTURA OUTPUT — 15 pól oddzielonych średnikami
-
-Kolumna | Nazwa pola | Przykład
-1 | Data decyzji | 2025-10-14
-2 | Status decyzji | BUY / AVOID / WATCH
-3 | Spółka | Richemont (CFR:SW)
-4 | Krótkie streszczenie tezy | Bifurkacja rynku diamentów i migracja marż
-5 | Materiał źródłowy | Podcast: The Economist Money Talks
-6 | Teza inwestycyjna (pełny opis, 3-5 zdań)
-7 | Wątpliwości/ryzyka (lista zagrożeń)
-8 | Gate rating | G1:PASS G2:RISK G3:HIGH G4:ACTIVE
-9 | Asymetria/Divergence | Asymetria: 3.5:1, Divergence: 1.4×
-10 | VOI/Falsifiers | VOI: X, Fals: Y, Primary risk: Z
-11 | Sektor | Handel & zachowania konsumenta
-12 | Region | Szwajcaria
-13 | Waluta | CHF
-14 | WHY BUY | #tag1 #tag2 #tag3
-15 | WHY AVOID | #tag1 #tag2
-
-📊 Szczegółowy opis pól
-
-1. Data decyzji
-Format: RRRR-MM-DD
-
-2. Status decyzji
-Wybierz dokładnie jedno:
-• BUY — kupuj
-• AVOID — unikaj
-• WATCH — obserwuj
-
-3. Spółka
-Format: Nazwa Spółki (TICKER:GIEŁDA)
-
-Przykłady:
-• Richemont (CFR:SW)
-• Tradeweb Markets Inc. (TW:NASDAQ)
-• Lockheed Martin (LMT:NYSE)
-
-Zasady:
-• Bez cudzysłowów i przecinków
-• Jeśli ticker nieznany → tylko nazwa, np. Palantir Technologies
-• Używaj standardowych kodów giełd: NASDAQ, NYSE, SW, LSE, GPW itd.
-• Format kompatybilny z Google Sheets i funkcją =GOOGLEFINANCE()
-
-4. Krótkie streszczenie tezy
-1-2 zdania — esencja mechanizmu wartości.
-
-Przykład:
-Bifurkacja rynku diamentów i migracja marż do marek natural-only
-
-5. Materiał źródłowy / podcast
-Źródło, z którego pochodzi teza lub inspiracja.
-
-Przykłady:
-• Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne
-• Raport: Morgan Stanley Semiconductors Q4 2024
-• Artykuł: WSJ — The End of Cloud CAPEX
-
-6. Teza inwestycyjna (dlaczego ta firma)
-3-5 zdań, pisane językiem strategicznym:
-
-Struktura:
-• Kontekst — co się zmienia w branży (trend, katalizator, regulacja)
-• Pozycja — jak firma jest ustawiona wobec tej zmiany (technologia, zasób, sieć, dostęp)
-• Logika inwestycyjna — dlaczego rynek tego nie wycenia (mispricing, timing, błędna percepcja)
-
-Przykład:
-Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej.
-
-Nie używaj:
-• Żargonu finansowego
-• Surowych wskaźników (P/E, EV/EBITDA)
-• Fraz typu "atrakcyjna wycena" bez kontekstu
-
-7. Wątpliwości / ryzyka
-Przedstaw jasno co może pójść nie tak i dlaczego.
-Nie opisuj wskaźników — tylko zależności przyczynowo-skutkowe.
-
-Przykłady:
-• Tempo adopcji może być niższe, jeśli integracja systemów partnerów się opóźni
-• Rosnące koszty finansowania mogą zredukować atrakcyjność CAPEX-u elektryfikacyjnego
-• Brak wspólnego standardu może zatrzymać efekt sieciowy
-
-8. Gate rating (G1–G4)
-Dla każdej z czterech bram podaj: status oraz krótkie uzasadnienie (dlaczego przeszło/nie przeszło i co się dowiedzieliśmy).
-
-Format:
-G1:[STATUS] - [uzasadnienie]; G2:[STATUS] - [uzasadnienie]; G3:[LEVEL] - [uzasadnienie]; G4:[STATUS] - [uzasadnienie]
-
-Statusy:
-• G1, G2, G4: PASS / FAIL / RISK
-• G3: LOW / MEDIUM / HIGH
-
-⚠️ UWAGA: Używaj przecinków i myślników w uzasadnieniach, NIE średników.
-
-Przykład:
-G1:PASS - bifurkacja rynku potwierdzona danymi De Beers, trend nieodwracalny; G2:PASS - marki Cartier i Van Cleef mają ugruntowaną pozycję w segmencie natural-only; G3:HIGH - kontrola narracji i kanałów DTC daje trwałą przewagę cenową; G4:ACTIVE - wzrost udziału high jewelry w miksie widoczny w raportach kwartalnych
-
-9. Asymetria / Divergence
-Krótka ocena relacji ryzyko/nagroda i percepcji rynku.
-
-Format:
-Asymetria: X:1, Divergence: Y× — krótki komentarz
-
-Przykład:
-Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only
-
-10. VOI / Falsifiers / Primary risk
-Zawiera trzy elementy oddzielone przecinkami lub średnikami wewnętrznymi:
-• VOI (Value of Information) — co musi się wydarzyć, żeby zwiększyć pozycję
-• Falsifiers — co unieważni tezę
-• Primary risk — główny czynnik destrukcji wartości
-
-Przykład:
-VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów
-
-11. Sektor
-Wybierz TYLKO jedną nazwę z poniższej listy (bez opisów, nawiasów, myślników):
-
-• AI & infrastruktura danych
-• Aplikacje AI & automatyzacja decyzji
-• Bezpieczeństwo & odporność systemowa
-• Energia & elektryfikacja
-• Zaawansowany przemysł & robotyka
-• Biologia & zdrowie obliczeniowe
-• Finanse & infrastruktura rynków
-• Handel & zachowania konsumenta
-
-⚠️ WAŻNE: W outputcie wpisz TYLKO nazwę sektora (np. Biologia & zdrowie obliczeniowe), bez dodatkowych opisów.
-
-Tezy sektorowe (kontekst):
-• AI & infrastruktura danych — Wzrost popytu na compute i dane napędza nową falę CAPEX-u infrastrukturalnego
-• Aplikacje AI & automatyzacja decyzji — AI przesuwa wartość z pracy ludzkiej do oprogramowania decyzyjnego
-• Bezpieczeństwo & odporność systemowa — Świat z rosnącą niepewnością strukturalną premiuje dostawców bezpieczeństwa
-• Energia & elektryfikacja — Zmiana kosztu kapitału i regulacji przesuwa marże w stronę infrastruktury elektrycznej
-• Zaawansowany przemysł & robotyka — Wzrost produktywności i deficyt pracy fizycznej napędzają automatyzację procesów realnych
-• Biologia & zdrowie obliczeniowe — Cyfryzacja biologii zmienia medycynę z reaktywnej na predykcyjną
-• Finanse & infrastruktura rynków — Monetyzacja przepływu wartości i danych w gospodarce kapitału
-• Handel & zachowania konsumenta — Zachowania konsumentów stają się algorytmiczne – przewaga zależy od danych o intencji
-
-12. Region
-Główny region operacyjny lub ekspozycji.
-
-Przykłady: USA, Szwajcaria, Chiny, Europa, Globalny
-
-13. Waluta
-Waluta raportowania lub główna waluta przychodów.
-
-Przykłady: USD, CHF, EUR, PLN
-
-14. WHY BUY (tagi wspierające)
-Wybierz 2-5 tagów z poniższej listy:
-
-#rosnacy_moat
-#dodatni_spread_roic_wacc
-#silny_wzrost
-#dlugoterminowe_kontrakty
-#katalizatory_w_horyzoncie
-#atrakcyjna_wycena
-#przelom_technologiczny
-#skalowalny_model
-#zdrowy_bilans
-#przyspieszajaca_adopcja
-
-15. WHY AVOID (tagi ryzyka)
-Wybierz 2-5 tagów z poniższej listy:
-
-#brak_moatu
-#ujemny_spread_roic_wacc
-#wysokie_zadluzenie
-#spalanie_gotowki
-#przewartosciowanie
-#ryzyko_regulacyjne
-#slaba_trakcja_klientow
-#ryzyko_podazowe
-#koncentracja_klientow
-#opoznienia_operacyjne
-
-⚠️ WAŻNE: Zawsze wypełnij oba pola (WHY BUY i WHY AVOID), niezależnie od decyzji końcowej.
-
-✅ Przykład kompletnego outputu z numeracją pól
-
-[1]2025-10-14;
-[2]BUY;
-[3]Richemont (CFR:SW);
-[4]Bifurkacja rynku diamentów i migracja marż do marek natural-only;
-[5]Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne;
-[6]Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej;
-[7]Spowolnienie popytu w Azji i USA oraz umocnienie CHF mogą ograniczyć rotację w segmencie high jewelry, a regulacje dotyczące pochodzenia kamieni mogą wprowadzić dodatkowe tarcia operacyjne;
-[8]G1:PASS - bifurkacja rynku potwierdzona danymi De Beers, trend nieodwracalny; G2:PASS - marki Cartier i Van Cleef mają ugruntowaną pozycję w segmencie natural-only; G3:HIGH - kontrola narracji i kanałów DTC daje trwałą przewagę cenową; G4:ACTIVE - wzrost udziału high jewelry w miksie widoczny w raportach kwartalnych;
-[9]Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only;
-[10]VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów;
-[11]Handel & zachowania konsumenta;
-[12]Szwajcaria;
-[13]CHF;
-[14]#rosnacy_moat #zdrowy_bilans #katalizatory_w_horyzoncie #przyspieszajaca_adopcja;
-[15]#slaba_trakcja_klientow #ryzyko_regulacyjne #ryzyko_podazowe
-
-Bez numeracji (finalna forma):
-
-2025-10-14; BUY; Richemont (CFR:SW); Bifurkacja rynku diamentów i migracja marż do marek natural-only; Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne; Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej; Spowolnienie popytu w Azji i USA oraz umocnienie CHF mogą ograniczyć rotację w segmencie high jewelry, a regulacje dotyczące pochodzenia kamieni mogą wprowadzić dodatkowe tarcia operacyjne; G1:PASS - bifurkacja rynku potwierdzona danymi De Beers, trend nieodwracalny; G2:PASS - marki Cartier i Van Cleef mają ugruntowaną pozycję w segmencie natural-only; G3:HIGH - kontrola narracji i kanałów DTC daje trwałą przewagę cenową; G4:ACTIVE - wzrost udziału high jewelry w miksie widoczny w raportach kwartalnych; Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only; VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów; Handel & zachowania konsumenta; Szwajcaria; CHF; #rosnacy_moat #zdrowy_bilans #katalizatory_w_horyzoncie #przyspieszajaca_adopcja; #slaba_trakcja_klientow #ryzyko_regulacyjne #ryzyko_podazowe
-
-✍️ Zasady stylistyczne
-
-• Output = dokładnie jedna linia tekstu
-• Pola oddzielone tylko średnikami (;)
-• Żadnych średników wewnątrz pól
-• Bez nazw kolumn i komentarzy
-• Styl: jasny, briefingowy, precyzyjny, bez przymiotników-wypełniaczy
-• Język: polski, ton strategiczny i analityczny
-
-🎯 Finalna instrukcja
-
-Wygeneruj dokładnie jedną linię tekstu zgodną z powyższą strukturą — 15 pól oddzielonych średnikami — bez numeracji, bez nagłówków, bez komentarzy.
-
-This will help for the next stage: Final output delivery.
+# STAGE 10 — POSITION STATE MACHINE
+
+## Profit Capture, Trend Gate & Re-Entry Engine
+
+## PURPOSE
+
+This stage does ONE thing: it manages an open position to minimize profit giveback and provide mechanical re-entry after corrections.
+
+What it does:
+- Detects when profit is at risk (after spikes or trend weakening)
+- Tightens protection mechanically
+- Exits when the trend breaks
+- Waits (cooldown) after exit
+- Re-enters when a healthy correction completes and the trend resumes
+
+This is a state machine: the position is always in exactly one of four states, and transitions between states are triggered by observable, measurable conditions. There is no discretion in the transitions.
+
+## ROLE
+
+You are a position management engine. You receive:
+- A company with an open BUY position from Stages 0–9
+- Current market data (collected via web search)
+- Inherited thesis KPIs from Stage 8 (falsifier, warn, confirm)
+
+If any required inherited input is missing from the conversation (e.g., ticker/exchange, entry price, position size, Bear/Base/Bull, KPI thresholds), you must try to recover it from reliable public sources (company filings/IR, official exchange data, reputable market data providers). If it still cannot be obtained, use a conservative proxy, explicitly label it ASSUMPTION, and proceed.
+
+You must compute all derived parameters explicitly and show arithmetic.
+
+## REQUIRED INPUTS
+
+Before producing any output, collect and compute these inputs.
+
+### From Prior Stages (INHERITED)
+- Ticker, Exchange
+- Entry Price (average)
+- Current Position Size
+- Bear_TOTAL
+- Base_TOTAL
+- Bull_TOTAL
+- Falsifier KPI
+- Warn KPI
+- Confirm KPI
+- Next VOI event
+- Dominant Driver
+- Persistence
+
+### From Market (COLLECT VIA WEB SEARCH)
+- Price (last close)
+- ATR_d (14-day ATR in price units)
+- ATR_w (weekly ATR; if proxy, ATR_w = ATR_d × 2.2 and label ASSUMPTION)
+- SMA50
+- SMA200
+- SMA200_slope (rising/flat/falling vs 20 trading days ago)
+- HWM (highest close since position open)
+- Unrealized_PnL and Unrealized_PnL%
+- Return_from_HWM
+- VIX
+- 5d_move
+
+### Computed Parameters (show formulas and numbers)
+- Spike_threshold = 2.5 × ATR_w
+- Chandelier_stop = HWM − k × ATR_w
+- Giveback_lock = Entry + (1 − MaxGiveback) × (HWM − Entry)
+- Effective_stop = max(Chandelier_stop, Giveback_lock)
+- Trend_UP = (Price > SMA200) AND (SMA200_slope = rising)
+- Pullback_min = HWM − 1.5 × ATR_w
+- Pullback_max = HWM − 4.0 × ATR_w
+
+## THE FOUR STATES
+
+Position is always in exactly one state:
+
+### STATE 1: NORMAL RUN
+- Hold, let trend run, use normal trailing parameters.
+- Scheduled profit actions:
+  - At Base_TOTAL: sell 25%.
+  - At Bull_TOTAL: sell 25% of remaining and tighten stop.
+- Transition out if:
+  - 5d_move > Spike_threshold → SPIKE-LOCK
+  - close below Effective_stop → EXITED/COOLDOWN
+  - 2 closes below SMA200 → EXITED/COOLDOWN
+  - Falsifier KPI triggered → EXITED/COOLDOWN (hard exit)
+
+### STATE 2: SPIKE-LOCK
+- Trigger: abnormal upward spike (5d_move > Spike_threshold).
+- Immediate action: sell 20-30%, tighten protection.
+- Transition out if:
+  - spike absorbed and trend intact → NORMAL RUN
+  - close below Effective_stop → EXITED/COOLDOWN
+  - 2 closes below SMA200 → EXITED/COOLDOWN
+
+### STATE 3: EXITED/COOLDOWN
+- Position fully closed.
+- Mandatory cooldown: 5 trading days minimum.
+- If exit came from falsifier: no re-entry.
+- Transition out if cooldown complete and Trend_UP = TRUE → RE-ENTRY WINDOW.
+
+### STATE 4: RE-ENTRY WINDOW
+- Wait for healthy correction band + reversal trigger.
+- Re-entry only when:
+  - Price in [Pullback_max, Pullback_min]
+  - and reversal signal (close > yesterday high OR reclaim SMA50)
+  - and Trend_UP = TRUE
+- Initial re-entry size: 50% of original target.
+- Add remaining 50% only on Confirm KPI.
+
+## FUNDAMENTAL OVERRIDE (always active)
+1) Falsifier KPI triggered: exit 100% within 5 trading days, no re-entry.
+2) Warn KPI triggered: reduce 30%, tighten trailing multiplier by 0.5.
+3) Confirm KPI triggered: add only per state rules (never override risk controls).
+4) Re-check on every quarterly earnings and VOI event.
+
+## OUTPUT FORMAT
+
+### PART 1: Position Narrative (main output, 800–1500 words)
+Write 5 sections:
+- A. Where are we now?
+- B. What protects us?
+- C. What triggers a change?
+- D. If stopped out, when do we come back?
+- E. When do we take profit?
+
+Every number must be explained in plain language with a "because" sentence.
+
+### PART 2: State Summary Card
+Provide a compact structured card with:
+- Company, date, current state
+- Price, entry, HWM, P&L
+- ATR_w, spike threshold
+- SMA50/SMA200, Trend_UP, VIX
+- Chandelier stop, Giveback lock, Effective stop
+- Next transition triggers
+- Profit schedule
+
+### PART 3: Decision Record (Single Line)
+One line, 12 fields, semicolon-separated only:
+1) Date (YYYY-MM-DD)
+2) Ticker:Exchange
+3) Current State (NORMAL/SPIKE-LOCK/EXITED/RE-ENTRY)
+4) Price
+5) Effective Stop
+6) Spike Threshold (5d move)
+7) Chandelier k
+8) Giveback Lock
+9) Trend Gate (YES/NO)
+10) Next profit take
+11) Falsifier
+12) Re-entry band or N/A
+
+## PROCESS INSTRUCTIONS
+In your thinking process:
+1) Collect market data via web search.
+2) Compute all derived parameters explicitly.
+3) Determine current state from conditions.
+4) Write Part 1 narrative.
+5) Fill Part 2 card.
+6) Produce Part 3 single-line record.
+
+## STYLE
+- Write in conversation language.
+- Paragraphs, not bullet dumps (except State Summary Card).
+- Explain first use of terms (e.g., ATR).
+- Be direct and operational.
+
+Keep Part 1 between 800 and 1500 words. Quality over quantity.

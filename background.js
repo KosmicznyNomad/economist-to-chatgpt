@@ -6,12 +6,14 @@ const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
 const RETRY_INTERVAL_MS = 500;
-// Auto-detect runner should pass through all tabs once and finish quickly.
-const DETECT_RESUME_MAX_PASSES = 1;
-const DETECT_RESUME_PASS_DELAY_MS = 0;
-const DETECT_RESUME_MAX_RUNTIME_MS = 45 * 1000;
+// Auto start over existing chats: one mode only (hard reset + scan + start).
+const RESET_SCAN_DEFAULT_PASSES = 3;
+const RESET_SCAN_PASS_DELAY_MS = 500;
+const RESET_SCAN_PER_TAB_BUDGET_MS = 6000;
+const RESET_SCAN_MIN_RUNTIME_MS = 90 * 1000;
 const AUTO_RECOVERY_MAX_ATTEMPTS = 4;
 const AUTO_RECOVERY_DELAY_MS = 8000;
+const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
 const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout', 'invalid_response'];
 
 // Optional cloud upload config (kept simple; safe to extend later).
@@ -504,6 +506,80 @@ function matchesWindowScope(process, windowId) {
   );
 }
 
+function requestProcessForceStopOnTab(tabId, payload = {}, timeoutMs = 1200) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve({
+        sent: false,
+        acknowledged: false,
+        reason: 'invalid_tab_id'
+      });
+      return;
+    }
+
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      resolve(result);
+    };
+
+    const timer = setTimeout(() => {
+      finish({
+        sent: false,
+        acknowledged: false,
+        reason: 'timeout'
+      });
+    }, Math.max(200, timeoutMs));
+
+    try {
+      const forceStopMessage = {
+        type: 'PROCESS_FORCE_STOP',
+        reason: typeof payload.reason === 'string' ? payload.reason : 'manual_stop',
+        origin: typeof payload.origin === 'string' ? payload.origin : 'background'
+      };
+      if (typeof payload.runId === 'string' && payload.runId.trim()) {
+        forceStopMessage.runId = payload.runId.trim();
+      }
+
+      chrome.tabs.sendMessage(
+        tabId,
+        forceStopMessage,
+        (response) => {
+          clearTimeout(timer);
+          if (chrome.runtime.lastError) {
+            finish({
+              sent: false,
+              acknowledged: false,
+              reason: chrome.runtime.lastError.message || 'runtime_error'
+            });
+            return;
+          }
+
+          const acknowledged = !!(
+            response?.acknowledged ||
+            response?.success ||
+            response?.stopped
+          );
+
+          finish({
+            sent: true,
+            acknowledged,
+            reason: acknowledged ? 'ack' : 'no_ack'
+          });
+        }
+      );
+    } catch (error) {
+      clearTimeout(timer);
+      finish({
+        sent: false,
+        acknowledged: false,
+        reason: error?.message || String(error)
+      });
+    }
+  });
+}
+
 async function stopSingleProcess(process, options = {}) {
   if (!process || isClosedProcessStatus(process.status)) return false;
 
@@ -525,16 +601,11 @@ async function stopSingleProcess(process, options = {}) {
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
 
   if (processTabId !== null) {
-    try {
-      await chrome.tabs.sendMessage(processTabId, {
-        type: 'PROCESS_FORCE_STOP',
-        runId,
-        reason,
-        origin: options.origin || 'background'
-      });
-    } catch (error) {
-      // Best-effort only. Tab may already be closed.
-    }
+    await requestProcessForceStopOnTab(processTabId, {
+      runId,
+      reason,
+      origin: options.origin || 'background'
+    });
   }
 
   let windowClosed = false;
@@ -583,6 +654,251 @@ async function stopActiveProcesses(options = {}) {
     matched: candidates.length,
     stopped,
     windowId: targetWindowId
+  };
+}
+
+function queryTabsInWindowSafe(windowId) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(windowId)) {
+      resolve({ ok: false, tabs: [], reason: 'invalid_window_id' });
+      return;
+    }
+
+    try {
+      chrome.tabs.query({ windowId }, (tabs) => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            tabs: [],
+            reason: chrome.runtime.lastError.message || 'runtime_error'
+          });
+          return;
+        }
+        resolve({
+          ok: true,
+          tabs: Array.isArray(tabs) ? tabs : [],
+          reason: ''
+        });
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        tabs: [],
+        reason: error?.message || String(error)
+      });
+    }
+  });
+}
+
+async function forceReloadWindowTabs(windowId, options = {}) {
+  const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : 15000;
+  const bypassCache = options.bypassCache !== false;
+  const skipTabIds = options?.skipTabIds instanceof Set ? options.skipTabIds : new Set();
+  const queryResult = await queryTabsInWindowSafe(windowId);
+
+  if (!queryResult.ok) {
+    return {
+      ok: false,
+      windowId,
+      totalTabs: 0,
+      attemptedTabIds: [],
+      reloadedTabs: 0,
+      failedTabs: 0,
+      reason: queryResult.reason || 'query_tabs_failed'
+    };
+  }
+
+  const tabs = Array.isArray(queryResult.tabs) ? queryResult.tabs : [];
+  const attemptedTabIds = [];
+  let reloadedTabs = 0;
+  let failedTabs = 0;
+
+  for (const tab of tabs) {
+    const tabId = Number.isInteger(tab?.id) ? tab.id : null;
+    if (tabId === null || skipTabIds.has(tabId)) continue;
+
+    attemptedTabIds.push(tabId);
+    const reloadResult = await forceReloadTab(tabId, { timeoutMs, bypassCache });
+    if (reloadResult?.ok) {
+      reloadedTabs += 1;
+    } else {
+      failedTabs += 1;
+    }
+  }
+
+  return {
+    ok: true,
+    windowId,
+    totalTabs: tabs.length,
+    attemptedTabIds,
+    reloadedTabs,
+    failedTabs,
+    reason: ''
+  };
+}
+
+async function forceStopAndReloadProcessContext(process, options = {}) {
+  const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : 15000;
+  const bypassCache = options.bypassCache !== false;
+  const reloadedWindowIds = options?.reloadedWindowIds instanceof Set
+    ? options.reloadedWindowIds
+    : new Set();
+  const seenTabIds = new Set();
+  const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+
+  let tabReloads = 0;
+  let tabReloadFailures = 0;
+  let windowReloads = 0;
+  let windowReloadFailures = 0;
+
+  if (processTabId !== null) {
+    seenTabIds.add(processTabId);
+    const reloadResult = await forceReloadTab(processTabId, { timeoutMs, bypassCache });
+    if (reloadResult?.ok) {
+      tabReloads += 1;
+    } else {
+      tabReloadFailures += 1;
+    }
+  }
+
+  if (processWindowId !== null && !reloadedWindowIds.has(processWindowId)) {
+    reloadedWindowIds.add(processWindowId);
+
+    const windowReloadResult = await forceReloadWindowTabs(processWindowId, {
+      timeoutMs,
+      bypassCache,
+      skipTabIds: seenTabIds
+    });
+
+    if (windowReloadResult.ok) {
+      windowReloads += 1;
+      tabReloads += windowReloadResult.reloadedTabs;
+      tabReloadFailures += windowReloadResult.failedTabs;
+    } else {
+      windowReloadFailures += 1;
+    }
+  }
+
+  return {
+    tabReloads,
+    tabReloadFailures,
+    windowReloads,
+    windowReloadFailures
+  };
+}
+
+async function resetTrackedProcessesForBulkRun(options = {}) {
+  await ensureProcessRegistryReady();
+
+  const clearHistory = options?.clearHistory !== false;
+  const reason = typeof options?.reason === 'string' && options.reason.trim()
+    ? options.reason.trim()
+    : 'bulk_reset_before_detect_resume';
+  const statusText = typeof options?.statusText === 'string' && options.statusText.trim()
+    ? options.statusText.trim()
+    : 'Reset przed globalnym uruchomieniem';
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'bulk-reset';
+  const now = Date.now();
+
+  const currentRecords = pruneProcessRecords(Array.from(processRegistry.values()));
+  const nextRecords = [];
+
+  let activeBefore = 0;
+  let resetCount = 0;
+  let historyRetained = 0;
+  let stopSignalsSent = 0;
+  let stopSignalsAcked = 0;
+  let tabReloads = 0;
+  let tabReloadFailures = 0;
+  let windowReloads = 0;
+  let windowReloadFailures = 0;
+  const reloadedWindowIds = new Set();
+
+  for (const process of currentRecords) {
+    if (!process || typeof process !== 'object') continue;
+    const isActive = !isClosedProcessStatus(process.status);
+
+    if (isActive) {
+      activeBefore += 1;
+
+      // Try graceful stop first; fallback to tab reload to hard-stop injected execution.
+      if (Number.isInteger(process.tabId)) {
+        const stopResult = await requestProcessForceStopOnTab(process.tabId, {
+          runId: process.id,
+          reason,
+          origin
+        });
+        if (stopResult.sent) {
+          stopSignalsSent += 1;
+        }
+        if (stopResult.acknowledged) {
+          stopSignalsAcked += 1;
+        }
+      }
+
+      // Always force a reload of process context during reset.
+      // This guarantees that in-tab execution is interrupted even when force-stop was acknowledged.
+      const reloadSummary = await forceStopAndReloadProcessContext(process, {
+        timeoutMs: 15000,
+        bypassCache: true,
+        reloadedWindowIds
+      });
+      tabReloads += reloadSummary.tabReloads;
+      tabReloadFailures += reloadSummary.tabReloadFailures;
+      windowReloads += reloadSummary.windowReloads;
+      windowReloadFailures += reloadSummary.windowReloadFailures;
+
+      const resetRecord = normalizeProcessRecord({
+        ...process,
+        status: 'stopped',
+        statusText,
+        reason,
+        needsAction: false,
+        autoRecovery: null,
+        finishedAt: Number.isInteger(process.finishedAt) ? process.finishedAt : now,
+        timestamp: now
+      });
+      if (resetRecord) {
+        nextRecords.push(resetRecord);
+        resetCount += 1;
+      }
+      continue;
+    }
+
+    if (!clearHistory) {
+      nextRecords.push(process);
+      historyRetained += 1;
+    }
+  }
+
+  processRegistry.clear();
+  nextRecords.forEach((record) => {
+    if (record?.id) processRegistry.set(record.id, record);
+  });
+
+  await persistProcessRegistry();
+  await broadcastProcessUpdate();
+
+  return {
+    clearHistory,
+    activeBefore,
+    resetCount,
+    historyRetained,
+    stopSignalsSent,
+    stopSignalsAcked,
+    tabReloads,
+    tabReloadFailures,
+    windowReloads,
+    windowReloadFailures,
+    uniqueWindowsReloaded: reloadedWindowIds.size,
+    totalAfter: nextRecords.length
   };
 }
 
@@ -800,7 +1116,7 @@ let PROMPTS_PORTFOLIO = [];
 // Nazwy etapów dla company analysis (synchronizowane z prompts-company.txt)
 const STAGE_NAMES_COMPANY = [
   "Stage 0: Evidence Ledger + Thesis",
-  "Pipeline Setup (Stages 0-9)",
+  "Pipeline Setup (Stages 0-10)",
   "Stage 1: Sub-segment Validation (Porter + S-curve)",
   "Stage 2: Stock Universe (15 names)",
   "Stage 2.5: Reverse DCF Lite + Driver Screen",
@@ -810,8 +1126,7 @@ const STAGE_NAMES_COMPANY = [
   "Stage 6: Thesis Monetization Quantification",
   "Reverse DCF (Full / TOTAL)",
   "Stage 8: Four-Gate Decision",
-  "Simple Story (PL narrative)",
-  "Four-Gate Output (1 line)"
+  "Stage 10: Position State Machine"
 ];
 
 // Funkcja generująca losowe opóźnienie dla anti-automation
@@ -1024,6 +1339,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
 
   const payload = '';
   const restOfPrompts = cleanedPrompts;
+  const companyPromptCatalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
   const processTitle = typeof options.processTitle === 'string' && options.processTitle.trim()
     ? options.processTitle.trim()
     : `Auto Resume from Stage ${normalizedStartIndex + 1}`;
@@ -1169,17 +1485,58 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     }
     await upsertProcess(processId, recoveryPatch);
 
-    try {
-      await chrome.tabs.reload(tabId);
-    } catch (reloadError) {
-      console.warn('[auto-resume] Nie udalo sie przeladowac karty:', reloadError?.message || reloadError);
+    const reloadResult = await forceReloadTab(tabId, {
+      timeoutMs: AUTO_RECOVERY_RELOAD_TIMEOUT_MS,
+      bypassCache: true
+    });
+    if (!reloadResult.ok) {
+      console.warn('[auto-resume] Nie udalo sie potwierdzic reloadu karty:', reloadResult);
     }
-    await waitForTabCompleteWithTimeout(tabId, 20000);
     await sleep(AUTO_RECOVERY_DELAY_MS);
 
+    const detectedRecoveryPoint = await detectCompanyRecoveryPointFromLastMessage(
+      tabId,
+      nextPromptOffset,
+      companyPromptCatalog
+    );
+    const alignedState = alignExecutionStateWithDetectedPrompt(
+      nextPromptOffset,
+      nextRemainingPrompts,
+      detectedRecoveryPoint
+    );
+
+    if (alignedState.applied) {
+      const syncedCurrentPrompt = Number.isInteger(alignedState.promptOffset) && alignedState.promptOffset >= 0
+        ? alignedState.promptOffset + 1
+        : recoveryCurrentPrompt;
+      const syncedStageIndex = syncedCurrentPrompt > 0 ? (syncedCurrentPrompt - 1) : null;
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType: 'company',
+        status: 'running',
+        needsAction: false,
+        currentPrompt: syncedCurrentPrompt,
+        totalPrompts: PROMPTS_COMPANY.length,
+        ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+        ...(syncedCurrentPrompt > 0 ? { stageName: `Prompt ${syncedCurrentPrompt}` } : {}),
+        statusText: `Auto-recovery sync: prompt ${syncedCurrentPrompt}`,
+        reason: 'auto_recovery_sync_last_message',
+        autoRecovery: {
+          attempt: autoRecoveryAttempt,
+          maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+          delayMs: AUTO_RECOVERY_DELAY_MS,
+          reason: recoveryReasonBase,
+          currentPrompt: syncedCurrentPrompt,
+          ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+          updatedAt: Date.now()
+        },
+        timestamp: Date.now()
+      });
+    }
+
     executionPayload = '';
-    executionPromptChain = nextRemainingPrompts;
-    executionPromptOffset = nextPromptOffset;
+    executionPromptChain = alignedState.remainingPrompts;
+    executionPromptOffset = alignedState.promptOffset;
   }
 
   if (result?.success) {
@@ -1202,8 +1559,22 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   return { success: false, error: 'resume_failed' };
 }
 
-async function detectLastCompanyPromptAndResumeAllTabs() {
+async function runResetScanStartAllTabs(options = {}) {
   try {
+    const origin = typeof options?.origin === 'string' && options.origin.trim()
+      ? options.origin.trim()
+      : 'reset-scan-start';
+
+    // Legacy request flags (resetProcesses/clearHistory) are intentionally ignored:
+    // this endpoint now always runs as hard reset + scan + start.
+    const resetSummary = await resetTrackedProcessesForBulkRun({
+      clearHistory: true,
+      reason: 'bulk_reset_before_scan_start',
+      statusText: 'Reset przed skanowaniem',
+      origin
+    });
+    await sleep(200);
+
     if (PROMPTS_COMPANY.length === 0) {
       await loadPrompts();
     }
@@ -1212,8 +1583,10 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
         success: false,
         scannedTabs: 0,
         matchedTabs: 0,
+        startedTabs: 0,
         resumedTabs: 0,
         results: [],
+        resetSummary,
         error: 'prompts_not_loaded'
       };
     }
@@ -1225,24 +1598,37 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
       .sort(compareTabsByWindowAndIndex);
     const resultsByTabId = new Map();
     const matchedTabIds = new Set();
-    const resumedTabIds = new Set();
+    const startedTabIds = new Set();
     const pendingTabIds = new Set(
       chatTabs
         .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
         .filter((id) => Number.isInteger(id))
     );
 
-    const terminalActions = new Set(['resumed', 'final_stage_already_sent']);
+    const terminalActions = new Set(['started', 'final_stage_already_sent']);
     const startedAt = Date.now();
+    const maxPasses = Number.isInteger(options?.maxPasses) && options.maxPasses > 0
+      ? options.maxPasses
+      : RESET_SCAN_DEFAULT_PASSES;
+    const maxRuntimeMs = Math.max(
+      RESET_SCAN_MIN_RUNTIME_MS,
+      chatTabs.length * RESET_SCAN_PER_TAB_BUDGET_MS,
+      Number.isInteger(options?.maxRuntimeMs) && options.maxRuntimeMs > 0
+        ? options.maxRuntimeMs
+        : 0
+    );
+    const passDelayMs = Number.isInteger(options?.passDelayMs) && options.passDelayMs >= 0
+      ? options.passDelayMs
+      : RESET_SCAN_PASS_DELAY_MS;
     let passCount = 0;
 
     while (
       pendingTabIds.size > 0 &&
-      passCount < DETECT_RESUME_MAX_PASSES &&
-      (Date.now() - startedAt) < DETECT_RESUME_MAX_RUNTIME_MS
+      passCount < maxPasses &&
+      (Date.now() - startedAt) < maxRuntimeMs
     ) {
       passCount += 1;
-      console.log('[detect-resume] Pass start', {
+      console.log('[reset-scan-start] Pass start', {
         pass: passCount,
         pending: pendingTabIds.size,
         scanned: chatTabs.length
@@ -1334,6 +1720,7 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
           row.action = 'no_user_message';
           row.reason = 'empty_user_message';
           resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
           await sleep(250);
           continue;
         }
@@ -1343,6 +1730,7 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
           row.action = 'no_match';
           row.reason = detection.reason || 'signature_not_found';
           resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
           await sleep(250);
           continue;
         }
@@ -1375,30 +1763,31 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
           row.action = 'active_process_exists';
           row.reason = 'active_process_on_tab';
           resultsByTabId.set(tab.id, row);
+          pendingTabIds.delete(tab.id);
           await sleep(250);
           continue;
         }
 
-        const autoResumeTitle = `Auto Resume: Prompt ${row.nextStartIndex + 1}`;
-        let resumeResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
-          processTitle: autoResumeTitle
+        const autoStartTitle = `Auto Start: Prompt ${row.nextStartIndex + 1}`;
+        let startResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
+          processTitle: autoStartTitle
         });
-        if (!resumeResult.success && resumeResult.error === 'inject_failed') {
+        if (!startResult.success && startResult.error === 'inject_failed') {
           await prepareTabForDetection(tab.id, row.windowId);
           await sleep(350);
-          resumeResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
-            processTitle: autoResumeTitle
+          startResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
+            processTitle: autoStartTitle
           });
         }
 
-        if (resumeResult.success) {
-          resumedTabIds.add(tab.id);
-          row.action = 'resumed';
-          row.reason = 'resume_started';
+        if (startResult.success) {
+          startedTabIds.add(tab.id);
+          row.action = 'started';
+          row.reason = 'start_started';
           pendingTabIds.delete(tab.id);
         } else {
-          row.action = resumeResult.error === 'inject_failed' ? 'inject_failed' : 'resume_failed';
-          row.reason = resumeResult.error || 'resume_failed';
+          row.action = startResult.error === 'inject_failed' ? 'inject_failed' : 'start_failed';
+          row.reason = startResult.error || 'start_failed';
         }
 
         resultsByTabId.set(tab.id, row);
@@ -1410,20 +1799,20 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
 
       if (
         pendingTabIds.size > 0 &&
-        passCount < DETECT_RESUME_MAX_PASSES &&
-        (Date.now() - startedAt) < DETECT_RESUME_MAX_RUNTIME_MS
+        passCount < maxPasses &&
+        (Date.now() - startedAt) < maxRuntimeMs
       ) {
-        console.log('[detect-resume] Pass delay', {
+        console.log('[reset-scan-start] Pass delay', {
           pass: passCount,
           pending: pendingTabIds.size,
-          delayMs: DETECT_RESUME_PASS_DELAY_MS
+          delayMs: passDelayMs
         });
-        await sleep(DETECT_RESUME_PASS_DELAY_MS);
+        await sleep(passDelayMs);
       }
     }
 
-    const runtimeLimitHit = (Date.now() - startedAt) >= DETECT_RESUME_MAX_RUNTIME_MS;
-    const passLimitHit = passCount >= DETECT_RESUME_MAX_PASSES;
+    const runtimeLimitHit = (Date.now() - startedAt) >= maxRuntimeMs;
+    const passLimitHit = passCount >= maxPasses;
     if (pendingTabIds.size > 0) {
       for (const tabId of pendingTabIds) {
         const row = resultsByTabId.get(tabId);
@@ -1453,25 +1842,33 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
       };
     });
 
-    console.log('[detect-resume] Summary', {
+    const startedCount = startedTabIds.size;
+    console.log('[reset-scan-start] Summary', {
       targetUrlPrefix: INVEST_GPT_URL_PREFIX,
+      maxPasses,
+      maxRuntimeMs,
       passCount,
       pendingAfterLoop: pendingTabIds.size,
       scannedTabs: chatTabs.length,
       matchedTabs: matchedTabIds.size,
-      resumedTabs: resumedTabIds.size
+      startedTabs: startedCount
     });
     results.forEach((item) => {
-      console.log('[detect-resume] Tab result', item);
+      console.log('[reset-scan-start] Tab result', item);
     });
 
     return {
       success: true,
       scannedTabs: chatTabs.length,
       matchedTabs: matchedTabIds.size,
-      resumedTabs: resumedTabIds.size,
+      startedTabs: startedCount,
+      // Legacy alias for compatibility.
+      resumedTabs: startedCount,
       passCount,
+      maxPasses,
+      maxRuntimeMs,
       pendingAfterLoop: pendingTabIds.size,
+      resetSummary,
       results
     };
   } catch (error) {
@@ -1479,6 +1876,7 @@ async function detectLastCompanyPromptAndResumeAllTabs() {
       success: false,
       scannedTabs: 0,
       matchedTabs: 0,
+      startedTabs: 0,
       resumedTabs: 0,
       results: [],
       error: error?.message || String(error)
@@ -1570,6 +1968,192 @@ function waitForTabCompleteWithTimeout(tabId, timeoutMs = 12000) {
   });
 }
 
+function requestTabReload(tabId, reloadProperties = {}) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'invalid_tab_id' });
+      return;
+    }
+
+    try {
+      chrome.tabs.reload(tabId, reloadProperties, () => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            reason: 'reload_command_failed',
+            error: chrome.runtime.lastError.message || 'runtime_last_error'
+          });
+          return;
+        }
+        resolve({ ok: true, reason: 'reload_command_sent' });
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        reason: 'reload_exception',
+        error: error?.message || String(error)
+      });
+    }
+  });
+}
+
+function requestTabNavigate(tabId, url) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'invalid_tab_id' });
+      return;
+    }
+    if (typeof url !== 'string' || !url.trim()) {
+      resolve({ ok: false, reason: 'invalid_url' });
+      return;
+    }
+
+    try {
+      chrome.tabs.update(tabId, { url: url.trim() }, () => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            reason: 'navigate_command_failed',
+            error: chrome.runtime.lastError.message || 'runtime_last_error'
+          });
+          return;
+        }
+        resolve({ ok: true, reason: 'navigate_command_sent' });
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        reason: 'navigate_exception',
+        error: error?.message || String(error)
+      });
+    }
+  });
+}
+
+function waitForTabReloadCycle(tabId, timeoutMs = AUTO_RECOVERY_RELOAD_TIMEOUT_MS) {
+  return new Promise((resolve) => {
+    if (!Number.isInteger(tabId)) {
+      resolve({ ok: false, reason: 'invalid_tab_id', sawLoading: false });
+      return;
+    }
+
+    let settled = false;
+    let sawLoading = false;
+    const startedAt = Date.now();
+
+    const finish = (ok, details = {}) => {
+      if (settled) return;
+      settled = true;
+      chrome.tabs.onUpdated.removeListener(onUpdated);
+      resolve({
+        ok,
+        sawLoading,
+        elapsedMs: Date.now() - startedAt,
+        ...details
+      });
+    };
+
+    const onUpdated = (updatedTabId, changeInfo) => {
+      if (updatedTabId !== tabId || settled) return;
+      if (changeInfo.status === 'loading') {
+        sawLoading = true;
+      }
+      if (changeInfo.status === 'complete' && sawLoading) {
+        finish(true, { reason: 'reload_completed', source: 'onUpdated' });
+      }
+    };
+
+    chrome.tabs.onUpdated.addListener(onUpdated);
+
+    (async () => {
+      while (!settled && (Date.now() - startedAt) < timeoutMs) {
+        const tabInfo = await getTabByIdSafe(tabId);
+        if (!tabInfo) {
+          finish(false, { reason: 'tab_not_found' });
+          return;
+        }
+        if (tabInfo.status === 'loading') {
+          sawLoading = true;
+        }
+        if (tabInfo.status === 'complete' && sawLoading) {
+          finish(true, { reason: 'reload_completed', source: 'poll' });
+          return;
+        }
+        await sleep(250);
+      }
+
+      if (!settled) {
+        finish(false, {
+          reason: sawLoading ? 'reload_complete_timeout' : 'reload_not_started'
+        });
+      }
+    })();
+  });
+}
+
+async function forceReloadTab(tabId, options = {}) {
+  const timeoutMs = Number.isInteger(options.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : AUTO_RECOVERY_RELOAD_TIMEOUT_MS;
+  const bypassCache = options.bypassCache !== false;
+  const reloadRequest = await requestTabReload(tabId, { bypassCache });
+
+  if (reloadRequest.ok) {
+    const reloadCycle = await waitForTabReloadCycle(tabId, timeoutMs);
+    if (reloadCycle.ok) {
+      return {
+        ok: true,
+        method: 'tabs.reload',
+        fallbackUsed: false,
+        ...reloadCycle
+      };
+    }
+  }
+
+  const tabInfo = await getTabByIdSafe(tabId);
+  const tabUrl = getTabEffectiveUrl(tabInfo);
+  if (!tabUrl) {
+    return {
+      ok: false,
+      method: 'tabs.reload',
+      fallbackUsed: false,
+      reason: reloadRequest.ok ? 'reload_failed_no_tab_url' : reloadRequest.reason,
+      error: reloadRequest.error || ''
+    };
+  }
+
+  const navigateRequest = await requestTabNavigate(tabId, tabUrl);
+  if (!navigateRequest.ok) {
+    return {
+      ok: false,
+      method: 'tabs.update',
+      fallbackUsed: true,
+      reason: navigateRequest.reason,
+      error: navigateRequest.error || '',
+      primaryReloadReason: reloadRequest.reason
+    };
+  }
+
+  const completed = await waitForTabCompleteWithTimeout(tabId, timeoutMs);
+  if (completed) {
+    return {
+      ok: true,
+      method: 'tabs.update',
+      fallbackUsed: true,
+      reason: 'navigate_completed',
+      primaryReloadReason: reloadRequest.reason
+    };
+  }
+
+  return {
+    ok: false,
+    method: 'tabs.update',
+    fallbackUsed: true,
+    reason: 'navigate_complete_timeout',
+    primaryReloadReason: reloadRequest.reason
+  };
+}
+
 async function prepareTabForDetection(tabId, windowId = null) {
   if (!Number.isInteger(tabId)) return false;
   try {
@@ -1589,7 +2173,7 @@ async function prepareTabForDetection(tabId, windowId = null) {
   try {
     const tabInfo = await chrome.tabs.get(tabId);
     if (tabInfo?.discarded) {
-      await chrome.tabs.reload(tabId);
+      await forceReloadTab(tabId, { timeoutMs: 12000 });
     }
   } catch (error) {
     // Ignore and continue.
@@ -1718,6 +2302,145 @@ async function ensureCompanyPromptsReady() {
   }
   await loadPrompts();
   return Array.isArray(PROMPTS_COMPANY) && PROMPTS_COMPANY.length > 0;
+}
+
+function buildCompanyPromptChainForResume(startIndex) {
+  if (!Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
+    return [];
+  }
+  const boundedStart = Number.isInteger(startIndex)
+    ? Math.max(0, Math.min(startIndex, PROMPTS_COMPANY.length))
+    : 0;
+  const chain = PROMPTS_COMPANY.slice(boundedStart);
+  if (chain.length === 0) return [];
+
+  const normalized = [...chain];
+  if (typeof normalized[0] === 'string') {
+    normalized[0] = normalized[0].replace('{{articlecontent}}', '').trim();
+  }
+  return normalized;
+}
+
+async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOffset = 0, catalog = null) {
+  const safeFallbackOffset = Number.isInteger(fallbackPromptOffset) && fallbackPromptOffset >= 0
+    ? fallbackPromptOffset
+    : 0;
+  if (!Number.isInteger(tabId)) {
+    return {
+      matched: false,
+      reason: 'invalid_tab_id',
+      promptOffset: safeFallbackOffset,
+      remainingPrompts: []
+    };
+  }
+
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady) {
+    return {
+      matched: false,
+      reason: 'prompts_not_loaded',
+      promptOffset: safeFallbackOffset,
+      remainingPrompts: []
+    };
+  }
+
+  const promptCatalog = Array.isArray(catalog) && catalog.length > 0
+    ? catalog
+    : buildPromptSignatureCatalog(PROMPTS_COMPANY);
+
+  let extraction = await extractLastUserMessageFromTab(tabId);
+  if (!extraction.success) {
+    await sleep(350);
+    extraction = await extractLastUserMessageFromTab(tabId);
+  }
+
+  if (!extraction.success) {
+    return {
+      matched: false,
+      reason: extraction.error || 'extract_last_user_message_failed',
+      promptOffset: safeFallbackOffset,
+      remainingPrompts: []
+    };
+  }
+
+  const lastUserText = typeof extraction.text === 'string' ? extraction.text.trim() : '';
+  if (!lastUserText) {
+    return {
+      matched: false,
+      reason: 'empty_user_message',
+      promptOffset: safeFallbackOffset,
+      remainingPrompts: []
+    };
+  }
+
+  const detection = detectPromptIndexFromMessage(lastUserText, promptCatalog);
+  if (!detection.matched || !Number.isInteger(detection.index)) {
+    return {
+      matched: false,
+      reason: detection.reason || 'signature_not_found',
+      promptOffset: safeFallbackOffset,
+      remainingPrompts: []
+    };
+  }
+
+  const nextStartIndex = detection.index + 1;
+  const promptOffset = Math.max(0, Math.min(nextStartIndex, PROMPTS_COMPANY.length));
+  const remainingPrompts = buildCompanyPromptChainForResume(promptOffset);
+  const promptCount = PROMPTS_COMPANY.length;
+  const finalStageReached = promptOffset >= promptCount;
+
+  return {
+    matched: true,
+    reason: 'matched',
+    promptOffset,
+    promptCount,
+    finalStageReached,
+    remainingPrompts,
+    detection
+  };
+}
+
+function alignExecutionStateWithDetectedPrompt(basePromptOffset, baseRemainingPrompts, detectedRecoveryPoint) {
+  const safeBaseOffset = Number.isInteger(basePromptOffset) && basePromptOffset >= 0
+    ? basePromptOffset
+    : 0;
+  const safeBaseRemaining = Array.isArray(baseRemainingPrompts) ? baseRemainingPrompts : [];
+
+  if (!detectedRecoveryPoint?.matched || !Number.isInteger(detectedRecoveryPoint.promptOffset)) {
+    return {
+      applied: false,
+      reason: detectedRecoveryPoint?.reason || 'no_detected_recovery_point',
+      promptOffset: safeBaseOffset,
+      remainingPrompts: safeBaseRemaining
+    };
+  }
+
+  const detectedOffset = Math.max(0, detectedRecoveryPoint.promptOffset);
+  if (detectedOffset <= safeBaseOffset) {
+    return {
+      applied: false,
+      reason: 'detected_offset_not_ahead',
+      promptOffset: safeBaseOffset,
+      remainingPrompts: safeBaseRemaining
+    };
+  }
+
+  if (Array.isArray(detectedRecoveryPoint.remainingPrompts)) {
+    return {
+      applied: true,
+      reason: 'detected_catalog_alignment',
+      promptOffset: detectedOffset,
+      remainingPrompts: detectedRecoveryPoint.remainingPrompts
+    };
+  }
+
+  const skipCount = detectedOffset - safeBaseOffset;
+  return {
+    applied: true,
+    reason: 'detected_delta_alignment',
+    promptOffset: detectedOffset,
+    remainingPrompts: safeBaseRemaining.slice(skipCount)
+  };
 }
 
 async function getTabByIdSafe(tabId) {
@@ -2332,7 +3055,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   } else if (message.type === 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME') {
-    detectLastCompanyPromptAndResumeAllTabs()
+    runResetScanStartAllTabs({
+      origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+    })
       .then((result) => sendResponse(result))
       .catch((error) => {
         console.warn('[monitor] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', error);
@@ -2340,7 +3065,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           success: false,
           scannedTabs: 0,
           matchedTabs: 0,
+          startedTabs: 0,
           resumedTabs: 0,
+          resetSummary: null,
           results: [],
           error: error?.message || String(error)
         });
@@ -2760,6 +3487,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       const restOfPrompts = promptChain.slice(1);
       processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
       const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
+      const companyPromptCatalog = (analysisType === 'company')
+        ? buildPromptSignatureCatalog(PROMPTS_COMPANY)
+        : null;
 
       await upsertProcess(processId, {
         title,
@@ -2928,17 +3658,66 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         await upsertProcess(processId, recoveryPatch);
 
         console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Auto-recovery ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS} (${recoveryReasonBase}) dla prompta ${recoveryCurrentPrompt}`);
-        try {
-          await chrome.tabs.reload(chatTabId);
-        } catch (reloadError) {
-          console.warn('[auto-recovery] Nie udalo sie przeladowac karty:', reloadError?.message || reloadError);
+        const reloadResult = await forceReloadTab(chatTabId, {
+          timeoutMs: AUTO_RECOVERY_RELOAD_TIMEOUT_MS,
+          bypassCache: true
+        });
+        if (!reloadResult.ok) {
+          console.warn('[auto-recovery] Nie udalo sie potwierdzic reloadu karty:', reloadResult);
         }
-        await waitForTabCompleteWithTimeout(chatTabId, 20000);
         await sleep(AUTO_RECOVERY_DELAY_MS);
 
+        let alignedState = {
+          applied: false,
+          reason: 'base_state',
+          promptOffset: nextPromptOffset,
+          remainingPrompts: nextRemainingPrompts
+        };
+        if (analysisType === 'company') {
+          const detectedRecoveryPoint = await detectCompanyRecoveryPointFromLastMessage(
+            chatTabId,
+            nextPromptOffset,
+            companyPromptCatalog
+          );
+          alignedState = alignExecutionStateWithDetectedPrompt(
+            nextPromptOffset,
+            nextRemainingPrompts,
+            detectedRecoveryPoint
+          );
+
+          if (alignedState.applied) {
+            const syncedCurrentPrompt = Number.isInteger(alignedState.promptOffset) && alignedState.promptOffset >= 0
+              ? alignedState.promptOffset + 1
+              : recoveryCurrentPrompt;
+            const syncedStageIndex = syncedCurrentPrompt > 0 ? (syncedCurrentPrompt - 1) : null;
+            await upsertProcess(processId, {
+              title: processTitle,
+              analysisType,
+              status: 'running',
+              needsAction: false,
+              currentPrompt: syncedCurrentPrompt,
+              totalPrompts: processTotalPrompts,
+              ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+              ...(syncedCurrentPrompt > 0 ? { stageName: `Prompt ${syncedCurrentPrompt}` } : {}),
+              statusText: `Auto-recovery sync: prompt ${syncedCurrentPrompt}`,
+              reason: 'auto_recovery_sync_last_message',
+              autoRecovery: {
+                attempt: autoRecoveryAttempt,
+                maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+                delayMs: AUTO_RECOVERY_DELAY_MS,
+                reason: recoveryReasonBase,
+                currentPrompt: syncedCurrentPrompt,
+                ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+                updatedAt: Date.now()
+              },
+              timestamp: Date.now()
+            });
+          }
+        }
+
         executionPayload = '';
-        executionPromptChain = nextRemainingPrompts;
-        executionPromptOffset = nextPromptOffset;
+        executionPromptChain = alignedState.remainingPrompts;
+        executionPromptOffset = alignedState.promptOffset;
       }
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
@@ -3416,6 +4195,42 @@ async function extractText() {
 
 // Funkcja wklejania do ChatGPT (content script)
 async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company', runId = null, progressContext = null, autoRecoveryContext = null) {
+  let forceStopRequested = false;
+  let forceStopReason = 'force_stop';
+  let forceStopOrigin = 'background';
+  let forceStopListener = null;
+
+  const isForceStopForCurrentRun = (message) => {
+    if (!message || message.type !== 'PROCESS_FORCE_STOP') return false;
+    if (typeof runId === 'string' && runId.trim()) {
+      if (typeof message.runId === 'string' && message.runId.trim()) {
+        return message.runId === runId;
+      }
+      return true;
+    }
+    return true;
+  };
+
+  const markForceStopRequested = (message = {}) => {
+    forceStopRequested = true;
+    if (typeof message.reason === 'string' && message.reason.trim()) {
+      forceStopReason = message.reason.trim();
+    }
+    if (typeof message.origin === 'string' && message.origin.trim()) {
+      forceStopOrigin = message.origin.trim();
+    }
+  };
+
+  const cleanupForceStopListener = () => {
+    if (!forceStopListener || !chrome?.runtime?.onMessage?.removeListener) return;
+    try {
+      chrome.runtime.onMessage.removeListener(forceStopListener);
+    } catch (error) {
+      // Ignore cleanup issues.
+    }
+    forceStopListener = null;
+  };
+
   try {
     console.log(`\n${'='.repeat(80)}`);
     console.log(`🚀 [injectToChat] START`);
@@ -3423,6 +4238,42 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`  Analysis: ${analysisType}`);
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
+
+    if (chrome?.runtime?.onMessage?.addListener) {
+      forceStopListener = (message, sender, sendResponse) => {
+        if (!isForceStopForCurrentRun(message)) return;
+        markForceStopRequested(message);
+        console.warn(`[injectToChat] Otrzymano PROCESS_FORCE_STOP (runId=${runId || 'n/a'})`);
+        if (typeof sendResponse === 'function') {
+          try {
+            sendResponse({
+              success: true,
+              acknowledged: true,
+              stopped: true,
+              runId: runId || null
+            });
+          } catch (error) {
+            // Ignore sendResponse issues.
+          }
+        }
+        return true;
+      };
+      try {
+        chrome.runtime.onMessage.addListener(forceStopListener);
+      } catch (error) {
+        forceStopListener = null;
+      }
+    }
+
+    const shouldStopNow = () => forceStopRequested;
+    const forceStopResult = () => ({
+      success: false,
+      lastResponse: '',
+      error: 'force_stopped',
+      stopped: true,
+      reason: forceStopReason,
+      origin: forceStopOrigin
+    });
 
     // Shared helpers for injected context
     function compactText(text) {
@@ -4341,6 +5192,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Snapshot ostatniej odpowiedzi assistant
 
   async function waitForResponse(maxWaitMs) {
+    if (shouldStopNow()) return false;
     const initialSnapshot = getAssistantSnapshot();
     const initialAssistantCount = initialSnapshot.count;
     const initialAssistantText = initialSnapshot.lastText || '';
@@ -4361,6 +5213,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`📊 [FAZA 1] Timeout dla detekcji startu: ${Math.round(startTimeout/1000)}s (${Math.round(startTimeout/60000)} min)`);
     
     while (Date.now() - phase1StartTime < startTimeout) {
+      if (shouldStopNow()) return false;
       if (hasStreamingInterruptedState()) {
         console.error('❌ [FAZA 1] Wykryto przerwany stream odpowiedzi (Stopped thinking / Streaming interrupted).');
         return false;
@@ -4558,6 +5411,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     console.log(`📊 [FAZA 2] Timeout dla detekcji zakończenia: ${Math.round(phase2Timeout/1000)}s (${Math.round(phase2Timeout/60000)} min)`);
     
     while (Date.now() - phase2StartTime < phase2Timeout) {
+      if (shouldStopNow()) return false;
       if (hasStreamingInterruptedState()) {
         console.error('❌ [FAZA 2] Wykryto przerwany stream odpowiedzi (Stopped thinking / Streaming interrupted).');
         return false;
@@ -5175,6 +6029,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
   async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
+    if (shouldStopNow()) return false;
     const startTime = Date.now();
     let consecutiveReady = 0;
     
@@ -5232,6 +6087,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     };
     
     while (Date.now() - startTime < maxWaitMs) {
+      if (shouldStopNow()) return false;
       // Sprawdź wszystkie elementy interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
                      document.querySelector('div[contenteditable="true"]');
@@ -5501,11 +6357,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
   // Funkcja wysyłania pojedynczego prompta
   async function sendPrompt(promptText, maxWaitForReady = responseWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
+    if (shouldStopNow()) return false;
     // KROK 0: POPRAWKA - Aktywuj kartę przed wysyłaniem (rozwiązuje problem z wyciszonymi kartami)
     const maxRetries = 3;
     let retryCount = 0;
     
     while (retryCount < maxRetries) {
+      if (shouldStopNow()) return false;
       try {
         console.log(`🔍 Aktywuję kartę ChatGPT przed wysyłaniem (próba ${retryCount + 1}/${maxRetries})...`);
         
@@ -5559,6 +6417,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const startTime = Date.now();
     
     while (Date.now() - startTime < maxWait) {
+      if (shouldStopNow()) return false;
       editor = document.querySelector('textarea#prompt-textarea') ||
                document.querySelector('[role="textbox"][contenteditable="true"]') ||
                document.querySelector('div[contenteditable="true"]') ||
@@ -5637,6 +6496,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const maxButtonWait = 10000; // Zwiększono z 3s na 10s
     
     while (waitTime < maxButtonWait) {
+      if (shouldStopNow()) return false;
       submitButton = document.querySelector('[data-testid="send-button"]') ||
                      document.querySelector('#composer-submit-button') ||
                      document.querySelector('button[aria-label="Send"]') ||
@@ -5680,6 +6540,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     const maxVerifyWait = 10000; // Zwiększono z 5s do 10s na weryfikację
     
     while (verifyTime < maxVerifyWait) {
+      if (shouldStopNow()) return false;
       // Po wysłaniu prompta ChatGPT powinien:
       // 1. Pokazać stopButton (zacząć generować) - NAJBARDZIEJ PEWNY wskaźnik
       // 2. LUB wyczyścić/disabled editor + disabled sendButton + nowa wiadomość w DOM
@@ -5767,6 +6628,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   
   // Retry loop - czekaj na editor (contenteditable div, nie textarea!)
   while (Date.now() - startTime < textareaWaitMs) {
+    if (shouldStopNow()) {
+      return forceStopResult();
+    }
     const editor = document.querySelector('[role="textbox"]') ||
                    document.querySelector('[contenteditable]') ||
                    document.querySelector('[data-testid="composer-input"]');
@@ -5793,10 +6657,16 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         // Wyślij tekst Economist
         console.log("📤 Wysyłam artykuł do ChatGPT...");
         await sendPrompt(payload, responseWaitMs, counter, promptOffset, totalPromptsForRun);
+        if (shouldStopNow()) {
+          return forceStopResult();
+        }
         
         // Czekaj na odpowiedź ChatGPT
         updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedź...');
         await waitForResponse(responseWaitMs);
+        if (shouldStopNow()) {
+          return forceStopResult();
+        }
         console.log("✅ Artykuł przetworzony");
 
         // Pobierz odpowiedź Stage 0 do wstawienia w kolejne prompty
@@ -5814,6 +6684,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         const delay = getRandomDelay();
         console.log(`⏸️ Anti-automation delay: ${(delay/1000).toFixed(1)}s przed rozpoczęciem prompt chain...`);
         await new Promise(resolve => setTimeout(resolve, delay));
+        if (shouldStopNow()) {
+          return forceStopResult();
+        }
       } else {
         // Resume mode - zacznij od razu od prompt chain
         updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Resume from stage...');
@@ -5824,6 +6697,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         updateCounter(counter, promptOffset, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
         
         const resumeInterfaceReady = await waitForInterfaceReady(responseWaitMs, counter, promptOffset, totalPromptsForRun);
+        if (shouldStopNow()) {
+          return forceStopResult();
+        }
         
         if (!resumeInterfaceReady) {
           console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
@@ -5865,6 +6741,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         delete window._preferredResponseReason;
         
         for (let i = 0; i < promptChain.length; i++) {
+          if (shouldStopNow()) {
+            return forceStopResult();
+          }
           const prompt = promptChain[i];
           const remaining = promptChain.length - i - 1;
           const localPromptNumber = i + 1;
@@ -5893,6 +6772,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           // Wyślij prompt
           console.log(`[${i + 1}/${promptChain.length}] Wywołuję sendPrompt()...`);
           const sent = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
+          if (shouldStopNow()) {
+            return forceStopResult();
+          }
           
           if (!sent) {
             console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
@@ -5926,6 +6808,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               // User naprawił, spróbuj wysłać ponownie ten sam prompt
               console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
               const retried = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
+              if (shouldStopNow()) {
+                return forceStopResult();
+              }
             
               if (!retried) {
                 console.error(`❌ Ponowna próba nieudana - przerywam chain`);
@@ -5955,8 +6840,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           // Pętla czekania na odpowiedź - powtarzaj aż się uda
           let responseCompleted = false;
           while (!responseCompleted) {
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
             console.log(`[${i + 1}/${promptChain.length}] Wywołuję waitForResponse()...`);
             const completed = await waitForResponse(responseWaitMs);
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
             
             if (!completed) {
               // Timeout - pokaż przyciski i czekaj na user
@@ -6010,6 +6901,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           let responseValid = false;
           let responseText = '';
           while (!responseValid) {
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
             console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
             responseText = await getLastResponseText();
             const isValid = validateResponse(responseText);
@@ -6051,6 +6945,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
               
               // Poczekaj na zakończenie odpowiedzi ChatGPT
               await waitForResponse(responseWaitMs);
+              if (shouldStopNow()) {
+                return forceStopResult();
+              }
               
               // Powtórz walidację
               continue;
@@ -6099,6 +6996,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             console.log(`⏸️ Anti-automation delay: ${(delay/1000).toFixed(1)}s przed promptem ${i + 2}/${promptChain.length}...`);
             updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `⏸️ Czekam ${(delay/1000).toFixed(0)}s...`);
             await new Promise(resolve => setTimeout(resolve, delay));
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
           }
         }
         
@@ -6186,6 +7086,16 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   return { success: false, lastResponse: '', error: 'Nie znaleziono textarea' };
   
   } catch (error) {
+    if (forceStopRequested) {
+      return {
+        success: false,
+        lastResponse: '',
+        error: 'force_stopped',
+        stopped: true,
+        reason: forceStopReason,
+        origin: forceStopOrigin
+      };
+    }
     console.error(`\n${'='.repeat(80)}`);
     console.error(`❌ [injectToChat] CRITICAL ERROR`);
     console.error(`  Error: ${error.message}`);
@@ -6200,6 +7110,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       needsAction: false
     });
     return { success: false, error: `Critical error: ${error.message}` };
+  } finally {
+    cleanupForceStopListener();
   }
 }
 

@@ -6,8 +6,6 @@ const detailsContainer = document.getElementById('process-details');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
 const resumeAllBtn = document.getElementById('resume-all-btn');
-const detectResumeBtn = document.getElementById('detect-resume-btn');
-const detectResults = document.getElementById('detect-results');
 const processSummary = document.getElementById('process-summary');
 
 let selectedProcessId = null;
@@ -69,12 +67,6 @@ if (historyToggle && historyList) {
 if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void resumeAllProcesses();
-  });
-}
-
-if (detectResumeBtn) {
-  detectResumeBtn.addEventListener('click', () => {
-    void detectLastPromptAndResume();
   });
 }
 
@@ -1151,161 +1143,6 @@ async function resumeNextStageFromPanel(process, button, options = {}) {
         button.disabled = false;
       }, 2200);
     }
-  }
-}
-
-function sendDetectLastPromptAndResume() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({
-      type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME'
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('[panel] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-        resolve({
-          success: false,
-          scannedTabs: 0,
-          matchedTabs: 0,
-          resumedTabs: 0,
-          passCount: 0,
-          pendingAfterLoop: 0,
-          results: [],
-          error: chrome.runtime.lastError.message || 'runtime_error'
-        });
-        return;
-      }
-
-      resolve({
-        success: !!response?.success,
-        scannedTabs: Number.isInteger(response?.scannedTabs) ? response.scannedTabs : 0,
-        matchedTabs: Number.isInteger(response?.matchedTabs) ? response.matchedTabs : 0,
-        resumedTabs: Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0,
-        passCount: Number.isInteger(response?.passCount) ? response.passCount : 0,
-        pendingAfterLoop: Number.isInteger(response?.pendingAfterLoop) ? response.pendingAfterLoop : 0,
-        results: Array.isArray(response?.results) ? response.results : [],
-        error: typeof response?.error === 'string' ? response.error : ''
-      });
-    });
-  });
-}
-
-function formatDetectAction(action) {
-  const map = {
-    resumed: 'wznowiono',
-    no_match: 'brak dopasowania',
-    no_user_message: 'brak wiadomosci usera',
-    final_stage_already_sent: 'ostatni etap juz wyslany',
-    active_process_exists: 'aktywny proces juz istnieje',
-    inject_failed: 'blad inject/odczytu',
-    resume_failed: 'blad wznowienia'
-  };
-  return map[action] || action || 'unknown';
-}
-
-function renderDetectResults(state = {}) {
-  if (!detectResults) return;
-
-  if (state.loading) {
-    detectResults.textContent = 'Przechodze po kartach GPT Inwestycje po kolei (1 pass, max 45s), wykrywam etap i uruchamiam wznowienie...';
-    return;
-  }
-
-  if (state.error) {
-    detectResults.textContent = `Blad: ${state.error}`;
-    return;
-  }
-
-  const response = state.response;
-  if (!response) {
-    detectResults.textContent = 'Wyniki auto-detekcji (GPT Inwestycje) pojawia sie tutaj.';
-    return;
-  }
-
-  const rows = Array.isArray(response.results) ? response.results : [];
-  const header = document.createElement('div');
-  header.className = 'detect-header';
-  header.textContent = `Skan: ${response.scannedTabs} | Dopasowane: ${response.matchedTabs} | Wznowione: ${response.resumedTabs} | Passy: ${response.passCount || 0} | Pozostale: ${response.pendingAfterLoop || 0}`;
-
-  detectResults.innerHTML = '';
-  detectResults.appendChild(header);
-
-  if (!response.success && response.error) {
-    const errorRow = document.createElement('div');
-    errorRow.className = 'detect-meta';
-    errorRow.textContent = `Blad wykonania: ${response.error}`;
-    detectResults.appendChild(errorRow);
-  }
-
-  if (rows.length === 0) {
-    const empty = document.createElement('div');
-    empty.className = 'detect-meta';
-    empty.textContent = 'Brak kart do raportu.';
-    detectResults.appendChild(empty);
-    return;
-  }
-
-  rows.forEach((item) => {
-    const row = document.createElement('div');
-    row.className = 'detect-row';
-
-    const title = item?.title || item?.url || `Tab ${item?.tabId ?? '-'}`;
-    const actionLabel = formatDetectAction(item?.action);
-    const promptText = Number.isInteger(item?.detectedPromptNumber)
-      ? `Prompt ${item.detectedPromptNumber}`
-      : 'brak';
-    const nextText = Number.isInteger(item?.nextStartIndex)
-      ? `startIndex=${item.nextStartIndex}`
-      : 'startIndex=-';
-    const stageText = typeof item?.detectedStageName === 'string' && item.detectedStageName
-      ? item.detectedStageName
-      : '-';
-    const methodText = typeof item?.detectedMethod === 'string' && item.detectedMethod
-      ? item.detectedMethod
-      : '-';
-    const msgCount = Number.isInteger(item?.userMessageCount) ? item.userMessageCount : 0;
-    const msgLen = Number.isInteger(item?.lastUserMessageLength) ? item.lastUserMessageLength : 0;
-    const attempts = Number.isInteger(item?.attempts) ? item.attempts : 0;
-    const lastPass = Number.isInteger(item?.lastPass) ? item.lastPass : 0;
-    const retryExhausted = !!item?.retryExhausted;
-    const consistencyText = item?.stageConsistency
-      ? `${item.stageConsistency}${Number.isInteger(item?.stageDelta) ? ` (delta=${item.stageDelta})` : ''}`
-      : '-';
-    const progressText = Number.isInteger(item?.progressPromptNumber)
-      ? `Prompt ${item.progressPromptNumber}${item?.progressStageName ? ` (${item.progressStageName})` : ''}`
-      : '-';
-    const signaturePreview = typeof item?.detectedSignature === 'string' && item.detectedSignature
-      ? item.detectedSignature
-      : '';
-
-    row.innerHTML = `
-      <div><strong>${escapeHtml(title)}</strong></div>
-      <div class="detect-meta">akcja: ${escapeHtml(actionLabel)} (${escapeHtml(String(item?.action || 'unknown'))}), reason: ${escapeHtml(String(item?.reason || '-'))}</div>
-      <div class="detect-meta">detected: ${escapeHtml(promptText)} | stage: ${escapeHtml(stageText)} | method: ${escapeHtml(methodText)} | next: ${escapeHtml(nextText)}</div>
-      <div class="detect-meta">proby: ${escapeHtml(String(attempts))} | ostatni pass: ${escapeHtml(String(lastPass))} | retry_exhausted: ${escapeHtml(String(retryExhausted))}</div>
-      <div class="detect-meta">spojnosc etapu: ${escapeHtml(consistencyText)} | progress(process): ${escapeHtml(progressText)}</div>
-      <div class="detect-meta">wiadomosci usera: ${escapeHtml(String(msgCount))}, dlugosc ostatniej: ${escapeHtml(String(msgLen))} znakow, tabId: ${escapeHtml(String(item?.tabId ?? '-'))}</div>
-      ${signaturePreview ? `<div class="detect-meta">sygnatura: ${escapeHtml(signaturePreview)}</div>` : ''}
-    `;
-    detectResults.appendChild(row);
-  });
-}
-
-async function detectLastPromptAndResume() {
-  if (!detectResumeBtn) return;
-
-  const originalText = detectResumeBtn.textContent || 'Wykryj ostatni prompt i wznow';
-  detectResumeBtn.disabled = true;
-  detectResumeBtn.textContent = 'Skanuje...';
-  renderDetectResults({ loading: true });
-
-  try {
-    const response = await sendDetectLastPromptAndResume();
-    renderDetectResults({ response });
-    await refreshProcesses();
-  } catch (error) {
-    renderDetectResults({ error: error?.message || String(error) });
-  } finally {
-    detectResumeBtn.disabled = false;
-    detectResumeBtn.textContent = originalText;
   }
 }
 

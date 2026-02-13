@@ -80,34 +80,6 @@
       display: flex;
       gap: 8px;
     }
-    .detect-results {
-      border: 1px solid var(--border);
-      background: var(--panel);
-      color: var(--muted);
-      border-radius: 10px;
-      padding: 10px;
-      font-size: 11px;
-      line-height: 1.4;
-      max-height: 180px;
-      overflow: auto;
-      white-space: normal;
-    }
-    .detect-row {
-      padding: 6px 0;
-      border-bottom: 1px solid var(--border);
-    }
-    .detect-row:last-child {
-      border-bottom: none;
-      padding-bottom: 0;
-    }
-    .detect-header {
-      color: var(--text);
-      font-weight: 700;
-      margin-bottom: 4px;
-    }
-    .detect-meta {
-      color: var(--muted);
-    }
     .summary-bar {
       border: 1px solid var(--border);
       background: var(--panel);
@@ -458,12 +430,10 @@
     <div class="sidebar">
       <div class="bulk-actions">
         <button id="resume-all-btn" class="bulk-btn" disabled>Wyslij nastepny prompt we wszystkich</button>
-        <button id="detect-resume-btn" class="bulk-btn">Wykryj ostatni prompt i wznow</button>
       </div>
       <div id="process-summary" class="summary-bar">
         Aktywne: 0 | Wymaga akcji: 0 | Zakonczone: 0 | Blad: 0 | Wszystkie: 0
       </div>
-      <div id="detect-results" class="detect-results">Wyniki auto-detekcji pojawia sie tutaj.</div>
       <div id="process-list" class="process-list"></div>
       <div id="empty-state" class="empty-state" style="display: none;">
         Brak aktywnych procesow
