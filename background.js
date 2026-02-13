@@ -3971,17 +3971,25 @@ async function runAnalysis(options = {}) {
       allTabs.push(...tabs);
     }
     
-    if (allTabs.length === 0) {
+    const orderedTabs = Array.from(
+      new Map(
+        allTabs
+          .filter((tab) => Number.isInteger(tab?.id))
+          .map((tab) => [tab.id, tab])
+      ).values()
+    ).sort(compareTabsByWindowAndIndex);
+
+    if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
       alert("Nie znaleziono otwartych artykułów z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Wall Street Journal\n- Foreign Affairs\n- YouTube");
       return;
     }
 
-    console.log(`✅ Znaleziono ${allTabs.length} artykułów łącznie`);
+    console.log(`✅ Znaleziono ${orderedTabs.length} artykułów łącznie`);
     
     // KROK 3: Wybór artykułów do analizy portfela
     console.log("\n🎯 Krok 3: Wybór artykułów do analizy portfela");
-    const selectedIndices = await getArticleSelection(allTabs);
+    const selectedIndices = await getArticleSelection(orderedTabs);
     
     if (selectedIndices === null) {
       console.log("❌ Anulowano wybór artykułów");
@@ -3993,7 +4001,9 @@ async function runAnalysis(options = {}) {
     // KROK 4: Przygotuj zaznaczone artykuły do analizy portfela
     let selectedTabs = [];
     if (selectedIndices.length > 0 && PROMPTS_PORTFOLIO.length > 0) {
-      selectedTabs = selectedIndices.map(index => allTabs[index]);
+      selectedTabs = selectedIndices
+        .map((index) => orderedTabs[index])
+        .filter(Boolean);
       console.log(`\n✅ Przygotowano ${selectedTabs.length} artykułów do analizy portfela`);
     } else if (selectedIndices.length > 0 && PROMPTS_PORTFOLIO.length === 0) {
       console.log("\n⚠️ Zaznaczono artykuły ale brak promptów - pomijam analizę portfela");
@@ -4003,14 +4013,14 @@ async function runAnalysis(options = {}) {
     
     // KROK 5: Uruchom oba procesy równolegle
     console.log("\n🚀 Krok 5: Uruchamianie procesów analizy");
-    console.log(`   - Analiza spółki: ${allTabs.length} artykułów`);
+    console.log(`   - Analiza spółki: ${orderedTabs.length} artykułów`);
     console.log(`   - Analiza portfela: ${selectedTabs.length} artykułów`);
     
     const processingTasks = [];
     
     // Zawsze uruchamiaj analizę spółki
     processingTasks.push(
-      processArticles(allTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+      processArticles(orderedTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
         invocationWindowId
       })
     );

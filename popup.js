@@ -1,4 +1,4 @@
-function withActiveWindowContext(callback) {
+﻿function withActiveWindowContext(callback) {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const activeTab = tabs && tabs.length > 0 ? tabs[0] : null;
     callback({
@@ -8,153 +8,131 @@ function withActiveWindowContext(callback) {
   });
 }
 
-function sendResetScanStartRequest(options = {}) {
-  const payload = {
-    type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
-    origin: typeof options?.origin === 'string' ? options.origin : 'popup'
-  };
-
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(
-      payload,
-      (response) => {
-        if (chrome.runtime.lastError) {
-          resolve({
-            success: false,
-            scannedTabs: 0,
-            matchedTabs: 0,
-            startedTabs: 0,
-            resumedTabs: 0,
-            passCount: 0,
-            maxPasses: 0,
-            maxRuntimeMs: 0,
-            pendingAfterLoop: 0,
-            resetSummary: null,
-            results: [],
-            error: chrome.runtime.lastError.message || 'runtime_error'
-          });
+function sendRuntimeMessage(payload) {
+  return new Promise((resolve, reject) => {
+    chrome.runtime.sendMessage(payload, (response) => {
+      if (chrome.runtime.lastError) {
+        const message = chrome.runtime.lastError.message || 'runtime_error';
+        if (message.includes('before a response was received')) {
+          resolve({});
           return;
         }
-
-        resolve({
-          success: !!response?.success,
-          scannedTabs: Number.isInteger(response?.scannedTabs) ? response.scannedTabs : 0,
-          matchedTabs: Number.isInteger(response?.matchedTabs) ? response.matchedTabs : 0,
-          resumedTabs: Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0,
-          startedTabs: Number.isInteger(response?.startedTabs)
-            ? response.startedTabs
-            : (Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0),
-          passCount: Number.isInteger(response?.passCount) ? response.passCount : 0,
-          maxPasses: Number.isInteger(response?.maxPasses) ? response.maxPasses : 0,
-          maxRuntimeMs: Number.isInteger(response?.maxRuntimeMs) ? response.maxRuntimeMs : 0,
-          pendingAfterLoop: Number.isInteger(response?.pendingAfterLoop) ? response.pendingAfterLoop : 0,
-          resetSummary: response?.resetSummary && typeof response.resetSummary === 'object'
-            ? response.resetSummary
-            : null,
-          results: Array.isArray(response?.results) ? response.results : [],
-          error: typeof response?.error === 'string' ? response.error : ''
-        });
+        reject(new Error(message));
+        return;
       }
-    );
+      resolve(response && typeof response === 'object' ? response : {});
+    });
   });
 }
 
 const resetScanStatus = document.getElementById('resetScanStatus');
 
-function formatResetSummary(summary) {
-  if (!summary || typeof summary !== 'object') return '';
-
-  const parts = [];
-  if (Number.isInteger(summary.activeBefore)) {
-    parts.push(`aktywne: ${summary.activeBefore}`);
-  }
-  if (Number.isInteger(summary.resetCount)) {
-    parts.push(`oznaczone stop: ${summary.resetCount}`);
-  }
-  if (Number.isInteger(summary.tabReloads) || Number.isInteger(summary.tabReloadFailures)) {
-    const ok = Number.isInteger(summary.tabReloads) ? summary.tabReloads : 0;
-    const fail = Number.isInteger(summary.tabReloadFailures) ? summary.tabReloadFailures : 0;
-    parts.push(`reload kart: ${ok}/${ok + fail}`);
-  }
-  if (Number.isInteger(summary.uniqueWindowsReloaded)) {
-    parts.push(`okna reload: ${summary.uniqueWindowsReloaded}`);
-  }
-  if (Number.isInteger(summary.windowReloadFailures) && summary.windowReloadFailures > 0) {
-    parts.push(`bledy okien: ${summary.windowReloadFailures}`);
-  }
-
-  if (parts.length === 0) return '';
-  return `Reset -> ${parts.join(', ')}`;
-}
-
-function renderResetScanStatus(state = {}) {
+function setRunStatus(text, isError = false) {
   if (!resetScanStatus) return;
-
-  if (state.loading) {
-    resetScanStatus.textContent = 'Resetuje, skanuje i uruchamiam...';
-    return;
-  }
-
-  if (state.error) {
-    resetScanStatus.textContent = `Blad: ${state.error}`;
-    return;
-  }
-
-  const response = state.response;
-  if (!response) {
-    return;
-  }
-
-  const rows = Array.isArray(response.results) ? response.results : [];
-  const unresolvedCount = rows.filter((row) => {
-    const action = row?.action || '';
-    return action !== 'started' && action !== 'resumed' && action !== 'final_stage_already_sent';
-  }).length;
-
-  if (!response.success && response.error) {
-    resetScanStatus.textContent = `Blad: ${response.error}`;
-    return;
-  }
-
-  const startedTabs = Number.isInteger(response?.startedTabs)
-    ? response.startedTabs
-    : (Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0);
-  const scanText = `Skan: ${response.scannedTabs}, uruchomione: ${startedTabs}, niewystartowane: ${unresolvedCount}`;
-  const resetText = formatResetSummary(response.resetSummary);
-  resetScanStatus.textContent = resetText
-    ? `${scanText}\n${resetText}`
-    : scanText;
+  resetScanStatus.textContent = text;
+  resetScanStatus.style.color = isError ? '#b91c1c' : '#374151';
+  resetScanStatus.style.borderColor = isError ? '#fecaca' : '#e5e7eb';
+  resetScanStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
 }
 
-async function executeResetScanFromPopup(button, options = {}) {
+async function executeRunAnalysisFromPopup(button, options = {}) {
   if (!button) return;
-  const originalHtml = button.innerHTML;
-  const loadingText = typeof options.loadingText === 'string' && options.loadingText.trim()
-    ? options.loadingText.trim()
-    : 'Resetuje...';
 
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = loadingText;
-  renderResetScanStatus({ loading: true });
+  button.textContent = 'Uruchamiam...';
+  setRunStatus('Uruchamiam analizy...');
 
   try {
-    const response = await sendResetScanStartRequest(options);
-    renderResetScanStatus({ response });
+    const payload = {
+      type: 'RUN_ANALYSIS',
+      origin: typeof options?.origin === 'string' ? options.origin : 'popup-run-analysis'
+    };
+    if (Number.isInteger(options?.windowId)) {
+      payload.windowId = options.windowId;
+    }
+
+    const response = await sendRuntimeMessage(payload);
+    if (response?.success === false) {
+      setRunStatus(`Blad: ${response.error || 'Nie udalo sie uruchomic analiz.'}`, true);
+      return;
+    }
+
+    setRunStatus('Uruchomiono analizy.');
   } catch (error) {
-    renderResetScanStatus({ error: error?.message || String(error) });
+    setRunStatus(`Blad: ${error?.message || String(error)}`, true);
   } finally {
     button.disabled = false;
     button.innerHTML = originalHtml;
   }
 }
 
-// Main action: hard reset + run through all tabs
+function getResumeAllSummary(response) {
+  const scannedTabs = Number.isInteger(response?.scannedTabs) ? response.scannedTabs : 0;
+  const startedTabs = Number.isInteger(response?.startedTabs)
+    ? response.startedTabs
+    : (Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0);
+  const rows = Array.isArray(response?.results) ? response.results : [];
+  const unresolvedCount = rows.filter((row) => {
+    const action = row?.action || '';
+    return action !== 'started' && action !== 'resumed' && action !== 'final_stage_already_sent';
+  }).length;
+
+  return `Skan: ${scannedTabs}, uruchomione: ${startedTabs}, niewystartowane: ${unresolvedCount}`;
+}
+
+async function executeResumeAllFromPopup(button, options = {}) {
+  if (!button) return;
+
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  button.textContent = 'Wznawiam...';
+  setRunStatus('Wznawiam wszystkie procesy...');
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
+      origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all'
+    });
+
+    if (!response || Object.keys(response).length === 0) {
+      setRunStatus('Polecenie wznowienia zostalo wyslane.');
+      return;
+    }
+
+    if (response.success === false) {
+      setRunStatus(`Blad: ${response.error || 'Nie udalo sie wznowic procesow.'}`, true);
+      return;
+    }
+
+    setRunStatus(getResumeAllSummary(response));
+  } catch (error) {
+    setRunStatus(`Blad: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
+// Main action: run analysis flow from popup
 const runBtn = document.getElementById('runBtn');
 if (runBtn) {
-  runBtn.addEventListener('click', async () => {
-    await executeResetScanFromPopup(runBtn, {
-      origin: 'popup-run-hard-reset',
-      loadingText: 'Resetuje...'
+  runBtn.addEventListener('click', () => {
+    withActiveWindowContext(({ windowId }) => {
+      void executeRunAnalysisFromPopup(runBtn, {
+        windowId,
+        origin: 'popup-run-analysis'
+      });
+    });
+  });
+}
+
+// Resume all processes by scanning existing chat tabs
+const resumeAllBtn = document.getElementById('resumeAllBtn');
+if (resumeAllBtn) {
+  resumeAllBtn.addEventListener('click', () => {
+    void executeResumeAllFromPopup(resumeAllBtn, {
+      origin: 'popup-resume-all'
     });
   });
 }
