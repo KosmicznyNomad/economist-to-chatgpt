@@ -2954,6 +2954,17 @@ function getRandomDelay() {
   return Math.floor(Math.random() * (maxDelay - minDelay + 1)) + minDelay;
 }
 
+function generateResponseId(runId = '') {
+  const safeRunId = typeof runId === 'string' && runId.trim()
+    ? runId.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+    : 'run';
+  if (globalThis?.crypto?.randomUUID) {
+    return `${safeRunId}_${globalThis.crypto.randomUUID()}`;
+  }
+  const randomPart = Math.random().toString(36).slice(2, 10);
+  return `${safeRunId}_${Date.now().toString(36)}_${randomPart}`;
+}
+
 async function uploadResponseToCloud(response) {
   if (!CLOUD_UPLOAD.enabled) {
     return { skipped: true, reason: "disabled" };
@@ -2980,6 +2991,8 @@ async function uploadResponseToCloud(response) {
     timestamp: response.timestamp,
     source: response.source,
     analysisType: response.analysisType,
+    runId: response.runId || null,
+    responseId: response.responseId || null,
     savedAt: new Date().toISOString(),
     extensionVersion: chrome.runtime.getManifest().version
   };
@@ -3107,7 +3120,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company', runId = null) {
+async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -3134,12 +3147,16 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     const normalizedRunId = typeof runId === 'string' && runId.trim()
       ? runId.trim()
       : '';
+    const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
+      ? responseId.trim()
+      : generateResponseId(normalizedRunId);
 
     const newResponse = {
       text: responseText,
       timestamp: Date.now(),
       source: source,
-      analysisType: analysisType
+      analysisType: analysisType,
+      responseId: normalizedResponseId
     };
     if (normalizedRunId) {
       newResponse.runId = normalizedRunId;
@@ -3203,7 +3220,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
 // Listener na wiadomości z content scriptu i popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'SAVE_RESPONSE') {
-    saveResponse(message.text, message.source, message.analysisType, message.runId);
+    saveResponse(message.text, message.source, message.analysisType, message.runId, message.responseId);
   } else if (message.type === 'RUN_ANALYSIS') {
     const invocationWindowId = Number.isInteger(message?.windowId)
       ? message.windowId

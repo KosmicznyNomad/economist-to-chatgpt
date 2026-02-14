@@ -1,5 +1,6 @@
 CREATE TABLE IF NOT EXISTS responses (
   id INTEGER PRIMARY KEY AUTOINCREMENT,
+  response_id TEXT,
   run_id TEXT,
   source TEXT,
   analysis_type TEXT,
@@ -13,6 +14,8 @@ CREATE TABLE IF NOT EXISTS responses (
   stage_word_count INTEGER,
   formatted_text TEXT
 );
+CREATE UNIQUE INDEX IF NOT EXISTS idx_responses_response_id
+  ON responses(response_id);
 
 CREATE TABLE IF NOT EXISTS four_gate_records (
   id INTEGER PRIMARY KEY AUTOINCREMENT,

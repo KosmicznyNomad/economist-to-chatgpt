@@ -113,3 +113,29 @@ const userMsgs = document.querySelectorAll('[data-message-author-role="user"]');
 console.log('User messages:', userMsgs.length);
 ```
 
+## Relay architecture (backend -> GitHub Actions -> monitoring)
+
+Current recommended production flow:
+
+`extension (lastResponse only) -> backend POST /responses -> repository_dispatch -> GitHub Actions -> monitoring API`
+
+New files:
+
+- `.github/workflows/relay-responses.yml`
+- `.github/scripts/relay_repository_dispatch.py`
+
+GitHub Secrets / Variables for workflow:
+
+- `MONITORING_API_URL` (secret)
+- `MONITORING_API_KEY` (secret, optional)
+- `MONITORING_API_KEY_HEADER` (variable, default `Authorization`)
+- `MONITORING_API_REQUIRED` (variable: `true/false`)
+- `MONITORING_TIMEOUT_SEC`, `MONITORING_RETRY_COUNT`, `MONITORING_BACKOFF_SEC` (variables, optional)
+
+Backend env required to publish `repository_dispatch`:
+
+- `GITHUB_DISPATCH_ENABLED=true`
+- `GITHUB_DISPATCH_TOKEN=<token>`
+- `GITHUB_DISPATCH_REPOSITORY=owner/repo`
+- optional: `GITHUB_DISPATCH_EVENT_TYPE=analysis_response`
+

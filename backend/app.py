@@ -3,17 +3,33 @@ import os
 import sqlite3
 import json
 import re
+import uuid
+from urllib.error import HTTPError, URLError
 from urllib.parse import urlencode
-from urllib.request import urlopen
+from urllib.request import Request, urlopen
 from datetime import datetime, timezone
 
-APP_VERSION = "0.1.0"
+APP_VERSION = "0.2.0"
+
+
+def env_flag(name, default=False):
+    raw = os.getenv(name)
+    if raw is None:
+        return default
+    return str(raw).strip().lower() in {"1", "true", "yes", "on"}
 
 DB_PATH = os.getenv("DB_PATH", "data/responses.db")
 API_KEY = os.getenv("API_KEY", "")
 API_KEY_HEADER = os.getenv("API_KEY_HEADER", "Authorization")
 TWELVEDATA_API_KEY = os.getenv("TWELVEDATA_API_KEY", "")
 TWELVEDATA_BASE_URL = os.getenv("TWELVEDATA_BASE_URL", "https://api.twelvedata.com")
+GITHUB_DISPATCH_ENABLED = env_flag("GITHUB_DISPATCH_ENABLED", False)
+GITHUB_DISPATCH_REQUIRED = env_flag("GITHUB_DISPATCH_REQUIRED", False)
+GITHUB_DISPATCH_TOKEN = os.getenv("GITHUB_DISPATCH_TOKEN", "")
+GITHUB_DISPATCH_REPOSITORY = os.getenv("GITHUB_DISPATCH_REPOSITORY", os.getenv("GITHUB_REPOSITORY", ""))
+GITHUB_DISPATCH_EVENT_TYPE = os.getenv("GITHUB_DISPATCH_EVENT_TYPE", "analysis_response")
+GITHUB_API_BASE_URL = os.getenv("GITHUB_API_BASE_URL", "https://api.github.com").rstrip("/")
+GITHUB_DISPATCH_TIMEOUT_SEC = int(os.getenv("GITHUB_DISPATCH_TIMEOUT_SEC", "15"))
 
 app = Flask(__name__)
 
@@ -81,6 +97,7 @@ def ensure_db():
         """
         CREATE TABLE IF NOT EXISTS responses (
             id INTEGER PRIMARY KEY AUTOINCREMENT,
+            response_id TEXT,
             run_id TEXT,
             source TEXT,
             analysis_type TEXT,
@@ -96,7 +113,9 @@ def ensure_db():
         )
         """
     )
+    ensure_column(conn, "responses", "response_id", "TEXT")
     ensure_column(conn, "responses", "formatted_text", "TEXT")
+    conn.execute("CREATE UNIQUE INDEX IF NOT EXISTS idx_responses_response_id ON responses(response_id)")
     conn.execute(
         """
         CREATE TABLE IF NOT EXISTS four_gate_records (
@@ -267,6 +286,82 @@ def authorize(request_obj):
     return provided == API_KEY
 
 
+def clean_optional_string(value):
+    if value is None:
+        return None
+    if not isinstance(value, str):
+        return str(value)
+    trimmed = value.strip()
+    return trimmed or None
+
+
+def dispatch_repository_event(client_payload):
+    if not GITHUB_DISPATCH_ENABLED:
+        return {"skipped": True, "reason": "dispatch_disabled"}
+    if not GITHUB_DISPATCH_TOKEN:
+        return {"skipped": True, "reason": "missing_dispatch_token"}
+    if not GITHUB_DISPATCH_REPOSITORY:
+        return {"skipped": True, "reason": "missing_dispatch_repository"}
+
+    url = f"{GITHUB_API_BASE_URL}/repos/{GITHUB_DISPATCH_REPOSITORY}/dispatches"
+    body = json.dumps(
+        {
+            "event_type": GITHUB_DISPATCH_EVENT_TYPE,
+            "client_payload": client_payload,
+        }
+    ).encode("utf-8")
+    request_obj = Request(
+        url,
+        data=body,
+        headers={
+            "Authorization": f"Bearer {GITHUB_DISPATCH_TOKEN}",
+            "Accept": "application/vnd.github+json",
+            "X-GitHub-Api-Version": "2022-11-28",
+            "Content-Type": "application/json",
+            "User-Agent": "economist-to-chatgpt-backend",
+        },
+        method="POST",
+    )
+
+    try:
+        with urlopen(request_obj, timeout=GITHUB_DISPATCH_TIMEOUT_SEC) as response:
+            return {
+                "success": True,
+                "status": response.status,
+                "eventType": GITHUB_DISPATCH_EVENT_TYPE,
+                "repository": GITHUB_DISPATCH_REPOSITORY,
+            }
+    except HTTPError as error:
+        details = ""
+        try:
+            details = error.read().decode("utf-8")
+        except Exception:
+            details = str(error)
+        return {
+            "success": False,
+            "status": error.code,
+            "error": details,
+            "eventType": GITHUB_DISPATCH_EVENT_TYPE,
+            "repository": GITHUB_DISPATCH_REPOSITORY,
+        }
+    except URLError as error:
+        return {
+            "success": False,
+            "status": None,
+            "error": str(error.reason),
+            "eventType": GITHUB_DISPATCH_EVENT_TYPE,
+            "repository": GITHUB_DISPATCH_REPOSITORY,
+        }
+    except Exception as error:
+        return {
+            "success": False,
+            "status": None,
+            "error": str(error),
+            "eventType": GITHUB_DISPATCH_EVENT_TYPE,
+            "repository": GITHUB_DISPATCH_REPOSITORY,
+        }
+
+
 @app.route("/health", methods=["GET"])
 def health():
     return jsonify({"status": "ok", "version": APP_VERSION})
@@ -283,17 +378,20 @@ def save_response():
     if not text:
         return jsonify({"error": "text_required"}), 400
 
-    run_id = payload.get("runId")
-    source = payload.get("source")
-    analysis_type = payload.get("analysisType")
+    run_id = clean_optional_string(payload.get("runId"))
+    response_id = clean_optional_string(payload.get("responseId")) or str(uuid.uuid4())
+    source = clean_optional_string(payload.get("source"))
+    analysis_type = clean_optional_string(payload.get("analysisType"))
     created_at = parse_timestamp(payload.get("timestamp"))
     received_at = datetime.now(timezone.utc).isoformat()
 
     stage = payload.get("stage") or {}
-    stage_index = stage.get("index")
-    stage_name = stage.get("name")
-    stage_duration_ms = stage.get("durationMs")
-    stage_word_count = stage.get("wordCount")
+    if not isinstance(stage, dict):
+        stage = {}
+    stage_index = stage.get("index") if isinstance(stage.get("index"), int) else None
+    stage_name = clean_optional_string(stage.get("name"))
+    stage_duration_ms = stage.get("durationMs") if isinstance(stage.get("durationMs"), int) else None
+    stage_word_count = stage.get("wordCount") if isinstance(stage.get("wordCount"), int) else None
 
     text_length = len(text)
     formatted_text = format_four_gate_line(text)
@@ -303,7 +401,8 @@ def save_response():
     cursor = conn.cursor()
     cursor.execute(
         """
-        INSERT INTO responses (
+        INSERT OR IGNORE INTO responses (
+            response_id,
             run_id,
             source,
             analysis_type,
@@ -316,9 +415,10 @@ def save_response():
             stage_duration_ms,
             stage_word_count,
             formatted_text
-        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+        ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         """,
         (
+            response_id,
             run_id,
             source,
             analysis_type,
@@ -333,8 +433,17 @@ def save_response():
             formatted_text
         )
     )
-    row_id = cursor.lastrowid
-    if four_gate_parts:
+    inserted = cursor.rowcount > 0
+    if inserted:
+        row_id = cursor.lastrowid
+    else:
+        existing = conn.execute(
+            "SELECT id FROM responses WHERE response_id = ?",
+            (response_id,)
+        ).fetchone()
+        row_id = existing[0] if existing else None
+
+    if inserted and four_gate_parts and row_id is not None:
         columns = ", ".join(FOUR_GATE_TABLE_COLUMNS)
         placeholders = ", ".join(["?"] * len(FOUR_GATE_TABLE_COLUMNS))
         cursor.execute(
@@ -353,7 +462,51 @@ def save_response():
     conn.commit()
     conn.close()
 
-    return jsonify({"ok": True, "id": row_id})
+    dispatch_payload = {
+        "responseId": response_id,
+        "runId": run_id,
+        "source": source,
+        "analysisType": analysis_type,
+        "text": text,
+        "textLength": text_length,
+        "timestamp": created_at,
+        "receivedAt": received_at,
+        "savedAt": clean_optional_string(payload.get("savedAt")),
+        "extensionVersion": clean_optional_string(payload.get("extensionVersion")),
+        "backendResponseDbId": row_id,
+        "backendDuplicate": not inserted,
+    }
+    if stage:
+        dispatch_payload["stage"] = {
+            "index": stage_index,
+            "name": stage_name,
+            "durationMs": stage_duration_ms,
+            "wordCount": stage_word_count,
+        }
+    if isinstance(payload.get("meta"), dict):
+        dispatch_payload["meta"] = payload.get("meta")
+
+    dispatch_result = dispatch_repository_event(dispatch_payload)
+    dispatch_failed = (
+        GITHUB_DISPATCH_ENABLED
+        and not dispatch_result.get("success")
+        and not dispatch_result.get("skipped")
+    )
+    status_code = 200
+    ok = True
+    if dispatch_failed and GITHUB_DISPATCH_REQUIRED:
+        ok = False
+        status_code = 502
+
+    return jsonify(
+        {
+            "ok": ok,
+            "id": row_id,
+            "responseId": response_id,
+            "duplicate": not inserted,
+            "dispatch": dispatch_result,
+        }
+    ), status_code
 
 
 @app.route("/responses/latest", methods=["GET"])

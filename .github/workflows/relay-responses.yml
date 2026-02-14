@@ -1,0 +1,48 @@
+name: Relay Responses
+
+on:
+  repository_dispatch:
+    types:
+      - analysis_response
+
+permissions:
+  contents: read
+  actions: write
+
+jobs:
+  relay:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Validate, dedupe, and relay payload
+        id: relay
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+          MONITORING_API_URL: ${{ secrets.MONITORING_API_URL }}
+          MONITORING_API_KEY: ${{ secrets.MONITORING_API_KEY }}
+          MONITORING_API_KEY_HEADER: ${{ vars.MONITORING_API_KEY_HEADER }}
+          MONITORING_API_REQUIRED: ${{ vars.MONITORING_API_REQUIRED }}
+          MONITORING_TIMEOUT_SEC: ${{ vars.MONITORING_TIMEOUT_SEC }}
+          MONITORING_RETRY_COUNT: ${{ vars.MONITORING_RETRY_COUNT }}
+          MONITORING_BACKOFF_SEC: ${{ vars.MONITORING_BACKOFF_SEC }}
+        run: python .github/scripts/relay_repository_dispatch.py
+
+      - name: Upload run trace
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.relay.outputs.trace_artifact_name || format('relay-trace-{0}', github.run_id) }}
+          path: ${{ steps.relay.outputs.artifact_dir || '.relay' }}
+          if-no-files-found: warn
+          retention-days: 90
+
+      - name: Upload idempotency marker
+        if: steps.relay.outputs.write_marker == 'true'
+        uses: actions/upload-artifact@v4
+        with:
+          name: ${{ steps.relay.outputs.marker_artifact_name }}
+          path: ${{ steps.relay.outputs.marker_file }}
+          if-no-files-found: error
+          retention-days: 90

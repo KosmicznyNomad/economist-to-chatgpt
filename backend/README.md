@@ -1,64 +1,120 @@
-# Backend (remote storage for last response)
+# Backend (remote storage + relay to GitHub Actions)
 
-Minimalny backend Flask + SQLite. Zapisuje odpowiedzi do tabeli `responses`.
+Flask + SQLite backend used as a single entry point for extension responses.
 
-## Uruchomienie lokalne
+## Integration flow
+
+`extension -> POST /responses -> repository_dispatch -> GitHub Actions -> monitoring API`
+
+The extension sends only the final `lastResponse` plus metadata.
+Backend stores the response, then publishes a `repository_dispatch` event.
+GitHub Actions performs validation, idempotency (`runId + responseId`), monitoring delivery, and audit artifacts.
+
+## Local run
 
 ```powershell
 cd economist-to-chatgpt\backend
 python -m venv .venv
 .\.venv\Scripts\Activate.ps1
 pip install -r requirements.txt
-$env:API_KEY = "twoj-klucz"
-$env:DB_PATH = "data/responses.db"
+
+$env:API_KEY = "your-key"                         # optional
+$env:DB_PATH = "data/responses.db"                # optional
+
+# Optional GitHub relay:
+$env:GITHUB_DISPATCH_ENABLED = "true"
+$env:GITHUB_DISPATCH_TOKEN = "ghp_..."
+$env:GITHUB_DISPATCH_REPOSITORY = "owner/repo"
+$env:GITHUB_DISPATCH_EVENT_TYPE = "analysis_response"
+
 python app.py
 ```
 
-Domyślny URL: `http://localhost:8787/responses`
+Default URL: `http://localhost:8787/responses`
 
 ## API
 
-- `POST /responses` — zapis odpowiedzi
-- `GET /responses/latest` — ostatni wpis (opcjonalnie)
-- `GET /market/daily` — dzienne zmiany spółek z bazy (wymaga Twelve Data)
+- `POST /responses` - save final response, optionally trigger GitHub `repository_dispatch`
+- `GET /responses/latest` - latest stored response
+- `GET /market/daily` - daily stock changes from DB symbols (Twelve Data)
 - `GET /health`
 
-### Przykładowy payload (z rozszerzenia)
+### Example payload (`POST /responses`)
 
 ```json
 {
-  "text": "...",
+  "text": "final response from ChatGPT",
   "timestamp": 1737900930000,
   "source": "Article title",
   "analysisType": "company",
-  "runId": "run_..."
+  "runId": "run_20260214_abc",
+  "responseId": "run_20260214_abc_4d7264db-9b5f-4e40-a5ff-5fba00dc50db",
+  "savedAt": "2026-02-14T13:42:10.213Z",
+  "extensionVersion": "1.0.0"
+}
+```
+
+### Example response
+
+```json
+{
+  "ok": true,
+  "id": 123,
+  "responseId": "run_20260214_abc_4d7264db-9b5f-4e40-a5ff-5fba00dc50db",
+  "duplicate": false,
+  "dispatch": {
+    "success": true,
+    "status": 204,
+    "eventType": "analysis_response",
+    "repository": "owner/repo"
+  }
 }
 ```
 
 ## Auth
 
-Jeśli ustawisz `API_KEY`, backend wymaga nagłówka zgodnego z `API_KEY_HEADER` (domyślnie `Authorization: Bearer <key>`).
+If `API_KEY` is set, backend requires header defined by `API_KEY_HEADER`.
+Default: `Authorization: Bearer <API_KEY>`.
 
-## Dane giełdowe (Twelve Data)
+## Environment variables
 
-Endpoint `/market/daily` korzysta z Twelve Data. Ustaw zmienną środowiskową:
+### Core
 
-```
-TWELVEDATA_API_KEY=twoj-klucz
-```
+- `DB_PATH` (default: `data/responses.db`)
+- `API_KEY` (optional)
+- `API_KEY_HEADER` (default: `Authorization`)
 
-Tickery są parsowane z pola "Spółka" (np. `Richemont (CFR:SW)`).
+### GitHub relay
 
-## Tabela
+- `GITHUB_DISPATCH_ENABLED` (`true/false`, default: `false`)
+- `GITHUB_DISPATCH_REQUIRED` (`true/false`, default: `false`)
+- `GITHUB_DISPATCH_TOKEN` (GitHub token with permission to call repository dispatch)
+- `GITHUB_DISPATCH_REPOSITORY` (`owner/repo`, fallback: `GITHUB_REPOSITORY`)
+- `GITHUB_DISPATCH_EVENT_TYPE` (default: `analysis_response`)
+- `GITHUB_API_BASE_URL` (default: `https://api.github.com`)
+- `GITHUB_DISPATCH_TIMEOUT_SEC` (default: `15`)
 
-`four_gate_records` - ustrukturyzowany zapis linii Four-Gate (15 pol) powiazany z `responses.id`.
+If `GITHUB_DISPATCH_REQUIRED=true` and dispatch fails, backend returns `502` (response is still stored in DB).
 
-`responses` — struktura w `schema.sql`.
+### Market data
 
-## Integracja z rozszerzeniem
+- `TWELVEDATA_API_KEY` for `/market/daily`
+- `TWELVEDATA_BASE_URL` (default: `https://api.twelvedata.com`)
 
-1. Ustaw `CLOUD_UPLOAD.url` w `background.js` na adres backendu (domyslnie `http://localhost:8787/responses`).
-2. Dodaj do `manifest.json` odpowiedni wpis w `host_permissions`, np. `http://localhost:8787/*` (lub docelowa domena).
-3. Opcjonalnie ustaw `API_KEY` i uzupelnij `CLOUD_UPLOAD.apiKey` w `background.js`.
+## Database
 
-Backend przyjmuje tylko koncowa odpowiedz (stage responses sa zapisywane lokalnie).
+`responses` table now includes:
+
+- `response_id` (unique index for dedupe/correlation)
+- `run_id`, `source`, `analysis_type`, `text`, `formatted_text`, stage metadata
+
+`four_gate_records` keeps parsed Four-Gate rows linked by `response_id` (DB FK).
+
+## Extension integration
+
+1. Set `CLOUD_UPLOAD.url` in `background.js` to backend URL (`http://localhost:8787/responses`).
+2. Set `CLOUD_UPLOAD.enabled = true`.
+3. Add backend host to `manifest.json` `host_permissions`.
+4. Optionally set backend auth key (`API_KEY` + `CLOUD_UPLOAD.apiKey`).
+
+Extension sends only the final chain output (`lastResponse`), not intermediate stage responses.
