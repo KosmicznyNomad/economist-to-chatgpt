@@ -1374,189 +1374,239 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     console.warn('[auto-resume] Nie udalo sie aktywowac karty przed resume:', error?.message || error);
   }
 
-  let results;
-  let result;
-  let executionPayload = payload;
-  let executionPromptChain = restOfPrompts;
-  let executionPromptOffset = normalizedStartIndex;
-  let autoRecoveryAttempt = 0;
+  const executeResumeFlow = async () => {
+    let results;
+    let result;
+    let executionPayload = payload;
+    let executionPromptChain = restOfPrompts;
+    let executionPromptOffset = normalizedStartIndex;
+    let autoRecoveryAttempt = 0;
 
-  while (true) {
-    try {
-      results = await chrome.scripting.executeScript({
-        target: { tabId },
-        function: injectToChat,
-        args: [
-          executionPayload,
-          executionPromptChain,
-          WAIT_FOR_TEXTAREA_MS,
-          WAIT_FOR_RESPONSE_MS,
-          RETRY_INTERVAL_MS,
-          processTitle,
-          'company',
-          processId,
-          {
-            promptOffset: executionPromptOffset,
-            totalPromptsOverride: PROMPTS_COMPANY.length
-          },
-          {
-            enabled: true,
-            attempt: autoRecoveryAttempt,
-            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-            delayMs: AUTO_RECOVERY_DELAY_MS,
-            reasons: [...AUTO_RECOVERY_REASONS]
-          }
-        ]
-      });
-    } catch (error) {
-      await upsertProcess(processId, {
-        status: 'failed',
-        needsAction: false,
-        statusText: 'Blad executeScript auto-resume',
-        reason: 'auto_resume_execute_script_failed',
-        error: error?.message || String(error),
-        autoRecovery: null,
-        finishedAt: Date.now(),
-        timestamp: Date.now()
-      });
-      return { success: false, error: 'inject_failed' };
-    }
+    while (true) {
+      try {
+        results = await chrome.scripting.executeScript({
+          target: { tabId },
+          function: injectToChat,
+          args: [
+            executionPayload,
+            executionPromptChain,
+            WAIT_FOR_TEXTAREA_MS,
+            WAIT_FOR_RESPONSE_MS,
+            RETRY_INTERVAL_MS,
+            processTitle,
+            'company',
+            processId,
+            {
+              promptOffset: executionPromptOffset,
+              totalPromptsOverride: PROMPTS_COMPANY.length
+            },
+            {
+              enabled: true,
+              attempt: autoRecoveryAttempt,
+              maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+              delayMs: AUTO_RECOVERY_DELAY_MS,
+              reasons: [...AUTO_RECOVERY_REASONS]
+            }
+          ]
+        });
+      } catch (error) {
+        await upsertProcess(processId, {
+          status: 'failed',
+          needsAction: false,
+          statusText: 'Blad executeScript auto-resume',
+          reason: 'auto_resume_execute_script_failed',
+          error: error?.message || String(error),
+          autoRecovery: null,
+          finishedAt: Date.now(),
+          timestamp: Date.now()
+        });
+        return { success: false, error: 'inject_failed' };
+      }
 
-    if (!results || results.length === 0) {
-      await upsertProcess(processId, {
-        status: 'failed',
-        needsAction: false,
-        statusText: 'Brak wyniku executeScript auto-resume',
-        reason: 'missing_execute_result',
-        autoRecovery: null,
-        finishedAt: Date.now(),
-        timestamp: Date.now()
-      });
-      return { success: false, error: 'missing_execute_result' };
-    }
+      if (!results || results.length === 0) {
+        await upsertProcess(processId, {
+          status: 'failed',
+          needsAction: false,
+          statusText: 'Brak wyniku executeScript auto-resume',
+          reason: 'missing_execute_result',
+          autoRecovery: null,
+          finishedAt: Date.now(),
+          timestamp: Date.now()
+        });
+        return { success: false, error: 'missing_execute_result' };
+      }
 
-    result = results?.[0]?.result;
-    const handoff = result?.error === 'auto_recovery_required' ? result?.autoRecovery : null;
-    if (!handoff || autoRecoveryAttempt >= AUTO_RECOVERY_MAX_ATTEMPTS) {
-      break;
-    }
+      result = results?.[0]?.result;
+      const handoff = result?.error === 'auto_recovery_required' ? result?.autoRecovery : null;
+      if (!handoff || autoRecoveryAttempt >= AUTO_RECOVERY_MAX_ATTEMPTS) {
+        break;
+      }
 
-    autoRecoveryAttempt += 1;
-    const nextPromptOffset = Number.isInteger(handoff.promptOffset) && handoff.promptOffset >= 0
-      ? handoff.promptOffset
-      : executionPromptOffset;
-    const nextRemainingPrompts = Array.isArray(handoff.remainingPrompts)
-      ? handoff.remainingPrompts
-      : executionPromptChain;
-    const recoveryReasonBase = typeof handoff.reason === 'string' && handoff.reason.trim()
-      ? handoff.reason.trim()
-      : 'unknown';
-    const recoveryReason = `auto_recovery_${recoveryReasonBase}`;
-    const recoveryCurrentPrompt = Number.isInteger(handoff.currentPrompt) && handoff.currentPrompt >= 0
-      ? handoff.currentPrompt
-      : (nextPromptOffset > 0 ? nextPromptOffset : executionPromptOffset);
-    const recoveryStageIndex = Number.isInteger(handoff.stageIndex)
-      ? handoff.stageIndex
-      : (recoveryCurrentPrompt > 0 ? (recoveryCurrentPrompt - 1) : null);
+      autoRecoveryAttempt += 1;
+      const nextPromptOffset = Number.isInteger(handoff.promptOffset) && handoff.promptOffset >= 0
+        ? handoff.promptOffset
+        : executionPromptOffset;
+      const nextRemainingPrompts = Array.isArray(handoff.remainingPrompts)
+        ? handoff.remainingPrompts
+        : executionPromptChain;
+      const recoveryReasonBase = typeof handoff.reason === 'string' && handoff.reason.trim()
+        ? handoff.reason.trim()
+        : 'unknown';
+      const recoveryReason = `auto_recovery_${recoveryReasonBase}`;
+      const recoveryCurrentPrompt = Number.isInteger(handoff.currentPrompt) && handoff.currentPrompt >= 0
+        ? handoff.currentPrompt
+        : (nextPromptOffset > 0 ? nextPromptOffset : executionPromptOffset);
+      const recoveryStageIndex = Number.isInteger(handoff.stageIndex)
+        ? handoff.stageIndex
+        : (recoveryCurrentPrompt > 0 ? (recoveryCurrentPrompt - 1) : null);
 
-    const recoveryPatch = {
-      title: processTitle,
-      analysisType: 'company',
-      status: 'running',
-      needsAction: false,
-      currentPrompt: recoveryCurrentPrompt,
-      totalPrompts: PROMPTS_COMPANY.length,
-      statusText: `Auto-reload ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
-      reason: recoveryReason,
-      autoRecovery: {
-        attempt: autoRecoveryAttempt,
-        maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-        delayMs: AUTO_RECOVERY_DELAY_MS,
-        reason: recoveryReasonBase,
-        currentPrompt: recoveryCurrentPrompt,
-        ...(Number.isInteger(recoveryStageIndex) ? { stageIndex: recoveryStageIndex } : {}),
-        updatedAt: Date.now()
-      },
-      timestamp: Date.now()
-    };
-    if (Number.isInteger(recoveryStageIndex)) {
-      recoveryPatch.stageIndex = recoveryStageIndex;
-      recoveryPatch.stageName = `Prompt ${recoveryStageIndex + 1}`;
-    }
-    await upsertProcess(processId, recoveryPatch);
-
-    const reloadResult = await forceReloadTab(tabId, {
-      timeoutMs: AUTO_RECOVERY_RELOAD_TIMEOUT_MS,
-      bypassCache: true
-    });
-    if (!reloadResult.ok) {
-      console.warn('[auto-resume] Nie udalo sie potwierdzic reloadu karty:', reloadResult);
-    }
-    await sleep(AUTO_RECOVERY_DELAY_MS);
-
-    const detectedRecoveryPoint = await detectCompanyRecoveryPointFromLastMessage(
-      tabId,
-      nextPromptOffset,
-      companyPromptCatalog
-    );
-    const alignedState = alignExecutionStateWithDetectedPrompt(
-      nextPromptOffset,
-      nextRemainingPrompts,
-      detectedRecoveryPoint
-    );
-
-    if (alignedState.applied) {
-      const syncedCurrentPrompt = Number.isInteger(alignedState.promptOffset) && alignedState.promptOffset >= 0
-        ? alignedState.promptOffset + 1
-        : recoveryCurrentPrompt;
-      const syncedStageIndex = syncedCurrentPrompt > 0 ? (syncedCurrentPrompt - 1) : null;
-      await upsertProcess(processId, {
+      const recoveryPatch = {
         title: processTitle,
         analysisType: 'company',
         status: 'running',
         needsAction: false,
-        currentPrompt: syncedCurrentPrompt,
+        currentPrompt: recoveryCurrentPrompt,
         totalPrompts: PROMPTS_COMPANY.length,
-        ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
-        ...(syncedCurrentPrompt > 0 ? { stageName: `Prompt ${syncedCurrentPrompt}` } : {}),
-        statusText: `Auto-recovery sync: prompt ${syncedCurrentPrompt}`,
-        reason: 'auto_recovery_sync_last_message',
+        statusText: `Auto-reload ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
+        reason: recoveryReason,
         autoRecovery: {
           attempt: autoRecoveryAttempt,
           maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
           delayMs: AUTO_RECOVERY_DELAY_MS,
           reason: recoveryReasonBase,
-          currentPrompt: syncedCurrentPrompt,
-          ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+          currentPrompt: recoveryCurrentPrompt,
+          ...(Number.isInteger(recoveryStageIndex) ? { stageIndex: recoveryStageIndex } : {}),
           updatedAt: Date.now()
         },
         timestamp: Date.now()
+      };
+      if (Number.isInteger(recoveryStageIndex)) {
+        recoveryPatch.stageIndex = recoveryStageIndex;
+        recoveryPatch.stageName = `Prompt ${recoveryStageIndex + 1}`;
+      }
+      await upsertProcess(processId, recoveryPatch);
+
+      const reloadResult = await forceReloadTab(tabId, {
+        timeoutMs: AUTO_RECOVERY_RELOAD_TIMEOUT_MS,
+        bypassCache: true
       });
+      if (!reloadResult.ok) {
+        console.warn('[auto-resume] Nie udalo sie potwierdzic reloadu karty:', reloadResult);
+      }
+      await sleep(AUTO_RECOVERY_DELAY_MS);
+
+      const detectedRecoveryPoint = await detectCompanyRecoveryPointFromLastMessage(
+        tabId,
+        nextPromptOffset,
+        companyPromptCatalog
+      );
+      const alignedState = alignExecutionStateWithDetectedPrompt(
+        nextPromptOffset,
+        nextRemainingPrompts,
+        detectedRecoveryPoint
+      );
+
+      if (alignedState.applied) {
+        const syncedCurrentPrompt = Number.isInteger(alignedState.promptOffset) && alignedState.promptOffset >= 0
+          ? alignedState.promptOffset + 1
+          : recoveryCurrentPrompt;
+        const syncedStageIndex = syncedCurrentPrompt > 0 ? (syncedCurrentPrompt - 1) : null;
+        await upsertProcess(processId, {
+          title: processTitle,
+          analysisType: 'company',
+          status: 'running',
+          needsAction: false,
+          currentPrompt: syncedCurrentPrompt,
+          totalPrompts: PROMPTS_COMPANY.length,
+          ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+          ...(syncedCurrentPrompt > 0 ? { stageName: `Prompt ${syncedCurrentPrompt}` } : {}),
+          statusText: `Auto-recovery sync: prompt ${syncedCurrentPrompt}`,
+          reason: 'auto_recovery_sync_last_message',
+          autoRecovery: {
+            attempt: autoRecoveryAttempt,
+            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+            delayMs: AUTO_RECOVERY_DELAY_MS,
+            reason: recoveryReasonBase,
+            currentPrompt: syncedCurrentPrompt,
+            ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
+            updatedAt: Date.now()
+          },
+          timestamp: Date.now()
+        });
+      }
+
+      executionPayload = '';
+      executionPromptChain = alignedState.remainingPrompts;
+      executionPromptOffset = alignedState.promptOffset;
     }
 
-    executionPayload = '';
-    executionPromptChain = alignedState.remainingPrompts;
-    executionPromptOffset = alignedState.promptOffset;
+    if (result?.success) {
+      return {
+        success: true,
+        processId
+      };
+    }
+
+    await upsertProcess(processId, {
+      status: 'failed',
+      needsAction: false,
+      statusText: 'Auto-resume nieudany',
+      reason: 'auto_resume_failed',
+      error: typeof result?.error === 'string' ? result.error : 'Unknown auto-resume error',
+      autoRecovery: null,
+      finishedAt: Date.now(),
+      timestamp: Date.now()
+    });
+    return { success: false, error: 'resume_failed' };
+  };
+
+  if (options?.detach === true) {
+    console.log('[auto-resume] Dispatch (detached)', {
+      processId,
+      tabId,
+      windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
+      startIndex: normalizedStartIndex,
+      startPromptNumber: normalizedStartIndex + 1
+    });
+
+    void executeResumeFlow()
+      .then((detachedResult) => {
+        if (detachedResult?.success) {
+          console.log('[auto-resume] Detached flow completed', {
+            processId,
+            tabId,
+            success: true
+          });
+          return;
+        }
+        console.warn('[auto-resume] Detached flow finished with failure', {
+          processId,
+          tabId,
+          error: detachedResult?.error || 'unknown_detached_error'
+        });
+      })
+      .catch(async (error) => {
+        console.error('[auto-resume] Detached flow unhandled exception', {
+          processId,
+          tabId,
+          error: error?.message || String(error)
+        });
+        await upsertProcess(processId, {
+          status: 'failed',
+          needsAction: false,
+          statusText: 'Auto-resume exception',
+          reason: 'auto_resume_unhandled_exception',
+          error: error?.message || String(error),
+          autoRecovery: null,
+          finishedAt: Date.now(),
+          timestamp: Date.now()
+        });
+      });
+
+    return { success: true, processId, detached: true };
   }
 
-  if (result?.success) {
-    return {
-      success: true,
-      processId
-    };
-  }
-
-  await upsertProcess(processId, {
-    status: 'failed',
-    needsAction: false,
-    statusText: 'Auto-resume nieudany',
-    reason: 'auto_resume_failed',
-    error: typeof result?.error === 'string' ? result.error : 'Unknown auto-resume error',
-    autoRecovery: null,
-    finishedAt: Date.now(),
-    timestamp: Date.now()
-  });
-  return { success: false, error: 'resume_failed' };
+  return executeResumeFlow();
 }
 
 async function runResetScanStartAllTabs(options = {}) {
@@ -1592,6 +1642,7 @@ async function runResetScanStartAllTabs(options = {}) {
     }
 
     const catalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
+    const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
     const tabsRaw = await chrome.tabs.query({});
     const chatTabs = tabsRaw
       .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
@@ -1605,7 +1656,6 @@ async function runResetScanStartAllTabs(options = {}) {
         .filter((id) => Number.isInteger(id))
     );
 
-    const terminalActions = new Set(['started', 'final_stage_already_sent']);
     const startedAt = Date.now();
     const maxPasses = Number.isInteger(options?.maxPasses) && options.maxPasses > 0
       ? options.maxPasses
@@ -1621,6 +1671,24 @@ async function runResetScanStartAllTabs(options = {}) {
       ? options.passDelayMs
       : RESET_SCAN_PASS_DELAY_MS;
     let passCount = 0;
+    const truncateForLog = (text, maxLen = 180) => {
+      if (typeof text !== 'string') return '';
+      const compact = text.replace(/\s+/g, ' ').trim();
+      if (compact.length <= maxLen) return compact;
+      return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
+    };
+
+    console.log('[reset-scan-start] Init', {
+      origin,
+      promptsCompanyCount: PROMPTS_COMPANY.length,
+      signatureCatalogCount: catalog.length,
+      promptRecordsCount: promptRecords.length,
+      chatTabsCount: chatTabs.length,
+      maxPasses,
+      maxRuntimeMs,
+      passDelayMs,
+      resetSummary
+    });
 
     while (
       pendingTabIds.size > 0 &&
@@ -1661,6 +1729,15 @@ async function runResetScanStartAllTabs(options = {}) {
           lastPass: passCount
         };
 
+        console.log('[reset-scan-start] Inspect tab', {
+          pass: passCount,
+          tabId: row.tabId,
+          windowId: row.windowId,
+          attempt: row.attempts,
+          url: truncateForLog(row.url, 140),
+          title: truncateForLog(row.title, 100)
+        });
+
         if (!Number.isInteger(tab?.id)) {
           row.action = 'inject_failed';
           row.reason = 'invalid_tab_id';
@@ -1689,13 +1766,25 @@ async function runResetScanStartAllTabs(options = {}) {
           row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
           resultsByTabId.set(tab.id, row);
           pendingTabIds.delete(tab.id);
+          console.warn('[reset-scan-start] Skip tab (url outside inwestycje GPT)', {
+            tabId: row.tabId,
+            reason: row.reason
+          });
           continue;
         }
 
         await prepareTabForDetection(tab.id, row.windowId);
+        console.log('[reset-scan-start] Tab prepared for detection', {
+          tabId: row.tabId,
+          windowId: row.windowId
+        });
 
         let extraction = await extractLastUserMessageFromTab(tab.id);
         if (!extraction.success) {
+          console.warn('[reset-scan-start] Extraction failed, retrying', {
+            tabId: row.tabId,
+            error: extraction.error || 'unknown_error'
+          });
           await sleep(350);
           extraction = await extractLastUserMessageFromTab(tab.id);
         }
@@ -1703,34 +1792,130 @@ async function runResetScanStartAllTabs(options = {}) {
           row.action = 'inject_failed';
           row.reason = extraction.error || 'extract_last_user_message_failed';
           resultsByTabId.set(tab.id, row);
+          console.warn('[reset-scan-start] Extraction failed after retry', {
+            tabId: row.tabId,
+            reason: row.reason
+          });
           await sleep(250);
           continue;
         }
 
         row.userMessageCount = Number.isInteger(extraction.count) ? extraction.count : 0;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
+        console.log('[reset-scan-start] Extraction success', {
+          tabId: row.tabId,
+          userMessageCount: row.userMessageCount,
+          lastUserMessageLength: row.lastUserMessageLength,
+          lastUserMessagePreview: truncateForLog(extraction.text, 220)
+        });
 
         const activeProcess = await getActiveProcessForTab(tab.id);
         if (activeProcess) {
           row.progressPromptNumber = Number.isInteger(activeProcess.currentPrompt) ? activeProcess.currentPrompt : null;
           row.progressStageName = typeof activeProcess.stageName === 'string' ? activeProcess.stageName : '';
+          console.log('[reset-scan-start] Active process detected on tab', {
+            tabId: row.tabId,
+            processId: activeProcess.id,
+            status: activeProcess.status,
+            currentPrompt: activeProcess.currentPrompt,
+            totalPrompts: activeProcess.totalPrompts,
+            stageName: activeProcess.stageName || ''
+          });
         }
 
-        if (!extraction.text || extraction.text.trim().length === 0) {
-          row.action = 'no_user_message';
-          row.reason = 'empty_user_message';
-          resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
-          await sleep(250);
-          continue;
+        const lastUserText = typeof extraction.text === 'string' ? extraction.text.trim() : '';
+        let detection = null;
+        let directDetectionReason = '';
+
+        if (lastUserText.length > 0) {
+          const directDetection = detectPromptIndexFromMessage(lastUserText, catalog);
+          if (directDetection.matched && Number.isInteger(directDetection.index)) {
+            detection = directDetection;
+            console.log('[reset-scan-start] Direct detection matched', {
+              tabId: row.tabId,
+              method: directDetection.method || 'unknown',
+              index: directDetection.index,
+              promptNumber: directDetection.promptNumber,
+              stageName: directDetection.stageName || '',
+              signatureLength: typeof directDetection.messageSignature === 'string'
+                ? directDetection.messageSignature.length
+                : null,
+              signaturePreview: truncateForLog(directDetection.messageSignatureRaw || directDetection.messageSignature || '', 140)
+            });
+          } else {
+            directDetectionReason = directDetection.reason || 'signature_not_found';
+            console.log('[reset-scan-start] Direct detection failed', {
+              tabId: row.tabId,
+              reason: directDetectionReason,
+              signatureLength: typeof directDetection.messageSignature === 'string'
+                ? directDetection.messageSignature.length
+                : null,
+              signaturePreview: truncateForLog(directDetection.messageSignatureRaw || directDetection.messageSignature || '', 140)
+            });
+          }
+        } else {
+          console.log('[reset-scan-start] Direct detection skipped (empty last user text)', {
+            tabId: row.tabId
+          });
         }
 
-        const detection = detectPromptIndexFromMessage(extraction.text, catalog);
-        if (!detection.matched || !Number.isInteger(detection.index)) {
-          row.action = 'no_match';
-          row.reason = detection.reason || 'signature_not_found';
+        if (!detection && promptRecords.length > 0) {
+          const recent = await extractRecentUserPromptsFromTab(tab.id, 4000);
+          const recentMessages = Array.isArray(recent?.messages) ? recent.messages : [];
+          const recentMatch = detectLastPromptMatch(recentMessages, promptRecords);
+          console.log('[reset-scan-start] Recent history fallback evaluated', {
+            tabId: row.tabId,
+            recentMessageCount: recentMessages.length,
+            recentUrl: truncateForLog(recent?.url || '', 140),
+            matched: !!recentMatch,
+            matchedMethod: recentMatch?.method || '',
+            matchedIndex: Number.isInteger(recentMatch?.index) ? recentMatch.index : null,
+            matchedPromptNumber: Number.isInteger(recentMatch?.promptNumber) ? recentMatch.promptNumber : null,
+            matchedSignaturePreview: truncateForLog(recentMatch?.signature || '', 140)
+          });
+          if (recentMatch && Number.isInteger(recentMatch.index)) {
+            const promptNumber = Number.isInteger(recentMatch.promptNumber)
+              ? recentMatch.promptNumber
+              : (recentMatch.index + 1);
+            detection = {
+              matched: true,
+              index: recentMatch.index,
+              promptNumber,
+              stageName: STAGE_NAMES_COMPANY[recentMatch.index] || `Prompt ${promptNumber}`,
+              method: typeof recentMatch.method === 'string' && recentMatch.method
+                ? `recent_${recentMatch.method}`
+                : 'recent_match',
+              messageSignature: typeof recentMatch.signature === 'string'
+                ? recentMatch.signature
+                : ''
+            };
+            console.log('[reset-scan-start] Detection recovered from recent history', {
+              tabId: row.tabId,
+              index: detection.index,
+              promptNumber: detection.promptNumber,
+              stageName: detection.stageName || '',
+              method: detection.method || ''
+            });
+          }
+        }
+
+        if (!detection || !Number.isInteger(detection.index)) {
+          if (lastUserText.length === 0) {
+            row.action = 'no_user_message';
+            row.reason = 'empty_user_message';
+          } else {
+            row.action = 'no_match';
+            row.reason = directDetectionReason || 'signature_not_found';
+          }
           resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
+          // Signature matching may fail during early page hydration; retry in next pass.
+          console.log('[reset-scan-start] Detection unresolved for tab (will retry)', {
+            pass: passCount,
+            tabId: row.tabId,
+            action: row.action,
+            reason: row.reason,
+            attempts: row.attempts
+          });
           await sleep(250);
           continue;
         }
@@ -1749,12 +1934,28 @@ async function runResetScanStartAllTabs(options = {}) {
           row.stageDelta = delta;
           row.stageConsistency = Math.abs(delta) <= 1 ? 'ok' : 'drift';
         }
+        console.log('[reset-scan-start] Detection resolved', {
+          tabId: row.tabId,
+          detectedPromptIndex: row.detectedPromptIndex,
+          detectedPromptNumber: row.detectedPromptNumber,
+          detectedStageName: row.detectedStageName,
+          detectedMethod: row.detectedMethod,
+          nextStartIndex: row.nextStartIndex,
+          progressPromptNumber: row.progressPromptNumber,
+          stageDelta: row.stageDelta,
+          stageConsistency: row.stageConsistency || ''
+        });
 
         if (row.nextStartIndex >= PROMPTS_COMPANY.length) {
           row.action = 'final_stage_already_sent';
           row.reason = 'already_at_last_stage';
           resultsByTabId.set(tab.id, row);
           pendingTabIds.delete(tab.id);
+          console.log('[reset-scan-start] Final stage already sent for tab', {
+            tabId: row.tabId,
+            detectedPromptNumber: row.detectedPromptNumber,
+            nextStartIndex: row.nextStartIndex
+          });
           await sleep(250);
           continue;
         }
@@ -1764,36 +1965,23 @@ async function runResetScanStartAllTabs(options = {}) {
           row.reason = 'active_process_on_tab';
           resultsByTabId.set(tab.id, row);
           pendingTabIds.delete(tab.id);
+          console.log('[reset-scan-start] Skip start due to active process', {
+            tabId: row.tabId,
+            reason: row.reason
+          });
           await sleep(250);
           continue;
         }
 
-        const autoStartTitle = `Auto Start: Prompt ${row.nextStartIndex + 1}`;
-        let startResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
-          processTitle: autoStartTitle
-        });
-        if (!startResult.success && startResult.error === 'inject_failed') {
-          await prepareTabForDetection(tab.id, row.windowId);
-          await sleep(350);
-          startResult = await resumeFromStageOnTab(tab.id, row.windowId, row.nextStartIndex, {
-            processTitle: autoStartTitle
-          });
-        }
-
-        if (startResult.success) {
-          startedTabIds.add(tab.id);
-          row.action = 'started';
-          row.reason = 'start_started';
-          pendingTabIds.delete(tab.id);
-        } else {
-          row.action = startResult.error === 'inject_failed' ? 'inject_failed' : 'start_failed';
-          row.reason = startResult.error || 'start_failed';
-        }
-
+        row.action = 'ready_to_start';
+        row.reason = 'ready_to_start';
         resultsByTabId.set(tab.id, row);
-        if (terminalActions.has(row.action)) {
-          pendingTabIds.delete(tab.id);
-        }
+        pendingTabIds.delete(tab.id);
+        console.log('[reset-scan-start] Tab queued for sequential start', {
+          tabId: row.tabId,
+          nextStartIndex: row.nextStartIndex,
+          startPromptNumber: row.nextStartIndex + 1
+        });
         await sleep(250);
       }
 
@@ -1825,6 +2013,66 @@ async function runResetScanStartAllTabs(options = {}) {
       }
     }
 
+    // Start phase: execute queued starts sequentially after full scan pass.
+    // This avoids interleaving scan/start on the same pass and makes behavior deterministic.
+    const startQueue = chatTabs
+      .map((tab) => {
+        if (!Number.isInteger(tab?.id)) return null;
+        const row = resultsByTabId.get(tab.id);
+        if (!row || row.action !== 'ready_to_start') return null;
+        return row;
+      })
+      .filter(Boolean);
+    console.log('[reset-scan-start] Start queue prepared', {
+      queueSize: startQueue.length,
+      queue: startQueue.map((row) => ({
+        tabId: row.tabId,
+        windowId: row.windowId,
+        nextStartIndex: row.nextStartIndex,
+        startPromptNumber: Number.isInteger(row.nextStartIndex) ? (row.nextStartIndex + 1) : null,
+        detectedPromptNumber: row.detectedPromptNumber,
+        detectedMethod: row.detectedMethod
+      }))
+    });
+
+    for (const row of startQueue) {
+      if (!Number.isInteger(row.tabId) || !Number.isInteger(row.nextStartIndex)) continue;
+
+      const autoStartTitle = `Auto Start: Prompt ${row.nextStartIndex + 1}`;
+      console.log('[reset-scan-start] Starting tab from queue', {
+        tabId: row.tabId,
+        windowId: row.windowId,
+        nextStartIndex: row.nextStartIndex,
+        autoStartTitle
+      });
+      const startResult = await resumeFromStageOnTab(row.tabId, row.windowId, row.nextStartIndex, {
+        processTitle: autoStartTitle,
+        detach: true
+      });
+
+      if (startResult.success) {
+        startedTabIds.add(row.tabId);
+        row.action = 'started';
+        row.reason = startResult.detached ? 'start_dispatched' : 'start_started';
+        console.log('[reset-scan-start] Start success', {
+          tabId: row.tabId,
+          processId: startResult.processId || '',
+          detached: !!startResult.detached,
+          action: row.action
+        });
+      } else {
+        row.action = 'start_failed';
+        row.reason = startResult.error || 'start_failed';
+        console.warn('[reset-scan-start] Start failed', {
+          tabId: row.tabId,
+          action: row.action,
+          reason: row.reason
+        });
+      }
+      resultsByTabId.set(row.tabId, row);
+      await sleep(250);
+    }
+
     const results = chatTabs.map((tab) => {
       const row = Number.isInteger(tab?.id) ? resultsByTabId.get(tab.id) : null;
       if (row) return row;
@@ -1843,6 +2091,13 @@ async function runResetScanStartAllTabs(options = {}) {
     });
 
     const startedCount = startedTabIds.size;
+    const actionCounts = results.reduce((acc, row) => {
+      const key = typeof row?.action === 'string' && row.action
+        ? row.action
+        : 'unknown';
+      acc[key] = (acc[key] || 0) + 1;
+      return acc;
+    }, {});
     console.log('[reset-scan-start] Summary', {
       targetUrlPrefix: INVEST_GPT_URL_PREFIX,
       maxPasses,
@@ -1851,7 +2106,8 @@ async function runResetScanStartAllTabs(options = {}) {
       pendingAfterLoop: pendingTabIds.size,
       scannedTabs: chatTabs.length,
       matchedTabs: matchedTabIds.size,
-      startedTabs: startedCount
+      startedTabs: startedCount,
+      actionCounts
     });
     results.forEach((item) => {
       console.log('[reset-scan-start] Tab result', item);
