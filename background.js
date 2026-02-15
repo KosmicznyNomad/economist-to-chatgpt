@@ -4624,6 +4624,13 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       console.log(`  - result.lastResponse length: ${result?.lastResponse?.length || 0}`);
       console.log(`  - result.lastResponse trim length: ${result?.lastResponse?.trim()?.length || 0}`);
       console.log(`  - result.lastResponse preview: "${result?.lastResponse?.substring(0, 100) || 'undefined'}..."`);
+
+      const injectMetrics = (result && typeof result === 'object' && result.metrics && typeof result.metrics === 'object')
+        ? result.metrics
+        : null;
+      if (injectMetrics) {
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] injectToChat metrics:`, injectMetrics);
+      }
       let finalStatus = 'completed';
       let finalStatusText = 'Zakonczono';
       let finalReason = '';
@@ -4715,6 +4722,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         reason: finalReason,
         error: finalError,
         autoRecovery: null,
+        ...(injectMetrics ? { injectMetrics } : {}),
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
           : {}),
@@ -5219,13 +5227,66 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     }
 
     const shouldStopNow = () => forceStopRequested;
+    const runStartedAt = Date.now();
+    const runMetrics = {
+      sendAttempts: 0,
+      sendOkVerified: 0,
+      sendOkInferred: 0,
+      sendFailures: 0,
+      sendSkipped: 0,
+      sendHardFail: 0,
+      responseTimeouts: 0,
+      responseSkipped: 0,
+      responseInvalid: 0,
+      captureOk: 0,
+      captureEmpty: 0
+    };
+    const sendOkPromptIndexes = new Set();
+
+    const runTag = `runId=${runId || 'n/a'}`;
+
+    const sendOkTotal = () => runMetrics.sendOkVerified + runMetrics.sendOkInferred;
+
+    function buildMetricsSnapshot(extra = {}) {
+      return {
+        ...runMetrics,
+        sendOkTotal: sendOkTotal(),
+        sendOkUnique: sendOkPromptIndexes.size,
+        durationMs: Date.now() - runStartedAt,
+        ...extra
+      };
+    }
+
+    function logSend(event, extra = {}) {
+      // Keep logs ASCII to avoid mojibake in some consoles.
+      console.log(`[inject][send] ${event} ${runTag}`, {
+        ok: sendOkTotal(),
+        uniqueOk: sendOkPromptIndexes.size,
+        verifiedOk: runMetrics.sendOkVerified,
+        inferredOk: runMetrics.sendOkInferred,
+        failures: runMetrics.sendFailures,
+        skipped: runMetrics.sendSkipped,
+        hardFail: runMetrics.sendHardFail,
+        ...extra
+      });
+    }
+
+    function logCapture(event, extra = {}) {
+      console.log(`[inject][capture] ${event} ${runTag}`, {
+        ok: runMetrics.captureOk,
+        empty: runMetrics.captureEmpty,
+        ...extra
+      });
+    }
+
     const forceStopResult = () => ({
       success: false,
       lastResponse: '',
       error: 'force_stopped',
       stopped: true,
       reason: forceStopReason,
-      origin: forceStopOrigin
+      origin: forceStopOrigin,
+      metrics: buildMetricsSnapshot({ stopped: true })
     });
 
     // Shared helpers for injected context
@@ -7339,6 +7400,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   // Funkcja wysyłania pojedynczego prompta
   async function sendPrompt(promptText, maxWaitForReady = responseWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     if (shouldStopNow()) return false;
+    runMetrics.sendAttempts += 1;
+    logSend('ATTEMPT', { promptIndex, promptTotal, chars: typeof promptText === 'string' ? promptText.length : 0 });
     // KROK 0: POPRAWKA - Aktywuj kartę przed wysyłaniem (rozwiązuje problem z wyciszonymi kartami)
     const maxRetries = 3;
     let retryCount = 0;
@@ -7593,6 +7656,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return false;
     }
     
+    runMetrics.sendOkVerified += 1;
+    sendOkPromptIndexes.add(promptIndex);
+    logSend('VERIFIED_OK', { promptIndex, promptTotal });
     return true;
   }
 
@@ -7694,7 +7760,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             reason: 'resume_interface_not_ready',
             needsAction: false
           });
-          return { success: false, lastResponse: '', error: 'Interface nie gotowy w trybie resume' };
+          return {
+            success: false,
+            lastResponse: '',
+            error: 'Interface nie gotowy w trybie resume',
+            metrics: buildMetricsSnapshot({ completed: false, reason: 'resume_interface_not_ready' })
+          };
         }
         
         console.log("✅ Interface gotowy - rozpoczynam resume chain");
@@ -7761,7 +7832,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             const sentDespiteFailure = await detectPromptSentDespiteFailure(promptSnapshotBeforeSend, prompt, 7000);
             if (sentDespiteFailure) {
               console.warn(`⚠️ sendPrompt zwrócił false, ale DOM pokazuje że prompt prawdopodobnie został wysłany - kontynuuję bez auto-reload`);
+              runMetrics.sendOkInferred += 1;
+              sendOkPromptIndexes.add(absoluteCurrentPrompt);
+              logSend('INFERRED_OK', { promptIndex: absoluteCurrentPrompt, promptTotal: totalPromptsForRun });
             } else {
+              runMetrics.sendFailures += 1;
+              logSend('FAIL', { promptIndex: absoluteCurrentPrompt, promptTotal: totalPromptsForRun });
             
               // Pokaż przyciski i czekaj na user - może naprawić sytuację lub pominąć
               const autoRecoveryHandoff = maybeTriggerAutoRecovery(
@@ -7780,6 +7856,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             
               if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - przechodzę do następnego prompta`);
+                runMetrics.sendSkipped += 1;
+                logSend('SKIP', { promptIndex: absoluteCurrentPrompt, promptTotal: totalPromptsForRun });
                 continue; // Pomiń resztę tego prompta, idź do następnego
               }
             
@@ -7805,7 +7883,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
                   needsAction: false
                 });
                 // WAŻNE: Musimy zwrócić obiekt, nie undefined!
-                return { success: false, lastResponse: '', error: 'Nie udało się wysłać prompta po retry' };
+                runMetrics.sendHardFail += 1;
+                logSend('HARD_FAIL', { promptIndex: absoluteCurrentPrompt, promptTotal: totalPromptsForRun });
+                return {
+                  success: false,
+                  lastResponse: '',
+                  error: 'Nie udało się wysłać prompta po retry',
+                  metrics: buildMetricsSnapshot({ failedAtPrompt: absoluteCurrentPrompt, reason: 'send_retry_failed' })
+                };
               }
             
               console.log(`✅ Ponowne wysyłanie udane - kontynuuję chain`);
@@ -7957,9 +8042,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
             const captureFingerprint = computeCopyFingerprint(window._lastResponseToSave);
             const rawFingerprint = computeCopyFingerprint(rawResponseText);
             if (window._lastResponseToSave && window._lastResponseToSave.length > 0) {
+              runMetrics.captureOk += 1;
+              logCapture('OK', { promptIndex: absoluteCurrentPrompt, chars: window._lastResponseToSave.length });
               console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${window._lastResponseToSave.length} znaków)`);
               console.log(`[copy-flow] [capture:last-prompt] prompt=${absoluteCurrentPrompt} len=${window._lastResponseToSave.length} fp=${captureFingerprint} rawLen=${rawResponseText.length} rawFp=${rawFingerprint} changed=${window._lastResponseToSave !== rawResponseText}`);
             } else {
+              runMetrics.captureEmpty += 1;
+              logCapture('EMPTY', { promptIndex: absoluteCurrentPrompt });
               console.warn(`⚠️ Ostatnia odpowiedź z prompta ${i + 1}/${promptChain.length} jest pusta! Zapisuję pustą odpowiedź dla debugowania.`);
               console.warn(`[copy-flow] [capture:last-prompt-empty] prompt=${absoluteCurrentPrompt} fp=${captureFingerprint} rawLen=${rawResponseText.length} rawFp=${rawFingerprint}`);
             }
@@ -8002,13 +8091,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           statusText: 'Zakonczono',
           needsAction: false
         });
-        
+
+        console.log('[inject][summary] completed', buildMetricsSnapshot({ completed: true, totalPrompts: totalPromptsForRun }));
         return {
           success: true,
           lastResponse: lastResponse,
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
-          selectedResponseReason: 'last_prompt'
+          selectedResponseReason: 'last_prompt',
+          metrics: buildMetricsSnapshot({ completed: true, totalPrompts: totalPromptsForRun })
         };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
@@ -8026,11 +8117,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         });
         
         // Brak prompt chain - nie ma odpowiedzi do zapisania
-        return { success: true, lastResponse: '' };
+        console.log('[inject][summary] completed_no_chain', buildMetricsSnapshot({ completed: true, totalPrompts: totalPromptsForRun }));
+        return { success: true, lastResponse: '', metrics: buildMetricsSnapshot({ completed: true, totalPrompts: totalPromptsForRun }) };
       }
       
       // Ten return nigdy nie powinien zostać osiągnięty
-      return { success: false, lastResponse: '', error: 'unexpected_code_path' };
+      return { success: false, lastResponse: '', error: 'unexpected_code_path', metrics: buildMetricsSnapshot({ completed: false }) };
     }
     
     // Czekaj przed następną próbą
@@ -8046,7 +8138,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     reason: 'textarea_not_found',
     needsAction: false
   });
-  return { success: false, lastResponse: '', error: 'Nie znaleziono textarea' };
+  return { success: false, lastResponse: '', error: 'Nie znaleziono textarea', metrics: buildMetricsSnapshot({ completed: false, reason: 'textarea_not_found' }) };
   
   } catch (error) {
     if (forceStopRequested) {
@@ -8072,7 +8164,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       reason: 'inject_critical_error',
       needsAction: false
     });
-    return { success: false, error: `Critical error: ${error.message}` };
+    return { success: false, lastResponse: '', error: `Critical error: ${error.message}`, metrics: buildMetricsSnapshot({ completed: false, reason: 'critical_error' }) };
   } finally {
     cleanupForceStopListener();
   }

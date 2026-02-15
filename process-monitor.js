@@ -364,12 +364,27 @@ function extractCompletedTextFromProcess(process) {
   return '';
 }
 
+// Clipboard copy counters (in-memory per panel tab open).
+const panelClipboardCounters = {
+  ops: 0,
+  opsOk: 0,
+  opsFail: 0,
+  copiedOk: 0,
+  copiedFail: 0
+};
+
+function logPanelClipboard(event, extra = {}) {
+  // Keep logs ASCII to avoid mojibake in some consoles.
+  console.log(`[panel:clipboard] ${event}`, { ...panelClipboardCounters, ...extra });
+}
+
 async function copyCompletedResponse(process, button) {
   if (!process || !button) return;
 
   const originalText = button.dataset.originalText || button.textContent || 'Skopiuj skonczona odpowiedz';
   button.dataset.originalText = originalText;
   button.disabled = true;
+  panelClipboardCounters.ops += 1;
 
   try {
     const responses = await readResponsesFromStorage();
@@ -383,15 +398,20 @@ async function copyCompletedResponse(process, button) {
     }
 
     await navigator.clipboard.writeText(text);
-    console.log('[panel] Copied completed response', {
+    panelClipboardCounters.opsOk += 1;
+    panelClipboardCounters.copiedOk += 1;
+    logPanelClipboard('OK copy_completed', {
       processId: process?.id,
       source: textFromStorage ? 'responses' : 'process_fallback',
       length: text.length
     });
-    button.textContent = '✓ Skopiowano';
+    button.textContent = `\u2713 Skopiowano (${panelClipboardCounters.copiedOk})`;
   } catch (error) {
+    panelClipboardCounters.opsFail += 1;
+    panelClipboardCounters.copiedFail += 1;
     console.warn('[panel] Nie udalo sie skopiowac skonczonej odpowiedzi:', error?.message || error);
-    button.textContent = '✕ Brak odpowiedzi';
+    logPanelClipboard('FAIL copy_completed', { processId: process?.id, error: error?.message || String(error) });
+    button.textContent = '\u2717 Brak odpowiedzi';
   }
 
   setTimeout(() => {
@@ -1519,6 +1539,22 @@ function renderDetails() {
 
   header.appendChild(titleWrap);
   header.appendChild(metaWrap);
+
+  const injectMetrics = selected?.injectMetrics && typeof selected.injectMetrics === 'object'
+    ? selected.injectMetrics
+    : null;
+  if (injectMetrics) {
+    const metricsLine = document.createElement('div');
+    metricsLine.className = 'details-subtitle';
+    const sendVerified = Number.isInteger(injectMetrics.sendOkVerified) ? injectMetrics.sendOkVerified : 0;
+    const sendInferred = Number.isInteger(injectMetrics.sendOkInferred) ? injectMetrics.sendOkInferred : 0;
+    const sendAttempts = Number.isInteger(injectMetrics.sendAttempts) ? injectMetrics.sendAttempts : 0;
+    const captureOk = Number.isInteger(injectMetrics.captureOk) ? injectMetrics.captureOk : 0;
+    const captureEmpty = Number.isInteger(injectMetrics.captureEmpty) ? injectMetrics.captureEmpty : 0;
+    const sendOk = sendVerified + sendInferred;
+    metricsLine.textContent = `IO: sent_ok=${sendOk} (verified=${sendVerified}, inferred=${sendInferred}) attempts=${sendAttempts} | captured_ok=${captureOk} empty=${captureEmpty}`;
+    header.appendChild(metricsLine);
+  }
 
   const autoRecovery = selected?.autoRecovery && typeof selected.autoRecovery === 'object'
     ? selected.autoRecovery

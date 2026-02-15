@@ -18,6 +18,21 @@ const copyAllPortfolioBtn = document.getElementById('copyAllPortfolioBtn');
 const RESPONSE_STORAGE_KEY = 'responses';
 let responseStorageReady = null;
 
+// Clipboard copy counters (in-memory per tab open).
+const clipboardCounters = {
+  ops: 0,
+  opsOk: 0,
+  opsFail: 0,
+  messagesAttempted: 0,
+  messagesCopiedOk: 0,
+  messagesCopiedFail: 0
+};
+
+function logClipboard(event, extra = {}) {
+  // Keep logs ASCII to avoid mojibake in some consoles.
+  console.log(`[clipboard] ${event}`, { ...clipboardCounters, ...extra });
+}
+
 function getStorageAreas() {
   return {
     local: chrome.storage?.local || null,
@@ -197,6 +212,9 @@ copyAllPortfolioBtn.addEventListener('click', async () => {
 
 // Funkcja kopiujÄ…ca wszystkie odpowiedzi danego typu
 async function copyAllByType(analysisType, button) {
+  let opCounted = false;
+  let attemptedCount = 0;
+  let attemptedChars = 0;
   try {
     await ensureResponseStorageReady();
     const responses = await readResponsesFromStorage();
@@ -213,12 +231,20 @@ async function copyAllByType(analysisType, button) {
     
     // PoĹ‚Ä…cz teksty z \n jako separator - kaĹĽda odpowiedĹş w nowym wierszu Google Sheets
     const allText = sortedResponses.map(r => r.text).join('\n');
+
+    attemptedCount = sortedResponses.length;
+    attemptedChars = allText.length;
+    clipboardCounters.ops += 1;
+    opCounted = true;
+    clipboardCounters.messagesAttempted += attemptedCount;
     
     await navigator.clipboard.writeText(allText);
+    clipboardCounters.opsOk += 1;
+    clipboardCounters.messagesCopiedOk += attemptedCount;
     
     // Wizualna informacja
     const originalText = button.textContent;
-    button.textContent = 'âś“ Skopiowano';
+    button.textContent = `\u2713 Skopiowano (${attemptedCount})`;
     button.classList.add('copied');
     
     setTimeout(() => {
@@ -226,13 +252,25 @@ async function copyAllByType(analysisType, button) {
       button.classList.remove('copied');
     }, 2000);
     
-    console.log(`âś… Skopiowano ${filteredResponses.length} odpowiedzi (${analysisType}) do clipboard`);
+    logClipboard('OK copy_all', {
+      analysisType,
+      copiedMessages: attemptedCount,
+      chars: attemptedChars
+    });
   } catch (error) {
-    console.error('âťŚ BĹ‚Ä…d kopiowania:', error);
-    button.textContent = 'âś— BĹ‚Ä…d';
+    if (!opCounted) {
+      clipboardCounters.ops += 1;
+      opCounted = true;
+      clipboardCounters.messagesAttempted += attemptedCount;
+    }
+    clipboardCounters.opsFail += 1;
+    clipboardCounters.messagesCopiedFail += attemptedCount;
+    console.error('[clipboard] ERROR copy_all:', error);
+    button.textContent = '\u2717 Blad';
     setTimeout(() => {
       button.textContent = 'Kopiuj wszystkie';
     }, 2000);
+    logClipboard('FAIL copy_all', { analysisType, attemptedMessages: attemptedCount, attemptedChars });
   }
 }
 
@@ -398,12 +436,18 @@ function createResponseItem(response) {
 
 // Funkcja kopiujÄ…ca tekst do clipboard
 async function copyToClipboard(text, button) {
+  const attemptedCount = 1;
+  const attemptedChars = typeof text === 'string' ? text.length : 0;
   try {
+    clipboardCounters.ops += 1;
+    clipboardCounters.messagesAttempted += attemptedCount;
     await navigator.clipboard.writeText(text);
+    clipboardCounters.opsOk += 1;
+    clipboardCounters.messagesCopiedOk += attemptedCount;
     
     // Wizualna informacja o skopiowaniu
     const originalText = button.textContent;
-    button.textContent = 'âś“ Skopiowano';
+    button.textContent = '\u2713 Skopiowano (1)';
     button.classList.add('copied');
     
     setTimeout(() => {
@@ -411,13 +455,16 @@ async function copyToClipboard(text, button) {
       button.classList.remove('copied');
     }, 2000);
     
-    console.log('âś… Skopiowano do clipboard');
+    logClipboard('OK copy_one', { chars: typeof text === 'string' ? text.length : 0 });
   } catch (error) {
-    console.error('âťŚ BĹ‚Ä…d kopiowania:', error);
-    button.textContent = 'âś— BĹ‚Ä…d';
+    clipboardCounters.opsFail += 1;
+    clipboardCounters.messagesCopiedFail += attemptedCount;
+    console.error('[clipboard] ERROR copy_one:', error);
+    button.textContent = '\u2717 Blad';
     setTimeout(() => {
       button.textContent = 'Kopiuj';
     }, 2000);
+    logClipboard('FAIL copy_one', { attemptedChars });
   }
 }
 
