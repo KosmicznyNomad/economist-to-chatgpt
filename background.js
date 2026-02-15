@@ -27,6 +27,23 @@ const CLOUD_UPLOAD = {
   backoffMs: 1000
 };
 
+// One-time setup: fill `token` once and extension will auto-dispatch final responses to watchlist.
+const WATCHLIST_DISPATCH = {
+  enabled: true,
+  apiBaseUrl: "https://api.github.com",
+  repository: "KosmicznyNomad/watchlist",
+  eventType: "economist_response",
+  token: "",
+  timeoutMs: 20000,
+  retryCount: 3,
+  backoffMs: 1500,
+  maxBackoffMs: 30 * 60 * 1000,
+  outboxStorageKey: "watchlist_dispatch_outbox",
+  outboxMaxItems: 5000,
+  alarmName: "watchlist-dispatch-flush",
+  alarmPeriodMinutes: 2
+};
+
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
 const CLOSED_PROCESS_STATUSES = new Set([
@@ -42,6 +59,7 @@ const CLOSED_PROCESS_STATUSES = new Set([
 ]);
 const processRegistry = new Map();
 let processRegistryReady = null;
+let watchlistDispatchFlushInProgress = false;
 
 function isClosedProcessStatus(status) {
   return CLOSED_PROCESS_STATUSES.has(String(status || '').toLowerCase());
@@ -2965,6 +2983,270 @@ function generateResponseId(runId = '') {
   return `${safeRunId}_${Date.now().toString(36)}_${randomPart}`;
 }
 
+function textFingerprint(text = '') {
+  const normalized = typeof text === 'string' ? text : String(text ?? '');
+  let hash = 0x811c9dc5; // FNV-1a 32-bit
+  for (let i = 0; i < normalized.length; i += 1) {
+    hash ^= normalized.charCodeAt(i);
+    hash = (hash >>> 0) * 0x01000193;
+  }
+  return (hash >>> 0).toString(16).padStart(8, '0');
+}
+
+function buildCopyTrace(runId = '', responseId = '') {
+  const normalizedRunId = typeof runId === 'string' && runId.trim() ? runId.trim() : 'no-run';
+  const normalizedResponseId = typeof responseId === 'string' && responseId.trim() ? responseId.trim() : 'no-response';
+  return `${normalizedRunId}/${normalizedResponseId}`;
+}
+
+function normalizeWatchlistDispatchPayload(response) {
+  if (!response || typeof response !== 'object') return null;
+  const text = typeof response.text === 'string' ? response.text : '';
+  if (!text.trim()) return null;
+
+  const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
+  const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
+
+  return {
+    schema: "economist.response.v1",
+    responseId: responseId || generateResponseId(runId),
+    runId: runId || null,
+    text,
+    source: typeof response.source === 'string' ? response.source : '',
+    analysisType: typeof response.analysisType === 'string' ? response.analysisType : '',
+    timestamp: response.timestamp ?? Date.now()
+  };
+}
+
+function getWatchlistOutboxDedupKey(item) {
+  if (!item || typeof item !== 'object') return '';
+  const payload = item.payload && typeof item.payload === 'object' ? item.payload : {};
+  const responseId = typeof payload.responseId === 'string' ? payload.responseId.trim() : '';
+  if (responseId) {
+    return `response:${responseId}`;
+  }
+  const base = [
+    typeof payload.runId === 'string' ? payload.runId.trim() : '',
+    typeof payload.source === 'string' ? payload.source.trim() : '',
+    typeof payload.text === 'string' ? payload.text.trim() : '',
+    String(payload.timestamp ?? '')
+  ].join('|');
+  return `hash:${textFingerprint(base)}`;
+}
+
+function sanitizeWatchlistOutbox(rawItems) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const deduped = new Map();
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const payload = item.payload && typeof item.payload === 'object' ? item.payload : null;
+    if (!payload) continue;
+    const key = getWatchlistOutboxDedupKey(item);
+    if (!key) continue;
+    deduped.set(key, {
+      payload,
+      queuedAt: Number.isInteger(item.queuedAt) ? item.queuedAt : Date.now(),
+      attemptCount: Number.isInteger(item.attemptCount) && item.attemptCount >= 0 ? item.attemptCount : 0,
+      nextAttemptAt: Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0,
+      lastError: typeof item.lastError === 'string' ? item.lastError : ''
+    });
+  }
+
+  const normalized = Array.from(deduped.values());
+  if (normalized.length <= WATCHLIST_DISPATCH.outboxMaxItems) {
+    return normalized;
+  }
+  return normalized.slice(normalized.length - WATCHLIST_DISPATCH.outboxMaxItems);
+}
+
+async function readWatchlistOutbox() {
+  const storageKey = WATCHLIST_DISPATCH.outboxStorageKey;
+  const result = await chrome.storage.local.get([storageKey]);
+  return sanitizeWatchlistOutbox(result?.[storageKey]);
+}
+
+async function writeWatchlistOutbox(items) {
+  const storageKey = WATCHLIST_DISPATCH.outboxStorageKey;
+  const normalized = sanitizeWatchlistOutbox(items);
+  await chrome.storage.local.set({ [storageKey]: normalized });
+  return normalized;
+}
+
+async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-response') {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    return { skipped: true, reason: 'dispatch_disabled' };
+  }
+
+  const payload = normalizeWatchlistDispatchPayload(response);
+  if (!payload) {
+    return { skipped: true, reason: 'invalid_payload' };
+  }
+
+  const current = await readWatchlistOutbox();
+  const next = [
+    ...current,
+    {
+      payload,
+      queuedAt: Date.now(),
+      attemptCount: 0,
+      nextAttemptAt: 0,
+      lastError: ''
+    }
+  ];
+  const saved = await writeWatchlistOutbox(next);
+  console.log(
+    `[copy-flow] [dispatch:queued] trace=${copyTrace} responseId=${payload.responseId} queueSize=${saved.length}`
+  );
+  return { queued: true, responseId: payload.responseId, queueSize: saved.length };
+}
+
+function isWatchlistDispatchConfigured() {
+  if (!WATCHLIST_DISPATCH.enabled) return false;
+  if (!WATCHLIST_DISPATCH.repository || !String(WATCHLIST_DISPATCH.repository).trim()) return false;
+  if (!WATCHLIST_DISPATCH.token || !String(WATCHLIST_DISPATCH.token).trim()) return false;
+  return true;
+}
+
+async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    return { skipped: true, reason: 'dispatch_disabled' };
+  }
+  if (!isWatchlistDispatchConfigured()) {
+    return { skipped: true, reason: 'missing_dispatch_credentials' };
+  }
+
+  const repository = WATCHLIST_DISPATCH.repository.trim();
+  const url = `${WATCHLIST_DISPATCH.apiBaseUrl.replace(/\/+$/, '')}/repos/${repository}/dispatches`;
+  const body = JSON.stringify({
+    event_type: WATCHLIST_DISPATCH.eventType,
+    client_payload: payload
+  });
+
+  const maxAttempts = Math.max(1, Number(WATCHLIST_DISPATCH.retryCount || 0) + 1);
+
+  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), WATCHLIST_DISPATCH.timeoutMs);
+    try {
+      console.log(`[copy-flow] [dispatch:attempt] trace=${copyTrace} attempt=${attempt}/${maxAttempts}`);
+      const response = await fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${WATCHLIST_DISPATCH.token}`,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+          'Content-Type': 'application/json'
+        },
+        body,
+        signal: controller.signal
+      });
+      clearTimeout(timeoutId);
+
+      if (!response.ok) {
+        const errorText = await response.text().catch(() => '');
+        throw new Error(`HTTP ${response.status}${errorText ? ` ${errorText}` : ''}`);
+      }
+
+      console.log(`[copy-flow] [dispatch:ok] trace=${copyTrace} status=${response.status}`);
+      return { success: true, status: response.status };
+    } catch (error) {
+      clearTimeout(timeoutId);
+      if (attempt < maxAttempts) {
+        console.warn(
+          `[copy-flow] [dispatch:retry] trace=${copyTrace} attempt=${attempt}/${maxAttempts} error=${error.message || String(error)}`
+        );
+        await sleep(WATCHLIST_DISPATCH.backoffMs * attempt);
+        continue;
+      }
+      console.error(
+        `[copy-flow] [dispatch:failed] trace=${copyTrace} attempts=${maxAttempts} error=${error.message || String(error)}`
+      );
+      return { success: false, error: error.message || String(error) };
+    }
+  }
+
+  return { success: false, error: 'unknown' };
+}
+
+async function flushWatchlistDispatchOutbox(reason = 'manual') {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    return { skipped: true, reason: 'dispatch_disabled' };
+  }
+  if (watchlistDispatchFlushInProgress) {
+    return { skipped: true, reason: 'flush_in_progress' };
+  }
+
+  watchlistDispatchFlushInProgress = true;
+  try {
+    const queued = await readWatchlistOutbox();
+    if (queued.length === 0) {
+      return { success: true, sent: 0, failed: 0, deferred: 0, remaining: 0 };
+    }
+
+    const remaining = [];
+    let sent = 0;
+    let failed = 0;
+    let deferred = 0;
+    const now = Date.now();
+
+    for (const item of queued) {
+      if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
+        failed += 1;
+        continue;
+      }
+
+      const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
+      if (nextAttemptAt > now) {
+        deferred += 1;
+        remaining.push(item);
+        continue;
+      }
+
+      const payload = item.payload;
+      const trace = buildCopyTrace(payload.runId || '', payload.responseId || '');
+      const dispatchResult = await sendWatchlistDispatch(payload, trace);
+      if (dispatchResult.success) {
+        sent += 1;
+        continue;
+      }
+
+      failed += 1;
+      const attemptCount = (Number.isInteger(item.attemptCount) ? item.attemptCount : 0) + 1;
+      const retryDelayMs = Math.min(
+        WATCHLIST_DISPATCH.maxBackoffMs,
+        Math.max(1000, WATCHLIST_DISPATCH.backoffMs * attemptCount)
+      );
+      remaining.push({
+        ...item,
+        attemptCount,
+        nextAttemptAt: Date.now() + retryDelayMs,
+        lastError: dispatchResult.reason || dispatchResult.error || 'dispatch_failed'
+      });
+    }
+
+    const persisted = await writeWatchlistOutbox(remaining);
+    console.log(
+      `[copy-flow] [dispatch:flush] reason=${reason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length}`
+    );
+    return { success: true, sent, failed, deferred, remaining: persisted.length };
+  } finally {
+    watchlistDispatchFlushInProgress = false;
+  }
+}
+
+function ensureWatchlistDispatchAlarm() {
+  if (!WATCHLIST_DISPATCH.enabled) return;
+  if (!chrome?.alarms?.create) return;
+  try {
+    chrome.alarms.create(WATCHLIST_DISPATCH.alarmName, {
+      periodInMinutes: WATCHLIST_DISPATCH.alarmPeriodMinutes
+    });
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:alarm-failed]', error);
+  }
+}
+
 async function uploadResponseToCloud(response) {
   if (!CLOUD_UPLOAD.enabled) {
     return { skipped: true, reason: "disabled" };
@@ -2987,6 +3269,7 @@ async function uploadResponseToCloud(response) {
   }
 
   const payload = {
+    schema: "economist.response.v1",
     text: response.text,
     timestamp: response.timestamp,
     source: response.source,
@@ -2996,6 +3279,9 @@ async function uploadResponseToCloud(response) {
     savedAt: new Date().toISOString(),
     extensionVersion: chrome.runtime.getManifest().version
   };
+  const copyTrace = buildCopyTrace(response.runId || '', response.responseId || '');
+  const copyFingerprint = textFingerprint(response.text || '');
+  console.log(`[copy-flow] [upload:start] trace=${copyTrace} len=${(response.text || '').length} fp=${copyFingerprint}`);
 
   const maxAttempts = Math.max(1, CLOUD_UPLOAD.retryCount + 1);
   const body = JSON.stringify(payload);
@@ -3005,6 +3291,7 @@ async function uploadResponseToCloud(response) {
     const timeoutId = setTimeout(() => controller.abort(), CLOUD_UPLOAD.timeoutMs);
 
     try {
+      console.log(`[copy-flow] [upload:attempt] trace=${copyTrace} attempt=${attempt}/${maxAttempts}`);
       const response = await fetch(CLOUD_UPLOAD.url, {
         method: "POST",
         headers,
@@ -3018,15 +3305,18 @@ async function uploadResponseToCloud(response) {
         throw new Error(`HTTP ${response.status}`);
       }
 
+      console.log(`[copy-flow] [upload:ok] trace=${copyTrace} status=${response.status}`);
       return { success: true, status: response.status };
     } catch (error) {
       clearTimeout(timeoutId);
 
       if (attempt < maxAttempts) {
+        console.warn(`[copy-flow] [upload:retry] trace=${copyTrace} attempt=${attempt}/${maxAttempts} error=${error.message || String(error)}`);
         await sleep(CLOUD_UPLOAD.backoffMs * attempt);
         continue;
       }
 
+      console.error(`[copy-flow] [upload:failed] trace=${copyTrace} attempts=${maxAttempts} error=${error.message || String(error)}`);
       return { success: false, error: error.message || String(error) };
     }
   }
@@ -3078,6 +3368,10 @@ loadPrompts();
 ensureProcessRegistryReady().catch((error) => {
   console.warn('[monitor] Initial process registry load failed:', error);
 });
+ensureWatchlistDispatchAlarm();
+flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
+  console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
+});
 
 // Obsługiwane źródła artykułów
 const SUPPORTED_SOURCES = [
@@ -3105,11 +3399,30 @@ function getSupportedSourcesQuery() {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "view-responses",
-    title: "Pokaż zebrane odpowiedzi",
+    title: "Poka� zebrane odpowiedzi",
     contexts: ["all"]
+  });
+  ensureWatchlistDispatchAlarm();
+  flushWatchlistDispatchOutbox('on_installed').catch((error) => {
+    console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
   });
 });
 
+chrome.runtime.onStartup.addListener(() => {
+  ensureWatchlistDispatchAlarm();
+  flushWatchlistDispatchOutbox('on_startup').catch((error) => {
+    console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
+  });
+});
+
+if (chrome?.alarms?.onAlarm) {
+  chrome.alarms.onAlarm.addListener((alarm) => {
+    if (!alarm || alarm.name !== WATCHLIST_DISPATCH.alarmName) return;
+    flushWatchlistDispatchOutbox('alarm').catch((error) => {
+      console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
+    });
+  });
+}
 // Handler kliknięcia menu kontekstowego
 chrome.contextMenus.onClicked.addListener((info, tab) => {
   if (info.menuItemId === "view-responses") {
@@ -3140,9 +3453,9 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     }
     
     const result = await chrome.storage.session.get(['responses']);
-    const responses = result.responses || [];
+    const storedResponses = Array.isArray(result.responses) ? result.responses : [];
     
-    console.log(`📦 Obecny stan storage: ${responses.length} odpowiedzi`);
+    console.log(`📦 Obecny stan storage: ${storedResponses.length} odpowiedzi`);
     
     const normalizedRunId = typeof runId === 'string' && runId.trim()
       ? runId.trim()
@@ -3150,6 +3463,9 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
       ? responseId.trim()
       : generateResponseId(normalizedRunId);
+    const copyTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
+    const copyFingerprint = textFingerprint(responseText);
+    console.log(`[copy-flow] [save:start] trace=${copyTrace} len=${responseText.length} fp=${copyFingerprint} analysis=${analysisType}`);
 
     const newResponse = {
       text: responseText,
@@ -3162,47 +3478,104 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       newResponse.runId = normalizedRunId;
     }
     
-    responses.push(newResponse);
+    const saveMaxAttempts = 4;
+    const saveRetryDelayMs = 650;
+    let verifiedResponses = storedResponses;
+    let lastSaved = null;
+    let saveAttemptOk = false;
 
-    console.log(`💾 Zapisuję do chrome.storage.session...`);
-    await chrome.storage.session.set({ responses });
+    for (let attempt = 1; attempt <= saveMaxAttempts; attempt += 1) {
+      try {
+        const snapshot = await chrome.storage.session.get(['responses']);
+        const currentResponses = Array.isArray(snapshot.responses) ? snapshot.responses : [];
+        const existingIndex = currentResponses.findIndex((item) => item?.responseId === normalizedResponseId);
 
-    // POPRAWKA: Weryfikacja że zapis faktycznie się udał
-    console.log(`🔍 Weryfikuję zapis...`);
-    const verification = await chrome.storage.session.get(['responses']);
-    const verifiedResponses = verification.responses || [];
+        if (existingIndex >= 0) {
+          verifiedResponses = currentResponses;
+          lastSaved = currentResponses[existingIndex];
+          saveAttemptOk = true;
+          console.log(`[copy-flow] [save:attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} dedupe=existing index=${existingIndex}`);
+          break;
+        }
 
-    if (verifiedResponses.length !== responses.length) {
-      console.error(`❌ KRYTYCZNY: Weryfikacja storage nieudana!`);
-      console.error(`   Oczekiwano: ${responses.length} odpowiedzi`);
-      console.error(`   Faktycznie: ${verifiedResponses.length} odpowiedzi`);
-      throw new Error('Storage verification failed - saved count does not match');
+        const responsesToStore = [...currentResponses, newResponse];
+        console.log(`[copy-flow] [save:attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} from=${currentResponses.length} target=${responsesToStore.length}`);
+
+        await chrome.storage.session.set({ responses: responsesToStore });
+
+        const verification = await chrome.storage.session.get(['responses']);
+        verifiedResponses = Array.isArray(verification.responses) ? verification.responses : [];
+        const candidate = verifiedResponses.find((item) => item?.responseId === normalizedResponseId) || verifiedResponses[verifiedResponses.length - 1];
+        const candidateText = typeof candidate?.text === 'string' ? candidate.text : '';
+        const candidateFingerprint = textFingerprint(candidateText);
+        const textMatch = candidateText === responseText;
+
+        console.log(
+          `[copy-flow] [save:verify-attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} count=${verifiedResponses.length} fp=${candidateFingerprint} textMatch=${textMatch}`
+        );
+
+        if (candidate && textMatch) {
+          lastSaved = candidate;
+          saveAttemptOk = true;
+          break;
+        }
+
+        if (attempt < saveMaxAttempts) {
+          console.warn(`[copy-flow] [save:retry] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} reason=verify_mismatch`);
+          await sleep(saveRetryDelayMs * attempt);
+        }
+      } catch (attemptError) {
+        if (attempt < saveMaxAttempts) {
+          console.warn(
+            `[copy-flow] [save:retry] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} reason=${attemptError.message || String(attemptError)}`
+          );
+          await sleep(saveRetryDelayMs * attempt);
+          continue;
+        }
+        throw attemptError;
+      }
     }
 
-    // Sprawdź czy ostatnia odpowiedź jest ta która właśnie zapisaliśmy
-    const lastSaved = verifiedResponses[verifiedResponses.length - 1];
-    if (lastSaved.text !== responseText) {
-      console.error(`❌ KRYTYCZNY: Ostatnia odpowiedź w storage nie pasuje!`);
-      console.error(`   Oczekiwano długość: ${responseText.length}`);
-      console.error(`   Faktycznie długość: ${lastSaved.text.length}`);
-      throw new Error('Storage verification failed - text mismatch');
+    if (!saveAttemptOk || !lastSaved) {
+      throw new Error('Storage verification failed after retries');
     }
 
+    const verifiedFingerprint = textFingerprint(lastSaved.text || '');
     console.log(`✅ Weryfikacja storage: OK`);
+    console.log(`[copy-flow] [save:verified] trace=${copyTrace} fp=${verifiedFingerprint} match=${verifiedFingerprint === copyFingerprint}`);
 
+    console.log(`[copy-flow] [save:upload] trace=${copyTrace} responseId=${normalizedResponseId}`);
     const uploadResult = await uploadResponseToCloud({ ...newResponse });
     if (uploadResult?.success) {
       console.log(`[cloud] Upload OK (status ${uploadResult.status})`);
+      console.log(`[copy-flow] [save:upload-ok] trace=${copyTrace} status=${uploadResult.status}`);
     } else if (uploadResult?.skipped) {
       console.log(`[cloud] Upload skipped (${uploadResult.reason || "unknown"})`);
+      console.log(`[copy-flow] [save:upload-skipped] trace=${copyTrace} reason=${uploadResult.reason || "unknown"}`);
     } else {
       console.warn(`[cloud] Upload failed: ${uploadResult?.error || "unknown"}`);
+      console.warn(`[copy-flow] [save:upload-failed] trace=${copyTrace} error=${uploadResult?.error || "unknown"}`);
+    }
+
+    const dispatchQueueResult = await enqueueWatchlistDispatch(newResponse, copyTrace);
+    if (dispatchQueueResult?.queued) {
+      console.log(
+        `[copy-flow] [dispatch:queued-ok] trace=${copyTrace} responseId=${dispatchQueueResult.responseId} queueSize=${dispatchQueueResult.queueSize}`
+      );
+      const flushResult = await flushWatchlistDispatchOutbox('save_response');
+      console.log(
+        `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} remaining=${flushResult?.remaining || 0}`
+      );
+    } else if (dispatchQueueResult?.skipped) {
+      console.log(
+        `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${dispatchQueueResult.reason || 'unknown'}`
+      );
     }
 
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`✅ ✅ ✅ [saveResponse] ZAPISANO I ZWERYFIKOWANO POMYŚLNIE ✅ ✅ ✅`);
     console.log(`${'*'.repeat(80)}`);
-    console.log(`Nowy stan: ${responses.length} odpowiedzi w storage (zweryfikowano: ${verifiedResponses.length})`);
+    console.log(`Nowy stan: ${verifiedResponses.length} odpowiedzi w storage (zweryfikowano: ${verifiedResponses.length})`);
     console.log(`Preview: "${responseText.substring(0, 150)}..."`);
     console.log(`${'*'.repeat(80)}\n`);
     return newResponse;
@@ -4101,6 +4474,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.log(`Zapisuję odpowiedź: ${resultLastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
         console.log(`Tytuł: ${title}`);
+        console.log(`[copy-flow] [process:save-call] run=${processId || 'no-run'} len=${resultLastResponse.length} fp=${textFingerprint(resultLastResponse)}`);
         
         const savedResponse = await saveResponse(resultLastResponse, title, analysisType, processId);
         if (Object.keys(completedResponsePatch).length > 0) {
@@ -4645,49 +5019,77 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       return null;
     }
 
-    function normalizeForComparison(text) {
-      if (typeof text !== 'string') return '';
-      return text
-        .toLowerCase()
-        .normalize('NFD')
-        .replace(/[\u0300-\u036f]/g, '')
-        .replace(/\s+/g, ' ')
-        .trim();
-    }
-
-    function looksLikeFourGatePrompt(promptText) {
-      const normalized = normalizeForComparison(promptText);
-      if (!normalized) return false;
-
-      const hasFourGate = normalized.includes('four-gate');
-      const hasOneLineInstruction = normalized.includes('jedna linia')
-        || normalized.includes('one line')
-        || normalized.includes('single line');
-      const hasSemicolonInstruction = normalized.includes('srednik')
-        || normalized.includes('semicolon')
-        || normalized.includes('15 pol');
-
-      return hasFourGate && (hasOneLineInstruction || hasSemicolonInstruction);
-    }
-
-    function looksLikeFourGateDecisionLine(text) {
-      if (typeof text !== 'string') return false;
-      const normalized = text.replace(/\r/g, '').trim();
-      if (!normalized) return false;
-
-      const nonEmptyLines = normalized
-        .split('\n')
-        .map((line) => line.trim())
-        .filter(Boolean);
-
-      if (nonEmptyLines.length !== 1) return false;
-
-      const parts = nonEmptyLines[0].split(';').map((part) => part.trim());
-      if (parts.length === 16 && parts[15] === '') {
-        parts.pop();
+    function computeCopyFingerprint(value = '') {
+      const normalized = typeof value === 'string' ? value : String(value ?? '');
+      let hash = 0x811c9dc5; // FNV-1a 32-bit
+      for (let i = 0; i < normalized.length; i += 1) {
+        hash ^= normalized.charCodeAt(i);
+        hash = (hash >>> 0) * 0x01000193;
       }
-      if (parts.length !== 15) return false;
-      return parts.every((part) => part.length > 0);
+      return (hash >>> 0).toString(16).padStart(8, '0');
+    }
+
+    async function captureLastResponseWithRetries(initialText = '', promptNumber = 0) {
+      const maxAttempts = 5;
+      const retryDelayMs = 700;
+      const initial = typeof initialText === 'string' ? initialText : '';
+
+      let bestText = initial;
+      let bestFp = computeCopyFingerprint(bestText);
+      let previousFp = bestFp;
+      let stableHits = bestText.trim().length > 0 ? 1 : 0;
+
+      console.log(
+        `[copy-flow] [capture:stabilize:start] prompt=${promptNumber} attempts=${maxAttempts} initialLen=${bestText.length} fp=${bestFp}`
+      );
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (attempt > 1) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+        }
+
+        let candidateText = '';
+        try {
+          const extracted = await getLastResponseText();
+          candidateText = typeof extracted === 'string' ? extracted : '';
+        } catch (error) {
+          console.warn(
+            `[copy-flow] [capture:stabilize:error] prompt=${promptNumber} attempt=${attempt}/${maxAttempts} error=${error?.message || String(error)}`
+          );
+          candidateText = '';
+        }
+
+        const candidateFp = computeCopyFingerprint(candidateText);
+        const candidateLen = candidateText.length;
+        const improved = candidateLen > bestText.length;
+        if (improved) {
+          bestText = candidateText;
+          bestFp = candidateFp;
+        }
+
+        if (candidateText.trim().length > 0 && candidateFp === previousFp) {
+          stableHits += 1;
+        } else {
+          stableHits = candidateText.trim().length > 0 ? 1 : 0;
+        }
+        previousFp = candidateFp;
+
+        console.log(
+          `[copy-flow] [capture:stabilize:attempt] prompt=${promptNumber} attempt=${attempt}/${maxAttempts} candidateLen=${candidateLen} candidateFp=${candidateFp} improved=${improved} bestLen=${bestText.length} stableHits=${stableHits}`
+        );
+
+        if (stableHits >= 2 && bestText.length > 0) {
+          console.log(
+            `[copy-flow] [capture:stabilize:stable] prompt=${promptNumber} attempt=${attempt}/${maxAttempts} len=${bestText.length} fp=${bestFp}`
+          );
+          break;
+        }
+      }
+
+      console.log(
+        `[copy-flow] [capture:stabilize:done] prompt=${promptNumber} finalLen=${bestText.length} fp=${bestFp} changed=${bestText !== initial}`
+      );
+      return bestText;
     }
 
     function buildAutoRecoveryHandoff(reason, localPromptIndex, promptChainSnapshot) {
@@ -7019,9 +7421,6 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log(`\n=== PROMPT CHAIN: ${promptChain.length} promptów do wykonania ===`);
         console.log(`Pełna lista promptów:`, promptChain);
         delete window._lastResponseToSave;
-        delete window._preferredResponseToSave;
-        delete window._preferredResponsePrompt;
-        delete window._preferredResponseReason;
         
         for (let i = 0; i < promptChain.length; i++) {
           if (shouldStopNow()) {
@@ -7252,22 +7651,21 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         });
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
-          const preferByPrompt = analysisType === 'company' && looksLikeFourGatePrompt(prompt);
-          const preferByFormat = analysisType === 'company' && looksLikeFourGateDecisionLine(responseText);
-          if (preferByPrompt || preferByFormat) {
-            window._preferredResponseToSave = responseText || '';
-            window._preferredResponsePrompt = absoluteCurrentPrompt;
-            window._preferredResponseReason = preferByPrompt ? 'four_gate_prompt' : 'four_gate_format';
-            console.log(`🎯 Wybrano odpowiedź z prompta ${absoluteCurrentPrompt} jako docelową do zapisu (${window._preferredResponseReason})`);
-          }
           const isLastPrompt = (i === promptChain.length - 1);
           if (isLastPrompt) {
+            const rawResponseText = responseText || '';
+            const stabilizedResponse = await captureLastResponseWithRetries(rawResponseText, absoluteCurrentPrompt);
+
             // Zapisz ZAWSZE ostatnią odpowiedź, nawet jeśli pusta (dla debugowania)
-            window._lastResponseToSave = responseText || '';
-            if (responseText && responseText.length > 0) {
-              console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${responseText.length} znaków)`);
+            window._lastResponseToSave = stabilizedResponse || '';
+            const captureFingerprint = computeCopyFingerprint(window._lastResponseToSave);
+            const rawFingerprint = computeCopyFingerprint(rawResponseText);
+            if (window._lastResponseToSave && window._lastResponseToSave.length > 0) {
+              console.log(`💾 Przygotowano ostatnią odpowiedź z prompta ${i + 1}/${promptChain.length} do zapisu (${window._lastResponseToSave.length} znaków)`);
+              console.log(`[copy-flow] [capture:last-prompt] prompt=${absoluteCurrentPrompt} len=${window._lastResponseToSave.length} fp=${captureFingerprint} rawLen=${rawResponseText.length} rawFp=${rawFingerprint} changed=${window._lastResponseToSave !== rawResponseText}`);
             } else {
               console.warn(`⚠️ Ostatnia odpowiedź z prompta ${i + 1}/${promptChain.length} jest pusta! Zapisuję pustą odpowiedź dla debugowania.`);
+              console.warn(`[copy-flow] [capture:last-prompt-empty] prompt=${absoluteCurrentPrompt} fp=${captureFingerprint} rawLen=${rawResponseText.length} rawFp=${rawFingerprint}`);
             }
           } else {
             console.log(`⏭️ Pomijam odpowiedź ${i + 1}/${promptChain.length} - nie jest to ostatni prompt`);
@@ -7292,26 +7690,12 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         removeCounter(counter, true);
         
         // Zwróć ostatnią odpowiedź do zapisania
-        const preferredResponse = typeof window._preferredResponseToSave === 'string'
-          ? window._preferredResponseToSave
-          : '';
-        const preferredPrompt = Number.isInteger(window._preferredResponsePrompt)
-          ? window._preferredResponsePrompt
-          : null;
-        const preferredReason = typeof window._preferredResponseReason === 'string'
-          ? window._preferredResponseReason
-          : '';
-        const lastResponse = preferredResponse || window._lastResponseToSave || '';
+        const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
-        delete window._preferredResponseToSave;
-        delete window._preferredResponsePrompt;
-        delete window._preferredResponseReason;
         console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków)`);
-        if (preferredResponse) {
-          console.log(`🎯 Użyto odpowiedzi Four-Gate (${preferredReason || 'preferred'})`);
-        }
+        console.log(`[copy-flow] [capture:return] prompt=${promptChain.length} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)}`);
         const completedPrompt = getAbsolutePromptIndex(promptChain.length);
-        const selectedPrompt = preferredPrompt || completedPrompt;
+        const selectedPrompt = completedPrompt;
         const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
         notifyProcess('PROCESS_PROGRESS', {
           status: 'completed',
@@ -7328,7 +7712,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           lastResponse: lastResponse,
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
-          selectedResponseReason: preferredReason
+          selectedResponseReason: 'last_prompt'
         };
       } else {
         console.log("ℹ️ Brak prompt chain do wykonania (prompt chain jest puste lub null)");
@@ -7423,4 +7807,5 @@ function waitForTabComplete(tabId) {
     });
   });
 }
+
 

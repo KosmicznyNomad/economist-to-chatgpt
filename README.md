@@ -1,141 +1,69 @@
-# News to ChatGPT
+﻿# News to ChatGPT
 
-Rozszerzenie Chrome do automatycznego przetwarzania artykułów newsowych przez ChatGPT z zaawansowanym prompt chain.
+Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
 
-## Funkcjonalność
+## What it does
+- Extracts text from supported news pages and YouTube transcripts.
+- Runs two flows:
+  - `company` on all supported tabs.
+  - `portfolio` on selected tabs.
+- Automates ChatGPT stage-by-stage with retries and resume support.
+- Saves final chain responses locally.
 
-### Podstawowe funkcje
-- Automatyczne kopiowanie artykułów do ChatGPT
-- Wsparcie dla wielu źródeł newsowych
-- Prompt chain - automatyczne wysyłanie sekwencji promptów
-- Ręczne wklejanie źródeł
-- Zapisywanie odpowiedzi ChatGPT
+## Current runtime flow
+`popup -> RUN_ANALYSIS -> processArticles -> injectToChat -> saveResponse -> responses.html`
 
-### Obsługiwane źródła
-- The Economist
-- Nikkei Asia
-- Caixin Global
-- The Africa Report
-- NZZ
-- Project Syndicate
-- The Ken
-- Wall Street Journal
-- Foreign Affairs
-- YouTube (transkrypcje)
+## Main files
+- `manifest.json` - permissions and service worker registration.
+- `background.js` - core orchestration and ChatGPT automation.
+- `popup.js` - run, stop, resume and navigation.
+- `process-monitor.js` - process control panel.
+- `responses.js` - responses view, copy/clear, storage migration.
+- `youtube-content.js` - transcript extraction for YouTube.
+- `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains.
 
-### Zaawansowane funkcje
-- Automatyczna interakcja z UI ChatGPT (wysyłanie, edycja, czekanie na odpowiedzi)
-- Obsługa błędów i retry logic
-- Edit+Resend przy błędach generowania
-- Licznik postępu prompt chain
-- Dwufazowa analiza (spółka + portfel)
+## Storage
+- Responses are written in worker to `chrome.storage.session.responses`.
+- `responses.js` migrates and merges data to `chrome.storage.local.responses`.
+- Process monitor snapshot is stored in `chrome.storage.local.process_monitor_state`.
 
-## Instalacja
+## Prompt chains
+- Prompt separator: `◄PROMPT_SEPARATOR►`.
+- Prompt #1 is payload template with `{{articlecontent}}`.
+- Remaining prompts are executed as chain in ChatGPT.
+- Only final chain response is persisted.
 
-1. Pobierz lub sklonuj to repozytorium
-2. Otwórz Chrome i wejdź na `chrome://extensions/`
-3. Włącz "Developer mode" w prawym górnym rogu
-4. Kliknij "Load unpacked" i wybierz folder z rozszerzeniem
-5. Rozszerzenie jest gotowe do użycia
+## Install (unpacked)
+1. Open `chrome://extensions/`.
+2. Enable `Developer mode`.
+3. Click `Load unpacked`.
+4. Select `economist-to-chatgpt` folder.
 
-## Użycie
+## Use
+### Web tab flow
+1. Open supported article/video tabs.
+2. Click extension icon (`Ctrl+Shift+E`).
+3. Choose tabs for portfolio analysis.
+4. Let both flows run.
 
-### Analiza artykułów z internetu
-1. Otwórz artykuły z obsługiwanych źródeł w osobnych kartach
-2. Kliknij ikonę rozszerzenia (lub naciśnij `Ctrl+Shift+E`)
-3. Wybierz artykuły do analizy portfela
-4. Rozszerzenie automatycznie przetworzy wszystkie artykuły
+### Manual source flow
+1. Open popup.
+2. Open manual source dialog.
+3. Paste title and text.
+4. Start selected number of instances.
 
-### Ręczne wklejanie źródeł
-1. Kliknij ikonę rozszerzenia
-2. Wybierz "Manual Source"
-3. Wklej tytuł i tekst
-4. Wybierz liczbę instancji do przetworzenia
+### Responses view
+- Open from popup or shortcut `Ctrl+Shift+R`.
+- Copy single response or copy all by analysis type.
 
-### Przeglądanie odpowiedzi
-- Naciśnij `Ctrl+Shift+R` aby otworzyć zebrane odpowiedzi
-- Lub kliknij prawym przyciskiem → "Pokaż zebrane odpowiedzi"
+## Supported source updates
+Keep these in sync when adding/removing domains:
+- `manifest.json` host permissions
+- `SUPPORTED_SOURCES` in `background.js`
+- `extractText()` selectors for source-specific parsing
 
-## Dokumentacja techniczna
-
-### Struktura DOM ChatGPT
-Szczegółowa dokumentacja interakcji z interfejsem ChatGPT:
-- **[CHATGPT_DOM_STRUCTURE.md](CHATGPT_DOM_STRUCTURE.md)** - Kompletna dokumentacja selektorów, stanów i best practices
-- **[CHATGPT_DOM_VISUAL.md](CHATGPT_DOM_VISUAL.md)** - Wizualna reprezentacja struktury DOM
-- **[CHATGPT_INTERACTION_EXAMPLES.js](CHATGPT_INTERACTION_EXAMPLES.js)** - Gotowe funkcje do użycia
-
-### Kluczowe pliki
-- `manifest.json` - Konfiguracja rozszerzenia
-- `background.js` - Logika główna (prompt chain, analiza artykułów)
-- `content-script.js` - Komunikacja z Google Sheets
-- `popup.html/js` - Interface użytkownika
-
-## Dla deweloperów
-
-### Interakcja z ChatGPT UI
-
-Rozszerzenie implementuje zaawansowaną interakcję z interfejsem ChatGPT:
-
-```javascript
-// Znajdowanie elementów
-const editor = document.querySelector('[role="textbox"][contenteditable="true"]');
-const sendButton = document.querySelector('[data-testid="send-button"]');
-const editButton = document.querySelector('button[aria-label="Edit message"]');
-
-// Wstawianie tekstu (contenteditable!)
-const textNode = document.createTextNode(promptText);
-editor.appendChild(textNode);
-editor.dispatchEvent(new InputEvent('input', { bubbles: true }));
-
-// Czekanie na odpowiedź
-while (!isInterfaceReady()) {
-  await new Promise(r => setTimeout(r, 500));
-}
-```
-
-Więcej przykładów w plikach dokumentacji.
-
-### Testowanie selektorów
-
-Możesz przetestować selektory bezpośrednio w DevTools Console na chatgpt.com:
-
-```javascript
-// Test edytora
-const editor = document.querySelector('[role="textbox"][contenteditable="true"]');
-console.log('Editor:', editor);
-
-// Test przycisku Send
-const sendBtn = document.querySelector('[data-testid="send-button"]');
-console.log('Send button:', sendBtn, 'disabled:', sendBtn?.disabled);
-
-// Test wiadomości
-const userMsgs = document.querySelectorAll('[data-message-author-role="user"]');
-console.log('User messages:', userMsgs.length);
-```
-
-## Relay architecture (backend -> GitHub Actions -> monitoring)
-
-Current recommended production flow:
-
-`extension (lastResponse only) -> backend POST /responses -> repository_dispatch -> GitHub Actions -> monitoring API`
-
-New files:
-
-- `.github/workflows/relay-responses.yml`
-- `.github/scripts/relay_repository_dispatch.py`
-
-GitHub Secrets / Variables for workflow:
-
-- `MONITORING_API_URL` (secret)
-- `MONITORING_API_KEY` (secret, optional)
-- `MONITORING_API_KEY_HEADER` (variable, default `Authorization`)
-- `MONITORING_API_REQUIRED` (variable: `true/false`)
-- `MONITORING_TIMEOUT_SEC`, `MONITORING_RETRY_COUNT`, `MONITORING_BACKOFF_SEC` (variables, optional)
-
-Backend env required to publish `repository_dispatch`:
-
-- `GITHUB_DISPATCH_ENABLED=true`
-- `GITHUB_DISPATCH_TOKEN=<token>`
-- `GITHUB_DISPATCH_REPOSITORY=owner/repo`
-- optional: `GITHUB_DISPATCH_EVENT_TYPE=analysis_response`
-
+## Notes
+- `background.js` is the central runtime file and contains most of automation/recovery logic.
+- Keep `STAGE_NAMES_COMPANY` aligned with company prompt order/count.
+- `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
+- Backend and GitHub relay components were removed from this repository.
