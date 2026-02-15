@@ -41,6 +41,8 @@ const WATCHLIST_DISPATCH = {
   maxBackoffMs: 30 * 60 * 1000,
   outboxStorageKey: "watchlist_dispatch_outbox",
   outboxMaxItems: 5000,
+  historyStorageKey: "watchlist_dispatch_history",
+  historyMaxItems: 200,
   alarmName: "watchlist-dispatch-flush",
   alarmPeriodMinutes: 2
 };
@@ -3024,6 +3026,10 @@ function normalizeWatchlistDispatchPayload(response) {
   if (stage) {
     payload.stage = stage;
   }
+  const conversationUrl = typeof response.conversationUrl === 'string' ? response.conversationUrl.trim() : '';
+  if (conversationUrl) {
+    payload.conversationUrl = conversationUrl;
+  }
   return payload;
 }
 
@@ -3080,6 +3086,54 @@ async function writeWatchlistOutbox(items) {
   const normalized = sanitizeWatchlistOutbox(items);
   await chrome.storage.local.set({ [storageKey]: normalized });
   return normalized;
+}
+
+function sanitizeWatchlistDispatchHistory(rawItems) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const normalized = [];
+
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    normalized.push({
+      ts: Number.isInteger(item.ts) ? item.ts : Date.now(),
+      kind: typeof item.kind === 'string' && item.kind.trim() ? item.kind.trim() : 'flush',
+      reason: typeof item.reason === 'string' ? item.reason : '',
+      success: item.success === true,
+      skipped: item.skipped === true,
+      skipReason: typeof item.skipReason === 'string' ? item.skipReason : '',
+      error: typeof item.error === 'string' ? item.error : '',
+      queued: Number.isInteger(item.queued) ? item.queued : 0,
+      sent: Number.isInteger(item.sent) ? item.sent : 0,
+      failed: Number.isInteger(item.failed) ? item.failed : 0,
+      deferred: Number.isInteger(item.deferred) ? item.deferred : 0,
+      remaining: Number.isInteger(item.remaining) ? item.remaining : 0
+    });
+  }
+
+  const limit = Math.max(1, Number(WATCHLIST_DISPATCH.historyMaxItems || 200));
+  if (normalized.length <= limit) return normalized;
+  return normalized.slice(normalized.length - limit);
+}
+
+async function readWatchlistDispatchHistory() {
+  const storageKey = WATCHLIST_DISPATCH.historyStorageKey;
+  if (!storageKey || !chrome?.storage?.local?.get) return [];
+  const result = await chrome.storage.local.get([storageKey]);
+  return sanitizeWatchlistDispatchHistory(result?.[storageKey]);
+}
+
+async function appendWatchlistDispatchHistory(entry) {
+  const storageKey = WATCHLIST_DISPATCH.historyStorageKey;
+  if (!storageKey || !chrome?.storage?.local?.get || !chrome?.storage?.local?.set) return;
+  try {
+    const snapshot = await chrome.storage.local.get([storageKey]);
+    const current = sanitizeWatchlistDispatchHistory(snapshot?.[storageKey]);
+    const normalizedEntry = sanitizeWatchlistDispatchHistory([entry])[0];
+    const next = sanitizeWatchlistDispatchHistory([...current, normalizedEntry]);
+    await chrome.storage.local.set({ [storageKey]: next });
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:history-write-failed]', error);
+  }
 }
 
 async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-response') {
@@ -3191,7 +3245,12 @@ async function resolveWatchlistDispatchConfiguration(forceReload = false) {
 }
 
 async function getWatchlistDispatchStatus(forceReload = false) {
-  const config = await resolveWatchlistDispatchConfiguration(forceReload);
+  const [config, outbox, history] = await Promise.all([
+    resolveWatchlistDispatchConfiguration(forceReload),
+    readWatchlistOutbox().catch(() => []),
+    readWatchlistDispatchHistory().catch(() => [])
+  ]);
+  const lastFlush = history.length > 0 ? history[history.length - 1] : null;
   return {
     enabled: WATCHLIST_DISPATCH.enabled,
     repository: typeof WATCHLIST_DISPATCH.repository === 'string' ? WATCHLIST_DISPATCH.repository.trim() : '',
@@ -3199,7 +3258,11 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     configured: !!config.ok,
     hasToken: !!config.token,
     tokenSource: config.tokenSource || 'missing',
-    reason: config.reason
+    reason: config.reason,
+    queueSize: Array.isArray(outbox) ? outbox.length : 0,
+    flushInProgress: !!watchlistDispatchFlushInProgress,
+    historySize: Array.isArray(history) ? history.length : 0,
+    lastFlush
   };
 }
 
@@ -3298,10 +3361,35 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
 }
 
 async function flushWatchlistDispatchOutbox(reason = 'manual') {
+  const ts = Date.now();
   if (!WATCHLIST_DISPATCH.enabled) {
+    appendWatchlistDispatchHistory({
+      ts,
+      kind: 'flush',
+      reason,
+      skipped: true,
+      skipReason: 'dispatch_disabled',
+      queued: 0,
+      sent: 0,
+      failed: 0,
+      deferred: 0,
+      remaining: 0
+    }).catch(() => {});
     return { skipped: true, reason: 'dispatch_disabled' };
   }
   if (watchlistDispatchFlushInProgress) {
+    appendWatchlistDispatchHistory({
+      ts,
+      kind: 'flush',
+      reason,
+      skipped: true,
+      skipReason: 'flush_in_progress',
+      queued: 0,
+      sent: 0,
+      failed: 0,
+      deferred: 0,
+      remaining: 0
+    }).catch(() => {});
     return { skipped: true, reason: 'flush_in_progress' };
   }
 
@@ -3309,6 +3397,17 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   try {
     const queued = await readWatchlistOutbox();
     if (queued.length === 0) {
+      appendWatchlistDispatchHistory({
+        ts,
+        kind: 'flush',
+        reason,
+        success: true,
+        queued: 0,
+        sent: 0,
+        failed: 0,
+        deferred: 0,
+        remaining: 0
+      }).catch(() => {});
       return { success: true, sent: 0, failed: 0, deferred: 0, remaining: 0 };
     }
 
@@ -3357,6 +3456,17 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     console.log(
       `[copy-flow] [dispatch:flush] reason=${reason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length}`
     );
+    appendWatchlistDispatchHistory({
+      ts,
+      kind: 'flush',
+      reason,
+      success: true,
+      queued: queued.length,
+      sent,
+      failed,
+      deferred,
+      remaining: persisted.length
+    }).catch(() => {});
     return { success: true, sent, failed, deferred, remaining: persisted.length };
   } finally {
     watchlistDispatchFlushInProgress = false;
@@ -3567,7 +3677,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null) {
+async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null, conversationUrl = null) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -3616,6 +3726,10 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       : null;
     if (normalizedStage) {
       newResponse.stage = normalizedStage;
+    }
+    const normalizedConversationUrl = typeof conversationUrl === 'string' ? conversationUrl.trim() : '';
+    if (normalizedConversationUrl) {
+      newResponse.conversationUrl = normalizedConversationUrl;
     }
     
     const saveMaxAttempts = 4;
@@ -3733,7 +3847,15 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
 // Listener na wiadomości z content scriptu i popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (message.type === 'SAVE_RESPONSE') {
-    saveResponse(message.text, message.source, message.analysisType, message.runId, message.responseId);
+    saveResponse(
+      message.text,
+      message.source,
+      message.analysisType,
+      message.runId,
+      message.responseId,
+      message.stage || null,
+      message.conversationUrl || null
+    );
   } else if (message.type === 'RUN_ANALYSIS') {
     const invocationWindowId = Number.isInteger(message?.windowId)
       ? message.windowId
@@ -4593,6 +4715,22 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       });
       
       result = results[0]?.result;
+
+      // Capture conversation URL from injected context (preferred) or from the tab (fallback).
+      let conversationUrl = typeof result?.conversationUrl === 'string'
+        ? result.conversationUrl.trim()
+        : '';
+      if (!conversationUrl) {
+        try {
+          const chatTab = await chrome.tabs.get(chatTabId);
+          const chatTabUrl = typeof chatTab?.url === 'string' ? chatTab.url.trim() : '';
+          if (chatTabUrl.startsWith('https://chatgpt.com/')) {
+            conversationUrl = chatTabUrl;
+          }
+        } catch (error) {
+          // Ignore and continue without URL.
+        }
+      }
       
       if (result === undefined) {
         console.error(`❌ KRYTYCZNY: results[0].result jest undefined!`);
@@ -4681,7 +4819,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           analysisType,
           processId,
           null,
-          Object.keys(stageMeta).length > 0 ? stageMeta : null
+          Object.keys(stageMeta).length > 0 ? stageMeta : null,
+          conversationUrl || null
         );
         if (Object.keys(completedResponsePatch).length > 0) {
           completedResponsePatch.completedResponseSaved = !!savedResponse;
@@ -8096,6 +8235,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         return {
           success: true,
           lastResponse: lastResponse,
+          conversationUrl: typeof location?.href === 'string' ? location.href : '',
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
           selectedResponseReason: 'last_prompt',

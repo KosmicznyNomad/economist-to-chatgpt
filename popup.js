@@ -53,6 +53,16 @@ function tokenSourceLabel(source) {
   return 'missing';
 }
 
+function formatLastDispatchFlush(lastFlush) {
+  if (!lastFlush || typeof lastFlush !== 'object') return 'brak';
+  const ts = Number.isInteger(lastFlush.ts) ? lastFlush.ts : null;
+  const when = ts ? new Date(ts).toLocaleString() : 'n/a';
+  if (lastFlush.skipped) {
+    return `skip=${lastFlush.skipReason || 'n/a'} @ ${when}`;
+  }
+  return `sent=${lastFlush.sent || 0}, failed=${lastFlush.failed || 0}, remaining=${lastFlush.remaining || 0} @ ${when}`;
+}
+
 function formatDispatchStatus(status) {
   if (!status || status.success === false) {
     return 'Dispatch status: blad odczytu.';
@@ -60,16 +70,18 @@ function formatDispatchStatus(status) {
   if (!status.enabled) {
     return 'Dispatch status: wylaczony.';
   }
+  const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
+  const flushText = formatLastDispatchFlush(status.lastFlush);
   if (status.configured) {
-    return `Dispatch status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}).`;
+    return `Dispatch status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
   }
   if (status.reason === 'missing_repository') {
-    return 'Dispatch status: brak repozytorium.';
+    return `Dispatch status: brak repozytorium. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
   }
   if (status.reason === 'missing_dispatch_credentials') {
-    return 'Dispatch status: brak tokena GitHub.';
+    return `Dispatch status: brak tokena GitHub. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
   }
-  return `Dispatch status: ${status.reason || 'nieznany'}.`;
+  return `Dispatch status: ${status.reason || 'nieznany'}. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
 }
 
 async function refreshDispatchStatus(forceReload = false) {
