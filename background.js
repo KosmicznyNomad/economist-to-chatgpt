@@ -3008,8 +3008,11 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
+  const stage = response.stage && typeof response.stage === 'object' && !Array.isArray(response.stage)
+    ? response.stage
+    : null;
 
-  return {
+  const payload = {
     schema: "economist.response.v1",
     responseId: responseId || generateResponseId(runId),
     runId: runId || null,
@@ -3018,6 +3021,10 @@ function normalizeWatchlistDispatchPayload(response) {
     analysisType: typeof response.analysisType === 'string' ? response.analysisType : '',
     timestamp: response.timestamp ?? Date.now()
   };
+  if (stage) {
+    payload.stage = stage;
+  }
+  return payload;
 }
 
 function getWatchlistOutboxDedupKey(item) {
@@ -3400,6 +3407,12 @@ async function uploadResponseToCloud(response) {
     savedAt: new Date().toISOString(),
     extensionVersion: chrome.runtime.getManifest().version
   };
+  const stage = response.stage && typeof response.stage === 'object' && !Array.isArray(response.stage)
+    ? response.stage
+    : null;
+  if (stage) {
+    payload.stage = stage;
+  }
   const copyTrace = buildCopyTrace(response.runId || '', response.responseId || '');
   const copyFingerprint = textFingerprint(response.text || '');
   console.log(`[copy-flow] [upload:start] trace=${copyTrace} len=${(response.text || '').length} fp=${copyFingerprint}`);
@@ -3520,7 +3533,7 @@ function getSupportedSourcesQuery() {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "view-responses",
-    title: "Poka� zebrane odpowiedzi",
+    title: "Pokaż zebrane odpowiedzi",
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
@@ -3554,7 +3567,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null) {
+async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -3597,6 +3610,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     };
     if (normalizedRunId) {
       newResponse.runId = normalizedRunId;
+    }
+    const normalizedStage = stage && typeof stage === 'object' && !Array.isArray(stage)
+      ? stage
+      : null;
+    if (normalizedStage) {
+      newResponse.stage = normalizedStage;
     }
     
     const saveMaxAttempts = 4;
@@ -4637,8 +4656,26 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.log(`Typ analizy: ${analysisType}`);
         console.log(`Tytuł: ${title}`);
         console.log(`[copy-flow] [process:save-call] run=${processId || 'no-run'} len=${resultLastResponse.length} fp=${textFingerprint(resultLastResponse)}`);
-        
-        const savedResponse = await saveResponse(resultLastResponse, title, analysisType, processId);
+
+        const stageMeta = {};
+        if (Number.isInteger(result?.selectedResponsePrompt)) {
+          stageMeta.selected_response_prompt = result.selectedResponsePrompt;
+        }
+        if (Number.isInteger(result?.selectedResponseStageIndex)) {
+          stageMeta.selected_response_stage_index = result.selectedResponseStageIndex;
+        }
+        if (typeof result?.selectedResponseReason === 'string' && result.selectedResponseReason.trim()) {
+          stageMeta.selected_response_reason = result.selectedResponseReason.trim();
+        }
+
+        const savedResponse = await saveResponse(
+          resultLastResponse,
+          title,
+          analysisType,
+          processId,
+          null,
+          Object.keys(stageMeta).length > 0 ? stageMeta : null
+        );
         if (Object.keys(completedResponsePatch).length > 0) {
           completedResponsePatch.completedResponseSaved = !!savedResponse;
         }
@@ -4902,6 +4939,99 @@ async function runManualSourceAnalysis(text, title, instances) {
 // YouTube używa dedykowanego content script (youtube-content.js)
 async function extractText() {
   const hostname = window.location.hostname;
+  const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+  const normalizeText = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+  const elementText = (el) => normalizeText(el && (el.innerText || el.textContent) ? (el.innerText || el.textContent) : '');
+  const safeClick = (el) => {
+    try {
+      if (el && typeof el.click === 'function') el.click();
+    } catch (_) {
+      // ignore
+    }
+  };
+
+  async function extractSpotifyTranscript() {
+    try {
+      const url = new URL(window.location.href);
+      const title = normalizeText(document.title || '');
+      const path = url.pathname || '';
+      const isEpisode = /(^|\/)episode\//.test(path);
+      const isTrack = /(^|\/)track\//.test(path);
+
+      // Give Spotify Web Player (React) a moment to render dynamic sections.
+      await sleep(350);
+
+      const transcriptWord = /transcript|transkrypc/i;
+      const triggerCandidates = Array.from(document.querySelectorAll('button, [role="button"], a'));
+      const trigger = triggerCandidates.find((el) => transcriptWord.test(`${elementText(el)} ${normalizeText(el.getAttribute('aria-label'))}`));
+      if (trigger) {
+        safeClick(trigger);
+        await sleep(450);
+      }
+
+      const transcriptSelectors = [
+        '[data-testid*="transcript" i]',
+        '[aria-label*="transcript" i]',
+        '[aria-label*="transkrypc" i]',
+        '[class*="transcript" i]',
+        '[id*="transcript" i]',
+        '[class*="transkrypc" i]',
+        '[id*="transkrypc" i]'
+      ];
+
+      const candidates = [];
+      for (const selector of transcriptSelectors) {
+        try {
+          candidates.push(...Array.from(document.querySelectorAll(selector)));
+        } catch (_) {
+          // ignore invalid selectors / browser quirks
+        }
+      }
+
+      const headings = Array.from(document.querySelectorAll('h1,h2,h3,h4,h5'));
+      for (const heading of headings) {
+        const headingText = elementText(heading);
+        if (!headingText) continue;
+        if (!transcriptWord.test(headingText)) continue;
+        const container = heading.closest('section, article, div') || heading.parentElement;
+        if (container) candidates.push(container);
+      }
+
+      // Pick the most "transcript-like" block: longest text among transcript-marked candidates.
+      let bestText = '';
+      const seen = new Set();
+      for (const el of candidates) {
+        if (!el || seen.has(el)) continue;
+        seen.add(el);
+        const text = elementText(el);
+        if (text.length > bestText.length) bestText = text;
+      }
+
+      bestText = normalizeText(bestText);
+      if (!bestText || bestText.length < 200) return '';
+
+      const headerType = isEpisode ? 'podcast transcript' : (isTrack ? 'track text (lyrics/transcript)' : 'page transcript');
+      const headerParts = [
+        '[Spotify]',
+        headerType,
+        title ? `Title: ${title}` : null,
+        `URL: ${url.href}`
+      ].filter(Boolean);
+
+      return `${headerParts.join(' | ')}\n\n${bestText}`;
+    } catch (error) {
+      console.error('Spotify transcript extraction failed:', error);
+      return '';
+    }
+  }
+
+  if (hostname.includes('open.spotify.com')) {
+    const spotifyTranscript = await extractSpotifyTranscript();
+    if (spotifyTranscript && spotifyTranscript.length > 50) {
+      console.log(`Spotify: extracted transcript text, length=${spotifyTranscript.length}`);
+      return spotifyTranscript;
+    }
+  }
   console.log(`Próbuję wyekstrahować tekst z: ${hostname}`);
   
   // Mapa selektorów specyficznych dla każdego źródła
@@ -4968,9 +5098,13 @@ async function extractText() {
       '.article-content'
     ],
     'open.spotify.com': [
-      '.NavBar__NavBarPage-sc-1guraqe-0.ejVULV',
-      '.NavBar__NavBarPage-sc-1guraqe-0',
+      '[data-testid*="transcript" i]',
+      '[aria-label*="transcript" i]',
+      '[aria-label*="transkrypc" i]',
+      '[class*="transcript" i]',
+      '[id*="transcript" i]',
       'article',
+      'main',
       '[role="main"]'
     ]
   };

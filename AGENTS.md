@@ -42,6 +42,7 @@ Response fields in use:
 - `analysisType`
 - `responseId`
 - optional `runId`
+- optional `stage` (object; e.g. selection metadata for the saved response)
 
 ## Prompt/stage alignment
 - Separator token: `◄PROMPT_SEPARATOR►`.
@@ -67,6 +68,10 @@ Response fields in use:
   - transport: GitHub `repository_dispatch` (`economist_response`)
   - periodic retry: `chrome.alarms` (`watchlist-dispatch-flush`)
   - credentials: token can be kept inline (`WATCHLIST_DISPATCH.token`) or in `chrome.storage.local` under `watchlist_dispatch_token`
+- Optional database upload (HTTP ingest) is handled in `background.js`:
+  - config: `CLOUD_UPLOAD` (disabled by default)
+  - payload schema: `economist.response.v1` (same as Watchlist dispatch), includes `stage` when available
+  - requires the target origin to be present in `manifest.json` `host_permissions` (otherwise `fetch()` will be blocked)
 
 ## Common change points
 - GPT targets: `CHAT_URL`, `CHAT_URL_PORTFOLIO` in `background.js`.
