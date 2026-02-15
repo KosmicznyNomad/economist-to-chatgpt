@@ -66,7 +66,7 @@ Response fields in use:
   - trigger: after `saveResponse()` stores final chain output
   - transport: GitHub `repository_dispatch` (`economist_response`)
   - periodic retry: `chrome.alarms` (`watchlist-dispatch-flush`)
-  - one-time credential: `WATCHLIST_DISPATCH.token` in `background.js`
+  - credentials: token can be kept inline (`WATCHLIST_DISPATCH.token`) or in `chrome.storage.local` under `watchlist_dispatch_token`
 
 ## Common change points
 - GPT targets: `CHAT_URL`, `CHAT_URL_PORTFOLIO` in `background.js`.

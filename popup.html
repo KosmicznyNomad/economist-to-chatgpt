@@ -147,6 +147,59 @@
     .advanced .advanced-content {
       margin-top: 8px;
     }
+
+    .dispatch-settings {
+      margin-top: 10px;
+      padding-top: 10px;
+      border-top: 1px dashed #d1d5db;
+    }
+
+    .dispatch-title {
+      font-size: 11px;
+      font-weight: 700;
+      letter-spacing: 0.04em;
+      text-transform: uppercase;
+      color: #6b7280;
+      margin-bottom: 8px;
+    }
+
+    .dispatch-input {
+      width: 100%;
+      box-sizing: border-box;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      padding: 8px 10px;
+      font-size: 12px;
+      margin-bottom: 8px;
+      background: #fff;
+      color: #111827;
+    }
+
+    .dispatch-actions {
+      display: flex;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .btn-inline {
+      margin-bottom: 0;
+      width: auto;
+      flex: 1;
+      text-align: center;
+      padding: 8px 10px;
+      font-size: 12px;
+    }
+
+    .dispatch-status {
+      margin: 0;
+      padding: 7px 9px;
+      border-radius: 8px;
+      background: #f3f4f6;
+      color: #374151;
+      font-size: 11px;
+      line-height: 1.35;
+      border: 1px solid #e5e7eb;
+    }
   </style>
 </head>
 <body>
@@ -198,6 +251,22 @@
           <span class="btn-icon">&#9881;</span>
           Panel decyzyjny
         </button>
+
+        <div class="dispatch-settings">
+          <div class="dispatch-title">Watchlist dispatch</div>
+          <input
+            class="dispatch-input"
+            id="watchlistTokenInput"
+            type="password"
+            placeholder="GitHub token (repository_dispatch)"
+            autocomplete="off"
+          />
+          <div class="dispatch-actions">
+            <button class="btn btn-inline" id="saveWatchlistTokenBtn">Zapisz token</button>
+            <button class="btn btn-inline" id="clearWatchlistTokenBtn">Wyczysc</button>
+          </div>
+          <p class="dispatch-status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status dispatch...</p>
+        </div>
       </div>
     </details>
   </div>

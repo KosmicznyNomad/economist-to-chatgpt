@@ -27,13 +27,14 @@ const CLOUD_UPLOAD = {
   backoffMs: 1000
 };
 
-// One-time setup: fill `token` once and extension will auto-dispatch final responses to watchlist.
+// One-time setup: prefer token in chrome.storage.local (tokenStorageKey); inline token remains fallback.
 const WATCHLIST_DISPATCH = {
   enabled: true,
   apiBaseUrl: "https://api.github.com",
   repository: "KosmicznyNomad/watchlist",
   eventType: "economist_response",
   token: "",
+  tokenStorageKey: "watchlist_dispatch_token",
   timeoutMs: 20000,
   retryCount: 3,
   backoffMs: 1500,
@@ -60,6 +61,7 @@ const CLOSED_PROCESS_STATUSES = new Set([
 const processRegistry = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
+let watchlistDispatchTokenCache = null;
 
 function isClosedProcessStatus(status) {
   return CLOSED_PROCESS_STATUSES.has(String(status || '').toLowerCase());
@@ -3101,22 +3103,141 @@ async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-respons
   return { queued: true, responseId: payload.responseId, queueSize: saved.length };
 }
 
-function isWatchlistDispatchConfigured() {
-  if (!WATCHLIST_DISPATCH.enabled) return false;
-  if (!WATCHLIST_DISPATCH.repository || !String(WATCHLIST_DISPATCH.repository).trim()) return false;
-  if (!WATCHLIST_DISPATCH.token || !String(WATCHLIST_DISPATCH.token).trim()) return false;
-  return true;
+function normalizeWatchlistDispatchToken(rawToken) {
+  return typeof rawToken === 'string' ? rawToken.trim() : '';
+}
+
+async function resolveWatchlistDispatchToken(forceReload = false) {
+  if (!forceReload && watchlistDispatchTokenCache && typeof watchlistDispatchTokenCache.token === 'string') {
+    return watchlistDispatchTokenCache;
+  }
+
+  const inlineToken = normalizeWatchlistDispatchToken(WATCHLIST_DISPATCH.token);
+  if (inlineToken) {
+    watchlistDispatchTokenCache = { token: inlineToken, source: 'inline_config' };
+    return watchlistDispatchTokenCache;
+  }
+
+  const storageKey = WATCHLIST_DISPATCH.tokenStorageKey;
+  if (!storageKey || !chrome?.storage?.local?.get) {
+    watchlistDispatchTokenCache = { token: '', source: 'missing' };
+    return watchlistDispatchTokenCache;
+  }
+
+  try {
+    const result = await chrome.storage.local.get([storageKey]);
+    const storedToken = normalizeWatchlistDispatchToken(result?.[storageKey]);
+    watchlistDispatchTokenCache = {
+      token: storedToken,
+      source: storedToken ? 'storage_local' : 'missing'
+    };
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:token-read-failed]', error);
+    watchlistDispatchTokenCache = { token: '', source: 'missing' };
+  }
+
+  return watchlistDispatchTokenCache;
+}
+
+async function resolveWatchlistDispatchConfiguration(forceReload = false) {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    return {
+      ok: false,
+      reason: 'dispatch_disabled',
+      repository: '',
+      token: '',
+      tokenSource: 'missing'
+    };
+  }
+
+  const repository = typeof WATCHLIST_DISPATCH.repository === 'string'
+    ? WATCHLIST_DISPATCH.repository.trim()
+    : '';
+  if (!repository) {
+    return {
+      ok: false,
+      reason: 'missing_repository',
+      repository: '',
+      token: '',
+      tokenSource: 'missing'
+    };
+  }
+
+  const tokenInfo = await resolveWatchlistDispatchToken(forceReload);
+  if (!tokenInfo.token) {
+    return {
+      ok: false,
+      reason: 'missing_dispatch_credentials',
+      repository,
+      token: '',
+      tokenSource: tokenInfo.source || 'missing'
+    };
+  }
+
+  return {
+    ok: true,
+    reason: null,
+    repository,
+    token: tokenInfo.token,
+    tokenSource: tokenInfo.source || 'missing'
+  };
+}
+
+async function getWatchlistDispatchStatus(forceReload = false) {
+  const config = await resolveWatchlistDispatchConfiguration(forceReload);
+  return {
+    enabled: WATCHLIST_DISPATCH.enabled,
+    repository: typeof WATCHLIST_DISPATCH.repository === 'string' ? WATCHLIST_DISPATCH.repository.trim() : '',
+    eventType: typeof WATCHLIST_DISPATCH.eventType === 'string' ? WATCHLIST_DISPATCH.eventType.trim() : '',
+    configured: !!config.ok,
+    hasToken: !!config.token,
+    tokenSource: config.tokenSource || 'missing',
+    reason: config.reason
+  };
+}
+
+async function setWatchlistDispatchToken(rawToken) {
+  const token = normalizeWatchlistDispatchToken(rawToken);
+  if (!token) {
+    return { success: false, reason: 'empty_token' };
+  }
+
+  const storageKey = WATCHLIST_DISPATCH.tokenStorageKey;
+  if (!storageKey || !chrome?.storage?.local?.set) {
+    return { success: false, reason: 'storage_unavailable' };
+  }
+
+  await chrome.storage.local.set({ [storageKey]: token });
+  watchlistDispatchTokenCache = { token, source: 'storage_local' };
+  return { success: true, source: 'storage_local' };
+}
+
+async function clearWatchlistDispatchToken() {
+  const storageKey = WATCHLIST_DISPATCH.tokenStorageKey;
+  if (storageKey && chrome?.storage?.local?.remove) {
+    await chrome.storage.local.remove([storageKey]);
+  }
+
+  watchlistDispatchTokenCache = null;
+  const resolved = await resolveWatchlistDispatchToken(true);
+  return {
+    success: true,
+    hasToken: !!resolved.token,
+    source: resolved.source
+  };
 }
 
 async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') {
   if (!WATCHLIST_DISPATCH.enabled) {
     return { skipped: true, reason: 'dispatch_disabled' };
   }
-  if (!isWatchlistDispatchConfigured()) {
-    return { skipped: true, reason: 'missing_dispatch_credentials' };
+
+  const dispatchConfig = await resolveWatchlistDispatchConfiguration();
+  if (!dispatchConfig.ok) {
+    return { skipped: true, reason: dispatchConfig.reason || 'missing_dispatch_credentials' };
   }
 
-  const repository = WATCHLIST_DISPATCH.repository.trim();
+  const repository = dispatchConfig.repository;
   const url = `${WATCHLIST_DISPATCH.apiBaseUrl.replace(/\/+$/, '')}/repos/${repository}/dispatches`;
   const body = JSON.stringify({
     event_type: WATCHLIST_DISPATCH.eventType,
@@ -3133,7 +3254,7 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
       const response = await fetch(url, {
         method: 'POST',
         headers: {
-          'Authorization': `Bearer ${WATCHLIST_DISPATCH.token}`,
+          'Authorization': `Bearer ${dispatchConfig.token}`,
           'Accept': 'application/vnd.github+json',
           'X-GitHub-Api-Version': '2022-11-28',
           'Content-Type': 'application/json'
@@ -3655,6 +3776,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       console.warn('[monitor] GET_PROCESSES failed:', error);
       sendResponse({ processes: [] });
     });
+    return true;
+  } else if (message.type === 'GET_WATCHLIST_DISPATCH_STATUS') {
+    getWatchlistDispatchStatus(Boolean(message?.forceReload))
+      .then((status) => sendResponse({ success: true, ...status }))
+      .catch((error) => {
+        console.warn('[copy-flow] [dispatch:status-failed]', error);
+        sendResponse({ success: false, error: error?.message || 'status_failed' });
+      });
+    return true;
+  } else if (message.type === 'SET_WATCHLIST_DISPATCH_TOKEN') {
+    setWatchlistDispatchToken(message?.token)
+      .then(async (result) => {
+        if (!result?.success) {
+          sendResponse({ success: false, reason: result?.reason || 'token_update_failed' });
+          return;
+        }
+
+        const [status, flushResult] = await Promise.all([
+          getWatchlistDispatchStatus(true),
+          flushWatchlistDispatchOutbox('credentials_updated').catch((error) => ({
+            success: false,
+            error: error?.message || String(error)
+          }))
+        ]);
+        sendResponse({ success: true, status, flushResult });
+      })
+      .catch((error) => {
+        console.warn('[copy-flow] [dispatch:set-token-failed]', error);
+        sendResponse({ success: false, error: error?.message || 'set_token_failed' });
+      });
+    return true;
+  } else if (message.type === 'CLEAR_WATCHLIST_DISPATCH_TOKEN') {
+    clearWatchlistDispatchToken()
+      .then(async () => {
+        const status = await getWatchlistDispatchStatus(true);
+        sendResponse({ success: true, status });
+      })
+      .catch((error) => {
+        console.warn('[copy-flow] [dispatch:clear-token-failed]', error);
+        sendResponse({ success: false, error: error?.message || 'clear_token_failed' });
+      });
     return true;
   } else if (message.type === 'PROCESS_PROGRESS') {
     handleProcessProgressMessage(message, sender)

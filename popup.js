@@ -26,6 +26,10 @@ function sendRuntimeMessage(payload) {
 }
 
 const resetScanStatus = document.getElementById('resetScanStatus');
+const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
+const watchlistTokenInput = document.getElementById('watchlistTokenInput');
+const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
+const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 
 function setRunStatus(text, isError = false) {
   if (!resetScanStatus) return;
@@ -33,6 +37,52 @@ function setRunStatus(text, isError = false) {
   resetScanStatus.style.color = isError ? '#b91c1c' : '#374151';
   resetScanStatus.style.borderColor = isError ? '#fecaca' : '#e5e7eb';
   resetScanStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+}
+
+function setDispatchStatus(text, isError = false) {
+  if (!watchlistDispatchStatus) return;
+  watchlistDispatchStatus.textContent = text;
+  watchlistDispatchStatus.style.color = isError ? '#b91c1c' : '#374151';
+  watchlistDispatchStatus.style.borderColor = isError ? '#fecaca' : '#e5e7eb';
+  watchlistDispatchStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+}
+
+function tokenSourceLabel(source) {
+  if (source === 'inline_config') return 'inline config';
+  if (source === 'storage_local') return 'local storage';
+  return 'missing';
+}
+
+function formatDispatchStatus(status) {
+  if (!status || status.success === false) {
+    return 'Dispatch status: blad odczytu.';
+  }
+  if (!status.enabled) {
+    return 'Dispatch status: wylaczony.';
+  }
+  if (status.configured) {
+    return `Dispatch status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}).`;
+  }
+  if (status.reason === 'missing_repository') {
+    return 'Dispatch status: brak repozytorium.';
+  }
+  if (status.reason === 'missing_dispatch_credentials') {
+    return 'Dispatch status: brak tokena GitHub.';
+  }
+  return `Dispatch status: ${status.reason || 'nieznany'}.`;
+}
+
+async function refreshDispatchStatus(forceReload = false) {
+  if (!watchlistDispatchStatus) return;
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_WATCHLIST_DISPATCH_STATUS',
+      forceReload
+    });
+    setDispatchStatus(formatDispatchStatus(response), response?.success === false);
+  } catch (error) {
+    setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+  }
 }
 
 async function executeRunAnalysisFromPopup(button, options = {}) {
@@ -202,3 +252,77 @@ if (responsesBtn) {
     window.close();
   });
 }
+
+function setDispatchButtonsDisabled(disabled) {
+  if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = disabled;
+  if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = disabled;
+}
+
+if (saveWatchlistTokenBtn) {
+  saveWatchlistTokenBtn.addEventListener('click', async () => {
+    const rawToken = typeof watchlistTokenInput?.value === 'string' ? watchlistTokenInput.value.trim() : '';
+    if (!rawToken) {
+      setDispatchStatus('Dispatch status: podaj token przed zapisem.', true);
+      return;
+    }
+
+    setDispatchButtonsDisabled(true);
+    const originalText = saveWatchlistTokenBtn.textContent;
+    saveWatchlistTokenBtn.textContent = 'Zapis...';
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'SET_WATCHLIST_DISPATCH_TOKEN',
+        token: rawToken
+      });
+      if (response?.success === false) {
+        setDispatchStatus(`Dispatch status: blad zapisu (${response.reason || response.error || 'unknown'}).`, true);
+        return;
+      }
+
+      if (watchlistTokenInput) {
+        watchlistTokenInput.value = '';
+      }
+
+      const statusPayload = response?.status && typeof response.status === 'object'
+        ? { success: true, ...response.status }
+        : response;
+      setDispatchStatus(formatDispatchStatus(statusPayload), false);
+    } catch (error) {
+      setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+    } finally {
+      saveWatchlistTokenBtn.textContent = originalText;
+      setDispatchButtonsDisabled(false);
+    }
+  });
+}
+
+if (clearWatchlistTokenBtn) {
+  clearWatchlistTokenBtn.addEventListener('click', async () => {
+    setDispatchButtonsDisabled(true);
+    const originalText = clearWatchlistTokenBtn.textContent;
+    clearWatchlistTokenBtn.textContent = 'Czyszcze...';
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'CLEAR_WATCHLIST_DISPATCH_TOKEN'
+      });
+      if (response?.success === false) {
+        setDispatchStatus(`Dispatch status: blad czyszczenia (${response.error || 'unknown'}).`, true);
+        return;
+      }
+
+      const statusPayload = response?.status && typeof response.status === 'object'
+        ? { success: true, ...response.status }
+        : response;
+      setDispatchStatus(formatDispatchStatus(statusPayload), false);
+    } catch (error) {
+      setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+    } finally {
+      clearWatchlistTokenBtn.textContent = originalText;
+      setDispatchButtonsDisabled(false);
+    }
+  });
+}
+
+void refreshDispatchStatus(true);
