@@ -1,0 +1,7 @@
+watchlist/.pytest_cache/
+watchlist/**/__pycache__/
+watchlist/**/*.pyc
+watchlist/out/
+watchlist/tmpci/
+watchlist/tmp_integration/
+watchlist/.vscode/
