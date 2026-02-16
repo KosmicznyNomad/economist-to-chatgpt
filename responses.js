@@ -14,6 +14,8 @@ const marketTableBody = marketTable ? marketTable.querySelector('tbody') : null;
 const clearBtn = document.getElementById('clearBtn');
 const copyAllCompanyBtn = document.getElementById('copyAllCompanyBtn');
 const copyAllPortfolioBtn = document.getElementById('copyAllPortfolioBtn');
+const copyAllCompanyWithLinkBtn = document.getElementById('copyAllCompanyWithLinkBtn');
+const copyAllPortfolioWithLinkBtn = document.getElementById('copyAllPortfolioWithLinkBtn');
 
 const RESPONSE_STORAGE_KEY = 'responses';
 let responseStorageReady = null;
@@ -205,10 +207,38 @@ copyAllCompanyBtn.addEventListener('click', async () => {
   await copyAllByType('company', copyAllCompanyBtn);
 });
 
+if (copyAllCompanyWithLinkBtn) {
+  copyAllCompanyWithLinkBtn.addEventListener('click', async () => {
+    await copyAllByTypeWithLink('company', copyAllCompanyWithLinkBtn);
+  });
+}
+
 // ObsĹ‚uga przycisku "Kopiuj wszystkie" dla analizy portfela
 copyAllPortfolioBtn.addEventListener('click', async () => {
   await copyAllByType('portfolio', copyAllPortfolioBtn);
 });
+
+if (copyAllPortfolioWithLinkBtn) {
+  copyAllPortfolioWithLinkBtn.addEventListener('click', async () => {
+    await copyAllByTypeWithLink('portfolio', copyAllPortfolioWithLinkBtn);
+  });
+}
+
+function normalizeConversationUrl(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) return '';
+  return raw;
+}
+
+function resolveConversationUrl(response) {
+  if (!response || typeof response !== 'object') return '';
+  return (
+    normalizeConversationUrl(response.conversationUrl) ||
+    normalizeConversationUrl(response.conversation_url) ||
+    ''
+  );
+}
 
 // Funkcja kopiujÄ…ca wszystkie odpowiedzi danego typu
 async function copyAllByType(analysisType, button) {
@@ -274,6 +304,70 @@ async function copyAllByType(analysisType, button) {
   }
 }
 
+// Kopiuje wszystkie odpowiedzi danego typu jako TSV: text<TAB>conversationUrl (po jednej odpowiedzi na wiersz).
+async function copyAllByTypeWithLink(analysisType, button) {
+  let opCounted = false;
+  let attemptedCount = 0;
+  let attemptedChars = 0;
+  try {
+    await ensureResponseStorageReady();
+    const responses = await readResponsesFromStorage();
+
+    const filteredResponses = responses.filter(r => (r.analysisType || 'company') === analysisType);
+    if (filteredResponses.length === 0) {
+      return;
+    }
+
+    const sortedResponses = [...filteredResponses].sort((a, b) => b.timestamp - a.timestamp);
+    const allText = sortedResponses
+      .map((response) => {
+        const text = typeof response?.text === 'string' ? response.text.replace(/\t/g, ' ') : '';
+        const url = resolveConversationUrl(response);
+        return `${text}\t${url}`;
+      })
+      .join('\n');
+
+    attemptedCount = sortedResponses.length;
+    attemptedChars = allText.length;
+    clipboardCounters.ops += 1;
+    opCounted = true;
+    clipboardCounters.messagesAttempted += attemptedCount;
+
+    await navigator.clipboard.writeText(allText);
+    clipboardCounters.opsOk += 1;
+    clipboardCounters.messagesCopiedOk += attemptedCount;
+
+    const originalText = button.textContent;
+    button.textContent = `\u2713 Skopiowano (${attemptedCount})`;
+    button.classList.add('copied');
+
+    setTimeout(() => {
+      button.textContent = originalText;
+      button.classList.remove('copied');
+    }, 2000);
+
+    logClipboard('OK copy_all_with_link', {
+      analysisType,
+      copiedMessages: attemptedCount,
+      chars: attemptedChars
+    });
+  } catch (error) {
+    if (!opCounted) {
+      clipboardCounters.ops += 1;
+      opCounted = true;
+      clipboardCounters.messagesAttempted += attemptedCount;
+    }
+    clipboardCounters.opsFail += 1;
+    clipboardCounters.messagesCopiedFail += attemptedCount;
+    console.error('[clipboard] ERROR copy_all_with_link:', error);
+    button.textContent = '\u2717 Blad';
+    setTimeout(() => {
+      button.textContent = 'Kopiuj z linkiem';
+    }, 2000);
+    logClipboard('FAIL copy_all_with_link', { analysisType, attemptedMessages: attemptedCount, attemptedChars });
+  }
+}
+
 // Funkcja wczytujÄ…ca odpowiedzi z storage
 async function loadResponses() {
   try {
@@ -317,6 +411,12 @@ function renderResponses(responses) {
   clearBtn.disabled = totalCount === 0;
   copyAllCompanyBtn.disabled = companyResponses.length === 0;
   copyAllPortfolioBtn.disabled = portfolioResponses.length === 0;
+  if (copyAllCompanyWithLinkBtn) {
+    copyAllCompanyWithLinkBtn.disabled = companyResponses.length === 0;
+  }
+  if (copyAllPortfolioWithLinkBtn) {
+    copyAllPortfolioWithLinkBtn.disabled = portfolioResponses.length === 0;
+  }
   
   // Renderuj sekcjÄ™ analizy spĂłĹ‚ki
   if (companyResponses.length === 0) {
@@ -405,6 +505,25 @@ function createResponseItem(response) {
   const actions = document.createElement('div');
   actions.className = 'response-actions';
   actions.appendChild(copyBtn);
+
+  const conversationUrl = resolveConversationUrl(response);
+  if (conversationUrl) {
+    const openChatBtn = document.createElement('button');
+    openChatBtn.className = 'toggle-btn';
+    openChatBtn.textContent = 'Otworz chat';
+    openChatBtn.addEventListener('click', () => {
+      try {
+        if (chrome?.tabs?.create) {
+          chrome.tabs.create({ url: conversationUrl });
+          return;
+        }
+      } catch (error) {
+        // Ignore and fallback below.
+      }
+      window.open(conversationUrl, '_blank', 'noopener,noreferrer');
+    });
+    actions.appendChild(openChatBtn);
+  }
   
   const text = document.createElement('div');
   text.className = 'response-text';

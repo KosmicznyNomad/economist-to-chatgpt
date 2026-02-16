@@ -43,6 +43,7 @@ Response fields in use:
 - `responseId`
 - optional `runId`
 - optional `stage` (object; e.g. selection metadata for the saved response)
+- optional `conversationUrl` (string; URL to the ChatGPT conversation)
 
 ## Prompt/stage alignment
 - Separator token: `◄PROMPT_SEPARATOR►`.
