@@ -3,176 +3,201 @@
 <head>
   <meta charset="utf-8">
   <style>
+    :root {
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #e5e7eb;
+      --primary: #0f172a;
+      --primary-hover: #020617;
+      --danger: #b91c1c;
+      --danger-hover: #991b1b;
+      --status-bg: #f3f4f6;
+      --status-border: #d1d5db;
+      --shadow: 0 4px 16px rgba(15, 23, 42, 0.08);
+    }
+
+    * {
+      box-sizing: border-box;
+    }
+
     body {
-      width: 320px;
-      padding: 14px;
+      width: 332px;
       margin: 0;
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
-      background: linear-gradient(165deg, #f6f7fb 0%, #eef1f8 100%);
-      color: #121826;
+      padding: 12px;
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      background: var(--bg);
+      color: var(--text);
+    }
+
+    .header {
+      margin-bottom: 10px;
+      padding: 8px 2px;
     }
 
     .title {
-      color: #1f2937;
-      font-size: 17px;
+      margin: 0;
+      font-size: 16px;
       font-weight: 700;
-      margin-bottom: 12px;
-      text-align: center;
+      letter-spacing: 0.02em;
     }
 
-    .section {
-      background: #ffffff;
-      border: 1px solid #e5e7eb;
-      border-radius: 10px;
+    .subtitle {
+      margin: 4px 0 0;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .card {
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
       padding: 10px;
+      box-shadow: var(--shadow);
       margin-bottom: 10px;
-      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.05);
     }
 
-    .section-title {
+    .card-title {
+      margin: 0 0 8px;
       font-size: 11px;
       font-weight: 700;
       letter-spacing: 0.04em;
       text-transform: uppercase;
-      color: #6b7280;
+      color: var(--muted);
+    }
+
+    .row {
+      display: flex;
+      gap: 8px;
       margin-bottom: 8px;
     }
 
-    .btn {
-      display: block;
-      width: 100%;
-      padding: 10px 12px;
-      margin-bottom: 8px;
-      background: #ffffff;
-      color: #111827;
-      border: 1px solid #d1d5db;
-      border-radius: 8px;
-      font-size: 14px;
-      font-weight: 600;
-      cursor: pointer;
-      transition: background 0.15s, border-color 0.15s;
-      text-align: left;
-      line-height: 1.2;
-    }
-
-    .btn:last-child {
+    .row:last-child {
       margin-bottom: 0;
     }
 
-    .btn:hover {
-      background: #f9fafb;
-      border-color: #9ca3af;
+    .btn {
+      width: 100%;
+      border: 1px solid #cbd5e1;
+      border-radius: 9px;
+      padding: 10px 12px;
+      font-size: 13px;
+      font-weight: 600;
+      color: var(--text);
+      background: #ffffff;
+      cursor: pointer;
+      text-align: left;
+      transition: background 0.15s, border-color 0.15s;
     }
 
-    .btn:active {
-      transform: translateY(0);
+    .btn:hover {
+      background: #f8fafc;
+      border-color: #94a3b8;
     }
 
     .btn:disabled {
       opacity: 0.7;
       cursor: wait;
-      transform: none;
-      box-shadow: none;
     }
 
     .btn-primary {
-      background: #111827;
+      background: var(--primary);
       color: #ffffff;
-      border-color: #111827;
+      border-color: var(--primary);
     }
 
     .btn-primary:hover {
-      background: #0b1220;
-      border-color: #0b1220;
+      background: var(--primary-hover);
+      border-color: var(--primary-hover);
     }
 
-    .btn-stop {
-      background: #b91c1c;
+    .btn-danger {
+      background: var(--danger);
       color: #ffffff;
-      border-color: #b91c1c;
+      border-color: var(--danger);
+      text-align: left;
     }
 
-    .btn-stop:hover {
-      background: #991b1b;
-      border-color: #991b1b;
+    .btn-danger:hover {
+      background: var(--danger-hover);
+      border-color: var(--danger-hover);
     }
 
-    .btn-icon {
-      margin-right: 8px;
+    .btn-center {
+      text-align: center;
     }
 
     .shortcut {
-      font-size: 11px;
-      opacity: 0.7;
-      font-weight: 500;
-      margin-left: 8px;
+      float: right;
+      font-size: 10px;
+      color: #475569;
+      font-weight: 700;
+      border: 1px solid #cbd5e1;
+      border-radius: 999px;
+      padding: 1px 6px;
+      background: #f8fafc;
     }
 
-    .btn-row {
-      display: flex;
-      align-items: center;
-      justify-content: space-between;
-      gap: 10px;
+    .btn-primary .shortcut,
+    .btn-danger .shortcut {
+      color: #334155;
+      border-color: #e2e8f0;
+      background: #ffffff;
     }
 
-    .detect-status {
+    .status {
       margin: 0;
-      padding: 7px 9px;
-      border-radius: 8px;
-      background: #f3f4f6;
+      padding: 8px 10px;
+      border-radius: 9px;
+      border: 1px solid var(--status-border);
+      background: var(--status-bg);
       color: #374151;
       font-size: 11px;
       line-height: 1.35;
       white-space: pre-line;
-      border: 1px solid #e5e7eb;
     }
 
-    .advanced {
-      margin-top: 8px;
+    .details {
+      margin-bottom: 10px;
+      background: var(--card);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: hidden;
     }
 
-    .advanced summary {
-      cursor: pointer;
-      color: #374151;
-      font-size: 12px;
-      font-weight: 600;
-      user-select: none;
+    .details summary {
       list-style: none;
+      cursor: pointer;
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      color: #334155;
+      border-bottom: 1px solid transparent;
+      user-select: none;
     }
 
-    .advanced summary::-webkit-details-marker {
+    .details[open] summary {
+      border-bottom-color: var(--border);
+      background: #f8fafc;
+    }
+
+    .details summary::-webkit-details-marker {
       display: none;
     }
 
-    .advanced .advanced-content {
-      margin-top: 8px;
-    }
-
-    .dispatch-settings {
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px dashed #d1d5db;
-    }
-
-    .dispatch-title {
-      font-size: 11px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-      text-transform: uppercase;
-      color: #6b7280;
-      margin-bottom: 8px;
+    .details-content {
+      padding: 10px;
     }
 
     .dispatch-input {
       width: 100%;
-      box-sizing: border-box;
-      border: 1px solid #d1d5db;
-      border-radius: 8px;
-      padding: 8px 10px;
+      border: 1px solid #cbd5e1;
+      border-radius: 9px;
+      padding: 9px 10px;
       font-size: 12px;
       margin-bottom: 8px;
-      background: #fff;
-      color: #111827;
     }
 
     .dispatch-actions {
@@ -180,96 +205,61 @@
       gap: 8px;
       margin-bottom: 8px;
     }
-
-    .btn-inline {
-      margin-bottom: 0;
-      width: auto;
-      flex: 1;
-      text-align: center;
-      padding: 8px 10px;
-      font-size: 12px;
-    }
-
-    .dispatch-status {
-      margin: 0;
-      padding: 7px 9px;
-      border-radius: 8px;
-      background: #f3f4f6;
-      color: #374151;
-      font-size: 11px;
-      line-height: 1.35;
-      border: 1px solid #e5e7eb;
-    }
   </style>
 </head>
 <body>
-  <div class="title">News -> ChatGPT</div>
+  <div class="header">
+    <p class="title">News to ChatGPT</p>
+    <p class="subtitle">Szybkie akcje. Skroty: 1-7</p>
+  </div>
 
-  <div class="section">
-    <div class="section-title">Akcje glowne</div>
-    <button class="btn btn-primary" id="runBtn">
-      <div class="btn-row">
-        <span><span class="btn-icon">&#9654;</span>Uruchom analizy</span>
-        <span class="shortcut">Ctrl+Shift+E</span>
-      </div>
-    </button>
-
-    <button class="btn btn-stop" id="stopBtn">
-      <span class="btn-icon">&#9632;</span>
-      Przerwij w tym oknie
-    </button>
-
-    <button class="btn" id="responsesBtn">
-      <div class="btn-row">
-        <span><span class="btn-icon">&#128214;</span>Zobacz odpowiedzi</span>
-        <span class="shortcut">Ctrl+Shift+R</span>
-      </div>
-    </button>
-
-    <div class="detect-status" id="resetScanStatus" aria-live="polite">
-      Gotowe.
+  <div class="card">
+    <p class="card-title">Analiza</p>
+    <div class="row">
+      <button class="btn" id="manualSourceBtn">Wklej zrodlo <span class="shortcut">1</span></button>
+    </div>
+    <div class="row">
+      <button class="btn btn-primary" id="runBtn">Uruchom analizy <span class="shortcut">2</span></button>
+    </div>
+    <div class="row">
+      <button class="btn" id="resumeStageBtn">Wznow od etapu <span class="shortcut">3</span></button>
+    </div>
+    <div class="row">
+      <button class="btn" id="resumeAllBtn">Wznow wszystkie <span class="shortcut">4</span></button>
     </div>
   </div>
 
-  <div class="section">
-    <details class="advanced">
-      <summary>Wiecej narzedzi</summary>
-      <div class="advanced-content">
-        <button class="btn" id="manualSourceBtn">
-          <span class="btn-icon">&#128221;</span>
-          Wklej zrodlo
-        </button>
-        <button class="btn" id="resumeStageBtn">
-          <span class="btn-icon">&#8635;</span>
-          Resume from Stage
-        </button>
-        <button class="btn" id="resumeAllBtn">
-          <span class="btn-icon">&#10227;</span>
-          Wznow wszystkie procesy
-        </button>
-        <button class="btn" id="decisionPanelBtn">
-          <span class="btn-icon">&#9881;</span>
-          Panel decyzyjny
-        </button>
-
-        <div class="dispatch-settings">
-          <div class="dispatch-title">Watchlist dispatch</div>
-          <input
-            class="dispatch-input"
-            id="watchlistTokenInput"
-            type="password"
-            placeholder="GitHub token (repository_dispatch)"
-            autocomplete="off"
-          />
-          <div class="dispatch-actions">
-            <button class="btn btn-inline" id="saveWatchlistTokenBtn">Zapisz token</button>
-            <button class="btn btn-inline" id="clearWatchlistTokenBtn">Wyczysc</button>
-          </div>
-          <p class="dispatch-status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status dispatch...</p>
-        </div>
-      </div>
-    </details>
+  <div class="card">
+    <p class="card-title">Wyniki i kontrola</p>
+    <div class="row">
+      <button class="btn" id="responsesBtn">Odpowiedzi <span class="shortcut">5</span></button>
+    </div>
+    <div class="row">
+      <button class="btn" id="decisionPanelBtn">Panel procesow <span class="shortcut">6</span></button>
+    </div>
+    <div class="row">
+      <button class="btn btn-danger" id="stopBtn">Przerwij w tym oknie <span class="shortcut">7</span></button>
+    </div>
   </div>
+
+  <details class="details">
+    <summary>Watchlist dispatch</summary>
+    <div class="details-content">
+      <input
+        class="dispatch-input"
+        id="watchlistTokenInput"
+        type="password"
+        placeholder="GitHub token (repository_dispatch)"
+        autocomplete="off"
+      />
+      <div class="dispatch-actions">
+        <button class="btn btn-center" id="saveWatchlistTokenBtn">Zapisz token</button>
+        <button class="btn btn-center" id="clearWatchlistTokenBtn">Wyczysc</button>
+      </div>
+      <div class="row"><button class="btn btn-center" id="flushWatchlistDispatchBtn">Wymus flush kolejki</button></div>
+      <p class="status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status dispatch...</p>
+    </div>
+  </details>
 
   <script src="popup.js"></script>
 </body>

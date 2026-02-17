@@ -66,4 +66,4 @@ Keep these in sync when adding/removing domains:
 - `background.js` is the central runtime file and contains most of automation/recovery logic.
 - Keep `STAGE_NAMES_COMPANY` aligned with company prompt order/count.
 - `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
-- Backend and GitHub relay components were removed from this repository.
+- External DB ingest path is removed; integration is dispatch-only (`repository_dispatch`) toward Watchlist intake (`data/inbox.ndjson` -> `data/positions.json`).

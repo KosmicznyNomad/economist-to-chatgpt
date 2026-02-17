@@ -74,11 +74,53 @@ const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
   invalid_response: 'Za krotka odpowiedz',
+  save_failed: 'Blad zapisu do bazy',
+  empty_response: 'Pusta odpowiedz (bez zapisu)',
   auto_recovery_send_failed: 'Auto-recovery po bledzie wysylania',
   auto_recovery_timeout: 'Auto-recovery po timeout',
   auto_recovery_invalid_response: 'Auto-recovery po niepoprawnej odpowiedzi'
 };
 const RESPONSE_STORAGE_KEY = 'responses';
+
+function shortenText(value, maxLength = 180) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  if (text.length <= maxLength) return text;
+  return `${text.slice(0, maxLength)}...`;
+}
+
+function getPersistenceLogLines(process, maxLines = 4) {
+  const normalizedMaxLines = Number.isInteger(maxLines) && maxLines > 0 ? maxLines : 4;
+  const lines = [];
+
+  const directLog = Array.isArray(process?.persistenceLog)
+    ? process.persistenceLog
+    : [];
+  directLog.forEach((line) => {
+    const normalized = shortenText(line, 220);
+    if (!normalized) return;
+    lines.push(normalized);
+  });
+
+  if (lines.length === 0) {
+    const summary = shortenText(process?.persistenceStatus?.dispatchSummary || '', 220);
+    if (summary) {
+      lines.push(summary);
+    }
+  }
+
+  if (lines.length === 0) {
+    const completedSaved = process?.completedResponseSaved;
+    const status = getNormalizedStatus(process);
+    if (completedSaved === true) {
+      lines.push('Baza: OK');
+    } else if (completedSaved === false && isCompletedStatus(status)) {
+      lines.push('Baza: BLAD zapisu');
+    }
+  }
+
+  return lines.slice(0, normalizedMaxLines);
+}
 
 function getNormalizedStatus(process) {
   if (!process || typeof process.status !== 'string') return '';
@@ -671,9 +713,13 @@ function updateProcessCard(entry, process, isSelected) {
   refs.stageMeta.textContent = `Etap: ${stageLabel}`;
 
   const statusLine = process.statusText ? String(process.statusText) : '';
-  if (statusLine || updatedAt) {
+  const persistenceLines = getPersistenceLogLines(process, 2);
+  if (statusLine || updatedAt || persistenceLines.length > 0) {
     const statusChunk = statusLine ? statusLine : 'brak statusText';
-    refs.statusMeta.textContent = `Status: ${statusChunk} | Aktualizacja: ${formatRelativeTime(updatedAt)}`;
+    const persistenceChunk = persistenceLines.length > 0
+      ? ` | ${persistenceLines.join(' | ')}`
+      : '';
+    refs.statusMeta.textContent = `Status: ${statusChunk}${persistenceChunk} | Aktualizacja: ${formatRelativeTime(updatedAt)}`;
     refs.statusMeta.style.display = 'block';
   } else {
     refs.statusMeta.textContent = '';
@@ -1241,8 +1287,18 @@ function updateUI(processes, options = {}) {
       const autoMax = Number.isInteger(autoRecovery?.maxAttempts) ? autoRecovery.maxAttempts : '';
       const autoReason = typeof autoRecovery?.reason === 'string' ? autoRecovery.reason : '';
       const autoPrompt = Number.isInteger(autoRecovery?.currentPrompt) ? autoRecovery.currentPrompt : '';
+      const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+        ? process.persistenceStatus
+        : null;
+      const persistenceDispatchSummary = typeof persistenceStatus?.dispatchSummary === 'string'
+        ? persistenceStatus.dispatchSummary
+        : '';
+      const persistenceSaveOk = typeof persistenceStatus?.saveOk === 'boolean'
+        ? String(persistenceStatus.saveOk)
+        : '';
+      const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}`;
+      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${persistenceLog}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -1571,6 +1627,14 @@ function renderDetails() {
     autoLine.className = 'details-subtitle';
     autoLine.textContent = `Auto-recovery: ${autoAttempt}/${autoMaxAttempts}, reason=${autoReason}, delay=${autoDelaySec}s${autoCurrentPrompt !== null ? `, prompt=${autoCurrentPrompt}` : ''}`;
     header.appendChild(autoLine);
+  }
+
+  const persistenceLines = getPersistenceLogLines(selected, 6);
+  if (persistenceLines.length > 0) {
+    const persistenceLine = document.createElement('div');
+    persistenceLine.className = 'details-subtitle';
+    persistenceLine.textContent = `Log zapisu: ${persistenceLines.join(' | ')}`;
+    header.appendChild(persistenceLine);
   }
 
   const actions = document.createElement('div');

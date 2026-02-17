@@ -3,7 +3,7 @@
     const activeTab = tabs && tabs.length > 0 ? tabs[0] : null;
     callback({
       activeTab,
-      windowId: Number.isInteger(activeTab?.windowId) ? activeTab.windowId : null
+      windowId: Number.isInteger(activeTab?.windowId) ? activeTab.windowId : null,
     });
   });
 }
@@ -25,31 +25,33 @@ function sendRuntimeMessage(payload) {
   });
 }
 
-const resetScanStatus = document.getElementById('resetScanStatus');
+const runStatus = document.getElementById('runStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
 const watchlistTokenInput = document.getElementById('watchlistTokenInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
+const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
 
 function setRunStatus(text, isError = false) {
-  if (!resetScanStatus) return;
-  resetScanStatus.textContent = text;
-  resetScanStatus.style.color = isError ? '#b91c1c' : '#374151';
-  resetScanStatus.style.borderColor = isError ? '#fecaca' : '#e5e7eb';
-  resetScanStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+  if (!runStatus) return;
+  runStatus.textContent = text;
+  runStatus.style.color = isError ? '#b91c1c' : '#374151';
+  runStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
+  runStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
 }
 
 function setDispatchStatus(text, isError = false) {
   if (!watchlistDispatchStatus) return;
   watchlistDispatchStatus.textContent = text;
   watchlistDispatchStatus.style.color = isError ? '#b91c1c' : '#374151';
-  watchlistDispatchStatus.style.borderColor = isError ? '#fecaca' : '#e5e7eb';
+  watchlistDispatchStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
   watchlistDispatchStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
 }
 
 function tokenSourceLabel(source) {
   if (source === 'inline_config') return 'inline config';
   if (source === 'storage_local') return 'local storage';
+  if (source === 'storage_sync') return 'sync storage';
   return 'missing';
 }
 
@@ -70,18 +72,37 @@ function formatDispatchStatus(status) {
   if (!status.enabled) {
     return 'Dispatch status: wylaczony.';
   }
+
   const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
   const flushText = formatLastDispatchFlush(status.lastFlush);
+  const retryText = Number.isInteger(status.nextRetryAt)
+    ? ` Nastepna proba: ${new Date(status.nextRetryAt).toLocaleString()}.`
+    : '';
+  const errorText = status.latestOutboxError
+    ? ` Ostatni blad: ${status.latestOutboxError}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
+    : '';
+
   if (status.configured) {
-    return `Dispatch status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
+    return `Dispatch status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
   }
   if (status.reason === 'missing_repository') {
-    return `Dispatch status: brak repozytorium. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
+    return `Dispatch status: brak repozytorium. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
   }
   if (status.reason === 'missing_dispatch_credentials') {
-    return `Dispatch status: brak tokena GitHub. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
+    return `Dispatch status: brak tokena GitHub. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
   }
-  return `Dispatch status: ${status.reason || 'nieznany'}. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.`;
+  return `Dispatch status: ${status.reason || 'nieznany'}. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
+}
+
+function formatDispatchFlushResult(flushResult) {
+  if (!flushResult || typeof flushResult !== 'object') return 'brak danych';
+  if (flushResult.skipped) {
+    return `skip (${flushResult.reason || 'unknown'})`;
+  }
+  if (flushResult.success === false) {
+    return `blad (${flushResult.error || 'unknown'})`;
+  }
+  return `sent=${flushResult.sent || 0}, failed=${flushResult.failed || 0}, deferred=${flushResult.deferred || 0}, remaining=${flushResult.remaining || 0}`;
 }
 
 async function refreshDispatchStatus(forceReload = false) {
@@ -89,7 +110,7 @@ async function refreshDispatchStatus(forceReload = false) {
   try {
     const response = await sendRuntimeMessage({
       type: 'GET_WATCHLIST_DISPATCH_STATUS',
-      forceReload
+      forceReload,
     });
     setDispatchStatus(formatDispatchStatus(response), response?.success === false);
   } catch (error) {
@@ -108,7 +129,7 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
   try {
     const payload = {
       type: 'RUN_ANALYSIS',
-      origin: typeof options?.origin === 'string' ? options.origin : 'popup-run-analysis'
+      origin: typeof options?.origin === 'string' ? options.origin : 'popup-run-analysis',
     };
     if (Number.isInteger(options?.windowId)) {
       payload.windowId = options.windowId;
@@ -133,7 +154,9 @@ function getResumeAllSummary(response) {
   const scannedTabs = Number.isInteger(response?.scannedTabs) ? response.scannedTabs : 0;
   const startedTabs = Number.isInteger(response?.startedTabs)
     ? response.startedTabs
-    : (Number.isInteger(response?.resumedTabs) ? response.resumedTabs : 0);
+    : Number.isInteger(response?.resumedTabs)
+      ? response.resumedTabs
+      : 0;
   const rows = Array.isArray(response?.results) ? response.results : [];
   const unresolvedCount = rows.filter((row) => {
     const action = row?.action || '';
@@ -154,7 +177,7 @@ async function executeResumeAllFromPopup(button, options = {}) {
   try {
     const response = await sendRuntimeMessage({
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
-      origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all'
+      origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all',
     });
 
     if (!response || Object.keys(response).length === 0) {
@@ -176,46 +199,45 @@ async function executeResumeAllFromPopup(button, options = {}) {
   }
 }
 
-// Main action: run analysis flow from popup
 const runBtn = document.getElementById('runBtn');
 if (runBtn) {
   runBtn.addEventListener('click', () => {
     withActiveWindowContext(({ windowId }) => {
       void executeRunAnalysisFromPopup(runBtn, {
         windowId,
-        origin: 'popup-run-analysis'
+        origin: 'popup-run-analysis',
       });
     });
   });
 }
 
-// Resume all processes by scanning existing chat tabs
 const resumeAllBtn = document.getElementById('resumeAllBtn');
 if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllBtn, {
-      origin: 'popup-resume-all'
+      origin: 'popup-resume-all',
     });
   });
 }
 
-// Stop active processes in current window
 const stopBtn = document.getElementById('stopBtn');
 if (stopBtn) {
   stopBtn.addEventListener('click', () => {
     withActiveWindowContext(({ windowId }) => {
-      chrome.runtime.sendMessage({
-        type: 'STOP_PROCESS',
-        windowId,
-        origin: 'popup-stop'
-      }, () => {
-        window.close();
-      });
+      chrome.runtime.sendMessage(
+        {
+          type: 'STOP_PROCESS',
+          windowId,
+          origin: 'popup-stop',
+        },
+        () => {
+          window.close();
+        }
+      );
     });
   });
 }
 
-// Open manual source popup
 const manualSourceBtn = document.getElementById('manualSourceBtn');
 if (manualSourceBtn) {
   manualSourceBtn.addEventListener('click', () => {
@@ -231,14 +253,13 @@ if (manualSourceBtn) {
         url: targetUrl,
         type: 'popup',
         width: 800,
-        height: 600
+        height: 600,
       });
       window.close();
     });
   });
 }
 
-// Open resume stage dialog
 const resumeStageBtn = document.getElementById('resumeStageBtn');
 if (resumeStageBtn) {
   resumeStageBtn.addEventListener('click', () => {
@@ -247,7 +268,6 @@ if (resumeStageBtn) {
   });
 }
 
-// Open decision panel
 const decisionPanelBtn = document.getElementById('decisionPanelBtn');
 if (decisionPanelBtn) {
   decisionPanelBtn.addEventListener('click', () => {
@@ -256,7 +276,6 @@ if (decisionPanelBtn) {
   });
 }
 
-// Open responses page
 const responsesBtn = document.getElementById('responsesBtn');
 if (responsesBtn) {
   responsesBtn.addEventListener('click', () => {
@@ -265,9 +284,44 @@ if (responsesBtn) {
   });
 }
 
+function isTextEntryElement(target) {
+  if (!(target instanceof HTMLElement)) return false;
+  const tag = (target.tagName || '').toUpperCase();
+  if (tag === 'INPUT' || tag === 'TEXTAREA' || tag === 'SELECT') return true;
+  return target.isContentEditable;
+}
+
+function clickIfEnabled(button) {
+  if (!button || button.disabled) return;
+  button.click();
+}
+
+const popupShortcutHandlers = {
+  '1': () => clickIfEnabled(manualSourceBtn),
+  '2': () => clickIfEnabled(runBtn),
+  '3': () => clickIfEnabled(resumeStageBtn),
+  '4': () => clickIfEnabled(resumeAllBtn),
+  '5': () => clickIfEnabled(responsesBtn),
+  '6': () => clickIfEnabled(decisionPanelBtn),
+  '7': () => clickIfEnabled(stopBtn),
+};
+
+document.addEventListener('keydown', (event) => {
+  if (event.defaultPrevented || event.repeat) return;
+  if (event.ctrlKey || event.metaKey || event.altKey) return;
+  if (isTextEntryElement(event.target)) return;
+
+  const handler = popupShortcutHandlers[event.key];
+  if (!handler) return;
+
+  event.preventDefault();
+  handler();
+});
+
 function setDispatchButtonsDisabled(disabled) {
   if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = disabled;
   if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = disabled;
+  if (flushWatchlistDispatchBtn) flushWatchlistDispatchBtn.disabled = disabled;
 }
 
 if (saveWatchlistTokenBtn) {
@@ -285,7 +339,7 @@ if (saveWatchlistTokenBtn) {
     try {
       const response = await sendRuntimeMessage({
         type: 'SET_WATCHLIST_DISPATCH_TOKEN',
-        token: rawToken
+        token: rawToken,
       });
       if (response?.success === false) {
         setDispatchStatus(`Dispatch status: blad zapisu (${response.reason || response.error || 'unknown'}).`, true);
@@ -316,9 +370,7 @@ if (clearWatchlistTokenBtn) {
     clearWatchlistTokenBtn.textContent = 'Czyszcze...';
 
     try {
-      const response = await sendRuntimeMessage({
-        type: 'CLEAR_WATCHLIST_DISPATCH_TOKEN'
-      });
+      const response = await sendRuntimeMessage({ type: 'CLEAR_WATCHLIST_DISPATCH_TOKEN' });
       if (response?.success === false) {
         setDispatchStatus(`Dispatch status: blad czyszczenia (${response.error || 'unknown'}).`, true);
         return;
@@ -332,6 +384,38 @@ if (clearWatchlistTokenBtn) {
       setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
     } finally {
       clearWatchlistTokenBtn.textContent = originalText;
+      setDispatchButtonsDisabled(false);
+    }
+  });
+}
+
+if (flushWatchlistDispatchBtn) {
+  flushWatchlistDispatchBtn.addEventListener('click', async () => {
+    setDispatchButtonsDisabled(true);
+    const originalText = flushWatchlistDispatchBtn.textContent;
+    flushWatchlistDispatchBtn.textContent = 'Flush...';
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'FLUSH_WATCHLIST_DISPATCH',
+        reason: 'popup_manual_flush',
+        forceReload: true,
+      });
+      if (response?.success === false) {
+        setDispatchStatus(`Dispatch status: blad flush (${response.error || 'unknown'}).`, true);
+        return;
+      }
+
+      const statusPayload = response?.status && typeof response.status === 'object'
+        ? { success: true, ...response.status }
+        : response;
+      const flushSummary = formatDispatchFlushResult(response?.flushResult);
+      const baseStatus = formatDispatchStatus(statusPayload);
+      setDispatchStatus(`${baseStatus} Flush: ${flushSummary}.`, false);
+    } catch (error) {
+      setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+    } finally {
+      flushWatchlistDispatchBtn.textContent = originalText;
       setDispatchButtonsDisabled(false);
     }
   });

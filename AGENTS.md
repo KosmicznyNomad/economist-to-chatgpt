@@ -69,10 +69,10 @@ Response fields in use:
   - transport: GitHub `repository_dispatch` (`economist_response`)
   - periodic retry: `chrome.alarms` (`watchlist-dispatch-flush`)
   - credentials: token can be kept inline (`WATCHLIST_DISPATCH.token`) or in `chrome.storage.local` under `watchlist_dispatch_token`
-- Optional database upload (HTTP ingest) is handled in `background.js`:
-  - config: `CLOUD_UPLOAD` (disabled by default)
-  - payload schema: `economist.response.v1` (same as Watchlist dispatch), includes `stage` when available
-  - requires the target origin to be present in `manifest.json` `host_permissions` (otherwise `fetch()` will be blocked)
+  - downstream watchlist automation runs in multi-session mode (`daily-run.yml`), so updates are processed across non-US sessions as well
+  - downstream Telegram deduplication is signature-based (action set), not only `bar_date`, so new material signals on the same date can still generate a notification
+- There is no separate DB ingest/upload path in extension runtime.
+- External handoff is dispatch-only and lands downstream in Watchlist `data/positions.json`.
 
 ## Common change points
 - GPT targets: `CHAT_URL`, `CHAT_URL_PORTFOLIO` in `background.js`.

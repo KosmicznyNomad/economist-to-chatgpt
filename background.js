@@ -16,18 +16,7 @@ const AUTO_RECOVERY_DELAY_MS = 8000;
 const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
 const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout', 'invalid_response'];
 
-// Optional cloud upload config (kept simple; safe to extend later).
-const CLOUD_UPLOAD = {
-  enabled: false,
-  url: "",
-  apiKey: "",
-  apiKeyHeader: "Authorization", // Use "Authorization" (Bearer) or custom header like "X-Api-Key".
-  timeoutMs: 20000,
-  retryCount: 2,
-  backoffMs: 1000
-};
-
-// One-time setup: prefer token in chrome.storage.local (tokenStorageKey); inline token remains fallback.
+// One-time setup: prefer token in chrome.storage.local, keep sync backup; inline token remains fallback.
 const WATCHLIST_DISPATCH = {
   enabled: true,
   apiBaseUrl: "https://api.github.com",
@@ -35,6 +24,7 @@ const WATCHLIST_DISPATCH = {
   eventType: "economist_response",
   token: "",
   tokenStorageKey: "watchlist_dispatch_token",
+  tokenSyncStorageKey: "watchlist_dispatch_token",
   timeoutMs: 20000,
   retryCount: 3,
   backoffMs: 1500,
@@ -1563,6 +1553,108 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     }
 
     if (result?.success) {
+      const resultLastResponse = typeof result?.lastResponse === 'string'
+        ? result.lastResponse
+        : '';
+      const hasResultLastResponse = resultLastResponse.trim().length > 0;
+      const selectedPrompt = Number.isInteger(result?.selectedResponsePrompt)
+        ? result.selectedResponsePrompt
+        : null;
+      const selectedStageIndex = Number.isInteger(result?.selectedResponseStageIndex)
+        ? result.selectedResponseStageIndex
+        : (selectedPrompt && selectedPrompt > 0 ? (selectedPrompt - 1) : null);
+
+      const stageMeta = {};
+      if (Number.isInteger(selectedPrompt)) {
+        stageMeta.selected_response_prompt = selectedPrompt;
+      }
+      if (Number.isInteger(selectedStageIndex)) {
+        stageMeta.selected_response_stage_index = selectedStageIndex;
+      }
+      if (typeof result?.selectedResponseReason === 'string' && result.selectedResponseReason.trim()) {
+        stageMeta.selected_response_reason = result.selectedResponseReason.trim();
+      }
+
+      const normalizedConversationUrl = normalizeChatConversationUrl(result?.conversationUrl)
+        || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
+
+      let saveResult = null;
+      if (hasResultLastResponse) {
+        saveResult = await saveResponse(
+          resultLastResponse,
+          processTitle,
+          'company',
+          processId,
+          null,
+          Object.keys(stageMeta).length > 0 ? stageMeta : null,
+          normalizedConversationUrl || null
+        );
+      } else {
+        console.warn('[auto-resume] Proces zakonczony, ale lastResponse jest pusta - pomijam saveResponse');
+      }
+
+      const persistenceSummary = buildPersistenceUiSummary({
+        hasResponse: hasResultLastResponse,
+        saveResult,
+        saveError: hasResultLastResponse && !saveResult?.success ? 'save_response_failed' : ''
+      });
+      await renderFinalCounterStatusOnTab(tabId, {
+        heading: hasResultLastResponse
+          ? (persistenceSummary.saveOk ? 'Zakonczono' : 'Zakonczono (blad zapisu)')
+          : 'Zakonczono (pusta odpowiedz)',
+        tone: persistenceSummary.tone,
+        lines: persistenceSummary.logLines,
+        autoCloseMs: persistenceSummary.saveOk ? 10000 : 14000
+      });
+
+      const MAX_COMPLETED_RESPONSE_CHARS = 180000;
+      const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+      const storedCompletedResponse = completedResponseTruncated
+        ? resultLastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+        : resultLastResponse;
+
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType: 'company',
+        status: 'completed',
+        needsAction: false,
+        statusText: persistenceSummary.statusText,
+        reason: persistenceSummary.reason,
+        ...(Number.isInteger(selectedPrompt) ? { currentPrompt: selectedPrompt } : {}),
+        ...(Number.isInteger(selectedStageIndex)
+          ? {
+            stageIndex: selectedStageIndex,
+            stageName: `Prompt ${selectedStageIndex + 1}`
+          }
+          : {}),
+        ...(normalizedConversationUrl ? { chatUrl: normalizedConversationUrl } : {}),
+        persistenceLog: persistenceSummary.logLines,
+        persistenceStatus: {
+          hasResponse: hasResultLastResponse,
+          saveOk: persistenceSummary.saveOk,
+          dispatchSummary: persistenceSummary.dispatchSummary,
+          copyTrace: persistenceSummary.copyTrace,
+          saveError: persistenceSummary.saveError,
+          dispatch: persistenceSummary.dispatch || null,
+          updatedAt: Date.now()
+        },
+        ...(hasResultLastResponse
+          ? {
+            completedResponseText: storedCompletedResponse,
+            completedResponseLength: resultLastResponse.length,
+            completedResponseTruncated,
+            completedResponseCapturedAt: Date.now(),
+            completedResponseSaved: persistenceSummary.saveOk,
+            completedResponseDispatch: persistenceSummary.dispatch || null,
+            completedResponseDispatchSummary: persistenceSummary.dispatchSummary,
+            completedResponseSaveTrace: persistenceSummary.copyTrace || ''
+          }
+          : {}),
+        autoRecovery: null,
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
+
       return {
         success: true,
         processId
@@ -2186,6 +2278,22 @@ function compactWhitespace(text) {
 function isChatGptUrl(url) {
   if (typeof url !== 'string') return false;
   return url.includes('chatgpt.com') || url.includes('chat.openai.com');
+}
+
+function normalizeChatConversationUrl(rawUrl) {
+  if (typeof rawUrl !== 'string') return '';
+  const candidate = rawUrl.trim();
+  if (!candidate) return '';
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return '';
+    const host = parsed.hostname.toLowerCase();
+    if (host !== 'chatgpt.com' && host !== 'chat.openai.com' && host !== 'www.chatgpt.com' && host !== 'www.chat.openai.com') return '';
+    if (!parsed.pathname || parsed.pathname === '/') return '';
+    return parsed.toString();
+  } catch (error) {
+    return '';
+  }
 }
 
 function isInvestGptUrl(url) {
@@ -2935,7 +3043,8 @@ async function handleProcessResumeNextStageMessage(message) {
 
   const resumeResult = await resumeFromStage(nextStartIndex, {
     targetTabId: chatTab.id,
-    suppressAlerts: true
+    suppressAlerts: true,
+    processTitle: title || undefined
   });
 
   if (!resumeResult?.success) {
@@ -3003,6 +3112,289 @@ function buildCopyTrace(runId = '', responseId = '') {
   return `${normalizedRunId}/${normalizedResponseId}`;
 }
 
+async function mirrorCopyFlowLogToTab(tabId, level, message, details = null) {
+  if (!Number.isInteger(tabId)) return;
+  if (!chrome?.scripting?.executeScript) return;
+
+  const normalizedLevel = level === 'error' || level === 'warn' ? level : 'log';
+  const normalizedMessage = typeof message === 'string' && message.trim()
+    ? message.trim()
+    : 'event';
+  const normalizedDetails = details && typeof details === 'object' ? details : null;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (payload) => {
+        const method = payload?.level === 'error'
+          ? 'error'
+          : payload?.level === 'warn'
+            ? 'warn'
+            : 'log';
+        const logger = (console && typeof console[method] === 'function') ? console[method] : console.log;
+        const prefix = '[copy-flow][sw->tab]';
+        if (payload?.details && typeof payload.details === 'object') {
+          logger(`${prefix} ${payload.message}`, payload.details);
+        } else {
+          logger(`${prefix} ${payload?.message || 'event'}`);
+        }
+      },
+      args: [{
+        level: normalizedLevel,
+        message: normalizedMessage,
+        details: normalizedDetails
+      }]
+    });
+  } catch (error) {
+    // Mirror logs are best-effort only.
+  }
+}
+
+function truncateDispatchLogText(value, maxLength = 240) {
+  const raw = typeof value === 'string' ? value : String(value ?? '');
+  if (raw.length <= maxLength) return raw;
+  return `${raw.slice(0, maxLength)}...`;
+}
+
+function formatDispatchUiSummary(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object'
+    ? dispatchOutcome
+    : null;
+  if (!dispatch) return 'Dispatch: brak danych';
+
+  if (dispatch.queueSkipped) {
+    const reason = typeof dispatch.queueSkipReason === 'string' && dispatch.queueSkipReason.trim()
+      ? dispatch.queueSkipReason.trim()
+      : 'unknown';
+    return `Dispatch: pominieto (${reason})`;
+  }
+
+  if (dispatch.queued) {
+    if (dispatch.flushSkipped) {
+      const queueSize = Number.isInteger(dispatch.queueSize) ? dispatch.queueSize : 0;
+      const reason = typeof dispatch.flushSkipReason === 'string' && dispatch.flushSkipReason.trim()
+        ? dispatch.flushSkipReason.trim()
+        : 'unknown';
+      return `Dispatch: kolejka=${queueSize}, flush pominiety (${reason})`;
+    }
+
+    const sent = Number.isInteger(dispatch.sent) ? dispatch.sent : 0;
+    const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
+    const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
+    const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
+    return `Dispatch: sent=${sent}, failed=${failed}, deferred=${deferred}, remaining=${remaining}`;
+  }
+
+  return 'Dispatch: brak wysylki';
+}
+
+function buildPersistenceUiSummary(options = {}) {
+  const hasResponse = options?.hasResponse !== false;
+  const saveResult = options?.saveResult && typeof options.saveResult === 'object'
+    ? options.saveResult
+    : null;
+  const saveErrorRaw = typeof options?.saveError === 'string' ? options.saveError : '';
+  const saveError = saveErrorRaw.trim();
+  const dispatch = saveResult?.dispatch && typeof saveResult.dispatch === 'object'
+    ? saveResult.dispatch
+    : null;
+  const dispatchSummary = formatDispatchUiSummary(dispatch);
+
+  if (!hasResponse) {
+    const logLines = [
+      'Baza: pominieto (pusta odpowiedz)',
+      'Dispatch: pominieto'
+    ];
+    return {
+      saveOk: false,
+      hasResponse: false,
+      statusText: 'Zakonczono (pusta odpowiedz)',
+      reason: 'empty_response',
+      tone: 'warn',
+      logLines,
+      dispatchSummary: 'Dispatch: pominieto',
+      dispatch: null,
+      copyTrace: '',
+      saveError: 'empty_response'
+    };
+  }
+
+  const saveOk = !!saveResult?.success;
+  if (!saveOk) {
+    const normalizedSaveError = saveError || 'save_failed';
+    const storageSummary = `Baza: BLAD zapisu (${truncateDispatchLogText(normalizedSaveError, 140)})`;
+    const logLines = [storageSummary, dispatchSummary];
+    return {
+      saveOk: false,
+      hasResponse: true,
+      statusText: `Zakonczono | ${storageSummary} | ${dispatchSummary}`,
+      reason: 'save_failed',
+      tone: 'error',
+      logLines,
+      dispatchSummary,
+      dispatch,
+      copyTrace: '',
+      saveError: normalizedSaveError
+    };
+  }
+
+  const verifiedCount = Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null;
+  const storageSummary = verifiedCount === null
+    ? 'Baza: OK'
+    : `Baza: OK (records=${verifiedCount})`;
+  const copyTrace = typeof saveResult?.copyTrace === 'string' && saveResult.copyTrace.trim()
+    ? saveResult.copyTrace.trim()
+    : '';
+  const logLines = [storageSummary, dispatchSummary];
+  if (copyTrace) {
+    logLines.push(`Trace: ${copyTrace}`);
+  }
+  if (typeof dispatch?.firstFailure === 'string' && dispatch.firstFailure.trim()) {
+    logLines.push(`Dispatch error: ${truncateDispatchLogText(dispatch.firstFailure, 180)}`);
+  }
+
+  const tone = Number.isInteger(dispatch?.failed) && dispatch.failed > 0 ? 'warn' : 'success';
+  return {
+    saveOk: true,
+    hasResponse: true,
+    statusText: `Zakonczono | ${storageSummary} | ${dispatchSummary}`,
+    reason: '',
+    tone,
+    logLines,
+    dispatchSummary,
+    dispatch,
+    copyTrace,
+    saveError: ''
+  };
+}
+
+async function renderFinalCounterStatusOnTab(tabId, options = {}) {
+  if (!Number.isInteger(tabId)) return;
+  if (!chrome?.scripting?.executeScript) return;
+
+  const heading = typeof options?.heading === 'string' && options.heading.trim()
+    ? options.heading.trim()
+    : 'Zakonczono';
+  const tone = options?.tone === 'error'
+    ? 'error'
+    : options?.tone === 'warn'
+      ? 'warn'
+      : 'success';
+  const lines = Array.isArray(options?.lines)
+    ? options.lines
+      .filter((line) => typeof line === 'string' && line.trim())
+      .map((line) => line.trim())
+      .slice(0, 6)
+    : [];
+  const autoCloseMs = Number.isInteger(options?.autoCloseMs)
+    ? Math.max(0, Math.min(options.autoCloseMs, 60000))
+    : 10000;
+
+  try {
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      func: (payload) => {
+        const counter = document.getElementById('economist-prompt-counter');
+        if (!counter) return { updated: false, reason: 'counter_missing' };
+
+        let content = document.getElementById('economist-counter-content');
+        if (!content) {
+          content = document.createElement('div');
+          content.id = 'economist-counter-content';
+          counter.appendChild(content);
+        }
+
+        const header = counter.firstElementChild;
+        if (header && header.style) {
+          header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
+        }
+
+        content.style.display = 'block';
+        content.style.padding = '8px 18px 14px 18px';
+        counter.style.minWidth = '270px';
+        counter.style.cursor = 'default';
+
+        if (payload.tone === 'success') {
+          counter.style.background = 'linear-gradient(135deg, #166534 0%, #15803d 100%)';
+        } else if (payload.tone === 'warn') {
+          counter.style.background = 'linear-gradient(135deg, #9a3412 0%, #b45309 100%)';
+        } else {
+          counter.style.background = 'linear-gradient(135deg, #991b1b 0%, #b91c1c 100%)';
+        }
+
+        while (content.firstChild) {
+          content.removeChild(content.firstChild);
+        }
+
+        const title = document.createElement('div');
+        title.style.fontSize = '17px';
+        title.style.fontWeight = '700';
+        title.style.marginBottom = payload.lines.length > 0 ? '6px' : '0';
+        title.textContent = payload.heading || 'Zakonczono';
+        content.appendChild(title);
+
+        payload.lines.forEach((line) => {
+          const row = document.createElement('div');
+          row.style.fontSize = '12px';
+          row.style.opacity = '0.95';
+          row.style.lineHeight = '1.35';
+          row.style.marginTop = '2px';
+          row.textContent = line;
+          content.appendChild(row);
+        });
+
+        const existingTimerId = Number.parseInt(counter.dataset.economistCloseTimerId || '', 10);
+        if (Number.isInteger(existingTimerId)) {
+          clearTimeout(existingTimerId);
+        }
+
+        if (Number.isInteger(payload.autoCloseMs) && payload.autoCloseMs >= 0) {
+          const timerId = window.setTimeout(() => {
+            const activeCounter = document.getElementById('economist-prompt-counter');
+            if (activeCounter) {
+              activeCounter.remove();
+            }
+          }, payload.autoCloseMs);
+          counter.dataset.economistCloseTimerId = String(timerId);
+        }
+
+        return { updated: true };
+      },
+      args: [{
+        heading,
+        tone,
+        lines,
+        autoCloseMs
+      }]
+    });
+  } catch (error) {
+    // Counter rendering is best-effort only.
+  }
+}
+
+function summarizeWatchlistDispatchPayload(payload) {
+  if (!payload || typeof payload !== 'object') return null;
+  const text = typeof payload.text === 'string' ? payload.text : '';
+  const stage = payload.stage && typeof payload.stage === 'object' ? payload.stage : null;
+  return {
+    responseId: typeof payload.responseId === 'string' ? payload.responseId : '',
+    runId: typeof payload.runId === 'string' ? payload.runId : '',
+    analysisType: typeof payload.analysisType === 'string' ? payload.analysisType : '',
+    source: typeof payload.source === 'string' ? payload.source : '',
+    timestamp: payload.timestamp ?? null,
+    textLength: text.length,
+    textFingerprint: textFingerprint(text),
+    hasConversationUrl: !!(typeof payload.conversationUrl === 'string' && payload.conversationUrl.trim()),
+    stage: stage
+      ? {
+        number: Number.isInteger(stage.number) ? stage.number : null,
+        index: Number.isInteger(stage.index) ? stage.index : null,
+        name: typeof stage.name === 'string' ? stage.name : ''
+      }
+      : null
+  };
+}
+
 function normalizeWatchlistDispatchPayload(response) {
   if (!response || typeof response !== 'object') return null;
   const text = typeof response.text === 'string' ? response.text : '';
@@ -3026,7 +3418,7 @@ function normalizeWatchlistDispatchPayload(response) {
   if (stage) {
     payload.stage = stage;
   }
-  const conversationUrl = typeof response.conversationUrl === 'string' ? response.conversationUrl.trim() : '';
+  const conversationUrl = normalizeChatConversationUrl(response.conversationUrl);
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
@@ -3143,6 +3535,17 @@ async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-respons
 
   const payload = normalizeWatchlistDispatchPayload(response);
   if (!payload) {
+    const text = typeof response?.text === 'string' ? response.text : '';
+    console.warn('[copy-flow] [dispatch:queue-skipped] invalid payload', {
+      trace: copyTrace,
+      hasResponse: !!response,
+      textLength: text.length,
+      textFingerprint: textFingerprint(text),
+      runId: typeof response?.runId === 'string' ? response.runId : '',
+      responseId: typeof response?.responseId === 'string' ? response.responseId : '',
+      analysisType: typeof response?.analysisType === 'string' ? response.analysisType : '',
+      source: typeof response?.source === 'string' ? response.source : ''
+    });
     return { skipped: true, reason: 'invalid_payload' };
   }
 
@@ -3158,14 +3561,41 @@ async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-respons
     }
   ];
   const saved = await writeWatchlistOutbox(next);
-  console.log(
-    `[copy-flow] [dispatch:queued] trace=${copyTrace} responseId=${payload.responseId} queueSize=${saved.length}`
-  );
+  console.log('[copy-flow] [dispatch:queued]', {
+    trace: copyTrace,
+    queueSize: saved.length,
+    payload: summarizeWatchlistDispatchPayload(payload)
+  });
   return { queued: true, responseId: payload.responseId, queueSize: saved.length };
 }
 
 function normalizeWatchlistDispatchToken(rawToken) {
   return typeof rawToken === 'string' ? rawToken.trim() : '';
+}
+
+function getWatchlistTokenStorageKeys() {
+  const localKey = typeof WATCHLIST_DISPATCH.tokenStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.tokenStorageKey.trim()
+    : '';
+  const syncKeyRaw = typeof WATCHLIST_DISPATCH.tokenSyncStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.tokenSyncStorageKey.trim()
+    : '';
+  const syncKey = syncKeyRaw || localKey;
+  return { localKey, syncKey };
+}
+
+async function readWatchlistTokenFromStorageArea(storageArea, storageKey) {
+  if (!storageArea || typeof storageArea.get !== 'function' || !storageKey) return '';
+  try {
+    const result = await storageArea.get([storageKey]);
+    return normalizeWatchlistDispatchToken(result?.[storageKey]);
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:token-read-failed]', {
+      storage: storageArea === chrome?.storage?.sync ? 'sync' : 'local',
+      error: error?.message || String(error)
+    });
+    return '';
+  }
 }
 
 async function resolveWatchlistDispatchToken(forceReload = false) {
@@ -3179,29 +3609,38 @@ async function resolveWatchlistDispatchToken(forceReload = false) {
     return watchlistDispatchTokenCache;
   }
 
-  const storageKey = WATCHLIST_DISPATCH.tokenStorageKey;
-  if (!storageKey || !chrome?.storage?.local?.get) {
+  const { localKey, syncKey } = getWatchlistTokenStorageKeys();
+  if (!localKey) {
     watchlistDispatchTokenCache = { token: '', source: 'missing' };
     return watchlistDispatchTokenCache;
   }
 
-  try {
-    const result = await chrome.storage.local.get([storageKey]);
-    const storedToken = normalizeWatchlistDispatchToken(result?.[storageKey]);
-    watchlistDispatchTokenCache = {
-      token: storedToken,
-      source: storedToken ? 'storage_local' : 'missing'
-    };
-  } catch (error) {
-    console.warn('[copy-flow] [dispatch:token-read-failed]', error);
-    watchlistDispatchTokenCache = { token: '', source: 'missing' };
+  const localToken = await readWatchlistTokenFromStorageArea(chrome?.storage?.local, localKey);
+  if (localToken) {
+    watchlistDispatchTokenCache = { token: localToken, source: 'storage_local' };
+    return watchlistDispatchTokenCache;
   }
 
+  const syncToken = await readWatchlistTokenFromStorageArea(chrome?.storage?.sync, syncKey);
+  if (syncToken) {
+    if (chrome?.storage?.local?.set) {
+      try {
+        await chrome.storage.local.set({ [localKey]: syncToken });
+      } catch (error) {
+        console.warn('[copy-flow] [dispatch:token-local-repair-failed]', error);
+      }
+    }
+    watchlistDispatchTokenCache = { token: syncToken, source: 'storage_sync' };
+    return watchlistDispatchTokenCache;
+  }
+
+  watchlistDispatchTokenCache = { token: '', source: 'missing' };
   return watchlistDispatchTokenCache;
 }
 
 async function resolveWatchlistDispatchConfiguration(forceReload = false) {
   if (!WATCHLIST_DISPATCH.enabled) {
+    console.warn('[copy-flow] [dispatch:config] disabled');
     return {
       ok: false,
       reason: 'dispatch_disabled',
@@ -3215,6 +3654,7 @@ async function resolveWatchlistDispatchConfiguration(forceReload = false) {
     ? WATCHLIST_DISPATCH.repository.trim()
     : '';
   if (!repository) {
+    console.warn('[copy-flow] [dispatch:config] missing repository');
     return {
       ok: false,
       reason: 'missing_repository',
@@ -3226,6 +3666,10 @@ async function resolveWatchlistDispatchConfiguration(forceReload = false) {
 
   const tokenInfo = await resolveWatchlistDispatchToken(forceReload);
   if (!tokenInfo.token) {
+    console.warn('[copy-flow] [dispatch:config] missing credentials', {
+      repository,
+      tokenSource: tokenInfo.source || 'missing'
+    });
     return {
       ok: false,
       reason: 'missing_dispatch_credentials',
@@ -3251,6 +3695,28 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     readWatchlistDispatchHistory().catch(() => [])
   ]);
   const lastFlush = history.length > 0 ? history[history.length - 1] : null;
+  const outboxItems = Array.isArray(outbox) ? outbox : [];
+  const retryCandidates = outboxItems
+    .map((item) => (Number.isInteger(item?.nextAttemptAt) ? item.nextAttemptAt : 0))
+    .filter((value) => value > Date.now());
+  const nextRetryAt = retryCandidates.length > 0 ? Math.min(...retryCandidates) : null;
+  const errorCandidates = outboxItems
+    .filter((item) => typeof item?.lastError === 'string' && item.lastError.trim())
+    .sort((a, b) => {
+      const attemptsA = Number.isInteger(a?.attemptCount) ? a.attemptCount : 0;
+      const attemptsB = Number.isInteger(b?.attemptCount) ? b.attemptCount : 0;
+      if (attemptsB !== attemptsA) return attemptsB - attemptsA;
+      const queuedA = Number.isInteger(a?.queuedAt) ? a.queuedAt : 0;
+      const queuedB = Number.isInteger(b?.queuedAt) ? b.queuedAt : 0;
+      return queuedB - queuedA;
+    });
+  const mostRecentError = errorCandidates.length > 0 ? errorCandidates[0] : null;
+  const latestOutboxError = mostRecentError
+    ? truncateDispatchLogText(mostRecentError.lastError, 220)
+    : '';
+  const latestOutboxErrorTrace = mostRecentError
+    ? buildCopyTrace(mostRecentError?.payload?.runId || '', mostRecentError?.payload?.responseId || '')
+    : '';
   return {
     enabled: WATCHLIST_DISPATCH.enabled,
     repository: typeof WATCHLIST_DISPATCH.repository === 'string' ? WATCHLIST_DISPATCH.repository.trim() : '',
@@ -3259,11 +3725,64 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     hasToken: !!config.token,
     tokenSource: config.tokenSource || 'missing',
     reason: config.reason,
-    queueSize: Array.isArray(outbox) ? outbox.length : 0,
+    queueSize: outboxItems.length,
     flushInProgress: !!watchlistDispatchFlushInProgress,
     historySize: Array.isArray(history) ? history.length : 0,
+    lastFlush,
+    nextRetryAt,
+    latestOutboxError,
+    latestOutboxErrorTrace
+  };
+}
+
+function summarizeWatchlistDispatchStatusForLog(status) {
+  if (!status || typeof status !== 'object') {
+    return {
+      configured: false,
+      reason: 'status_unavailable',
+      queueSize: 0
+    };
+  }
+
+  const lastFlush = status.lastFlush && typeof status.lastFlush === 'object'
+    ? {
+      reason: typeof status.lastFlush.reason === 'string' ? status.lastFlush.reason : '',
+      sent: Number.isInteger(status.lastFlush.sent) ? status.lastFlush.sent : 0,
+      failed: Number.isInteger(status.lastFlush.failed) ? status.lastFlush.failed : 0,
+      deferred: Number.isInteger(status.lastFlush.deferred) ? status.lastFlush.deferred : 0,
+      remaining: Number.isInteger(status.lastFlush.remaining) ? status.lastFlush.remaining : 0,
+      skipped: status.lastFlush.skipped === true,
+      skipReason: typeof status.lastFlush.skipReason === 'string' ? status.lastFlush.skipReason : ''
+    }
+    : null;
+
+  return {
+    configured: !!status.configured,
+    reason: typeof status.reason === 'string' ? status.reason : '',
+    queueSize: Number.isInteger(status.queueSize) ? status.queueSize : 0,
+    flushInProgress: !!status.flushInProgress,
+    tokenSource: typeof status.tokenSource === 'string' ? status.tokenSource : 'missing',
+    nextRetryAt: Number.isInteger(status.nextRetryAt) ? status.nextRetryAt : null,
+    latestOutboxError: typeof status.latestOutboxError === 'string' ? status.latestOutboxError : '',
     lastFlush
   };
+}
+
+async function logWatchlistDispatchStatusSnapshot(context, forceReload = false, extra = {}) {
+  try {
+    const status = await getWatchlistDispatchStatus(forceReload);
+    console.log('[copy-flow] [dispatch:status-snapshot]', {
+      context: typeof context === 'string' ? context : 'unknown',
+      ...summarizeWatchlistDispatchStatusForLog(status),
+      ...extra
+    });
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:status-snapshot-failed]', {
+      context: typeof context === 'string' ? context : 'unknown',
+      error: error?.message || String(error),
+      ...extra
+    });
+  }
 }
 
 async function setWatchlistDispatchToken(rawToken) {
@@ -3272,20 +3791,52 @@ async function setWatchlistDispatchToken(rawToken) {
     return { success: false, reason: 'empty_token' };
   }
 
-  const storageKey = WATCHLIST_DISPATCH.tokenStorageKey;
-  if (!storageKey || !chrome?.storage?.local?.set) {
+  const { localKey, syncKey } = getWatchlistTokenStorageKeys();
+  let localSaved = false;
+  let syncSaved = false;
+
+  if (localKey && chrome?.storage?.local?.set) {
+    try {
+      await chrome.storage.local.set({ [localKey]: token });
+      localSaved = true;
+    } catch (error) {
+      console.warn('[copy-flow] [dispatch:token-local-save-failed]', error);
+    }
+  }
+
+  if (syncKey && chrome?.storage?.sync?.set) {
+    try {
+      await chrome.storage.sync.set({ [syncKey]: token });
+      syncSaved = true;
+    } catch (error) {
+      console.warn('[copy-flow] [dispatch:token-sync-save-failed]', error);
+    }
+  }
+
+  if (!localSaved && !syncSaved) {
     return { success: false, reason: 'storage_unavailable' };
   }
 
-  await chrome.storage.local.set({ [storageKey]: token });
-  watchlistDispatchTokenCache = { token, source: 'storage_local' };
-  return { success: true, source: 'storage_local' };
+  const source = localSaved ? 'storage_local' : 'storage_sync';
+  watchlistDispatchTokenCache = { token, source };
+  return { success: true, source, localSaved, syncSaved };
 }
 
 async function clearWatchlistDispatchToken() {
-  const storageKey = WATCHLIST_DISPATCH.tokenStorageKey;
-  if (storageKey && chrome?.storage?.local?.remove) {
-    await chrome.storage.local.remove([storageKey]);
+  const { localKey, syncKey } = getWatchlistTokenStorageKeys();
+  if (localKey && chrome?.storage?.local?.remove) {
+    try {
+      await chrome.storage.local.remove([localKey]);
+    } catch (error) {
+      console.warn('[copy-flow] [dispatch:token-local-clear-failed]', error);
+    }
+  }
+  if (syncKey && chrome?.storage?.sync?.remove) {
+    try {
+      await chrome.storage.sync.remove([syncKey]);
+    } catch (error) {
+      console.warn('[copy-flow] [dispatch:token-sync-clear-failed]', error);
+    }
   }
 
   watchlistDispatchTokenCache = null;
@@ -3315,6 +3866,16 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
   });
 
   const maxAttempts = Math.max(1, Number(WATCHLIST_DISPATCH.retryCount || 0) + 1);
+  console.log('[copy-flow] [dispatch:send-start]', {
+    trace: copyTrace,
+    repository,
+    eventType: WATCHLIST_DISPATCH.eventType,
+    url,
+    maxAttempts,
+    timeoutMs: WATCHLIST_DISPATCH.timeoutMs,
+    tokenSource: dispatchConfig.tokenSource || 'unknown',
+    payload: summarizeWatchlistDispatchPayload(payload)
+  });
 
   for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
     const controller = new AbortController();
@@ -3336,37 +3897,95 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
 
       if (!response.ok) {
         const errorText = await response.text().catch(() => '');
-        throw new Error(`HTTP ${response.status}${errorText ? ` ${errorText}` : ''}`);
+        const requestId = response.headers?.get?.('x-github-request-id') || '';
+        const rateLimitRemaining = response.headers?.get?.('x-ratelimit-remaining') || '';
+        const rateLimitReset = response.headers?.get?.('x-ratelimit-reset') || '';
+        const normalizedErrorText = truncateDispatchLogText(errorText, 500);
+        const httpError = new Error(
+          `HTTP ${response.status}${normalizedErrorText ? ` ${normalizedErrorText}` : ''}`
+        );
+        httpError.dispatchMeta = {
+          reason: 'http_error',
+          status: response.status,
+          requestId,
+          rateLimitRemaining,
+          rateLimitReset,
+          responseSnippet: normalizedErrorText
+        };
+        throw httpError;
       }
 
-      console.log(`[copy-flow] [dispatch:ok] trace=${copyTrace} status=${response.status}`);
+      const requestId = response.headers?.get?.('x-github-request-id') || '';
+      const rateLimitRemaining = response.headers?.get?.('x-ratelimit-remaining') || '';
+      console.log('[copy-flow] [dispatch:ok]', {
+        trace: copyTrace,
+        status: response.status,
+        requestId,
+        rateLimitRemaining
+      });
       return { success: true, status: response.status };
     } catch (error) {
       clearTimeout(timeoutId);
+      const errorMessage = error?.message || String(error);
+      const dispatchMeta = error?.dispatchMeta && typeof error.dispatchMeta === 'object'
+        ? error.dispatchMeta
+        : {};
+      if (!dispatchMeta.reason && error?.name === 'AbortError') {
+        dispatchMeta.reason = 'timeout';
+      }
+      const retryDelayMs = WATCHLIST_DISPATCH.backoffMs * attempt;
       if (attempt < maxAttempts) {
-        console.warn(
-          `[copy-flow] [dispatch:retry] trace=${copyTrace} attempt=${attempt}/${maxAttempts} error=${error.message || String(error)}`
-        );
-        await sleep(WATCHLIST_DISPATCH.backoffMs * attempt);
+        console.warn('[copy-flow] [dispatch:retry]', {
+          trace: copyTrace,
+          attempt: `${attempt}/${maxAttempts}`,
+          retryDelayMs,
+          error: truncateDispatchLogText(errorMessage, 500),
+          reason: dispatchMeta.reason || 'dispatch_error',
+          status: dispatchMeta.status || null,
+          requestId: dispatchMeta.requestId || ''
+        });
+        await sleep(retryDelayMs);
         continue;
       }
-      console.error(
-        `[copy-flow] [dispatch:failed] trace=${copyTrace} attempts=${maxAttempts} error=${error.message || String(error)}`
-      );
-      return { success: false, error: error.message || String(error) };
+      console.error('[copy-flow] [dispatch:failed]', {
+        trace: copyTrace,
+        attempts: maxAttempts,
+        error: truncateDispatchLogText(errorMessage, 700),
+        reason: dispatchMeta.reason || 'dispatch_error',
+        status: dispatchMeta.status || null,
+        requestId: dispatchMeta.requestId || '',
+        rateLimitRemaining: dispatchMeta.rateLimitRemaining || '',
+        rateLimitReset: dispatchMeta.rateLimitReset || '',
+        responseSnippet: dispatchMeta.responseSnippet || ''
+      });
+      return {
+        success: false,
+        error: errorMessage,
+        reason: dispatchMeta.reason || 'dispatch_error',
+        status: dispatchMeta.status || null,
+        requestId: dispatchMeta.requestId || ''
+      };
     }
   }
 
   return { success: false, error: 'unknown' };
 }
 
+function normalizeWatchlistFlushReason(rawReason, fallback = 'manual') {
+  if (typeof rawReason !== 'string') return fallback;
+  const trimmed = rawReason.trim();
+  if (!trimmed) return fallback;
+  return trimmed.slice(0, 80);
+}
+
 async function flushWatchlistDispatchOutbox(reason = 'manual') {
+  const normalizedReason = normalizeWatchlistFlushReason(reason, 'manual');
   const ts = Date.now();
   if (!WATCHLIST_DISPATCH.enabled) {
     appendWatchlistDispatchHistory({
       ts,
       kind: 'flush',
-      reason,
+      reason: normalizedReason,
       skipped: true,
       skipReason: 'dispatch_disabled',
       queued: 0,
@@ -3381,7 +4000,7 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     appendWatchlistDispatchHistory({
       ts,
       kind: 'flush',
-      reason,
+      reason: normalizedReason,
       skipped: true,
       skipReason: 'flush_in_progress',
       queued: 0,
@@ -3396,11 +4015,13 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   watchlistDispatchFlushInProgress = true;
   try {
     const queued = await readWatchlistOutbox();
+    console.log(`[copy-flow] [dispatch:flush-start] reason=${normalizedReason} queued=${queued.length}`);
     if (queued.length === 0) {
+      console.log(`[copy-flow] [dispatch:flush-empty] reason=${normalizedReason}`);
       appendWatchlistDispatchHistory({
         ts,
         kind: 'flush',
-        reason,
+        reason: normalizedReason,
         success: true,
         queued: 0,
         sent: 0,
@@ -3416,16 +4037,24 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     let failed = 0;
     let deferred = 0;
     const now = Date.now();
+    let firstFailure = '';
 
     for (const item of queued) {
       if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
         failed += 1;
+        if (!firstFailure) {
+          firstFailure = 'invalid_queue_item';
+        }
+        console.warn('[copy-flow] [dispatch:item-invalid] reason=invalid_queue_item');
         continue;
       }
 
       const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
       if (nextAttemptAt > now) {
         deferred += 1;
+        const waitMs = Math.max(0, nextAttemptAt - now);
+        const trace = buildCopyTrace(item.payload.runId || '', item.payload.responseId || '');
+        console.log(`[copy-flow] [dispatch:item-deferred] trace=${trace} waitMs=${waitMs}`);
         remaining.push(item);
         continue;
       }
@@ -3444,30 +4073,45 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         WATCHLIST_DISPATCH.maxBackoffMs,
         Math.max(1000, WATCHLIST_DISPATCH.backoffMs * attemptCount)
       );
+      const dispatchError = dispatchResult.reason || dispatchResult.error || 'dispatch_failed';
+      if (!firstFailure) {
+        firstFailure = truncateDispatchLogText(`${trace}:${dispatchError}`, 300);
+      }
+      console.warn(
+        `[copy-flow] [dispatch:item-failed] trace=${trace} attemptCount=${attemptCount} retryInMs=${retryDelayMs} error=${truncateDispatchLogText(dispatchError, 400)}`
+      );
       remaining.push({
         ...item,
         attemptCount,
         nextAttemptAt: Date.now() + retryDelayMs,
-        lastError: dispatchResult.reason || dispatchResult.error || 'dispatch_failed'
+        lastError: dispatchError
       });
     }
 
     const persisted = await writeWatchlistOutbox(remaining);
     console.log(
-      `[copy-flow] [dispatch:flush] reason=${reason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length}`
+      `[copy-flow] [dispatch:flush] reason=${normalizedReason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length}`
     );
     appendWatchlistDispatchHistory({
       ts,
       kind: 'flush',
-      reason,
+      reason: normalizedReason,
       success: true,
       queued: queued.length,
       sent,
       failed,
       deferred,
-      remaining: persisted.length
+      remaining: persisted.length,
+      error: firstFailure || ''
     }).catch(() => {});
-    return { success: true, sent, failed, deferred, remaining: persisted.length };
+    return {
+      success: true,
+      sent,
+      failed,
+      deferred,
+      remaining: persisted.length,
+      firstFailure: firstFailure || ''
+    };
   } finally {
     watchlistDispatchFlushInProgress = false;
   }
@@ -3483,89 +4127,6 @@ function ensureWatchlistDispatchAlarm() {
   } catch (error) {
     console.warn('[copy-flow] [dispatch:alarm-failed]', error);
   }
-}
-
-async function uploadResponseToCloud(response) {
-  if (!CLOUD_UPLOAD.enabled) {
-    return { skipped: true, reason: "disabled" };
-  }
-  if (!CLOUD_UPLOAD.url) {
-    console.warn("[cloud] Upload enabled but URL is empty");
-    return { skipped: true, reason: "missing_url" };
-  }
-
-  const headers = {
-    "Content-Type": "application/json"
-  };
-
-  if (CLOUD_UPLOAD.apiKey) {
-    if ((CLOUD_UPLOAD.apiKeyHeader || "").toLowerCase() === "authorization") {
-      headers.Authorization = `Bearer ${CLOUD_UPLOAD.apiKey}`;
-    } else {
-      headers[CLOUD_UPLOAD.apiKeyHeader] = CLOUD_UPLOAD.apiKey;
-    }
-  }
-
-  const payload = {
-    schema: "economist.response.v1",
-    text: response.text,
-    timestamp: response.timestamp,
-    source: response.source,
-    analysisType: response.analysisType,
-    runId: response.runId || null,
-    responseId: response.responseId || null,
-    savedAt: new Date().toISOString(),
-    extensionVersion: chrome.runtime.getManifest().version
-  };
-  const stage = response.stage && typeof response.stage === 'object' && !Array.isArray(response.stage)
-    ? response.stage
-    : null;
-  if (stage) {
-    payload.stage = stage;
-  }
-  const copyTrace = buildCopyTrace(response.runId || '', response.responseId || '');
-  const copyFingerprint = textFingerprint(response.text || '');
-  console.log(`[copy-flow] [upload:start] trace=${copyTrace} len=${(response.text || '').length} fp=${copyFingerprint}`);
-
-  const maxAttempts = Math.max(1, CLOUD_UPLOAD.retryCount + 1);
-  const body = JSON.stringify(payload);
-
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), CLOUD_UPLOAD.timeoutMs);
-
-    try {
-      console.log(`[copy-flow] [upload:attempt] trace=${copyTrace} attempt=${attempt}/${maxAttempts}`);
-      const response = await fetch(CLOUD_UPLOAD.url, {
-        method: "POST",
-        headers,
-        body,
-        signal: controller.signal
-      });
-
-      clearTimeout(timeoutId);
-
-      if (!response.ok) {
-        throw new Error(`HTTP ${response.status}`);
-      }
-
-      console.log(`[copy-flow] [upload:ok] trace=${copyTrace} status=${response.status}`);
-      return { success: true, status: response.status };
-    } catch (error) {
-      clearTimeout(timeoutId);
-
-      if (attempt < maxAttempts) {
-        console.warn(`[copy-flow] [upload:retry] trace=${copyTrace} attempt=${attempt}/${maxAttempts} error=${error.message || String(error)}`);
-        await sleep(CLOUD_UPLOAD.backoffMs * attempt);
-        continue;
-      }
-
-      console.error(`[copy-flow] [upload:failed] trace=${copyTrace} attempts=${maxAttempts} error=${error.message || String(error)}`);
-      return { success: false, error: error.message || String(error) };
-    }
-  }
-
-  return { success: false, error: "unknown" };
 }
 
 // Funkcja wczytująca prompty z plików txt
@@ -3613,6 +4174,7 @@ ensureProcessRegistryReady().catch((error) => {
   console.warn('[monitor] Initial process registry load failed:', error);
 });
 ensureWatchlistDispatchAlarm();
+logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
 });
@@ -3647,6 +4209,7 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
+  logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
   });
@@ -3654,6 +4217,7 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   ensureWatchlistDispatchAlarm();
+  logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
   });
@@ -3662,6 +4226,7 @@ chrome.runtime.onStartup.addListener(() => {
 if (chrome?.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (!alarm || alarm.name !== WATCHLIST_DISPATCH.alarmName) return;
+    logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
     flushWatchlistDispatchOutbox('alarm').catch((error) => {
       console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
     });
@@ -3710,6 +4275,13 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     const copyTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
     const copyFingerprint = textFingerprint(responseText);
     console.log(`[copy-flow] [save:start] trace=${copyTrace} len=${responseText.length} fp=${copyFingerprint} analysis=${analysisType}`);
+    console.log('[copy-flow] [save:meta]', {
+      trace: copyTrace,
+      runId: normalizedRunId || '',
+      responseId: normalizedResponseId,
+      hasStage: !!(stage && typeof stage === 'object' && !Array.isArray(stage)),
+      hasConversationUrl: !!(typeof conversationUrl === 'string' && conversationUrl.trim())
+    });
 
     const newResponse = {
       text: responseText,
@@ -3727,7 +4299,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     if (normalizedStage) {
       newResponse.stage = normalizedStage;
     }
-    const normalizedConversationUrl = typeof conversationUrl === 'string' ? conversationUrl.trim() : '';
+    const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
     if (normalizedConversationUrl) {
       newResponse.conversationUrl = normalizedConversationUrl;
     }
@@ -3798,32 +4370,55 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     console.log(`✅ Weryfikacja storage: OK`);
     console.log(`[copy-flow] [save:verified] trace=${copyTrace} fp=${verifiedFingerprint} match=${verifiedFingerprint === copyFingerprint}`);
 
-    console.log(`[copy-flow] [save:upload] trace=${copyTrace} responseId=${normalizedResponseId}`);
-    const uploadResult = await uploadResponseToCloud({ ...newResponse });
-    if (uploadResult?.success) {
-      console.log(`[cloud] Upload OK (status ${uploadResult.status})`);
-      console.log(`[copy-flow] [save:upload-ok] trace=${copyTrace} status=${uploadResult.status}`);
-    } else if (uploadResult?.skipped) {
-      console.log(`[cloud] Upload skipped (${uploadResult.reason || "unknown"})`);
-      console.log(`[copy-flow] [save:upload-skipped] trace=${copyTrace} reason=${uploadResult.reason || "unknown"}`);
-    } else {
-      console.warn(`[cloud] Upload failed: ${uploadResult?.error || "unknown"}`);
-      console.warn(`[copy-flow] [save:upload-failed] trace=${copyTrace} error=${uploadResult?.error || "unknown"}`);
-    }
+    const dispatchOutcome = {
+      queued: false,
+      queueSize: 0,
+      queueSkipped: false,
+      queueSkipReason: '',
+      flushSkipped: false,
+      flushSkipReason: '',
+      sent: 0,
+      failed: 0,
+      deferred: 0,
+      remaining: 0,
+      firstFailure: ''
+    };
 
     const dispatchQueueResult = await enqueueWatchlistDispatch(newResponse, copyTrace);
     if (dispatchQueueResult?.queued) {
+      dispatchOutcome.queued = true;
+      dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
       console.log(
         `[copy-flow] [dispatch:queued-ok] trace=${copyTrace} responseId=${dispatchQueueResult.responseId} queueSize=${dispatchQueueResult.queueSize}`
       );
       const flushResult = await flushWatchlistDispatchOutbox('save_response');
-      console.log(
-        `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} remaining=${flushResult?.remaining || 0}`
-      );
+      if (flushResult?.skipped) {
+        dispatchOutcome.flushSkipped = true;
+        dispatchOutcome.flushSkipReason = typeof flushResult?.reason === 'string' ? flushResult.reason : 'unknown';
+        console.warn(
+          `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${flushResult?.reason || 'unknown'}`
+        );
+      } else {
+        dispatchOutcome.sent = Number.isInteger(flushResult?.sent) ? flushResult.sent : 0;
+        dispatchOutcome.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
+        dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
+        dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
+        dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
+        console.log(
+          `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
+        );
+      }
+      await logWatchlistDispatchStatusSnapshot('save_response:post_flush', false, { trace: copyTrace });
     } else if (dispatchQueueResult?.skipped) {
+      dispatchOutcome.queueSkipped = true;
+      dispatchOutcome.queueSkipReason = typeof dispatchQueueResult?.reason === 'string' ? dispatchQueueResult.reason : 'unknown';
       console.log(
         `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${dispatchQueueResult.reason || 'unknown'}`
       );
+      await logWatchlistDispatchStatusSnapshot('save_response:queue_skipped', false, {
+        trace: copyTrace,
+        skipReason: dispatchQueueResult.reason || 'unknown'
+      });
     }
 
     console.log(`\n${'*'.repeat(80)}`);
@@ -3832,7 +4427,13 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     console.log(`Nowy stan: ${verifiedResponses.length} odpowiedzi w storage (zweryfikowano: ${verifiedResponses.length})`);
     console.log(`Preview: "${responseText.substring(0, 150)}..."`);
     console.log(`${'*'.repeat(80)}\n`);
-    return newResponse;
+    return {
+      success: true,
+      response: newResponse,
+      copyTrace,
+      verifiedCount: verifiedResponses.length,
+      dispatch: dispatchOutcome
+    };
   } catch (error) {
     console.error(`\n${'!'.repeat(80)}`);
     console.error(`❌ ❌ ❌ [saveResponse] BŁĄD ZAPISYWANIA ❌ ❌ ❌`);
@@ -3926,6 +4527,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, error: error?.message || 'status_failed' });
       });
     return true;
+  } else if (message.type === 'FLUSH_WATCHLIST_DISPATCH') {
+    (async () => {
+      const reason = normalizeWatchlistFlushReason(message?.reason, 'manual_popup');
+      console.log('[copy-flow] [dispatch:manual-flush-requested]', { reason });
+      const flushResult = await flushWatchlistDispatchOutbox(reason);
+      const status = await getWatchlistDispatchStatus(Boolean(message?.forceReload));
+      await logWatchlistDispatchStatusSnapshot('manual_flush', false, { reason, flushResult });
+      sendResponse({ success: true, flushResult, status });
+    })().catch((error) => {
+      console.warn('[copy-flow] [dispatch:manual-flush-failed]', error);
+      sendResponse({ success: false, error: error?.message || 'manual_flush_failed' });
+    });
+    return true;
   } else if (message.type === 'SET_WATCHLIST_DISPATCH_TOKEN') {
     setWatchlistDispatchToken(message?.token)
       .then(async (result) => {
@@ -3941,6 +4555,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             error: error?.message || String(error)
           }))
         ]);
+        await logWatchlistDispatchStatusSnapshot('credentials_updated', false, { flushResult });
         sendResponse({ success: true, status, flushResult });
       })
       .catch((error) => {
@@ -3952,6 +4567,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     clearWatchlistDispatchToken()
       .then(async () => {
         const status = await getWatchlistDispatchStatus(true);
+        await logWatchlistDispatchStatusSnapshot('credentials_cleared', false);
         sendResponse({ success: true, status });
       })
       .catch((error) => {
@@ -4041,7 +4657,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'RESUME_STAGE_START') {
     // Uruchom analizę od konkretnego etapu
     console.log('📩 Otrzymano RESUME_STAGE_START:', { startIndex: message.startIndex });
-    resumeFromStage(message.startIndex)
+    const resumeOptions = {};
+    if (typeof message?.title === 'string' && message.title.trim()) {
+      resumeOptions.processTitle = message.title.trim();
+    }
+    resumeFromStage(message.startIndex, resumeOptions)
       .then((result) => sendResponse(result || { success: false, error: 'resume_result_missing' }))
       .catch((error) => {
         console.warn('[resume] RESUME_STAGE_START failed:', error);
@@ -4717,16 +5337,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       result = results[0]?.result;
 
       // Capture conversation URL from injected context (preferred) or from the tab (fallback).
-      let conversationUrl = typeof result?.conversationUrl === 'string'
-        ? result.conversationUrl.trim()
-        : '';
+      let conversationUrl = normalizeChatConversationUrl(result?.conversationUrl);
       if (!conversationUrl) {
         try {
           const chatTab = await chrome.tabs.get(chatTabId);
-          const chatTabUrl = typeof chatTab?.url === 'string' ? chatTab.url.trim() : '';
-          if (chatTabUrl.startsWith('https://chatgpt.com/')) {
-            conversationUrl = chatTabUrl;
-          }
+          const chatTabUrl = getTabEffectiveUrl(chatTab);
+          conversationUrl = normalizeChatConversationUrl(chatTabUrl);
         } catch (error) {
           // Ignore and continue without URL.
         }
@@ -4779,6 +5395,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       const hasResultLastResponse = resultLastResponse.trim().length > 0;
       const MAX_COMPLETED_RESPONSE_CHARS = 180000;
       let completedResponsePatch = {};
+      let persistencePatch = null;
 
       if (typeof result?.lastResponse === 'string') {
         const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
@@ -4801,6 +5418,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.log(`Typ analizy: ${analysisType}`);
         console.log(`Tytuł: ${title}`);
         console.log(`[copy-flow] [process:save-call] run=${processId || 'no-run'} len=${resultLastResponse.length} fp=${textFingerprint(resultLastResponse)}`);
+        await mirrorCopyFlowLogToTab(chatTabId, 'log', `[save:start] run=${processId || 'no-run'} len=${resultLastResponse.length}`, {
+          analysisType,
+          source: title,
+          responseLength: resultLastResponse.length
+        });
 
         const stageMeta = {};
         if (Number.isInteger(result?.selectedResponsePrompt)) {
@@ -4813,7 +5435,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           stageMeta.selected_response_reason = result.selectedResponseReason.trim();
         }
 
-        const savedResponse = await saveResponse(
+        const saveResult = await saveResponse(
           resultLastResponse,
           title,
           analysisType,
@@ -4822,17 +5444,96 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           Object.keys(stageMeta).length > 0 ? stageMeta : null,
           conversationUrl || null
         );
+        const persistenceSummary = buildPersistenceUiSummary({
+          hasResponse: true,
+          saveResult,
+          saveError: saveResult?.success ? '' : 'save_response_failed'
+        });
+        finalStatusText = persistenceSummary.statusText;
+        finalReason = persistenceSummary.reason;
+        persistencePatch = {
+          persistenceLog: persistenceSummary.logLines,
+          persistenceStatus: {
+            hasResponse: true,
+            saveOk: persistenceSummary.saveOk,
+            dispatchSummary: persistenceSummary.dispatchSummary,
+            copyTrace: persistenceSummary.copyTrace,
+            saveError: persistenceSummary.saveError,
+            dispatch: persistenceSummary.dispatch || null,
+            updatedAt: Date.now()
+          }
+        };
         if (Object.keys(completedResponsePatch).length > 0) {
-          completedResponsePatch.completedResponseSaved = !!savedResponse;
+          completedResponsePatch.completedResponseSaved = persistenceSummary.saveOk;
+          completedResponsePatch.completedResponseDispatch = persistenceSummary.dispatch || null;
+          completedResponsePatch.completedResponseDispatchSummary = persistenceSummary.dispatchSummary;
+          completedResponsePatch.completedResponseSaveTrace = persistenceSummary.copyTrace || '';
         }
+        await mirrorCopyFlowLogToTab(
+          chatTabId,
+          persistenceSummary.saveOk ? 'log' : 'warn',
+          persistenceSummary.saveOk
+            ? `[save:ok] trace=${saveResult?.copyTrace || 'n/a'}`
+            : '[save:failed]',
+          persistenceSummary.saveOk
+            ? {
+              responseId: saveResult?.response?.responseId || null,
+              verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
+              dispatch: saveResult?.dispatch || null
+            }
+            : {
+              analysisType,
+              source: title
+            }
+        );
+        await mirrorCopyFlowLogToTab(
+          chatTabId,
+          persistenceSummary.saveOk ? 'log' : 'warn',
+          '[save:summary]',
+          {
+            statusText: finalStatusText,
+            log: persistenceSummary.logLines,
+            reason: persistenceSummary.reason || '',
+            dispatch: persistenceSummary.dispatch || null
+          }
+        );
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: persistenceSummary.saveOk ? 'Zakonczono' : 'Zakonczono (blad zapisu)',
+          tone: persistenceSummary.tone,
+          lines: persistenceSummary.logLines,
+          autoCloseMs: persistenceSummary.saveOk ? 10000 : 14000
+        });
         
         console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
         console.log(`${'='.repeat(80)}\n`);
       } else if (result && result.success && !hasResultLastResponse) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse jest pusta lub null ⚠️ ⚠️ ⚠️`);
         console.warn(`lastResponse: "${result.lastResponse}" (długość: ${result.lastResponse?.length || 0})`);
-        finalStatusText = 'Zakonczono (pusta odpowiedz)';
-        finalReason = 'empty_response';
+        const persistenceSummary = buildPersistenceUiSummary({ hasResponse: false });
+        finalStatusText = persistenceSummary.statusText;
+        finalReason = persistenceSummary.reason;
+        persistencePatch = {
+          persistenceLog: persistenceSummary.logLines,
+          persistenceStatus: {
+            hasResponse: false,
+            saveOk: false,
+            dispatchSummary: persistenceSummary.dispatchSummary,
+            copyTrace: '',
+            saveError: persistenceSummary.saveError,
+            dispatch: null,
+            updatedAt: Date.now()
+          }
+        };
+        await mirrorCopyFlowLogToTab(chatTabId, 'warn', '[save:skipped_empty_response]', {
+          statusText: finalStatusText,
+          log: persistenceSummary.logLines
+        });
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: 'Zakonczono (pusta odpowiedz)',
+          tone: persistenceSummary.tone,
+          lines: persistenceSummary.logLines,
+          autoCloseMs: 10000
+        });
         console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
@@ -4840,6 +5541,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         finalStatusText = 'Blad procesu';
         finalReason = 'inject_failed';
         finalError = result?.error || '';
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: 'Blad procesu',
+          tone: 'error',
+          lines: [`Powod: ${finalError || finalReason}`],
+          autoCloseMs: 14000
+        });
         console.log(`${'='.repeat(80)}\n`);
       } else {
         console.error(`\n❌ ❌ ❌ NIEOCZEKIWANY STAN ❌ ❌ ❌`);
@@ -4849,6 +5556,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         finalStatus = 'failed';
         finalStatusText = 'Nieoczekiwany wynik';
         finalReason = 'invalid_result';
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: 'Blad procesu',
+          tone: 'error',
+          lines: ['Powod: invalid_result'],
+          autoCloseMs: 14000
+        });
         console.log(`${'='.repeat(80)}\n`);
       }
 
@@ -4862,6 +5575,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         error: finalError,
         autoRecovery: null,
         ...(injectMetrics ? { injectMetrics } : {}),
+        ...(persistencePatch ? persistencePatch : {}),
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
           : {}),
@@ -8211,14 +8925,20 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log(`\n🎉 ZAKOŃCZONO PROMPT CHAIN - wykonano wszystkie ${promptChain.length} promptów`);
         
         // Usuń licznik z animacją sukcesu
-        removeCounter(counter, true);
+        const completedPrompt = getAbsolutePromptIndex(promptChain.length);
+        const counterCurrent = completedPrompt > 0
+          ? completedPrompt
+          : (totalPromptsForRun > 0 ? totalPromptsForRun : 1);
+        const counterTotal = totalPromptsForRun > 0
+          ? totalPromptsForRun
+          : Math.max(counterCurrent, 1);
+        updateCounter(counter, counterCurrent, counterTotal, 'Prompt chain zakonczony. Trwa zapis do bazy...');
         
         // Zwróć ostatnią odpowiedź do zapisania
         const lastResponse = window._lastResponseToSave || '';
         delete window._lastResponseToSave;
         console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków)`);
         console.log(`[copy-flow] [capture:return] prompt=${promptChain.length} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)}`);
-        const completedPrompt = getAbsolutePromptIndex(promptChain.length);
         const selectedPrompt = completedPrompt;
         const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
         notifyProcess('PROCESS_PROGRESS', {
@@ -8227,7 +8947,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           totalPrompts: totalPromptsForRun,
           stageIndex: completedPrompt > 0 ? (completedPrompt - 1) : null,
           stageName: completedPrompt > 0 ? `Prompt ${completedPrompt}` : 'Start',
-          statusText: 'Zakonczono',
+          statusText: 'Prompt chain zakonczony - trwa zapis do bazy',
           needsAction: false
         });
 

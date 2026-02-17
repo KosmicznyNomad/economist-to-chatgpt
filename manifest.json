@@ -24,7 +24,6 @@
     "https://*.foreignaffairs.com/*",
     "https://*.barrons.com/*",
     "https://open.spotify.com/*",
-    "http://localhost:8787/*",
     "https://api.github.com/*",
     "https://chatgpt.com/*"
   ],

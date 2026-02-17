@@ -119,7 +119,9 @@ startBtn.addEventListener('click', () => {
   if (!isNaN(selectedIndex)) {
     chrome.runtime.sendMessage({
       type: 'RESUME_STAGE_START',
-      startIndex: selectedIndex
+      startIndex: selectedIndex,
+      title: resumeTitle,
+      analysisType: resumeAnalysisType
     });
     window.close();
   }
