@@ -135,7 +135,7 @@ console.log(`${'*'.repeat(80)}`);
 
 ### Krok 1: Przeładuj Rozszerzenie
 1. `chrome://extensions`
-2. Znajdź "Economist to ChatGPT"
+2. Znajdź "Iskra"
 3. Kliknij ikonę odświeżania (🔄)
 
 ### Krok 2: Otwórz Konsolę Service Worker
