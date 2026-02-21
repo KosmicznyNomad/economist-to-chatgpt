@@ -1,6 +1,6 @@
 {
   "manifest_version": 3,
-  "name": "News to ChatGPT",
+  "name": "Iskra",
   "version": "2.0",
   "description": "Kopiuje artykuły z news sites do ChatGPT z prompt chain",
   "permissions": [

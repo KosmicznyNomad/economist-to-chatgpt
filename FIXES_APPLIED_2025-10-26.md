@@ -232,7 +232,7 @@ if (messages.length === 0 && attempt === 0) {
 
 ### 1. Reload Extension
 ```bash
-chrome://extensions → Find "Economist to ChatGPT" → Click reload (🔄)
+chrome://extensions → Find "Iskra" → Click reload (🔄)
 ```
 
 ### 2. Open Service Worker Console

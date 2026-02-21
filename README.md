@@ -1,4 +1,4 @@
-﻿# News to ChatGPT
+# Iskra
 
 Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
 

@@ -1,4 +1,4 @@
-# Chrome Extension Architecture: Economist to ChatGPT
+# Chrome Extension Architecture: Iskra
 
 ## Project Overview
 This is a Chrome extension that automates the process of analyzing articles from various news sources (The Economist, Nikkei Asia, etc.) and YouTube content by sending them to ChatGPT with a structured prompt chain. The extension captures ChatGPT's responses and stores them locally for later retrieval.

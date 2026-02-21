@@ -1,4 +1,4 @@
-# Raport: teoria i mechanizm dzialania systemu "News to ChatGPT"
+# Raport: teoria i mechanizm dzialania systemu "Iskra"
 
 ## 1. Cel i zakres systemu
 System to rozszerzenie Chrome automatyzujace prace z artykulami newsowymi i tresciami z YouTube, ktore przekazuje material do ChatGPT w formie uporzadkowanego prompt chain i zapisuje wynikowe odpowiedzi. Celem jest eliminacja manualnego kopiowania, utrzymanie spojnej metody analizy oraz szybkie zebranie odpowiedzi w jednym miejscu.
