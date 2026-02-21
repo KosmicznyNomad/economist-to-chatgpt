@@ -2,6 +2,19 @@ const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/pro
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
 const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
+const CHAT_GPT_HOSTS = new Set([
+  'chatgpt.com',
+  'www.chatgpt.com',
+  'chat.openai.com',
+  'www.chat.openai.com'
+]);
+const INVEST_GPT_PATH_BASE = (() => {
+  try {
+    return new URL(INVEST_GPT_URL_BASE).pathname.replace(/\/+$/, '');
+  } catch (error) {
+    return '/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje';
+  }
+})();
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
@@ -16,15 +29,21 @@ const AUTO_RECOVERY_DELAY_MS = 8000;
 const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
 const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout', 'invalid_response'];
 
-// One-time setup: prefer token in chrome.storage.local, keep sync backup; inline token remains fallback.
+// Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
 const WATCHLIST_DISPATCH = {
   enabled: true,
-  apiBaseUrl: "https://api.github.com",
-  repository: "KosmicznyNomad/watchlist",
-  eventType: "economist_response",
-  token: "",
-  tokenStorageKey: "watchlist_dispatch_token",
-  tokenSyncStorageKey: "watchlist_dispatch_token",
+  intakeUrl: "https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response",
+  keyId: "extension-primary",
+  secret: "233bf044070040d30391b224219635080696bbe1bf4eda74317213f49f01b862",
+  // Fallback for networks where outbound 80/443 to server is blocked.
+  // Use with: ssh -N -L 18080:127.0.0.1:8080 iskierka
+  localTunnelIntakeUrl: "http://127.0.0.1:18080/api/v1/intake/economist-response",
+  intakeUrlStorageKey: "watchlist_intake_url",
+  intakeUrlSyncStorageKey: "watchlist_intake_url",
+  keyIdStorageKey: "watchlist_intake_key_id",
+  keyIdSyncStorageKey: "watchlist_intake_key_id",
+  secretStorageKey: "watchlist_intake_secret",
+  secretSyncStorageKey: "watchlist_intake_secret",
   timeoutMs: 20000,
   retryCount: 3,
   backoffMs: 1500,
@@ -35,6 +54,12 @@ const WATCHLIST_DISPATCH = {
   historyMaxItems: 200,
   alarmName: "watchlist-dispatch-flush",
   alarmPeriodMinutes: 2
+};
+
+const AUTO_RESTORE_WINDOWS = {
+  enabledStorageKey: 'auto_restore_windows_enabled',
+  alarmName: 'auto-restore-process-windows',
+  alarmPeriodMinutes: 15
 };
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
@@ -53,7 +78,8 @@ const CLOSED_PROCESS_STATUSES = new Set([
 const processRegistry = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
-let watchlistDispatchTokenCache = null;
+let watchlistDispatchCredentialsCache = null;
+let autoRestoreWindowsInProgress = false;
 
 function isClosedProcessStatus(status) {
   return CLOSED_PROCESS_STATUSES.has(String(status || '').toLowerCase());
@@ -592,6 +618,211 @@ function requestProcessForceStopOnTab(tabId, payload = {}, timeoutMs = 1200) {
   });
 }
 
+function extractResponseIdFromCopyTrace(copyTrace, expectedRunId = '') {
+  if (typeof copyTrace !== 'string' || !copyTrace.trim()) return '';
+  const trimmed = copyTrace.trim();
+  const separator = trimmed.lastIndexOf('/');
+  if (separator < 0 || separator >= trimmed.length - 1) return '';
+  const runPart = trimmed.slice(0, separator).trim();
+  const responsePart = trimmed.slice(separator + 1).trim();
+  if (!responsePart || responsePart === 'no-response') return '';
+  if (typeof expectedRunId === 'string' && expectedRunId.trim() && runPart && runPart !== expectedRunId.trim()) {
+    return '';
+  }
+  return responsePart;
+}
+
+function buildRestartReplayResponseId(runId = '', responseText = '', promptNumber = 0) {
+  const safeRunId = typeof runId === 'string' && runId.trim()
+    ? runId.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+    : 'run';
+  const safePromptNumber = Number.isInteger(promptNumber) && promptNumber > 0 ? promptNumber : 0;
+  const fp = textFingerprint(responseText || '');
+  return `${safeRunId}_restart_p${safePromptNumber}_${fp}`;
+}
+
+function extractAssistantTextFromProcess(process) {
+  if (!process || typeof process !== 'object') return '';
+  if (typeof process.completedResponseText === 'string' && process.completedResponseText.trim()) {
+    return process.completedResponseText.trim();
+  }
+  const messages = Array.isArray(process.messages) ? process.messages : [];
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const message = messages[i];
+    if (!message || message.role !== 'assistant') continue;
+    const text = typeof message.text === 'string' ? message.text.trim() : '';
+    if (text) return text;
+  }
+  return '';
+}
+
+async function extractLastAssistantResponseFromTab(tabId, maxWaitMs = 1800) {
+  if (!Number.isInteger(tabId)) return '';
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: async (waitMs) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
+
+        function extractTextFromNode(node) {
+          if (!node) return '';
+          const clone = node.cloneNode(true);
+          const removableSelectors = [
+            '[data-testid="copy-turn-action-button"]',
+            '[data-testid="message-actions"]',
+            'button',
+            'svg',
+            'aside',
+            'nav',
+            'footer'
+          ];
+          removableSelectors.forEach((selector) => {
+            clone.querySelectorAll(selector).forEach((child) => child.remove());
+          });
+          return compact(clone.innerText || clone.textContent || '');
+        }
+
+        function readAssistantText() {
+          const byRole = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+          for (let i = byRole.length - 1; i >= 0; i -= 1) {
+            const text = extractTextFromNode(byRole[i]);
+            if (text) return text;
+          }
+          const conversationTurns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'));
+          for (let i = conversationTurns.length - 1; i >= 0; i -= 1) {
+            const turn = conversationTurns[i];
+            const candidate = turn.querySelector('[data-message-author-role="assistant"]') || turn;
+            const text = extractTextFromNode(candidate);
+            if (text) return text;
+          }
+          const articles = Array.from(document.querySelectorAll('article'));
+          for (let i = articles.length - 1; i >= 0; i -= 1) {
+            const text = extractTextFromNode(articles[i]);
+            if (text) return text;
+          }
+          return '';
+        }
+
+        const startedAt = Date.now();
+        let best = '';
+        while ((Date.now() - startedAt) <= waitMs) {
+          const candidate = readAssistantText();
+          if (candidate.length > best.length) {
+            best = candidate;
+          }
+          if (best.length >= 50) break;
+          await sleep(220);
+        }
+        return best;
+      },
+      args: [Math.max(500, Math.min(maxWaitMs, 12000))]
+    });
+    const text = typeof results?.[0]?.result === 'string' ? results[0].result.trim() : '';
+    return text;
+  } catch (error) {
+    return '';
+  }
+}
+
+async function replayCompletedResponseForProcess(process, options = {}) {
+  if (!process || typeof process !== 'object') {
+    return { attempted: false, success: false, reason: 'invalid_process' };
+  }
+
+  const currentPrompt = Number.isInteger(process.currentPrompt) ? process.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : 0;
+  const statusText = typeof process.statusText === 'string' ? process.statusText.toLowerCase() : '';
+  const hasCompletedPayload = typeof process.completedResponseText === 'string' && process.completedResponseText.trim().length > 0;
+  const likelyFinalStage = hasCompletedPayload
+    || (Number.isInteger(process.completedResponseLength) && process.completedResponseLength > 0)
+    || (totalPrompts > 0 && currentPrompt >= totalPrompts)
+    || statusText.includes('trwa zapis do bazy')
+    || statusText.includes('zakonczony');
+  if (!likelyFinalStage && options?.force !== true) {
+    return { attempted: false, success: false, reason: 'not_final_stage' };
+  }
+
+  const alreadySaved = process?.completedResponseSaved === true || process?.persistenceStatus?.saveOk === true;
+  if (alreadySaved && options?.force !== true) {
+    return { attempted: false, success: true, reason: 'already_saved' };
+  }
+
+  const runId = typeof process.id === 'string' ? process.id : '';
+  const analysisType = typeof process.analysisType === 'string' && process.analysisType.trim()
+    ? process.analysisType.trim()
+    : 'company';
+  const source = typeof process.title === 'string' && process.title.trim()
+    ? process.title.trim()
+    : 'Restart replay';
+
+  let responseText = extractAssistantTextFromProcess(process);
+  if (!responseText && Number.isInteger(options?.tabId)) {
+    responseText = await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
+  }
+  if (!responseText) {
+    return { attempted: false, success: false, reason: 'missing_response_text' };
+  }
+
+  const existingTrace = typeof process.completedResponseSaveTrace === 'string' && process.completedResponseSaveTrace.trim()
+    ? process.completedResponseSaveTrace.trim()
+    : (typeof process?.persistenceStatus?.copyTrace === 'string' ? process.persistenceStatus.copyTrace.trim() : '');
+  const responseIdFromTrace = extractResponseIdFromCopyTrace(existingTrace, runId);
+  const promptNumber = Number.isInteger(process.currentPrompt) && process.currentPrompt > 0
+    ? process.currentPrompt
+    : (Number.isInteger(process.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+  const responseId = responseIdFromTrace || buildRestartReplayResponseId(runId, responseText, promptNumber);
+
+  const stageMeta = {};
+  if (promptNumber > 0) {
+    stageMeta.selected_response_prompt = promptNumber;
+  }
+  if (Number.isInteger(process.stageIndex) && process.stageIndex >= 0) {
+    stageMeta.selected_response_stage_index = process.stageIndex;
+  } else if (promptNumber > 0) {
+    stageMeta.selected_response_stage_index = promptNumber - 1;
+  }
+  stageMeta.selected_response_reason = 'restart_replay';
+
+  const conversationUrl = normalizeChatConversationUrl(process.chatUrl)
+    || normalizeChatConversationUrl(process.sourceUrl)
+    || null;
+
+  const saveResult = await saveResponse(
+    responseText,
+    source,
+    analysisType,
+    runId || null,
+    responseId,
+    stageMeta,
+    conversationUrl
+  );
+
+  if (!saveResult?.success) {
+    return {
+      attempted: true,
+      success: false,
+      reason: 'save_response_failed',
+      responseId,
+      responseLength: responseText.length
+    };
+  }
+
+  const dispatchSummary = formatDispatchUiSummary(saveResult.dispatch);
+  return {
+    attempted: true,
+    success: true,
+    reason: 'saved',
+    responseId,
+    responseLength: responseText.length,
+    copyTrace: typeof saveResult.copyTrace === 'string' ? saveResult.copyTrace : '',
+    dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
+      ? saveResult.dispatch
+      : null,
+    dispatchSummary
+  };
+}
+
 async function stopSingleProcess(process, options = {}) {
   if (!process || isClosedProcessStatus(process.status)) return false;
 
@@ -611,6 +842,25 @@ async function stopSingleProcess(process, options = {}) {
     : null;
   const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
+  const replayOnRestart = options?.replayLatestResponse === true
+    || reason === 'restarted_in_same_window';
+  let replayResult = null;
+
+  if (replayOnRestart) {
+    replayResult = await replayCompletedResponseForProcess(process, {
+      force: options?.forceReplayLatestResponse === true || reason === 'restarted_in_same_window',
+      tabId: processTabId,
+      tabReadTimeoutMs: 1800
+    });
+    console.log('[restart] replay-last-response', {
+      runId,
+      attempted: replayResult?.attempted === true,
+      success: replayResult?.success === true,
+      reason: replayResult?.reason || '',
+      responseId: replayResult?.responseId || '',
+      copyTrace: replayResult?.copyTrace || ''
+    });
+  }
 
   if (processTabId !== null) {
     await requestProcessForceStopOnTab(processTabId, {
@@ -629,14 +879,51 @@ async function stopSingleProcess(process, options = {}) {
     await removeTabSafe(processTabId);
   }
 
-  await upsertProcess(runId, {
+  const stopPatch = {
     status: 'stopped',
     statusText,
     reason,
     needsAction: false,
     finishedAt: now,
     timestamp: now
-  });
+  };
+
+  if (replayResult?.attempted) {
+    stopPatch.restartReplay = {
+      attempted: true,
+      success: replayResult?.success === true,
+      reason: replayResult?.reason || '',
+      responseId: replayResult?.responseId || '',
+      copyTrace: replayResult?.copyTrace || '',
+      updatedAt: now
+    };
+  }
+
+  if (replayResult?.attempted && replayResult?.success) {
+    stopPatch.completedResponseSaved = true;
+    if (typeof replayResult.copyTrace === 'string' && replayResult.copyTrace.trim()) {
+      stopPatch.completedResponseSaveTrace = replayResult.copyTrace.trim();
+    }
+    if (replayResult.dispatch && typeof replayResult.dispatch === 'object') {
+      stopPatch.completedResponseDispatch = replayResult.dispatch;
+      stopPatch.completedResponseDispatchSummary = replayResult.dispatchSummary || formatDispatchUiSummary(replayResult.dispatch);
+    }
+    const previousStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+      ? process.persistenceStatus
+      : {};
+    stopPatch.persistenceStatus = {
+      ...previousStatus,
+      hasResponse: true,
+      saveOk: true,
+      dispatchSummary: replayResult.dispatchSummary || formatDispatchUiSummary(replayResult.dispatch),
+      copyTrace: replayResult.copyTrace || '',
+      saveError: '',
+      dispatch: replayResult.dispatch || null,
+      updatedAt: now
+    };
+  }
+
+  await upsertProcess(runId, stopPatch);
 
   return true;
 }
@@ -657,7 +944,9 @@ async function stopActiveProcesses(options = {}) {
       reason: options.reason,
       statusText: options.statusText,
       origin: options.origin,
-      preserveWindowId
+      preserveWindowId,
+      replayLatestResponse: options?.replayLatestResponse === true,
+      forceReplayLatestResponse: options?.forceReplayLatestResponse === true
     });
     if (didStop) stopped += 1;
   }
@@ -1329,7 +1618,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     return { success: false, error: 'tab_not_found' };
   }
 
-  if (!targetTab?.url || !targetTab.url.includes('chatgpt.com')) {
+  const targetTabUrl = getTabEffectiveUrl(targetTab);
+  if (!isChatGptUrl(targetTabUrl)) {
     return { success: false, error: 'tab_not_chatgpt' };
   }
 
@@ -1369,8 +1659,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     needsAction: false,
     startedAt: Date.now(),
     timestamp: Date.now(),
-    sourceUrl: targetTab.url || '',
-    chatUrl: targetTab.url || '',
+    sourceUrl: targetTabUrl || '',
+    chatUrl: targetTabUrl || '',
     tabId,
     windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
     messages: []
@@ -1418,6 +1708,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
               maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
               delayMs: AUTO_RECOVERY_DELAY_MS,
               reasons: [...AUTO_RECOVERY_REASONS]
+            },
+            {
+              persistFinalResponseViaMessage: true,
+              mode: 'runtime_message',
+              saveTimeoutMs: 18000
             }
           ]
         });
@@ -1577,18 +1872,34 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
 
       const normalizedConversationUrl = normalizeChatConversationUrl(result?.conversationUrl)
         || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
+      const providedResponseId = typeof result?.responseId === 'string' && result.responseId.trim()
+        ? result.responseId.trim()
+        : null;
+      const injectedSaveResult = result?.persistedSaveResult && typeof result.persistedSaveResult === 'object'
+        ? result.persistedSaveResult
+        : null;
+      const savedViaInjectedMessage = result?.persistedViaMessage === true && !!injectedSaveResult?.success;
 
       let saveResult = null;
       if (hasResultLastResponse) {
-        saveResult = await saveResponse(
-          resultLastResponse,
-          processTitle,
-          'company',
-          processId,
-          null,
-          Object.keys(stageMeta).length > 0 ? stageMeta : null,
-          normalizedConversationUrl || null
-        );
+        if (savedViaInjectedMessage) {
+          saveResult = injectedSaveResult;
+          console.log('[auto-resume] saveResponse pominięte - zapis wykonany z kontekstu karty', {
+            processId,
+            responseId: providedResponseId || injectedSaveResult?.response?.responseId || '',
+            copyTrace: injectedSaveResult?.copyTrace || ''
+          });
+        } else {
+          saveResult = await saveResponse(
+            resultLastResponse,
+            processTitle,
+            'company',
+            processId,
+            providedResponseId,
+            Object.keys(stageMeta).length > 0 ? stageMeta : null,
+            normalizedConversationUrl || null
+          );
+        }
       } else {
         console.warn('[auto-resume] Proces zakonczony, ale lastResponse jest pusta - pomijam saveResponse');
       }
@@ -1596,7 +1907,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: hasResultLastResponse,
         saveResult,
-        saveError: hasResultLastResponse && !saveResult?.success ? 'save_response_failed' : ''
+        saveError: hasResultLastResponse && !saveResult?.success
+          ? (typeof result?.persistedSaveError === 'string' && result.persistedSaveError.trim()
+            ? result.persistedSaveError.trim()
+            : 'save_response_failed')
+          : ''
       });
       await renderFinalCounterStatusOnTab(tabId, {
         heading: hasResultLastResponse
@@ -1832,6 +2147,7 @@ async function runResetScanStartAllTabs(options = {}) {
           detectedStageName: null,
           detectedMethod: '',
           detectedSignature: '',
+          detectedHasAssistantReply: null,
           progressPromptNumber: null,
           progressStageName: '',
           stageConsistency: '',
@@ -1973,21 +2289,35 @@ async function runResetScanStartAllTabs(options = {}) {
           });
         }
 
-        if (!detection && promptRecords.length > 0) {
+        let recentMatch = null;
+        if (promptRecords.length > 0) {
           const recent = await extractRecentUserPromptsFromTab(tab.id, 4000);
-          const recentMessages = Array.isArray(recent?.messages) ? recent.messages : [];
-          const recentMatch = detectLastPromptMatch(recentMessages, promptRecords);
+          const recentEntries = Array.isArray(recent?.messageMeta) && recent.messageMeta.length > 0
+            ? recent.messageMeta
+            : (Array.isArray(recent?.messages) ? recent.messages : []);
+          recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
           console.log('[reset-scan-start] Recent history fallback evaluated', {
             tabId: row.tabId,
-            recentMessageCount: recentMessages.length,
+            recentMessageCount: recentEntries.length,
             recentUrl: truncateForLog(recent?.url || '', 140),
             matched: !!recentMatch,
             matchedMethod: recentMatch?.method || '',
             matchedIndex: Number.isInteger(recentMatch?.index) ? recentMatch.index : null,
             matchedPromptNumber: Number.isInteger(recentMatch?.promptNumber) ? recentMatch.promptNumber : null,
+            matchedHasAssistantReply: typeof recentMatch?.hasAssistantReplyAfter === 'boolean'
+              ? recentMatch.hasAssistantReplyAfter
+              : null,
             matchedSignaturePreview: truncateForLog(recentMatch?.signature || '', 140)
           });
-          if (recentMatch && Number.isInteger(recentMatch.index)) {
+
+          if (detection && Number.isInteger(detection.index)) {
+            if (recentMatch && Number.isInteger(recentMatch.index) && recentMatch.index === detection.index) {
+              detection.hasAssistantReplyAfter = recentMatch.hasAssistantReplyAfter;
+              if (typeof recentMatch.signature === 'string' && recentMatch.signature) {
+                detection.messageSignature = recentMatch.signature;
+              }
+            }
+          } else if (recentMatch && Number.isInteger(recentMatch.index)) {
             const promptNumber = Number.isInteger(recentMatch.promptNumber)
               ? recentMatch.promptNumber
               : (recentMatch.index + 1);
@@ -2001,14 +2331,18 @@ async function runResetScanStartAllTabs(options = {}) {
                 : 'recent_match',
               messageSignature: typeof recentMatch.signature === 'string'
                 ? recentMatch.signature
-                : ''
+                : '',
+              hasAssistantReplyAfter: recentMatch.hasAssistantReplyAfter
             };
             console.log('[reset-scan-start] Detection recovered from recent history', {
               tabId: row.tabId,
               index: detection.index,
               promptNumber: detection.promptNumber,
               stageName: detection.stageName || '',
-              method: detection.method || ''
+              method: detection.method || '',
+              hasAssistantReplyAfter: typeof detection.hasAssistantReplyAfter === 'boolean'
+                ? detection.hasAssistantReplyAfter
+                : null
             });
           }
         }
@@ -2042,7 +2376,15 @@ async function runResetScanStartAllTabs(options = {}) {
         row.detectedSignature = typeof detection.messageSignature === 'string'
           ? detection.messageSignature.slice(0, 180)
           : '';
-        row.nextStartIndex = detection.index + 1;
+        row.detectedHasAssistantReply = typeof detection.hasAssistantReplyAfter === 'boolean'
+          ? detection.hasAssistantReplyAfter
+          : null;
+        const shouldAdvancePrompt = row.detectedHasAssistantReply !== false;
+        row.nextStartIndex = computeNextResumeIndex(
+          detection.index,
+          PROMPTS_COMPANY.length,
+          shouldAdvancePrompt
+        );
         if (Number.isInteger(row.progressPromptNumber) && Number.isInteger(row.detectedPromptNumber)) {
           const delta = row.detectedPromptNumber - row.progressPromptNumber;
           row.stageDelta = delta;
@@ -2054,13 +2396,14 @@ async function runResetScanStartAllTabs(options = {}) {
           detectedPromptNumber: row.detectedPromptNumber,
           detectedStageName: row.detectedStageName,
           detectedMethod: row.detectedMethod,
+          detectedHasAssistantReply: row.detectedHasAssistantReply,
           nextStartIndex: row.nextStartIndex,
           progressPromptNumber: row.progressPromptNumber,
           stageDelta: row.stageDelta,
           stageConsistency: row.stageConsistency || ''
         });
 
-        if (row.nextStartIndex >= PROMPTS_COMPANY.length) {
+        if (!Number.isInteger(row.nextStartIndex)) {
           row.action = 'final_stage_already_sent';
           row.reason = 'already_at_last_stage';
           resultsByTabId.set(tab.id, row);
@@ -2088,13 +2431,16 @@ async function runResetScanStartAllTabs(options = {}) {
         }
 
         row.action = 'ready_to_start';
-        row.reason = 'ready_to_start';
+        row.reason = row.detectedHasAssistantReply === false
+          ? 'retry_same_prompt_no_assistant_reply'
+          : 'ready_to_start';
         resultsByTabId.set(tab.id, row);
         pendingTabIds.delete(tab.id);
         console.log('[reset-scan-start] Tab queued for sequential start', {
           tabId: row.tabId,
           nextStartIndex: row.nextStartIndex,
-          startPromptNumber: row.nextStartIndex + 1
+          startPromptNumber: row.nextStartIndex + 1,
+          reason: row.reason
         });
         await sleep(250);
       }
@@ -2277,7 +2623,15 @@ function compactWhitespace(text) {
 
 function isChatGptUrl(url) {
   if (typeof url !== 'string') return false;
-  return url.includes('chatgpt.com') || url.includes('chat.openai.com');
+  const candidate = url.trim();
+  if (!candidate) return false;
+  try {
+    const parsed = new URL(candidate);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    return CHAT_GPT_HOSTS.has(parsed.hostname.toLowerCase());
+  } catch (error) {
+    return candidate.includes('chatgpt.com') || candidate.includes('chat.openai.com');
+  }
 }
 
 function normalizeChatConversationUrl(rawUrl) {
@@ -2288,7 +2642,7 @@ function normalizeChatConversationUrl(rawUrl) {
     const parsed = new URL(candidate);
     if (!['http:', 'https:'].includes(parsed.protocol)) return '';
     const host = parsed.hostname.toLowerCase();
-    if (host !== 'chatgpt.com' && host !== 'chat.openai.com' && host !== 'www.chatgpt.com' && host !== 'www.chat.openai.com') return '';
+    if (!CHAT_GPT_HOSTS.has(host)) return '';
     if (!parsed.pathname || parsed.pathname === '/') return '';
     return parsed.toString();
   } catch (error) {
@@ -2299,10 +2653,22 @@ function normalizeChatConversationUrl(rawUrl) {
 function isInvestGptUrl(url) {
   if (typeof url !== 'string') return false;
   const compactUrl = url.trim();
-  if (!compactUrl.startsWith(INVEST_GPT_URL_BASE)) return false;
-  if (compactUrl.length === INVEST_GPT_URL_BASE.length) return true;
-  const separator = compactUrl.charAt(INVEST_GPT_URL_BASE.length);
-  return separator === '/' || separator === '?' || separator === '#';
+  if (!compactUrl) return false;
+
+  try {
+    const parsed = new URL(compactUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    if (!CHAT_GPT_HOSTS.has(parsed.hostname.toLowerCase())) return false;
+    const normalizedPath = (parsed.pathname || '').replace(/\/+$/, '');
+    if (!normalizedPath) return false;
+    if (normalizedPath === INVEST_GPT_PATH_BASE) return true;
+    return normalizedPath.startsWith(`${INVEST_GPT_PATH_BASE}/`);
+  } catch (error) {
+    if (!compactUrl.startsWith(INVEST_GPT_URL_BASE)) return false;
+    if (compactUrl.length === INVEST_GPT_URL_BASE.length) return true;
+    const separator = compactUrl.charAt(INVEST_GPT_URL_BASE.length);
+    return separator === '/' || separator === '?' || separator === '#';
+  }
 }
 
 function getTabEffectiveUrl(tab) {
@@ -2323,6 +2689,204 @@ function compareTabsByWindowAndIndex(left, right) {
   const leftId = Number.isInteger(left?.id) ? left.id : Number.MAX_SAFE_INTEGER;
   const rightId = Number.isInteger(right?.id) ? right.id : Number.MAX_SAFE_INTEGER;
   return leftId - rightId;
+}
+
+function compareProcessesForRestore(left, right) {
+  const leftWindow = Number.isInteger(left?.windowId) ? left.windowId : Number.MAX_SAFE_INTEGER;
+  const rightWindow = Number.isInteger(right?.windowId) ? right.windowId : Number.MAX_SAFE_INTEGER;
+  if (leftWindow !== rightWindow) return leftWindow - rightWindow;
+
+  const leftStartedAt = Number.isInteger(left?.startedAt)
+    ? left.startedAt
+    : (Number.isInteger(left?.timestamp) ? left.timestamp : 0);
+  const rightStartedAt = Number.isInteger(right?.startedAt)
+    ? right.startedAt
+    : (Number.isInteger(right?.timestamp) ? right.timestamp : 0);
+  if (leftStartedAt !== rightStartedAt) return leftStartedAt - rightStartedAt;
+
+  return String(left?.id || '').localeCompare(String(right?.id || ''));
+}
+
+async function restoreProcessWindows(options = {}) {
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'restore-process-windows';
+
+  const snapshot = await getProcessSnapshot();
+  const activeProcesses = snapshot
+    .filter((process) => !isClosedProcessStatus(process?.status))
+    .sort(compareProcessesForRestore);
+  const activeProcessByTabId = new Map();
+  const activeProcessByWindowId = new Map();
+  activeProcesses.forEach((process) => {
+    if (Number.isInteger(process?.tabId) && !activeProcessByTabId.has(process.tabId)) {
+      activeProcessByTabId.set(process.tabId, process);
+    }
+    if (Number.isInteger(process?.windowId) && !activeProcessByWindowId.has(process.windowId)) {
+      activeProcessByWindowId.set(process.windowId, process);
+    }
+  });
+
+  const tabsRaw = await chrome.tabs.query({});
+  const investTabs = tabsRaw
+    .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
+    .sort(compareTabsByWindowAndIndex);
+
+  if (investTabs.length === 0 && activeProcesses.length === 0) {
+    return {
+      success: true,
+      origin,
+      requested: 0,
+      restored: 0,
+      opened: 0,
+      failed: 0,
+      skipped: 0,
+      results: []
+    };
+  }
+
+  const targets = [];
+  const handledContextKeys = new Set();
+  let skipped = 0;
+
+  investTabs.forEach((tab) => {
+    const tabId = Number.isInteger(tab?.id) ? tab.id : null;
+    const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
+    if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) return;
+    const contextKey = `tab:${tabId}`;
+    if (handledContextKeys.has(contextKey)) {
+      skipped += 1;
+      return;
+    }
+    handledContextKeys.add(contextKey);
+    targets.push({
+      source: 'tab_scan',
+      tabId,
+      windowId,
+      url: getTabEffectiveUrl(tab) || ''
+    });
+  });
+
+  activeProcesses.forEach((process) => {
+    const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+    const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+    if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
+    const contextKey = Number.isInteger(processTabId)
+      ? `tab:${processTabId}`
+      : `window:${processWindowId}`;
+    if (handledContextKeys.has(contextKey)) {
+      skipped += 1;
+      return;
+    }
+    handledContextKeys.add(contextKey);
+    targets.push({
+      source: 'process_context',
+      tabId: processTabId,
+      windowId: processWindowId,
+      url: typeof process?.chatUrl === 'string' ? process.chatUrl.trim() : '',
+      process
+    });
+  });
+
+  const results = [];
+  let restored = 0;
+  let failed = 0;
+
+  for (const target of targets) {
+    const targetTabId = Number.isInteger(target?.tabId) ? target.tabId : null;
+    const targetWindowIdInput = Number.isInteger(target?.windowId) ? target.windowId : null;
+    const tabProcess = Number.isInteger(targetTabId) ? activeProcessByTabId.get(targetTabId) : null;
+    const windowProcess = Number.isInteger(targetWindowIdInput) ? activeProcessByWindowId.get(targetWindowIdInput) : null;
+    const process = tabProcess || windowProcess || target?.process || null;
+    const runId = process?.id ? String(process.id) : '';
+
+    let tab = targetTabId ? await getTabByIdSafe(targetTabId) : null;
+    if (tab && !isInvestGptUrl(getTabEffectiveUrl(tab))) {
+      tab = null;
+    }
+    const targetWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : targetWindowIdInput;
+
+    let windowUpdated = false;
+    let windowState = '';
+    if (Number.isInteger(targetWindowId)) {
+      try {
+        const windowInfo = await chrome.windows.get(targetWindowId);
+        windowState = typeof windowInfo?.state === 'string' ? windowInfo.state : '';
+        const updatePayload = windowState && windowState !== 'normal'
+          ? { state: 'normal', focused: true }
+          : { focused: true };
+        await chrome.windows.update(targetWindowId, updatePayload);
+        windowUpdated = true;
+      } catch (error) {
+        // Keep going, tab activation may still work.
+      }
+    }
+
+    if (!tab && Number.isInteger(targetWindowId)) {
+      try {
+        const tabsInWindow = await chrome.tabs.query({ windowId: targetWindowId });
+        const investTab = tabsInWindow.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate)));
+        if (investTab && Number.isInteger(investTab.id)) {
+          tab = investTab;
+          if (runId && process) {
+            await upsertProcess(runId, {
+              tabId: investTab.id,
+              windowId: targetWindowId,
+              chatUrl: getTabEffectiveUrl(investTab) || (typeof process?.chatUrl === 'string' ? process.chatUrl : '')
+            });
+          }
+        }
+      } catch (error) {
+        // Ignore: no suitable tab found in this window.
+      }
+    }
+
+    let tabActivated = false;
+    if (Number.isInteger(tab?.id)) {
+      try {
+        await chrome.tabs.update(tab.id, { active: true });
+        tabActivated = true;
+      } catch (error) {
+        // Ignore, report as failed below if needed.
+      }
+    }
+
+    if (windowUpdated || tabActivated) {
+      restored += 1;
+      results.push({
+        runId,
+        action: 'restored_existing',
+        source: target.source || 'unknown',
+        tabId: Number.isInteger(tab?.id) ? tab.id : targetTabId,
+        windowId: Number.isInteger(tab?.windowId) ? tab.windowId : targetWindowId,
+        url: Number.isInteger(tab?.id) ? (getTabEffectiveUrl(tab) || '') : (target?.url || ''),
+        windowStateBefore: windowState || null
+      });
+    } else {
+      failed += 1;
+      results.push({
+        runId,
+        action: 'failed_restore',
+        source: target.source || 'unknown',
+        tabId: targetTabId,
+        windowId: targetWindowId,
+        reason: 'missing_or_unreachable_process_context'
+      });
+    }
+
+    await sleep(2000);
+  }
+
+  return {
+    success: true,
+    origin,
+    requested: targets.length,
+    restored,
+    opened: 0,
+    failed,
+    skipped,
+    results
+  };
 }
 
 function waitForTabCompleteWithTimeout(tabId, timeoutMs = 12000) {
@@ -2769,11 +3333,31 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
     };
   }
 
-  const nextStartIndex = detection.index + 1;
-  const promptOffset = Math.max(0, Math.min(nextStartIndex, PROMPTS_COMPANY.length));
-  const remainingPrompts = buildCompanyPromptChainForResume(promptOffset);
   const promptCount = PROMPTS_COMPANY.length;
-  const finalStageReached = promptOffset >= promptCount;
+  let hasAssistantReplyAfter = null;
+  const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
+  if (promptRecords.length > 0) {
+    const recent = await extractRecentUserPromptsFromTab(tabId, 3500);
+    const recentEntries = Array.isArray(recent?.messageMeta) && recent.messageMeta.length > 0
+      ? recent.messageMeta
+      : (Array.isArray(recent?.messages) ? recent.messages : []);
+    const recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
+    if (recentMatch && Number.isInteger(recentMatch.index) && recentMatch.index === detection.index) {
+      hasAssistantReplyAfter = recentMatch.hasAssistantReplyAfter;
+    }
+  }
+
+  const shouldAdvancePrompt = hasAssistantReplyAfter !== false;
+  const nextStartIndex = computeNextResumeIndex(
+    detection.index,
+    PROMPTS_COMPANY.length,
+    shouldAdvancePrompt
+  );
+  const finalStageReached = !Number.isInteger(nextStartIndex);
+  const promptOffset = finalStageReached
+    ? PROMPTS_COMPANY.length
+    : Math.max(0, Math.min(nextStartIndex, PROMPTS_COMPANY.length));
+  const remainingPrompts = buildCompanyPromptChainForResume(promptOffset);
 
   return {
     matched: true,
@@ -2782,7 +3366,10 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
     promptCount,
     finalStageReached,
     remainingPrompts,
-    detection
+    detection: {
+      ...detection,
+      hasAssistantReplyAfter
+    }
   };
 }
 
@@ -2848,7 +3435,7 @@ async function resolveChatTabForProcess(process, message = {}) {
 
   for (const tabId of candidateTabIds) {
     const tab = await getTabByIdSafe(tabId);
-    if (tab && isChatGptUrl(tab.url || '')) {
+    if (tab && isChatGptUrl(getTabEffectiveUrl(tab))) {
       return tab;
     }
   }
@@ -2889,7 +3476,7 @@ async function resolveChatTabForProcess(process, message = {}) {
 
 async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
   if (!Number.isInteger(tabId)) {
-    return { messages: [], url: '' };
+    return { messages: [], messageMeta: [], url: '' };
   }
 
   try {
@@ -2899,41 +3486,85 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
 
-        function readUserMessages() {
-          const nodes = Array.from(document.querySelectorAll('[data-message-author-role="user"]'));
+        function readConversationEntries() {
+          const nodes = Array.from(
+            document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+          );
           return nodes
-            .map((node) => compact(node.innerText || node.textContent || ''))
-            .filter((text) => text.length > 0)
-            .slice(-14)
-            .map((text) => text.length > 24000 ? text.slice(0, 24000) : text);
+            .map((node) => {
+              const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
+              const text = compact(node?.innerText || node?.textContent || '');
+              return {
+                role,
+                text: text.length > 24000 ? text.slice(0, 24000) : text
+              };
+            })
+            .filter((entry) => (entry.role === 'user' || entry.role === 'assistant') && entry.text.length > 0)
+            .slice(-40);
+        }
+
+        function buildUserMessageMeta() {
+          const conversation = readConversationEntries();
+          const users = [];
+          for (let i = 0; i < conversation.length; i += 1) {
+            const entry = conversation[i];
+            if (entry.role !== 'user') continue;
+
+            let hasAssistantReplyAfter = false;
+            let assistantReplyLength = 0;
+            for (let j = i + 1; j < conversation.length; j += 1) {
+              const nextEntry = conversation[j];
+              if (nextEntry.role === 'assistant') {
+                hasAssistantReplyAfter = nextEntry.text.length > 0;
+                assistantReplyLength = nextEntry.text.length;
+                break;
+              }
+              if (nextEntry.role === 'user') {
+                break;
+              }
+            }
+
+            users.push({
+              text: entry.text,
+              hasAssistantReplyAfter,
+              assistantReplyLength
+            });
+          }
+          return users.slice(-14);
         }
 
         const startedAt = Date.now();
-        let messages = readUserMessages();
+        let messageMeta = buildUserMessageMeta();
+        let messages = messageMeta.map((entry) => entry.text);
         while (messages.length === 0 && (Date.now() - startedAt) < waitMs) {
           await sleep(300);
-          messages = readUserMessages();
+          messageMeta = buildUserMessageMeta();
+          messages = messageMeta.map((entry) => entry.text);
         }
 
         return {
           url: location.href,
-          messages
+          messages,
+          messageMeta
         };
       },
       args: [maxWaitMs]
     });
 
-    return results?.[0]?.result || { messages: [], url: '' };
+    return results?.[0]?.result || { messages: [], messageMeta: [], url: '' };
   } catch (error) {
     console.warn('[resume] Nie udalo sie odczytac promptow usera z tab:', tabId, error?.message || error);
-    return { messages: [], url: '' };
+    return { messages: [], messageMeta: [], url: '' };
   }
 }
 
 function detectLastPromptMatch(userMessages, promptRecords) {
   const messages = Array.isArray(userMessages) ? userMessages : [];
   for (let i = messages.length - 1; i >= 0; i -= 1) {
-    const text = messages[i];
+    const entry = messages[i];
+    const text = typeof entry === 'string'
+      ? entry
+      : (typeof entry?.text === 'string' ? entry.text : '');
     if (typeof text !== 'string' || text.trim().length === 0) continue;
     const signature = buildTwoSentenceSignature(text);
     const normalizedPromptText = normalizeSignatureText(text).slice(0, 360);
@@ -2942,20 +3573,31 @@ function detectLastPromptMatch(userMessages, promptRecords) {
       return {
         ...matched,
         messageIndex: i,
-        signature
+        signature,
+        hasAssistantReplyAfter: typeof entry?.hasAssistantReplyAfter === 'boolean'
+          ? entry.hasAssistantReplyAfter
+          : null,
+        assistantReplyLength: Number.isInteger(entry?.assistantReplyLength)
+          ? entry.assistantReplyLength
+          : null
       };
     }
   }
   return null;
 }
 
-function computeNextResumeIndex(lastPromptIndex, totalPrompts) {
+function computeNextResumeIndex(lastPromptIndex, totalPrompts, shouldAdvancePrompt = true) {
   if (!Number.isInteger(lastPromptIndex)) return null;
   const promptCount = Number.isInteger(totalPrompts) ? totalPrompts : 0;
   if (promptCount <= 0) return null;
 
   const maxIndex = promptCount - 1;
   const boundedCurrent = Math.min(Math.max(lastPromptIndex, 0), maxIndex);
+  if (shouldAdvancePrompt === false) {
+    // Retry the same prompt when no assistant response was generated.
+    return boundedCurrent;
+  }
+
   const nextIndex = boundedCurrent + 1;
   if (nextIndex > maxIndex) return null;
 
@@ -3006,21 +3648,31 @@ async function handleProcessResumeNextStageMessage(message) {
 
   const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
   const extracted = await extractRecentUserPromptsFromTab(chatTab.id);
-  const matched = detectLastPromptMatch(extracted.messages, promptRecords);
+  const extractedEntries = Array.isArray(extracted?.messageMeta) && extracted.messageMeta.length > 0
+    ? extracted.messageMeta
+    : (Array.isArray(extracted?.messages) ? extracted.messages : []);
+  const matched = detectLastPromptMatch(extractedEntries, promptRecords);
 
   const detectedPromptIndex = matched
     ? matched.index
     : getProgressPromptIndex(process);
   const detectedMethod = matched ? matched.method : 'progress_fallback';
+  const shouldAdvancePrompt = matched?.hasAssistantReplyAfter !== false;
+  const retrySamePrompt = matched?.hasAssistantReplyAfter === false;
 
-  const nextStartIndex = computeNextResumeIndex(detectedPromptIndex, PROMPTS_COMPANY.length);
+  const nextStartIndex = computeNextResumeIndex(
+    detectedPromptIndex,
+    PROMPTS_COMPANY.length,
+    shouldAdvancePrompt
+  );
   if (!Number.isInteger(nextStartIndex)) {
     return {
       success: false,
       error: 'already_at_last_prompt',
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
-      detectedMethod
+      detectedMethod,
+      retrySamePrompt
     };
   }
 
@@ -3037,7 +3689,8 @@ async function handleProcessResumeNextStageMessage(message) {
       startPromptNumber: nextStartIndex + 1,
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
-      detectedMethod
+      detectedMethod,
+      retrySamePrompt
     };
   }
 
@@ -3055,13 +3708,16 @@ async function handleProcessResumeNextStageMessage(message) {
       startPromptNumber: nextStartIndex + 1,
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
-      detectedMethod
+      detectedMethod,
+      retrySamePrompt
     };
   }
 
   await upsertProcess(runId, {
     status: 'stopped',
-    statusText: `Wznowiono od Prompt ${nextStartIndex + 1}`,
+    statusText: retrySamePrompt
+      ? `Ponowiono Prompt ${nextStartIndex + 1} (brak odpowiedzi)`
+      : `Wznowiono od Prompt ${nextStartIndex + 1}`,
     reason: 'resumed_from_decision_panel',
     needsAction: false,
     finishedAt: Date.now(),
@@ -3075,7 +3731,8 @@ async function handleProcessResumeNextStageMessage(message) {
     startPromptNumber: nextStartIndex + 1,
     detectedPromptIndex,
     detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
-    detectedMethod
+    detectedMethod,
+    retrySamePrompt
   };
 }
 
@@ -3294,10 +3951,21 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
     await chrome.scripting.executeScript({
       target: { tabId },
       func: (payload) => {
-        const counter = document.getElementById('economist-prompt-counter');
-        if (!counter) return { updated: false, reason: 'counter_missing' };
+        const counters = Array.from(document.querySelectorAll('#economist-prompt-counter'));
+        if (counters.length === 0) return { updated: false, reason: 'counter_missing' };
 
-        let content = document.getElementById('economist-counter-content');
+        const counter = counters[counters.length - 1];
+        if (counters.length > 1) {
+          counters.slice(0, -1).forEach((node) => {
+            try {
+              node.remove();
+            } catch (_) {
+              // ignore
+            }
+          });
+        }
+
+        let content = counter.querySelector('#economist-counter-content');
         if (!content) {
           content = document.createElement('div');
           content.id = 'economist-counter-content';
@@ -3350,10 +4018,14 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
 
         if (Number.isInteger(payload.autoCloseMs) && payload.autoCloseMs >= 0) {
           const timerId = window.setTimeout(() => {
-            const activeCounter = document.getElementById('economist-prompt-counter');
-            if (activeCounter) {
-              activeCounter.remove();
-            }
+            const activeCounters = Array.from(document.querySelectorAll('#economist-prompt-counter'));
+            activeCounters.forEach((node) => {
+              try {
+                node.remove();
+              } catch (_) {
+                // ignore
+              }
+            });
           }, payload.autoCloseMs);
           counter.dataset.economistCloseTimerId = String(timerId);
         }
@@ -3573,69 +4245,161 @@ function normalizeWatchlistDispatchToken(rawToken) {
   return typeof rawToken === 'string' ? rawToken.trim() : '';
 }
 
-function getWatchlistTokenStorageKeys() {
-  const localKey = typeof WATCHLIST_DISPATCH.tokenStorageKey === 'string'
-    ? WATCHLIST_DISPATCH.tokenStorageKey.trim()
-    : '';
-  const syncKeyRaw = typeof WATCHLIST_DISPATCH.tokenSyncStorageKey === 'string'
-    ? WATCHLIST_DISPATCH.tokenSyncStorageKey.trim()
-    : '';
-  const syncKey = syncKeyRaw || localKey;
-  return { localKey, syncKey };
+function isLocalWatchlistLoopbackHost(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim().toLowerCase() : '';
+  return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
-async function readWatchlistTokenFromStorageArea(storageArea, storageKey) {
+function normalizeWatchlistIntakeUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    const protocol = String(parsed.protocol || '').toLowerCase();
+    const hostname = String(parsed.hostname || '').toLowerCase();
+    if (protocol === 'https:') return parsed.toString();
+    // Allow plain HTTP only for local SSH tunnel endpoint.
+    if (protocol === 'http:' && isLocalWatchlistLoopbackHost(hostname)) return parsed.toString();
+    return '';
+  } catch {
+    return '';
+  }
+}
+
+function buildWatchlistDispatchUrlCandidates(primaryIntakeUrl) {
+  const primary = normalizeWatchlistIntakeUrl(primaryIntakeUrl);
+  if (!primary) return [];
+
+  const urls = [primary];
+  const fallback = normalizeWatchlistIntakeUrl(WATCHLIST_DISPATCH.localTunnelIntakeUrl || '');
+  if (!fallback || fallback === primary) {
+    return urls;
+  }
+
+  try {
+    const primaryHost = new URL(primary).hostname;
+    const fallbackHost = new URL(fallback).hostname;
+    const primaryIsLoopback = isLocalWatchlistLoopbackHost(primaryHost);
+    const fallbackIsLoopback = isLocalWatchlistLoopbackHost(fallbackHost);
+    if (!primaryIsLoopback && fallbackIsLoopback) {
+      urls.push(fallback);
+    }
+  } catch {
+    // Keep primary URL only when URL parsing is inconsistent.
+  }
+
+  return urls;
+}
+
+function shouldSwitchWatchlistUrlCandidateEarly({
+  usingFallbackUrl,
+  hasAnotherUrlCandidate,
+  dispatchReason,
+  statusCode
+}) {
+  if (usingFallbackUrl || !hasAnotherUrlCandidate) return false;
+  if (statusCode != null) return false;
+  const reason = typeof dispatchReason === 'string' ? dispatchReason.trim().toLowerCase() : '';
+  return reason === 'timeout' || reason === 'dispatch_error';
+}
+
+function normalizeWatchlistKeyId(rawKeyId) {
+  return typeof rawKeyId === 'string' ? rawKeyId.trim() : '';
+}
+
+function getWatchlistCredentialStorageKeys() {
+  const secretLocalKey = typeof WATCHLIST_DISPATCH.secretStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.secretStorageKey.trim()
+    : '';
+  const secretSyncKeyRaw = typeof WATCHLIST_DISPATCH.secretSyncStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.secretSyncStorageKey.trim()
+    : '';
+  const intakeUrlLocalKey = typeof WATCHLIST_DISPATCH.intakeUrlStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.intakeUrlStorageKey.trim()
+    : '';
+  const intakeUrlSyncKeyRaw = typeof WATCHLIST_DISPATCH.intakeUrlSyncStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.intakeUrlSyncStorageKey.trim()
+    : '';
+  const keyIdLocalKey = typeof WATCHLIST_DISPATCH.keyIdStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.keyIdStorageKey.trim()
+    : '';
+  const keyIdSyncKeyRaw = typeof WATCHLIST_DISPATCH.keyIdSyncStorageKey === 'string'
+    ? WATCHLIST_DISPATCH.keyIdSyncStorageKey.trim()
+    : '';
+  return {
+    secretLocalKey,
+    secretSyncKey: secretSyncKeyRaw || secretLocalKey,
+    intakeUrlLocalKey,
+    intakeUrlSyncKey: intakeUrlSyncKeyRaw || intakeUrlLocalKey,
+    keyIdLocalKey,
+    keyIdSyncKey: keyIdSyncKeyRaw || keyIdLocalKey,
+  };
+}
+
+async function readWatchlistValueFromStorageArea(storageArea, storageKey, normalizer) {
   if (!storageArea || typeof storageArea.get !== 'function' || !storageKey) return '';
   try {
     const result = await storageArea.get([storageKey]);
-    return normalizeWatchlistDispatchToken(result?.[storageKey]);
+    return normalizer(result?.[storageKey]);
   } catch (error) {
-    console.warn('[copy-flow] [dispatch:token-read-failed]', {
+    console.warn('[copy-flow] [dispatch:config-read-failed]', {
       storage: storageArea === chrome?.storage?.sync ? 'sync' : 'local',
+      key: storageKey,
       error: error?.message || String(error)
     });
     return '';
   }
 }
 
-async function resolveWatchlistDispatchToken(forceReload = false) {
-  if (!forceReload && watchlistDispatchTokenCache && typeof watchlistDispatchTokenCache.token === 'string') {
-    return watchlistDispatchTokenCache;
+async function resolveWatchlistSetting({
+  inlineValue,
+  localKey,
+  syncKey,
+  normalizer,
+  forceReload = false,
+  cacheKey
+}) {
+  if (!forceReload && watchlistDispatchCredentialsCache && typeof watchlistDispatchCredentialsCache[cacheKey] === 'string') {
+    const cachedValue = watchlistDispatchCredentialsCache[cacheKey];
+    const cachedSource = watchlistDispatchCredentialsCache[`${cacheKey}Source`] || 'missing';
+    return { value: cachedValue, source: cachedSource };
   }
 
-  const inlineToken = normalizeWatchlistDispatchToken(WATCHLIST_DISPATCH.token);
-  if (inlineToken) {
-    watchlistDispatchTokenCache = { token: inlineToken, source: 'inline_config' };
-    return watchlistDispatchTokenCache;
+  const inline = normalizer(inlineValue);
+  if (inline) {
+    return { value: inline, source: 'inline_config' };
   }
 
-  const { localKey, syncKey } = getWatchlistTokenStorageKeys();
-  if (!localKey) {
-    watchlistDispatchTokenCache = { token: '', source: 'missing' };
-    return watchlistDispatchTokenCache;
+  const local = await readWatchlistValueFromStorageArea(chrome?.storage?.local, localKey, normalizer);
+  if (local) {
+    return { value: local, source: 'storage_local' };
   }
 
-  const localToken = await readWatchlistTokenFromStorageArea(chrome?.storage?.local, localKey);
-  if (localToken) {
-    watchlistDispatchTokenCache = { token: localToken, source: 'storage_local' };
-    return watchlistDispatchTokenCache;
-  }
-
-  const syncToken = await readWatchlistTokenFromStorageArea(chrome?.storage?.sync, syncKey);
-  if (syncToken) {
-    if (chrome?.storage?.local?.set) {
+  const sync = await readWatchlistValueFromStorageArea(chrome?.storage?.sync, syncKey, normalizer);
+  if (sync) {
+    if (localKey && chrome?.storage?.local?.set) {
       try {
-        await chrome.storage.local.set({ [localKey]: syncToken });
+        await chrome.storage.local.set({ [localKey]: sync });
       } catch (error) {
-        console.warn('[copy-flow] [dispatch:token-local-repair-failed]', error);
+        console.warn('[copy-flow] [dispatch:config-local-repair-failed]', { key: localKey, error });
       }
     }
-    watchlistDispatchTokenCache = { token: syncToken, source: 'storage_sync' };
-    return watchlistDispatchTokenCache;
+    return { value: sync, source: 'storage_sync' };
   }
 
-  watchlistDispatchTokenCache = { token: '', source: 'missing' };
-  return watchlistDispatchTokenCache;
+  return { value: '', source: 'missing' };
+}
+
+async function resolveWatchlistDispatchToken(forceReload = false) {
+  const keys = getWatchlistCredentialStorageKeys();
+  return resolveWatchlistSetting({
+    inlineValue: WATCHLIST_DISPATCH.secret,
+    localKey: keys.secretLocalKey,
+    syncKey: keys.secretSyncKey,
+    normalizer: normalizeWatchlistDispatchToken,
+    forceReload,
+    cacheKey: 'secret'
+  });
 }
 
 async function resolveWatchlistDispatchConfiguration(forceReload = false) {
@@ -3644,47 +4408,91 @@ async function resolveWatchlistDispatchConfiguration(forceReload = false) {
     return {
       ok: false,
       reason: 'dispatch_disabled',
-      repository: '',
-      token: '',
-      tokenSource: 'missing'
+      intakeUrl: '',
+      keyId: '',
+      secret: '',
+      intakeUrlSource: 'missing',
+      keyIdSource: 'missing',
+      secretSource: 'missing'
     };
   }
 
-  const repository = typeof WATCHLIST_DISPATCH.repository === 'string'
-    ? WATCHLIST_DISPATCH.repository.trim()
-    : '';
-  if (!repository) {
-    console.warn('[copy-flow] [dispatch:config] missing repository');
+  const keys = getWatchlistCredentialStorageKeys();
+  const [secretInfo, intakeUrlInfo, keyIdInfo] = await Promise.all([
+    resolveWatchlistDispatchToken(forceReload),
+    resolveWatchlistSetting({
+      inlineValue: WATCHLIST_DISPATCH.intakeUrl,
+      localKey: keys.intakeUrlLocalKey,
+      syncKey: keys.intakeUrlSyncKey,
+      normalizer: normalizeWatchlistIntakeUrl,
+      forceReload,
+      cacheKey: 'intakeUrl'
+    }),
+    resolveWatchlistSetting({
+      inlineValue: WATCHLIST_DISPATCH.keyId,
+      localKey: keys.keyIdLocalKey,
+      syncKey: keys.keyIdSyncKey,
+      normalizer: normalizeWatchlistKeyId,
+      forceReload,
+      cacheKey: 'keyId'
+    }),
+  ]);
+
+  watchlistDispatchCredentialsCache = {
+    secret: secretInfo.value || '',
+    secretSource: secretInfo.source || 'missing',
+    intakeUrl: intakeUrlInfo.value || '',
+    intakeUrlSource: intakeUrlInfo.source || 'missing',
+    keyId: keyIdInfo.value || '',
+    keyIdSource: keyIdInfo.source || 'missing',
+  };
+
+  if (!intakeUrlInfo.value) {
     return {
       ok: false,
-      reason: 'missing_repository',
-      repository: '',
-      token: '',
-      tokenSource: 'missing'
+      reason: 'missing_intake_url',
+      intakeUrl: '',
+      keyId: keyIdInfo.value || '',
+      secret: '',
+      intakeUrlSource: intakeUrlInfo.source || 'missing',
+      keyIdSource: keyIdInfo.source || 'missing',
+      secretSource: secretInfo.source || 'missing'
     };
   }
-
-  const tokenInfo = await resolveWatchlistDispatchToken(forceReload);
-  if (!tokenInfo.token) {
-    console.warn('[copy-flow] [dispatch:config] missing credentials', {
-      repository,
-      tokenSource: tokenInfo.source || 'missing'
-    });
+  if (!keyIdInfo.value) {
+    return {
+      ok: false,
+      reason: 'missing_key_id',
+      intakeUrl: intakeUrlInfo.value || '',
+      keyId: '',
+      secret: '',
+      intakeUrlSource: intakeUrlInfo.source || 'missing',
+      keyIdSource: keyIdInfo.source || 'missing',
+      secretSource: secretInfo.source || 'missing'
+    };
+  }
+  if (!secretInfo.value) {
     return {
       ok: false,
       reason: 'missing_dispatch_credentials',
-      repository,
-      token: '',
-      tokenSource: tokenInfo.source || 'missing'
+      intakeUrl: intakeUrlInfo.value || '',
+      keyId: keyIdInfo.value || '',
+      secret: '',
+      intakeUrlSource: intakeUrlInfo.source || 'missing',
+      keyIdSource: keyIdInfo.source || 'missing',
+      secretSource: secretInfo.source || 'missing'
     };
   }
 
   return {
     ok: true,
     reason: null,
-    repository,
-    token: tokenInfo.token,
-    tokenSource: tokenInfo.source || 'missing'
+    intakeUrl: intakeUrlInfo.value,
+    keyId: keyIdInfo.value,
+    secret: secretInfo.value,
+    intakeUrlSource: intakeUrlInfo.source || 'missing',
+    keyIdSource: keyIdInfo.source || 'missing',
+    secretSource: secretInfo.source || 'missing'
   };
 }
 
@@ -3719,11 +4527,13 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     : '';
   return {
     enabled: WATCHLIST_DISPATCH.enabled,
-    repository: typeof WATCHLIST_DISPATCH.repository === 'string' ? WATCHLIST_DISPATCH.repository.trim() : '',
-    eventType: typeof WATCHLIST_DISPATCH.eventType === 'string' ? WATCHLIST_DISPATCH.eventType.trim() : '',
+    intakeUrl: config.intakeUrl || '',
+    keyId: config.keyId || '',
     configured: !!config.ok,
-    hasToken: !!config.token,
-    tokenSource: config.tokenSource || 'missing',
+    hasToken: !!config.secret,
+    tokenSource: config.secretSource || 'missing',
+    intakeUrlSource: config.intakeUrlSource || 'missing',
+    keyIdSource: config.keyIdSource || 'missing',
     reason: config.reason,
     queueSize: outboxItems.length,
     flushInProgress: !!watchlistDispatchFlushInProgress,
@@ -3759,9 +4569,13 @@ function summarizeWatchlistDispatchStatusForLog(status) {
   return {
     configured: !!status.configured,
     reason: typeof status.reason === 'string' ? status.reason : '',
+    intakeUrl: typeof status.intakeUrl === 'string' ? status.intakeUrl : '',
+    keyId: typeof status.keyId === 'string' ? status.keyId : '',
     queueSize: Number.isInteger(status.queueSize) ? status.queueSize : 0,
     flushInProgress: !!status.flushInProgress,
     tokenSource: typeof status.tokenSource === 'string' ? status.tokenSource : 'missing',
+    intakeUrlSource: typeof status.intakeUrlSource === 'string' ? status.intakeUrlSource : 'missing',
+    keyIdSource: typeof status.keyIdSource === 'string' ? status.keyIdSource : 'missing',
     nextRetryAt: Number.isInteger(status.nextRetryAt) ? status.nextRetryAt : null,
     latestOutboxError: typeof status.latestOutboxError === 'string' ? status.latestOutboxError : '',
     lastFlush
@@ -3785,31 +4599,60 @@ async function logWatchlistDispatchStatusSnapshot(context, forceReload = false, 
   }
 }
 
-async function setWatchlistDispatchToken(rawToken) {
-  const token = normalizeWatchlistDispatchToken(rawToken);
-  if (!token) {
+async function setWatchlistDispatchToken(rawInput) {
+  const keys = getWatchlistCredentialStorageKeys();
+  const payload = rawInput && typeof rawInput === 'object'
+    ? rawInput
+    : { secret: rawInput };
+
+  const currentConfig = await resolveWatchlistDispatchConfiguration(true).catch(() => ({
+    intakeUrl: '',
+    keyId: ''
+  }));
+  const intakeUrl = normalizeWatchlistIntakeUrl(payload?.intakeUrl || currentConfig?.intakeUrl || WATCHLIST_DISPATCH.intakeUrl);
+  const keyId = normalizeWatchlistKeyId(payload?.keyId || currentConfig?.keyId || WATCHLIST_DISPATCH.keyId);
+  const secret = normalizeWatchlistDispatchToken(payload?.secret);
+
+  if (!intakeUrl) {
+    return { success: false, reason: 'missing_intake_url' };
+  }
+  if (!keyId) {
+    return { success: false, reason: 'missing_key_id' };
+  }
+  if (!secret) {
     return { success: false, reason: 'empty_token' };
   }
 
-  const { localKey, syncKey } = getWatchlistTokenStorageKeys();
   let localSaved = false;
   let syncSaved = false;
 
-  if (localKey && chrome?.storage?.local?.set) {
-    try {
-      await chrome.storage.local.set({ [localKey]: token });
-      localSaved = true;
-    } catch (error) {
-      console.warn('[copy-flow] [dispatch:token-local-save-failed]', error);
+  if (chrome?.storage?.local?.set) {
+    const localPayload = {};
+    if (keys.secretLocalKey) localPayload[keys.secretLocalKey] = secret;
+    if (keys.intakeUrlLocalKey) localPayload[keys.intakeUrlLocalKey] = intakeUrl;
+    if (keys.keyIdLocalKey) localPayload[keys.keyIdLocalKey] = keyId;
+    if (Object.keys(localPayload).length > 0) {
+      try {
+        await chrome.storage.local.set(localPayload);
+        localSaved = true;
+      } catch (error) {
+        console.warn('[copy-flow] [dispatch:token-local-save-failed]', error);
+      }
     }
   }
 
-  if (syncKey && chrome?.storage?.sync?.set) {
-    try {
-      await chrome.storage.sync.set({ [syncKey]: token });
-      syncSaved = true;
-    } catch (error) {
-      console.warn('[copy-flow] [dispatch:token-sync-save-failed]', error);
+  if (chrome?.storage?.sync?.set) {
+    const syncPayload = {};
+    if (keys.secretSyncKey) syncPayload[keys.secretSyncKey] = secret;
+    if (keys.intakeUrlSyncKey) syncPayload[keys.intakeUrlSyncKey] = intakeUrl;
+    if (keys.keyIdSyncKey) syncPayload[keys.keyIdSyncKey] = keyId;
+    if (Object.keys(syncPayload).length > 0) {
+      try {
+        await chrome.storage.sync.set(syncPayload);
+        syncSaved = true;
+      } catch (error) {
+        console.warn('[copy-flow] [dispatch:token-sync-save-failed]', error);
+      }
     }
   }
 
@@ -3817,35 +4660,85 @@ async function setWatchlistDispatchToken(rawToken) {
     return { success: false, reason: 'storage_unavailable' };
   }
 
-  const source = localSaved ? 'storage_local' : 'storage_sync';
-  watchlistDispatchTokenCache = { token, source };
-  return { success: true, source, localSaved, syncSaved };
+  watchlistDispatchCredentialsCache = {
+    secret,
+    secretSource: localSaved ? 'storage_local' : 'storage_sync',
+    intakeUrl,
+    intakeUrlSource: localSaved ? 'storage_local' : 'storage_sync',
+    keyId,
+    keyIdSource: localSaved ? 'storage_local' : 'storage_sync',
+  };
+  return { success: true, source: localSaved ? 'storage_local' : 'storage_sync', localSaved, syncSaved };
 }
 
 async function clearWatchlistDispatchToken() {
-  const { localKey, syncKey } = getWatchlistTokenStorageKeys();
-  if (localKey && chrome?.storage?.local?.remove) {
-    try {
-      await chrome.storage.local.remove([localKey]);
-    } catch (error) {
-      console.warn('[copy-flow] [dispatch:token-local-clear-failed]', error);
+  const keys = getWatchlistCredentialStorageKeys();
+  if (chrome?.storage?.local?.remove) {
+    const localKeys = [keys.secretLocalKey, keys.intakeUrlLocalKey, keys.keyIdLocalKey].filter(Boolean);
+    if (localKeys.length > 0) {
+      try {
+        await chrome.storage.local.remove(localKeys);
+      } catch (error) {
+        console.warn('[copy-flow] [dispatch:token-local-clear-failed]', error);
+      }
     }
   }
-  if (syncKey && chrome?.storage?.sync?.remove) {
-    try {
-      await chrome.storage.sync.remove([syncKey]);
-    } catch (error) {
-      console.warn('[copy-flow] [dispatch:token-sync-clear-failed]', error);
+  if (chrome?.storage?.sync?.remove) {
+    const syncKeys = [keys.secretSyncKey, keys.intakeUrlSyncKey, keys.keyIdSyncKey].filter(Boolean);
+    if (syncKeys.length > 0) {
+      try {
+        await chrome.storage.sync.remove(syncKeys);
+      } catch (error) {
+        console.warn('[copy-flow] [dispatch:token-sync-clear-failed]', error);
+      }
     }
   }
 
-  watchlistDispatchTokenCache = null;
-  const resolved = await resolveWatchlistDispatchToken(true);
+  watchlistDispatchCredentialsCache = null;
   return {
     success: true,
-    hasToken: !!resolved.token,
-    source: resolved.source
+    hasToken: false,
+    source: 'missing'
   };
+}
+
+async function sha256HexForDispatch(value) {
+  const encoder = new TextEncoder();
+  const data = encoder.encode(typeof value === 'string' ? value : String(value || ''));
+  const digest = await crypto.subtle.digest('SHA-256', data);
+  return Array.from(new Uint8Array(digest)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+async function hmacSha256Hex(secret, canonical) {
+  const encoder = new TextEncoder();
+  const key = await crypto.subtle.importKey(
+    'raw',
+    encoder.encode(secret),
+    { name: 'HMAC', hash: 'SHA-256' },
+    false,
+    ['sign']
+  );
+  const signature = await crypto.subtle.sign('HMAC', key, encoder.encode(canonical));
+  return Array.from(new Uint8Array(signature)).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function generateWatchlistNonce() {
+  if (typeof crypto?.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  const bytes = new Uint8Array(16);
+  crypto.getRandomValues(bytes);
+  return Array.from(bytes).map((byte) => byte.toString(16).padStart(2, '0')).join('');
+}
+
+function buildWatchlistCanonicalString({ method, path, timestamp, nonce, bodyHash }) {
+  return [
+    String(method || 'POST').toUpperCase(),
+    String(path || '/'),
+    String(timestamp || ''),
+    String(nonce || ''),
+    String(bodyHash || ''),
+  ].join('\\n');
 }
 
 async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') {
@@ -3858,117 +4751,172 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
     return { skipped: true, reason: dispatchConfig.reason || 'missing_dispatch_credentials' };
   }
 
-  const repository = dispatchConfig.repository;
-  const url = `${WATCHLIST_DISPATCH.apiBaseUrl.replace(/\/+$/, '')}/repos/${repository}/dispatches`;
-  const body = JSON.stringify({
-    event_type: WATCHLIST_DISPATCH.eventType,
-    client_payload: payload
-  });
-
+  const urlCandidates = buildWatchlistDispatchUrlCandidates(dispatchConfig.intakeUrl);
+  if (urlCandidates.length === 0) {
+    return { success: false, reason: 'missing_intake_url', error: 'missing_intake_url' };
+  }
+  const body = JSON.stringify(payload);
   const maxAttempts = Math.max(1, Number(WATCHLIST_DISPATCH.retryCount || 0) + 1);
-  console.log('[copy-flow] [dispatch:send-start]', {
-    trace: copyTrace,
-    repository,
-    eventType: WATCHLIST_DISPATCH.eventType,
-    url,
-    maxAttempts,
-    timeoutMs: WATCHLIST_DISPATCH.timeoutMs,
-    tokenSource: dispatchConfig.tokenSource || 'unknown',
-    payload: summarizeWatchlistDispatchPayload(payload)
-  });
+  let lastFailure = { success: false, error: 'unknown', reason: 'dispatch_error', status: null, requestId: '' };
 
-  for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
-    const controller = new AbortController();
-    const timeoutId = setTimeout(() => controller.abort(), WATCHLIST_DISPATCH.timeoutMs);
-    try {
-      console.log(`[copy-flow] [dispatch:attempt] trace=${copyTrace} attempt=${attempt}/${maxAttempts}`);
-      const response = await fetch(url, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${dispatchConfig.token}`,
-          'Accept': 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-          'Content-Type': 'application/json'
-        },
-        body,
-        signal: controller.signal
-      });
-      clearTimeout(timeoutId);
+  for (let candidateIndex = 0; candidateIndex < urlCandidates.length; candidateIndex += 1) {
+    const url = urlCandidates[candidateIndex];
+    const urlObject = new URL(url);
+    const usingFallbackUrl = candidateIndex > 0;
 
-      if (!response.ok) {
-        const errorText = await response.text().catch(() => '');
-        const requestId = response.headers?.get?.('x-github-request-id') || '';
-        const rateLimitRemaining = response.headers?.get?.('x-ratelimit-remaining') || '';
-        const rateLimitReset = response.headers?.get?.('x-ratelimit-reset') || '';
-        const normalizedErrorText = truncateDispatchLogText(errorText, 500);
-        const httpError = new Error(
-          `HTTP ${response.status}${normalizedErrorText ? ` ${normalizedErrorText}` : ''}`
-        );
-        httpError.dispatchMeta = {
-          reason: 'http_error',
+    console.log('[copy-flow] [dispatch:send-start]', {
+      trace: copyTrace,
+      intakeUrl: url,
+      usingFallbackUrl,
+      urlCandidateIndex: candidateIndex + 1,
+      urlCandidatesCount: urlCandidates.length,
+      keyId: dispatchConfig.keyId,
+      maxAttempts,
+      timeoutMs: WATCHLIST_DISPATCH.timeoutMs,
+      credentialSources: {
+        secret: dispatchConfig.secretSource || 'unknown',
+        intakeUrl: dispatchConfig.intakeUrlSource || 'unknown',
+        keyId: dispatchConfig.keyIdSource || 'unknown'
+      },
+      payload: summarizeWatchlistDispatchPayload(payload)
+    });
+
+    for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      const timeoutId = setTimeout(() => controller.abort(), WATCHLIST_DISPATCH.timeoutMs);
+      try {
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const nonce = generateWatchlistNonce();
+        const bodyHash = await sha256HexForDispatch(body);
+        const canonical = buildWatchlistCanonicalString({
+          method: 'POST',
+          path: urlObject.pathname || '/',
+          timestamp,
+          nonce,
+          bodyHash,
+        });
+        const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
+
+        console.log(`[copy-flow] [dispatch:attempt] trace=${copyTrace} attempt=${attempt}/${maxAttempts} intakeUrl=${url}`);
+        const response = await fetch(url, {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Watchlist-Key-Id': dispatchConfig.keyId,
+            'X-Watchlist-Timestamp': timestamp,
+            'X-Watchlist-Nonce': nonce,
+            'X-Watchlist-Signature': signature,
+          },
+          body,
+          signal: controller.signal
+        });
+        clearTimeout(timeoutId);
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          const requestId = response.headers?.get?.('x-request-id') || response.headers?.get?.('x-correlation-id') || '';
+          const normalizedErrorText = truncateDispatchLogText(errorText, 500);
+          const httpError = new Error(
+            `HTTP ${response.status}${normalizedErrorText ? ` ${normalizedErrorText}` : ''}`
+          );
+          httpError.dispatchMeta = {
+            reason: 'http_error',
+            status: response.status,
+            requestId,
+            responseSnippet: normalizedErrorText
+          };
+          throw httpError;
+        }
+
+        const requestId = response.headers?.get?.('x-request-id') || response.headers?.get?.('x-correlation-id') || '';
+        let responseJson = null;
+        try {
+          responseJson = await response.json();
+        } catch {
+          responseJson = null;
+        }
+        console.log('[copy-flow] [dispatch:ok]', {
+          trace: copyTrace,
+          intakeUrl: url,
           status: response.status,
           requestId,
-          rateLimitRemaining,
-          rateLimitReset,
-          responseSnippet: normalizedErrorText
-        };
-        throw httpError;
-      }
+          responseBody: responseJson && typeof responseJson === 'object'
+            ? {
+              status: responseJson.status || '',
+              event_id: responseJson.event_id || null
+            }
+            : null
+        });
+        return { success: true, status: response.status, eventId: responseJson?.event_id || null };
+      } catch (error) {
+        clearTimeout(timeoutId);
+        const errorMessage = error?.message || String(error);
+        const dispatchMeta = error?.dispatchMeta && typeof error.dispatchMeta === 'object'
+          ? error.dispatchMeta
+          : {};
+        if (!dispatchMeta.reason && error?.name === 'AbortError') {
+          dispatchMeta.reason = 'timeout';
+        }
+        const dispatchReason = dispatchMeta.reason || 'dispatch_error';
+        const hasAnotherUrlCandidate = candidateIndex < (urlCandidates.length - 1);
+        const switchCandidateEarly = shouldSwitchWatchlistUrlCandidateEarly({
+          usingFallbackUrl,
+          hasAnotherUrlCandidate,
+          dispatchReason,
+          statusCode: dispatchMeta.status ?? null
+        });
+        const retryDelayMs = WATCHLIST_DISPATCH.backoffMs * attempt;
+        if (attempt < maxAttempts) {
+          if (switchCandidateEarly) {
+            console.warn('[copy-flow] [dispatch:switch-url-candidate]', {
+              trace: copyTrace,
+              fromIntakeUrl: url,
+              toCandidateIndex: candidateIndex + 2,
+              reason: dispatchReason,
+              error: truncateDispatchLogText(errorMessage, 500)
+            });
+            break;
+          }
+          console.warn('[copy-flow] [dispatch:retry]', {
+            trace: copyTrace,
+            intakeUrl: url,
+            attempt: `${attempt}/${maxAttempts}`,
+            retryDelayMs,
+            error: truncateDispatchLogText(errorMessage, 500),
+            reason: dispatchReason,
+            status: dispatchMeta.status || null,
+            requestId: dispatchMeta.requestId || ''
+          });
+          await sleep(retryDelayMs);
+          continue;
+        }
 
-      const requestId = response.headers?.get?.('x-github-request-id') || '';
-      const rateLimitRemaining = response.headers?.get?.('x-ratelimit-remaining') || '';
-      console.log('[copy-flow] [dispatch:ok]', {
-        trace: copyTrace,
-        status: response.status,
-        requestId,
-        rateLimitRemaining
-      });
-      return { success: true, status: response.status };
-    } catch (error) {
-      clearTimeout(timeoutId);
-      const errorMessage = error?.message || String(error);
-      const dispatchMeta = error?.dispatchMeta && typeof error.dispatchMeta === 'object'
-        ? error.dispatchMeta
-        : {};
-      if (!dispatchMeta.reason && error?.name === 'AbortError') {
-        dispatchMeta.reason = 'timeout';
-      }
-      const retryDelayMs = WATCHLIST_DISPATCH.backoffMs * attempt;
-      if (attempt < maxAttempts) {
-        console.warn('[copy-flow] [dispatch:retry]', {
-          trace: copyTrace,
-          attempt: `${attempt}/${maxAttempts}`,
-          retryDelayMs,
-          error: truncateDispatchLogText(errorMessage, 500),
-          reason: dispatchMeta.reason || 'dispatch_error',
+        lastFailure = {
+          success: false,
+          error: errorMessage,
+          reason: dispatchReason,
           status: dispatchMeta.status || null,
           requestId: dispatchMeta.requestId || ''
+        };
+
+        const failedLogMethod = hasAnotherUrlCandidate ? 'warn' : 'error';
+        console[failedLogMethod]('[copy-flow] [dispatch:failed]', {
+          trace: copyTrace,
+          intakeUrl: url,
+          usingFallbackUrl,
+          attempts: maxAttempts,
+          hasAnotherUrlCandidate,
+          error: truncateDispatchLogText(errorMessage, 700),
+          reason: dispatchReason,
+          status: dispatchMeta.status || null,
+          requestId: dispatchMeta.requestId || '',
+          responseSnippet: dispatchMeta.responseSnippet || ''
         });
-        await sleep(retryDelayMs);
-        continue;
       }
-      console.error('[copy-flow] [dispatch:failed]', {
-        trace: copyTrace,
-        attempts: maxAttempts,
-        error: truncateDispatchLogText(errorMessage, 700),
-        reason: dispatchMeta.reason || 'dispatch_error',
-        status: dispatchMeta.status || null,
-        requestId: dispatchMeta.requestId || '',
-        rateLimitRemaining: dispatchMeta.rateLimitRemaining || '',
-        rateLimitReset: dispatchMeta.rateLimitReset || '',
-        responseSnippet: dispatchMeta.responseSnippet || ''
-      });
-      return {
-        success: false,
-        error: errorMessage,
-        reason: dispatchMeta.reason || 'dispatch_error',
-        status: dispatchMeta.status || null,
-        requestId: dispatchMeta.requestId || ''
-      };
     }
   }
 
-  return { success: false, error: 'unknown' };
+  return lastFailure;
 }
 
 function normalizeWatchlistFlushReason(rawReason, fallback = 'manual') {
@@ -4129,6 +5077,154 @@ function ensureWatchlistDispatchAlarm() {
   }
 }
 
+function getAlarmSafe(alarmName) {
+  return new Promise((resolve) => {
+    if (!chrome?.alarms?.get) {
+      resolve(null);
+      return;
+    }
+    try {
+      chrome.alarms.get(alarmName, (alarm) => {
+        if (chrome.runtime.lastError) {
+          resolve(null);
+          return;
+        }
+        resolve(alarm || null);
+      });
+    } catch (error) {
+      resolve(null);
+    }
+  });
+}
+
+function clearAlarmSafe(alarmName) {
+  return new Promise((resolve) => {
+    if (!chrome?.alarms?.clear) {
+      resolve(false);
+      return;
+    }
+    try {
+      chrome.alarms.clear(alarmName, (cleared) => {
+        if (chrome.runtime.lastError) {
+          resolve(false);
+          return;
+        }
+        resolve(!!cleared);
+      });
+    } catch (error) {
+      resolve(false);
+    }
+  });
+}
+
+async function getAutoRestoreWindowsEnabled() {
+  try {
+    const key = AUTO_RESTORE_WINDOWS.enabledStorageKey;
+    const result = await chrome.storage.local.get([key]);
+    return result?.[key] === true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function syncAutoRestoreWindowsAlarm() {
+  const enabled = await getAutoRestoreWindowsEnabled();
+  if (!chrome?.alarms?.create) {
+    return { enabled, alarmActive: false, nextRunAt: null };
+  }
+
+  if (enabled) {
+    try {
+      chrome.alarms.create(AUTO_RESTORE_WINDOWS.alarmName, {
+        delayInMinutes: AUTO_RESTORE_WINDOWS.alarmPeriodMinutes,
+        periodInMinutes: AUTO_RESTORE_WINDOWS.alarmPeriodMinutes
+      });
+    } catch (error) {
+      console.warn('[auto-restore] create alarm failed:', error);
+    }
+  } else {
+    await clearAlarmSafe(AUTO_RESTORE_WINDOWS.alarmName);
+  }
+
+  const alarm = await getAlarmSafe(AUTO_RESTORE_WINDOWS.alarmName);
+  return {
+    enabled,
+    alarmActive: !!alarm,
+    nextRunAt: Number.isInteger(alarm?.scheduledTime) ? alarm.scheduledTime : null
+  };
+}
+
+async function getAutoRestoreWindowsStatus(options = {}) {
+  if (options?.forceSync) {
+    const synced = await syncAutoRestoreWindowsAlarm();
+    return {
+      success: true,
+      enabled: !!synced.enabled,
+      alarmActive: !!synced.alarmActive,
+      nextRunAt: synced.nextRunAt,
+      periodInMinutes: AUTO_RESTORE_WINDOWS.alarmPeriodMinutes,
+      inProgress: autoRestoreWindowsInProgress
+    };
+  }
+
+  const enabled = await getAutoRestoreWindowsEnabled();
+  const alarm = await getAlarmSafe(AUTO_RESTORE_WINDOWS.alarmName);
+  return {
+    success: true,
+    enabled,
+    alarmActive: !!alarm,
+    nextRunAt: Number.isInteger(alarm?.scheduledTime) ? alarm.scheduledTime : null,
+    periodInMinutes: AUTO_RESTORE_WINDOWS.alarmPeriodMinutes,
+    inProgress: autoRestoreWindowsInProgress
+  };
+}
+
+async function setAutoRestoreWindowsEnabled(enabled) {
+  const nextEnabled = enabled === true;
+  const key = AUTO_RESTORE_WINDOWS.enabledStorageKey;
+  await chrome.storage.local.set({ [key]: nextEnabled });
+  const status = await getAutoRestoreWindowsStatus({ forceSync: true });
+  return { success: true, ...status };
+}
+
+async function runAutoRestoreWindowsCycle(options = {}) {
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'auto-restore-cycle';
+
+  const enabled = await getAutoRestoreWindowsEnabled();
+  if (!enabled) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'auto_restore_disabled',
+      origin
+    };
+  }
+
+  if (autoRestoreWindowsInProgress) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'auto_restore_already_running',
+      origin
+    };
+  }
+
+  autoRestoreWindowsInProgress = true;
+  try {
+    const restoreResult = await restoreProcessWindows({ origin });
+    return {
+      success: true,
+      skipped: false,
+      origin,
+      ...restoreResult
+    };
+  } finally {
+    autoRestoreWindowsInProgress = false;
+  }
+}
+
 // Funkcja wczytująca prompty z plików txt
 async function loadPrompts() {
   try {
@@ -4174,6 +5270,9 @@ ensureProcessRegistryReady().catch((error) => {
   console.warn('[monitor] Initial process registry load failed:', error);
 });
 ensureWatchlistDispatchAlarm();
+syncAutoRestoreWindowsAlarm().catch((error) => {
+  console.warn('[auto-restore] sync alarm on boot failed:', error);
+});
 logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
@@ -4193,7 +5292,8 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
   { pattern: "https://*.barrons.com/*", name: "Barron's" },
   { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
-  { pattern: "https://open.spotify.com/*", name: "Spotify" }
+  { pattern: "https://open.spotify.com/*", name: "Spotify" },
+  { pattern: "https://mail.google.com/*", name: "Gmail" }
 ];
 
 // Funkcja zwracająca tablicę URLi do query
@@ -4209,6 +5309,9 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
+  syncAutoRestoreWindowsAlarm().catch((error) => {
+    console.warn('[auto-restore] sync alarm onInstalled failed:', error);
+  });
   logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
@@ -4217,6 +5320,9 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   ensureWatchlistDispatchAlarm();
+  syncAutoRestoreWindowsAlarm().catch((error) => {
+    console.warn('[auto-restore] sync alarm onStartup failed:', error);
+  });
   logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
@@ -4225,11 +5331,21 @@ chrome.runtime.onStartup.addListener(() => {
 
 if (chrome?.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
-    if (!alarm || alarm.name !== WATCHLIST_DISPATCH.alarmName) return;
-    logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
-    flushWatchlistDispatchOutbox('alarm').catch((error) => {
-      console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
-    });
+    if (!alarm || typeof alarm.name !== 'string') return;
+
+    if (alarm.name === WATCHLIST_DISPATCH.alarmName) {
+      logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
+      flushWatchlistDispatchOutbox('alarm').catch((error) => {
+        console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
+      });
+      return;
+    }
+
+    if (alarm.name === AUTO_RESTORE_WINDOWS.alarmName) {
+      runAutoRestoreWindowsCycle({ origin: 'auto_restore_alarm' }).catch((error) => {
+        console.warn('[auto-restore] cycle failed:', error);
+      });
+    }
   });
 }
 // Handler kliknięcia menu kontekstowego
@@ -4456,7 +5572,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.responseId,
       message.stage || null,
       message.conversationUrl || null
-    );
+    )
+      .then((saveResult) => {
+        if (typeof sendResponse === 'function') {
+          sendResponse({
+            success: !!saveResult?.success,
+            saveResult: saveResult
+              ? {
+                success: !!saveResult.success,
+                copyTrace: typeof saveResult.copyTrace === 'string' ? saveResult.copyTrace : '',
+                verifiedCount: Number.isInteger(saveResult.verifiedCount) ? saveResult.verifiedCount : null,
+                response: saveResult.response && typeof saveResult.response === 'object'
+                  ? {
+                    responseId: typeof saveResult.response.responseId === 'string' ? saveResult.response.responseId : ''
+                  }
+                  : null,
+                dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
+                  ? saveResult.dispatch
+                  : null
+              }
+              : null
+          });
+        }
+      })
+      .catch((error) => {
+        if (typeof sendResponse === 'function') {
+          sendResponse({
+            success: false,
+            error: error?.message || String(error)
+          });
+        }
+      });
+    return true;
   } else if (message.type === 'RUN_ANALYSIS') {
     const invocationWindowId = Number.isInteger(message?.windowId)
       ? message.windowId
@@ -4527,6 +5674,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, error: error?.message || 'status_failed' });
       });
     return true;
+  } else if (message.type === 'GET_AUTO_RESTORE_WINDOWS_STATUS') {
+    getAutoRestoreWindowsStatus({ forceSync: Boolean(message?.forceSync) })
+      .then((status) => sendResponse(status))
+      .catch((error) => {
+        console.warn('[auto-restore] status failed:', error);
+        sendResponse({ success: false, error: error?.message || 'auto_restore_status_failed' });
+      });
+    return true;
+  } else if (message.type === 'SET_AUTO_RESTORE_WINDOWS_ENABLED') {
+    setAutoRestoreWindowsEnabled(Boolean(message?.enabled))
+      .then((status) => sendResponse(status))
+      .catch((error) => {
+        console.warn('[auto-restore] set enabled failed:', error);
+        sendResponse({ success: false, error: error?.message || 'auto_restore_set_failed' });
+      });
+    return true;
   } else if (message.type === 'FLUSH_WATCHLIST_DISPATCH') {
     (async () => {
       const reason = normalizeWatchlistFlushReason(message?.reason, 'manual_popup');
@@ -4541,7 +5704,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   } else if (message.type === 'SET_WATCHLIST_DISPATCH_TOKEN') {
-    setWatchlistDispatchToken(message?.token)
+    const credentials = message?.credentials && typeof message.credentials === 'object'
+      ? message.credentials
+      : {
+        intakeUrl: message?.intakeUrl,
+        keyId: message?.keyId,
+        secret: message?.token
+      };
+    setWatchlistDispatchToken(credentials)
       .then(async (result) => {
         if (!result?.success) {
           sendResponse({ success: false, reason: result?.reason || 'token_update_failed' });
@@ -4646,6 +5816,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, error: error?.message || 'resume_exception' });
       });
     return true;
+  } else if (message.type === 'RESTORE_PROCESS_WINDOWS') {
+    restoreProcessWindows({
+      origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+    })
+      .then((result) => sendResponse(result))
+      .catch((error) => {
+        console.warn('[monitor] RESTORE_PROCESS_WINDOWS failed:', error);
+        sendResponse({
+          success: false,
+          requested: 0,
+          restored: 0,
+          opened: 0,
+          failed: 0,
+          results: [],
+          error: error?.message || String(error)
+        });
+      });
+    return true;
   } else if (message.type === 'GET_COMPANY_PROMPTS') {
     // Zwróć prompty dla company
     sendResponse({ prompts: PROMPTS_COMPANY });
@@ -4740,7 +5928,7 @@ async function resumeFromStage(startIndex, options = {}) {
       }
     }
 
-    if (!isChatGptUrl(activeTab.url || '')) {
+    if (!isChatGptUrl(getTabEffectiveUrl(activeTab))) {
       notifyAlert('Blad: Aktywna karta nie jest ChatGPT.');
       return { success: false, error: 'active_tab_not_chatgpt' };
     }
@@ -5134,6 +6322,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
               maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
               delayMs: AUTO_RECOVERY_DELAY_MS,
               reasons: autoRecoveryReasonsList
+            },
+            {
+              persistFinalResponseViaMessage: true,
+              mode: 'runtime_message',
+              saveTimeoutMs: 15000
             }
           ]
         });
@@ -5434,20 +6627,33 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         if (typeof result?.selectedResponseReason === 'string' && result.selectedResponseReason.trim()) {
           stageMeta.selected_response_reason = result.selectedResponseReason.trim();
         }
+        const providedResponseId = typeof result?.responseId === 'string' && result.responseId.trim()
+          ? result.responseId.trim()
+          : null;
+        const injectedSaveResult = result?.persistedSaveResult && typeof result.persistedSaveResult === 'object'
+          ? result.persistedSaveResult
+          : null;
+        const savedViaInjectedMessage = result?.persistedViaMessage === true && !!injectedSaveResult?.success;
 
-        const saveResult = await saveResponse(
-          resultLastResponse,
-          title,
-          analysisType,
-          processId,
-          null,
-          Object.keys(stageMeta).length > 0 ? stageMeta : null,
-          conversationUrl || null
-        );
+        const saveResult = savedViaInjectedMessage
+          ? injectedSaveResult
+          : await saveResponse(
+            resultLastResponse,
+            title,
+            analysisType,
+            processId,
+            providedResponseId,
+            Object.keys(stageMeta).length > 0 ? stageMeta : null,
+            conversationUrl || null
+          );
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
           saveResult,
-          saveError: saveResult?.success ? '' : 'save_response_failed'
+          saveError: saveResult?.success
+            ? ''
+            : (typeof result?.persistedSaveError === 'string' && result.persistedSaveError.trim()
+              ? result.persistedSaveError.trim()
+              : 'save_response_failed')
         });
         finalStatusText = persistenceSummary.statusText;
         finalReason = persistenceSummary.reason;
@@ -5640,7 +6846,9 @@ async function runAnalysis(options = {}) {
         windowId: invocationWindowId,
         reason: 'restarted_in_same_window',
         statusText: 'Zatrzymano przez ponowne uruchomienie',
-        origin: 'run-analysis-restart'
+        origin: 'run-analysis-restart',
+        replayLatestResponse: true,
+        forceReplayLatestResponse: true
       });
       if (stopResult.stopped > 0) {
         console.log(`[run] Zatrzymano ${stopResult.stopped} aktywnych procesow w oknie ${invocationWindowId}`);
@@ -5688,7 +6896,7 @@ async function runAnalysis(options = {}) {
 
     if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
-      alert("Nie znaleziono otwartych artykułów z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Wall Street Journal\n- Foreign Affairs\n- YouTube");
+      alert("Nie znaleziono otwartych kart z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Wall Street Journal\n- Foreign Affairs\n- Barron's\n- Spotify\n- YouTube\n- Gmail");
       return;
     }
 
@@ -5886,12 +7094,114 @@ async function extractText() {
     }
   }
 
+  async function extractGmailOpenEmail() {
+    try {
+      const url = new URL(window.location.href);
+
+      // Gmail renders message panels lazily after navigation.
+      await sleep(500);
+
+      const firstText = (selectors, minLength = 1) => {
+        for (const selector of selectors) {
+          let elements = [];
+          try {
+            elements = Array.from(document.querySelectorAll(selector));
+          } catch (_) {
+            continue;
+          }
+          for (const element of elements) {
+            const text = elementText(element);
+            if (text.length >= minLength) {
+              return text;
+            }
+          }
+        }
+        return '';
+      };
+
+      const longestText = (selectors, minLength = 1) => {
+        let best = '';
+        for (const selector of selectors) {
+          let elements = [];
+          try {
+            elements = Array.from(document.querySelectorAll(selector));
+          } catch (_) {
+            continue;
+          }
+          for (const element of elements) {
+            const text = elementText(element);
+            if (text.length >= minLength && text.length > best.length) {
+              best = text;
+            }
+          }
+        }
+        return best;
+      };
+
+      const subject = firstText([
+        'h2.hP',
+        'h2[data-thread-perm-id]',
+        'div[role="main"] h2[tabindex="-1"]',
+        'div[role="main"] h2'
+      ], 2);
+
+      const sender = firstText([
+        'div.adn.ads span.gD',
+        'div[role="listitem"] span.gD',
+        'span.gD[email]',
+        'span[email][name]',
+        'span[email]'
+      ], 2);
+
+      const sentAtNode = document.querySelector('div.adn.ads span.g3[title], div[role="listitem"] span.g3[title], span.g3[title]');
+      const sentAt = normalizeText(
+        (sentAtNode && (sentAtNode.getAttribute('title') || sentAtNode.innerText || sentAtNode.textContent)) || ''
+      );
+
+      const bodyText = longestText([
+        'div.adn.ads div.a3s.aiL',
+        'div.adn.ads div.a3s',
+        'div[role="listitem"] div.a3s.aiL',
+        'div[role="listitem"] div.a3s',
+        'div[role="main"] div.a3s.aiL',
+        'div[role="main"] div.a3s'
+      ], 20);
+
+      if (!subject && !bodyText) {
+        return '';
+      }
+
+      const headerParts = [
+        '[Gmail]',
+        subject ? `Subject: ${subject}` : null,
+        sender ? `From: ${sender}` : null,
+        sentAt ? `Date: ${sentAt}` : null,
+        `URL: ${url.href}`
+      ].filter(Boolean);
+
+      return `${headerParts.join(' | ')}\n\n${bodyText}`;
+    } catch (error) {
+      console.error('Gmail extraction failed:', error);
+      return '';
+    }
+  }
+
   if (hostname.includes('open.spotify.com')) {
     const spotifyTranscript = await extractSpotifyTranscript();
     if (spotifyTranscript && spotifyTranscript.length > 50) {
       console.log(`Spotify: extracted transcript text, length=${spotifyTranscript.length}`);
       return spotifyTranscript;
     }
+  }
+
+  if (hostname.includes('mail.google.com')) {
+    const gmailEmail = await extractGmailOpenEmail();
+    if (gmailEmail && gmailEmail.length > 20) {
+      console.log(`Gmail: extracted open email, length=${gmailEmail.length}`);
+      return gmailEmail;
+    }
+    console.log('Gmail: open email not detected, skipping tab');
+    return '';
   }
   console.log(`Próbuję wyekstrahować tekst z: ${hostname}`);
   
@@ -6008,7 +7318,19 @@ async function extractText() {
 }
 
 // Funkcja wklejania do ChatGPT (content script)
-async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs, retryIntervalMs, articleTitle, analysisType = 'company', runId = null, progressContext = null, autoRecoveryContext = null) {
+async function injectToChat(
+  payload,
+  promptChain,
+  textareaWaitMs,
+  responseWaitMs,
+  retryIntervalMs,
+  articleTitle,
+  analysisType = 'company',
+  runId = null,
+  progressContext = null,
+  autoRecoveryContext = null,
+  persistenceContext = null
+) {
   let forceStopRequested = false;
   let forceStopReason = 'force_stop';
   let forceStopOrigin = 'background';
@@ -6088,23 +7410,37 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
       sendFailures: 0,
       sendSkipped: 0,
       sendHardFail: 0,
+      sendDuplicateAttempts: 0,
       responseTimeouts: 0,
       responseSkipped: 0,
       responseInvalid: 0,
+      responseAccepted: 0,
+      responseAcceptedEmpty: 0,
+      responseDuplicateAccepted: 0,
+      stageCompleted: 0,
       captureOk: 0,
       captureEmpty: 0
     };
     const sendOkPromptIndexes = new Set();
+    const sendAttemptPromptIndexes = new Set();
+    const sendAttemptsByPrompt = new Map();
+    const stageCompletedPromptIndexes = new Set();
+    const responseFingerprintsAccepted = new Map();
 
     const runTag = `runId=${runId || 'n/a'}`;
 
     const sendOkTotal = () => runMetrics.sendOkVerified + runMetrics.sendOkInferred;
+    const duplicateTotal = () => runMetrics.sendDuplicateAttempts + runMetrics.responseDuplicateAccepted;
 
     function buildMetricsSnapshot(extra = {}) {
       return {
         ...runMetrics,
         sendOkTotal: sendOkTotal(),
         sendOkUnique: sendOkPromptIndexes.size,
+        sendAttemptUnique: sendAttemptPromptIndexes.size,
+        stageCompletedUnique: stageCompletedPromptIndexes.size,
+        responseAcceptedUnique: responseFingerprintsAccepted.size,
+        duplicateTotal: duplicateTotal(),
         durationMs: Date.now() - runStartedAt,
         ...extra
       };
@@ -6145,6 +7481,77 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     // Shared helpers for injected context
     function compactText(text) {
       return (text || '').replace(/\s+/g, ' ').trim();
+    }
+
+    function normalizePromptMetricIndex(promptIndex) {
+      return Number.isInteger(promptIndex) && promptIndex > 0 ? promptIndex : null;
+    }
+
+    function registerPromptAttempt(promptIndex) {
+      const normalizedIndex = normalizePromptMetricIndex(promptIndex);
+      if (!normalizedIndex) return;
+      sendAttemptPromptIndexes.add(normalizedIndex);
+      const nextCount = (sendAttemptsByPrompt.get(normalizedIndex) || 0) + 1;
+      sendAttemptsByPrompt.set(normalizedIndex, nextCount);
+      if (nextCount > 1) {
+        runMetrics.sendDuplicateAttempts += 1;
+      }
+    }
+
+    function registerStageCompletion(promptIndex, responseText = '', validated = true) {
+      if (!validated) return;
+      const normalizedIndex = normalizePromptMetricIndex(promptIndex);
+      if (!normalizedIndex) return;
+
+      if (!stageCompletedPromptIndexes.has(normalizedIndex)) {
+        stageCompletedPromptIndexes.add(normalizedIndex);
+        runMetrics.stageCompleted = stageCompletedPromptIndexes.size;
+      }
+
+      const normalizedResponse = compactText(responseText);
+      if (!normalizedResponse) {
+        runMetrics.responseAcceptedEmpty += 1;
+        return;
+      }
+
+      runMetrics.responseAccepted += 1;
+      const fp = computeCopyFingerprint(normalizedResponse);
+      const seenCount = responseFingerprintsAccepted.get(fp) || 0;
+      responseFingerprintsAccepted.set(fp, seenCount + 1);
+      if (seenCount > 0) {
+        runMetrics.responseDuplicateAccepted += 1;
+      }
+    }
+
+    function buildCounterSummary(current, total, status) {
+      const safeTotal = Number.isInteger(total) && total > 0
+        ? total
+        : (Number.isInteger(totalPromptsForRun) ? totalPromptsForRun : 0);
+      const safeCurrent = Number.isInteger(current) && current > 0
+        ? current
+        : 0;
+      const boundedCurrent = safeTotal > 0
+        ? Math.min(Math.max(safeCurrent, 0), safeTotal)
+        : safeCurrent;
+      const progressPct = safeTotal > 0
+        ? Math.round((boundedCurrent / safeTotal) * 100)
+        : 0;
+      const duplicateCount = duplicateTotal();
+      return {
+        safeTotal,
+        safeCurrent,
+        boundedCurrent,
+        progressPct,
+        status: typeof status === 'string' ? status : '',
+        stagesOk: runMetrics.stageCompleted,
+        promptsAll: runMetrics.sendAttempts,
+        promptsUnique: sendAttemptPromptIndexes.size,
+        responsesAll: runMetrics.responseAccepted,
+        responsesUnique: responseFingerprintsAccepted.size,
+        duplicatePrompts: runMetrics.sendDuplicateAttempts,
+        duplicateResponses: runMetrics.responseDuplicateAccepted,
+        duplicateCount
+      };
     }
 
     function getAssistantSnapshot() {
@@ -6213,6 +7620,14 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         ? autoRecoveryContext.reasons.filter((reason) => typeof reason === 'string')
         : []
     );
+    const persistenceMode = typeof persistenceContext?.mode === 'string'
+      ? persistenceContext.mode.trim()
+      : '';
+    const persistFinalResponseViaMessage = persistenceContext?.persistFinalResponseViaMessage === true
+      || persistenceMode === 'runtime_message';
+    const persistenceTimeoutMs = Number.isInteger(persistenceContext?.saveTimeoutMs) && persistenceContext.saveTimeoutMs > 0
+      ? Math.max(1000, Math.min(persistenceContext.saveTimeoutMs, 60000))
+      : 18000;
 
     function getAbsolutePromptIndex(localPromptNumber) {
       if (!Number.isInteger(localPromptNumber) || localPromptNumber <= 0) return 0;
@@ -6237,6 +7652,91 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         hash = (hash >>> 0) * 0x01000193;
       }
       return (hash >>> 0).toString(16).padStart(8, '0');
+    }
+
+    function buildInjectedResponseId(responseText = '', selectedPrompt = null) {
+      const safeRunId = typeof runId === 'string' && runId.trim()
+        ? runId.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+        : 'run';
+      const promptPart = Number.isInteger(selectedPrompt) && selectedPrompt > 0
+        ? `p${selectedPrompt}`
+        : 'p0';
+      const fp = computeCopyFingerprint(responseText);
+      return `${safeRunId}_${promptPart}_${fp}`;
+    }
+
+    async function sendRuntimeMessageWithTimeout(message, timeoutMs = 15000) {
+      if (!chrome?.runtime?.sendMessage) {
+        return { ok: false, error: 'runtime_unavailable' };
+      }
+      const safeTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0
+        ? Math.max(1000, Math.min(timeoutMs, 60000))
+        : 15000;
+      const timeoutMarker = { __timeout__: true };
+      try {
+        const response = await Promise.race([
+          chrome.runtime.sendMessage(message),
+          new Promise((resolve) => setTimeout(() => resolve(timeoutMarker), safeTimeout))
+        ]);
+        if (response && response.__timeout__ === true) {
+          return { ok: false, error: 'runtime_timeout' };
+        }
+        return { ok: true, response };
+      } catch (error) {
+        return { ok: false, error: error?.message || String(error) };
+      }
+    }
+
+    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex) {
+      const normalizedText = typeof responseText === 'string' ? responseText : '';
+      if (!normalizedText.trim()) {
+        return { ok: false, error: 'empty_response' };
+      }
+
+      const stageMeta = {};
+      if (Number.isInteger(selectedPrompt)) {
+        stageMeta.selected_response_prompt = selectedPrompt;
+      }
+      if (Number.isInteger(selectedStageIndex)) {
+        stageMeta.selected_response_stage_index = selectedStageIndex;
+      }
+      if (Number.isInteger(selectedPrompt)) {
+        stageMeta.selected_response_reason = 'last_prompt';
+      }
+
+      const messagePayload = {
+        type: 'SAVE_RESPONSE',
+        text: normalizedText,
+        source: articleTitle || '',
+        analysisType,
+        runId: typeof runId === 'string' ? runId : '',
+        responseId: typeof responseId === 'string' ? responseId : '',
+        stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
+        conversationUrl: typeof location?.href === 'string' ? location.href : ''
+      };
+
+      const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);
+      if (!saveAttempt.ok) {
+        return { ok: false, error: saveAttempt.error || 'save_message_failed' };
+      }
+
+      const runtimeResponse = saveAttempt.response && typeof saveAttempt.response === 'object'
+        ? saveAttempt.response
+        : null;
+      if (!runtimeResponse?.success) {
+        return {
+          ok: false,
+          error: runtimeResponse?.error || 'save_response_failed',
+          saveResult: runtimeResponse?.saveResult || null
+        };
+      }
+
+      return {
+        ok: true,
+        saveResult: runtimeResponse?.saveResult && typeof runtimeResponse.saveResult === 'object'
+          ? runtimeResponse.saveResult
+          : null
+      };
     }
 
     async function captureLastResponseWithRetries(initialText = '', promptNumber = 0) {
@@ -6539,6 +8039,15 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
     
   // Funkcja tworząca licznik promptów
   function createCounter() {
+    const existingCounters = Array.from(document.querySelectorAll('#economist-prompt-counter'));
+    existingCounters.forEach((node) => {
+      try {
+        node.remove();
+      } catch (_) {
+        // ignore
+      }
+    });
+
     const counter = document.createElement('div');
     counter.id = 'economist-prompt-counter';
     
@@ -6697,42 +8206,85 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   
   // Funkcja aktualizująca licznik
   function updateCounter(counter, current, total, status = '') {
-    const content = document.getElementById('economist-counter-content');
-    if (!content) return;
-    
-    if (current === 0) {
-      content.innerHTML = `
-        <div style="font-size: 16px; margin-bottom: 4px;">📝 Przetwarzanie artykułu</div>
-        <div style="font-size: 12px; opacity: 0.9;">${status}</div>
-      `;
-    } else {
-      const percent = Math.round((current / total) * 100);
-      content.innerHTML = `
-        <div style="font-size: 16px; margin-bottom: 4px;">Prompt Chain</div>
-        <div style="font-size: 24px; margin-bottom: 4px;">${current} / ${total}</div>
-        <div style="background: rgba(255,255,255,0.3); height: 6px; border-radius: 3px; margin-bottom: 4px;">
-          <div style="background: white; height: 100%; border-radius: 3px; width: ${percent}%; transition: width 0.3s;"></div>
-        </div>
-        <div style="font-size: 12px; opacity: 0.9;">${status}</div>
-      `;
+    const activeCounter = (counter && counter.isConnected)
+      ? counter
+      : Array.from(document.querySelectorAll('#economist-prompt-counter')).pop();
+    if (!activeCounter) return;
+
+    let content = activeCounter.querySelector('#economist-counter-content');
+    if (!content) {
+      content = document.createElement('div');
+      content.id = 'economist-counter-content';
+      content.style.cssText = 'padding: 8px 24px 16px 24px; text-align: center; display: block;';
+      activeCounter.appendChild(content);
     }
+    if (!content) return;
+
+    const summary = buildCounterSummary(current, total, status);
+    const safeStatus = String(summary.status || '')
+      .replace(/&/g, '&amp;')
+      .replace(/</g, '&lt;')
+      .replace(/>/g, '&gt;');
+
+    const title = summary.safeCurrent === 0
+      ? 'Przetwarzanie'
+      : 'Prompt Chain';
+    const progressText = summary.safeTotal > 0
+      ? `${summary.boundedCurrent} / ${summary.safeTotal}`
+      : (summary.safeCurrent > 0 ? String(summary.safeCurrent) : '0 / 0');
+
+    content.innerHTML = `
+      <div style="font-size: 15px; font-weight: 700; margin-bottom: 6px;">${title}</div>
+      <div style="display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 6px; margin-bottom: 8px; text-align: left;">
+        <div style="background: rgba(255,255,255,0.16); border-radius: 8px; padding: 6px 8px;">
+          <div style="font-size: 10px; opacity: 0.85;">Etapy OK</div>
+          <div style="font-size: 15px; font-weight: 700;">${summary.stagesOk}/${summary.safeTotal || 0}</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.16); border-radius: 8px; padding: 6px 8px;">
+          <div style="font-size: 10px; opacity: 0.85;">Prompty</div>
+          <div style="font-size: 15px; font-weight: 700;">${summary.promptsUnique}/${summary.promptsAll}</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.16); border-radius: 8px; padding: 6px 8px;">
+          <div style="font-size: 10px; opacity: 0.85;">Odpowiedzi</div>
+          <div style="font-size: 15px; font-weight: 700;">${summary.responsesUnique}/${summary.responsesAll}</div>
+        </div>
+        <div style="background: rgba(255,255,255,0.16); border-radius: 8px; padding: 6px 8px;">
+          <div style="font-size: 10px; opacity: 0.85;">Duplikacje</div>
+          <div style="font-size: 15px; font-weight: 700;">${summary.duplicateCount}</div>
+        </div>
+      </div>
+      <div style="font-size: 19px; margin-bottom: 5px;">${progressText}</div>
+      <div style="background: rgba(255,255,255,0.3); height: 6px; border-radius: 3px; margin-bottom: 5px;">
+        <div style="background: white; height: 100%; border-radius: 3px; width: ${summary.progressPct}%; transition: width 0.25s;"></div>
+      </div>
+      <div style="font-size: 10px; opacity: 0.88; margin-bottom: 2px;">
+        DUP_P=${summary.duplicatePrompts} | DUP_R=${summary.duplicateResponses}
+      </div>
+      <div style="font-size: 12px; opacity: 0.95;">${safeStatus}</div>
+    `;
   }
   
   // Funkcja usuwająca licznik
   function removeCounter(counter, success = true) {
+    const activeCounter = (counter && counter.isConnected)
+      ? counter
+      : Array.from(document.querySelectorAll('#economist-prompt-counter')).pop();
+    if (!activeCounter) return;
     if (success) {
-      const content = document.getElementById('economist-counter-content');
+      const content = activeCounter.querySelector('#economist-counter-content');
       if (content) {
         content.innerHTML = `
           <div style="font-size: 18px;">🎉 Zakończono!</div>
         `;
         content.style.display = 'block';
         content.style.padding = '8px 24px 16px 24px';
-        counter.style.minWidth = '200px';
+        activeCounter.style.minWidth = '200px';
       }
-      setTimeout(() => counter.remove(), 3000);
+      setTimeout(() => {
+        if (activeCounter.isConnected) activeCounter.remove();
+      }, 3000);
     } else {
-      counter.remove();
+      activeCounter.remove();
     }
   }
   
@@ -8254,6 +9806,7 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
   async function sendPrompt(promptText, maxWaitForReady = responseWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     if (shouldStopNow()) return false;
     runMetrics.sendAttempts += 1;
+    registerPromptAttempt(promptIndex);
     logSend('ATTEMPT', { promptIndex, promptTotal, chars: typeof promptText === 'string' ? promptText.length : 0 });
     // KROK 0: POPRAWKA - Aktywuj kartę przed wysyłaniem (rozwiązuje problem z wyciszonymi kartami)
     const maxRetries = 3;
@@ -8571,6 +10124,9 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
 
         // Pobierz odpowiedź Stage 0 do wstawienia w kolejne prompty
         stage0Response = await getLastResponseText();
+        const stage0PromptIndex = normalizePromptMetricIndex(promptOffset);
+        const stage0Validated = validateResponse(stage0Response);
+        registerStageCompletion(stage0PromptIndex, stage0Response, stage0Validated);
         if (stage0Response && stage0Response.trim().length > 0) {
           console.log(`🧩 Stage 0 captured (${stage0Response.length} znaków) - będzie wstawione w prompt chain`);
         } else {
@@ -8883,6 +10439,8 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           statusText: 'Prompt zakonczony',
           needsAction: false
         });
+        const stageValidated = validateResponse(responseText);
+        registerStageCompletion(absoluteCurrentPrompt, responseText, stageValidated);
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -8941,6 +10499,38 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
         console.log(`[copy-flow] [capture:return] prompt=${promptChain.length} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)}`);
         const selectedPrompt = completedPrompt;
         const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
+        const responseId = buildInjectedResponseId(lastResponse, selectedPrompt);
+        let persistedViaMessage = false;
+        let persistedSaveResult = null;
+        let persistedSaveError = '';
+        if (persistFinalResponseViaMessage && lastResponse.trim().length > 0) {
+          console.log(
+            `[copy-flow] [capture:tab-save:start] prompt=${selectedPrompt} len=${lastResponse.length} responseId=${responseId}`
+          );
+          const tabSaveResult = await persistFinalResponseViaRuntimeMessage(
+            lastResponse,
+            responseId,
+            selectedPrompt,
+            selectedStageIndex
+          );
+          if (tabSaveResult.ok) {
+            persistedViaMessage = true;
+            persistedSaveResult = tabSaveResult.saveResult && typeof tabSaveResult.saveResult === 'object'
+              ? tabSaveResult.saveResult
+              : null;
+            console.log(
+              `[copy-flow] [capture:tab-save:ok] prompt=${selectedPrompt} responseId=${responseId} trace=${persistedSaveResult?.copyTrace || 'n/a'}`
+            );
+          } else {
+            persistedSaveError = typeof tabSaveResult.error === 'string' ? tabSaveResult.error : 'save_message_failed';
+            persistedSaveResult = tabSaveResult.saveResult && typeof tabSaveResult.saveResult === 'object'
+              ? tabSaveResult.saveResult
+              : null;
+            console.warn(
+              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}`
+            );
+          }
+        }
         notifyProcess('PROCESS_PROGRESS', {
           status: 'completed',
           currentPrompt: completedPrompt,
@@ -8956,9 +10546,13 @@ async function injectToChat(payload, promptChain, textareaWaitMs, responseWaitMs
           success: true,
           lastResponse: lastResponse,
           conversationUrl: typeof location?.href === 'string' ? location.href : '',
+          responseId,
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
           selectedResponseReason: 'last_prompt',
+          persistedViaMessage,
+          persistedSaveResult,
+          persistedSaveError,
           metrics: buildMetricsSnapshot({ completed: true, totalPrompts: totalPromptsForRun })
         };
       } else {
@@ -9055,5 +10649,7 @@ function waitForTabComplete(tabId) {
     });
   });
 }
+
+
 
 

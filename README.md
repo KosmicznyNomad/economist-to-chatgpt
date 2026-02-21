@@ -1,9 +1,9 @@
-# Iskra
+﻿# Iskra
 
 Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
 
 ## What it does
-- Extracts text from supported news pages and YouTube transcripts.
+- Extracts text from supported news pages, Spotify transcripts, open Gmail emails, and YouTube transcripts.
 - Runs two flows:
   - `company` on all supported tabs.
   - `portfolio` on selected tabs.
@@ -41,7 +41,7 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 
 ## Use
 ### Web tab flow
-1. Open supported article/video tabs.
+1. Open supported article/video/email tabs (for Gmail: open the specific email first).
 2. Click extension icon (`Ctrl+Shift+E`).
 3. Choose tabs for portfolio analysis.
 4. Let both flows run.
@@ -56,6 +56,16 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - Open from popup or shortcut `Ctrl+Shift+R`.
 - Copy single response or copy all by analysis type.
 
+### Watchlist intake setup
+1. Open popup -> `Watchlist intake`.
+2. Set `Intake URL`, `Key ID`, `Secret`.
+3. Save credentials and trigger flush.
+4. Worker sends `economist.response.v1` directly over HTTPS with HMAC headers and outbox retry.
+
+If current network blocks direct access to Watchlist HTTPS endpoint, start local SSH tunnel and use local intake URL:
+- tunnel: `ssh -N -L 18080:127.0.0.1:8080 iskierka`
+- intake URL: `http://127.0.0.1:18080/api/v1/intake/economist-response`
+
 ## Supported source updates
 Keep these in sync when adding/removing domains:
 - `manifest.json` host permissions
@@ -66,4 +76,6 @@ Keep these in sync when adding/removing domains:
 - `background.js` is the central runtime file and contains most of automation/recovery logic.
 - Keep `STAGE_NAMES_COMPANY` aligned with company prompt order/count.
 - `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
-- External DB ingest path is removed; integration is dispatch-only (`repository_dispatch`) toward Watchlist intake (`data/inbox.ndjson` -> `data/positions.json`).
+- Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
+
+

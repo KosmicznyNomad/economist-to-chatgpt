@@ -655,4 +655,3 @@ User can copy/view response
 ```
 
 Plus manual source input for any text.
-

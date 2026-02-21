@@ -1,4 +1,4 @@
-<!DOCTYPE html>
+﻿<!DOCTYPE html>
 <html>
 <head>
   <meta charset="utf-8">
@@ -243,24 +243,57 @@
   </div>
 
   <details class="details">
-    <summary>Watchlist dispatch</summary>
+    <summary>Watchlist intake</summary>
     <div class="details-content">
       <input
         class="dispatch-input"
-        id="watchlistTokenInput"
+        id="watchlistIntakeUrlInput"
+        type="url"
+        placeholder="Intake URL (https://...)"
+        autocomplete="off"
+      />
+      <input
+        class="dispatch-input"
+        id="watchlistKeyIdInput"
+        type="text"
+        placeholder="Key ID"
+        autocomplete="off"
+      />
+      <input
+        class="dispatch-input"
+        id="watchlistSecretInput"
         type="password"
-        placeholder="GitHub token (repository_dispatch)"
+        placeholder="Secret (HMAC)"
         autocomplete="off"
       />
       <div class="dispatch-actions">
-        <button class="btn btn-center" id="saveWatchlistTokenBtn">Zapisz token</button>
+        <button class="btn btn-center" id="saveWatchlistTokenBtn">Zapisz dane</button>
         <button class="btn btn-center" id="clearWatchlistTokenBtn">Wyczysc</button>
       </div>
       <div class="row"><button class="btn btn-center" id="flushWatchlistDispatchBtn">Wymus flush kolejki</button></div>
-      <p class="status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status dispatch...</p>
+      <p class="status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status intake...</p>
+    </div>
+  </details>
+
+  <details class="details">
+    <summary>Dodatkowe narzedzia</summary>
+    <div class="details-content">
+      <div class="row">
+        <button class="btn btn-center" id="restoreProcessWindowsBtn">Przywroc okna procesow (workflow)</button>
+      </div>
+      <div class="row">
+        <button class="btn btn-center" id="autoRestoreToggleBtn">Auto co 15 min: OFF</button>
+      </div>
+      <p class="status" id="restoreProcessWindowsStatus" aria-live="polite">
+        Przywraca aktywne karty procesu na ekran w trybie normalnym (bez maksymalizacji).
+      </p>
+      <p class="status" id="autoRestoreStatus" aria-live="polite">
+        Automatyzacja: wylaczona.
+      </p>
     </div>
   </details>
 
   <script src="popup.js"></script>
 </body>
 </html>
+

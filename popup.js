@@ -1,4 +1,4 @@
-﻿function withActiveWindowContext(callback) {
+function withActiveWindowContext(callback) {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const activeTab = tabs && tabs.length > 0 ? tabs[0] : null;
     callback({
@@ -27,10 +27,16 @@ function sendRuntimeMessage(payload) {
 
 const runStatus = document.getElementById('runStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
-const watchlistTokenInput = document.getElementById('watchlistTokenInput');
+const watchlistIntakeUrlInput = document.getElementById('watchlistIntakeUrlInput');
+const watchlistKeyIdInput = document.getElementById('watchlistKeyIdInput');
+const watchlistSecretInput = document.getElementById('watchlistSecretInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
+const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
+const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
+const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
+const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 
 function setRunStatus(text, isError = false) {
   if (!runStatus) return;
@@ -48,11 +54,68 @@ function setDispatchStatus(text, isError = false) {
   watchlistDispatchStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
 }
 
+function setRestoreProcessWindowsStatus(text, isError = false) {
+  if (!restoreProcessWindowsStatus) return;
+  restoreProcessWindowsStatus.textContent = text;
+  restoreProcessWindowsStatus.style.color = isError ? '#b91c1c' : '#374151';
+  restoreProcessWindowsStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
+  restoreProcessWindowsStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+}
+
+function setAutoRestoreStatus(text, isError = false) {
+  if (!autoRestoreStatus) return;
+  autoRestoreStatus.textContent = text;
+  autoRestoreStatus.style.color = isError ? '#b91c1c' : '#374151';
+  autoRestoreStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
+  autoRestoreStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+}
+
+function applyAutoRestoreUi(status) {
+  const enabled = !!status?.enabled;
+  if (autoRestoreToggleBtn) {
+    autoRestoreToggleBtn.textContent = enabled ? 'Auto co 15 min: ON' : 'Auto co 15 min: OFF';
+    autoRestoreToggleBtn.dataset.enabled = enabled ? 'true' : 'false';
+  }
+}
+
+function formatAutoRestoreStatus(status) {
+  if (!status || status.success === false) {
+    return 'Automatyzacja: blad odczytu.';
+  }
+  const enabled = !!status.enabled;
+  const nextRunAt = Number.isInteger(status.nextRunAt) ? new Date(status.nextRunAt).toLocaleString() : 'brak';
+  const alarmActive = !!status.alarmActive;
+  if (!enabled) {
+    return 'Automatyzacja: wylaczona.';
+  }
+  return `Automatyzacja: WLACZONA (co 15 min). Alarm: ${alarmActive ? 'aktywny' : 'brak'}. Nastepne uruchomienie: ${nextRunAt}.`;
+}
+
+async function refreshAutoRestoreStatus(forceSync = false) {
+  if (!autoRestoreStatus) return;
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_AUTO_RESTORE_WINDOWS_STATUS',
+      forceSync,
+    });
+    applyAutoRestoreUi(response);
+    setAutoRestoreStatus(formatAutoRestoreStatus(response), response?.success === false);
+  } catch (error) {
+    setAutoRestoreStatus(`Automatyzacja: ${error?.message || String(error)}`, true);
+  }
+}
+
 function tokenSourceLabel(source) {
   if (source === 'inline_config') return 'inline config';
   if (source === 'storage_local') return 'local storage';
   if (source === 'storage_sync') return 'sync storage';
   return 'missing';
+}
+
+function safePreview(value, fallback = 'n/a') {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return fallback;
+  return text.length > 48 ? `${text.slice(0, 45)}...` : text;
 }
 
 function formatLastDispatchFlush(lastFlush) {
@@ -67,10 +130,10 @@ function formatLastDispatchFlush(lastFlush) {
 
 function formatDispatchStatus(status) {
   if (!status || status.success === false) {
-    return 'Dispatch status: blad odczytu.';
+    return 'Intake status: blad odczytu.';
   }
   if (!status.enabled) {
-    return 'Dispatch status: wylaczony.';
+    return 'Intake status: wylaczony.';
   }
 
   const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
@@ -81,17 +144,21 @@ function formatDispatchStatus(status) {
   const errorText = status.latestOutboxError
     ? ` Ostatni blad: ${status.latestOutboxError}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
     : '';
+  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
 
   if (status.configured) {
-    return `Dispatch status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
+    return `Intake status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}. ${base}`;
   }
-  if (status.reason === 'missing_repository') {
-    return `Dispatch status: brak repozytorium. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
+  if (status.reason === 'missing_intake_url') {
+    return `Intake status: brak Intake URL. ${base}`;
+  }
+  if (status.reason === 'missing_key_id') {
+    return `Intake status: brak Key ID. ${base}`;
   }
   if (status.reason === 'missing_dispatch_credentials') {
-    return `Dispatch status: brak tokena GitHub. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
+    return `Intake status: brak sekretu HMAC. ${base}`;
   }
-  return `Dispatch status: ${status.reason || 'nieznany'}. Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
+  return `Intake status: ${status.reason || 'nieznany'}. ${base}`;
 }
 
 function formatDispatchFlushResult(flushResult) {
@@ -112,9 +179,17 @@ async function refreshDispatchStatus(forceReload = false) {
       type: 'GET_WATCHLIST_DISPATCH_STATUS',
       forceReload,
     });
+    if (response && typeof response === 'object') {
+      if (watchlistIntakeUrlInput && typeof response.intakeUrl === 'string' && response.intakeUrl.trim()) {
+        watchlistIntakeUrlInput.value = response.intakeUrl.trim();
+      }
+      if (watchlistKeyIdInput && typeof response.keyId === 'string' && response.keyId.trim()) {
+        watchlistKeyIdInput.value = response.keyId.trim();
+      }
+    }
     setDispatchStatus(formatDispatchStatus(response), response?.success === false);
   } catch (error) {
-    setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+    setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
   }
 }
 
@@ -284,6 +359,78 @@ if (responsesBtn) {
   });
 }
 
+if (restoreProcessWindowsBtn) {
+  restoreProcessWindowsBtn.addEventListener('click', async () => {
+    const originalText = restoreProcessWindowsBtn.textContent;
+    restoreProcessWindowsBtn.disabled = true;
+    restoreProcessWindowsBtn.textContent = 'Przywracam...';
+    setRestoreProcessWindowsStatus('Przywracam aktywne procesy na ekran...');
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'RESTORE_PROCESS_WINDOWS',
+        origin: 'popup-restore-process-windows',
+      });
+
+      if (response?.success === false) {
+        setRestoreProcessWindowsStatus(
+          `Blad przywracania: ${response.error || response.reason || 'unknown'}.`,
+          true
+        );
+        return;
+      }
+
+      const requested = Number.isInteger(response?.requested) ? response.requested : 0;
+      const restored = Number.isInteger(response?.restored) ? response.restored : 0;
+      const opened = Number.isInteger(response?.opened) ? response.opened : 0;
+      const failed = Number.isInteger(response?.failed) ? response.failed : 0;
+      const skipped = Number.isInteger(response?.skipped) ? response.skipped : 0;
+
+      setRestoreProcessWindowsStatus(
+        `Gotowe. Strony: ${requested}, przywrocone: ${restored}, otwarte: ${opened}, pominiete: ${skipped}, bledy: ${failed}.`,
+        failed > 0
+      );
+    } catch (error) {
+      setRestoreProcessWindowsStatus(`Blad przywracania: ${error?.message || String(error)}.`, true);
+    } finally {
+      restoreProcessWindowsBtn.disabled = false;
+      restoreProcessWindowsBtn.textContent = originalText;
+    }
+  });
+}
+
+if (autoRestoreToggleBtn) {
+  autoRestoreToggleBtn.addEventListener('click', async () => {
+    const currentlyEnabled = autoRestoreToggleBtn.dataset.enabled === 'true';
+    const nextEnabled = !currentlyEnabled;
+    const originalText = autoRestoreToggleBtn.textContent;
+    autoRestoreToggleBtn.disabled = true;
+    autoRestoreToggleBtn.textContent = nextEnabled ? 'Wlaczam auto...' : 'Wylaczam auto...';
+    setAutoRestoreStatus(nextEnabled ? 'Wlaczam automatyzacje co 15 min...' : 'Wylaczam automatyzacje...');
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'SET_AUTO_RESTORE_WINDOWS_ENABLED',
+        enabled: nextEnabled,
+        origin: 'popup-auto-restore-toggle',
+      });
+      if (response?.success === false) {
+        setAutoRestoreStatus(`Automatyzacja: ${response.error || response.reason || 'unknown'}.`, true);
+      } else {
+        applyAutoRestoreUi(response);
+        setAutoRestoreStatus(formatAutoRestoreStatus(response), false);
+      }
+    } catch (error) {
+      setAutoRestoreStatus(`Automatyzacja: ${error?.message || String(error)}`, true);
+    } finally {
+      autoRestoreToggleBtn.disabled = false;
+      if (!autoRestoreToggleBtn.dataset.enabled) {
+        autoRestoreToggleBtn.textContent = originalText;
+      }
+    }
+  });
+}
+
 function isTextEntryElement(target) {
   if (!(target instanceof HTMLElement)) return false;
   const tag = (target.tagName || '').toUpperCase();
@@ -326,9 +473,11 @@ function setDispatchButtonsDisabled(disabled) {
 
 if (saveWatchlistTokenBtn) {
   saveWatchlistTokenBtn.addEventListener('click', async () => {
-    const rawToken = typeof watchlistTokenInput?.value === 'string' ? watchlistTokenInput.value.trim() : '';
-    if (!rawToken) {
-      setDispatchStatus('Dispatch status: podaj token przed zapisem.', true);
+    const intakeUrl = typeof watchlistIntakeUrlInput?.value === 'string' ? watchlistIntakeUrlInput.value.trim() : '';
+    const keyId = typeof watchlistKeyIdInput?.value === 'string' ? watchlistKeyIdInput.value.trim() : '';
+    const secret = typeof watchlistSecretInput?.value === 'string' ? watchlistSecretInput.value.trim() : '';
+    if (!intakeUrl || !keyId || !secret) {
+      setDispatchStatus('Intake status: podaj Intake URL, Key ID i Secret przed zapisem.', true);
       return;
     }
 
@@ -339,15 +488,19 @@ if (saveWatchlistTokenBtn) {
     try {
       const response = await sendRuntimeMessage({
         type: 'SET_WATCHLIST_DISPATCH_TOKEN',
-        token: rawToken,
+        credentials: {
+          intakeUrl,
+          keyId,
+          secret,
+        },
       });
       if (response?.success === false) {
-        setDispatchStatus(`Dispatch status: blad zapisu (${response.reason || response.error || 'unknown'}).`, true);
+        setDispatchStatus(`Intake status: blad zapisu (${response.reason || response.error || 'unknown'}).`, true);
         return;
       }
 
-      if (watchlistTokenInput) {
-        watchlistTokenInput.value = '';
+      if (watchlistSecretInput) {
+        watchlistSecretInput.value = '';
       }
 
       const statusPayload = response?.status && typeof response.status === 'object'
@@ -355,7 +508,7 @@ if (saveWatchlistTokenBtn) {
         : response;
       setDispatchStatus(formatDispatchStatus(statusPayload), false);
     } catch (error) {
-      setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+      setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
     } finally {
       saveWatchlistTokenBtn.textContent = originalText;
       setDispatchButtonsDisabled(false);
@@ -372,16 +525,20 @@ if (clearWatchlistTokenBtn) {
     try {
       const response = await sendRuntimeMessage({ type: 'CLEAR_WATCHLIST_DISPATCH_TOKEN' });
       if (response?.success === false) {
-        setDispatchStatus(`Dispatch status: blad czyszczenia (${response.error || 'unknown'}).`, true);
+        setDispatchStatus(`Intake status: blad czyszczenia (${response.error || 'unknown'}).`, true);
         return;
       }
+
+      if (watchlistIntakeUrlInput) watchlistIntakeUrlInput.value = '';
+      if (watchlistKeyIdInput) watchlistKeyIdInput.value = '';
+      if (watchlistSecretInput) watchlistSecretInput.value = '';
 
       const statusPayload = response?.status && typeof response.status === 'object'
         ? { success: true, ...response.status }
         : response;
       setDispatchStatus(formatDispatchStatus(statusPayload), false);
     } catch (error) {
-      setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+      setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
     } finally {
       clearWatchlistTokenBtn.textContent = originalText;
       setDispatchButtonsDisabled(false);
@@ -402,7 +559,7 @@ if (flushWatchlistDispatchBtn) {
         forceReload: true,
       });
       if (response?.success === false) {
-        setDispatchStatus(`Dispatch status: blad flush (${response.error || 'unknown'}).`, true);
+        setDispatchStatus(`Intake status: blad flush (${response.error || 'unknown'}).`, true);
         return;
       }
 
@@ -413,7 +570,7 @@ if (flushWatchlistDispatchBtn) {
       const baseStatus = formatDispatchStatus(statusPayload);
       setDispatchStatus(`${baseStatus} Flush: ${flushSummary}.`, false);
     } catch (error) {
-      setDispatchStatus(`Dispatch status: ${error?.message || String(error)}`, true);
+      setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
     } finally {
       flushWatchlistDispatchBtn.textContent = originalText;
       setDispatchButtonsDisabled(false);
@@ -421,4 +578,7 @@ if (flushWatchlistDispatchBtn) {
   });
 }
 
-void refreshDispatchStatus(true);
+void Promise.all([
+  refreshDispatchStatus(true),
+  refreshAutoRestoreStatus(true),
+]);
