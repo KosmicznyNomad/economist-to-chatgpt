@@ -77,6 +77,7 @@ const AUTO_RESTORE_WINDOWS = {
   minAssistantSentences: 2,
   maxIssueItems: 12
 };
+const RESUME_COMPOSER_THINKING_EFFORT_STORAGE_KEY = 'resume_composer_thinking_effort';
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
@@ -121,6 +122,41 @@ async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
     await sleep(100);
   }
   return manualPdfProviderPorts.has(safeProviderId);
+}
+
+function normalizeComposerThinkingEffort(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) return '';
+  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+    return normalized;
+  }
+  return '';
+}
+
+async function getStoredResumeComposerThinkingEffort() {
+  try {
+    const stored = await chrome.storage.local.get(RESUME_COMPOSER_THINKING_EFFORT_STORAGE_KEY);
+    return normalizeComposerThinkingEffort(stored?.[RESUME_COMPOSER_THINKING_EFFORT_STORAGE_KEY]);
+  } catch (error) {
+    console.warn('[resume-effort] get stored value failed:', error?.message || error);
+    return '';
+  }
+}
+
+async function setStoredResumeComposerThinkingEffort(value) {
+  const normalized = normalizeComposerThinkingEffort(value);
+  try {
+    if (normalized) {
+      await chrome.storage.local.set({
+        [RESUME_COMPOSER_THINKING_EFFORT_STORAGE_KEY]: normalized
+      });
+    } else {
+      await chrome.storage.local.remove(RESUME_COMPOSER_THINKING_EFFORT_STORAGE_KEY);
+    }
+  } catch (error) {
+    console.warn('[resume-effort] set stored value failed:', error?.message || error);
+  }
+  return normalized;
 }
 
 function isClosedProcessStatus(status) {
@@ -1867,6 +1903,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
 
   const targetWindowId = Number.isInteger(windowId) ? windowId : targetTab.windowId;
   const reloadBeforeResume = options?.reloadBeforeResume !== false;
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
   if (reloadBeforeResume) {
     const prepareResult = await prepareTabForResume(tabId, targetWindowId, {
       timeoutMs: 15000,
@@ -1908,7 +1945,9 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     title: processTitle,
     analysisType: 'company',
     status: 'starting',
-    statusText: 'Auto-resume przygotowanie',
+    statusText: composerThinkingEffort
+      ? `Auto-resume przygotowanie (${composerThinkingEffort})`
+      : 'Auto-resume przygotowanie',
     currentPrompt: normalizedStartIndex,
     totalPrompts: PROMPTS_COMPANY.length,
     stageIndex: normalizedStartIndex > 0 ? (normalizedStartIndex - 1) : null,
@@ -1956,7 +1995,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
             processId,
             {
               promptOffset: executionPromptOffset,
-              totalPromptsOverride: PROMPTS_COMPANY.length
+              totalPromptsOverride: PROMPTS_COMPANY.length,
+              composerThinkingEffort
             },
             {
               enabled: true,
@@ -2253,6 +2293,10 @@ async function runResetScanStartAllTabs(options = {}) {
       ? options.origin.trim()
       : 'reset-scan-start';
     const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
+    let composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
+    if (!composerThinkingEffort) {
+      composerThinkingEffort = await getStoredResumeComposerThinkingEffort();
+    }
     const requestedScope = typeof options?.scope === 'string' && options.scope.trim()
       ? options.scope.trim()
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
@@ -2277,7 +2321,8 @@ async function runResetScanStartAllTabs(options = {}) {
     const resetSummary = {
       mode: 'scoped_active_processes',
       scope,
-      forceRepeatLastPrompt
+      forceRepeatLastPrompt,
+      composerThinkingEffort: composerThinkingEffort || ''
     };
 
     const promptsReady = await ensureCompanyPromptsReady();
@@ -2504,6 +2549,7 @@ async function runResetScanStartAllTabs(options = {}) {
       scope,
       promptsCompanyCount: PROMPTS_COMPANY.length,
       forceRepeatLastPrompt,
+      composerThinkingEffort: composerThinkingEffort || '',
       signatureCatalogCount: catalog.length,
       promptRecordsCount: promptRecords.length,
       activeProcessesCount: activeProcesses.length,
@@ -2968,21 +3014,25 @@ async function runResetScanStartAllTabs(options = {}) {
     for (const row of startQueue) {
       if (!Number.isInteger(row.tabId) || !Number.isInteger(row.nextStartIndex)) continue;
 
-      const autoStartTitle = forceRepeatLastPrompt
-        ? `Auto Repeat: Prompt ${row.nextStartIndex + 1}`
-        : `Auto Start: Prompt ${row.nextStartIndex + 1}`;
+      const autoStartPrefix = forceRepeatLastPrompt ? 'Auto Repeat' : 'Auto Start';
+      const autoStartEffort = composerThinkingEffort
+        ? ` [${composerThinkingEffort.toUpperCase()}]`
+        : '';
+      const autoStartTitle = `${autoStartPrefix}${autoStartEffort}: Prompt ${row.nextStartIndex + 1}`;
       console.log('[reset-scan-start] Starting process from queue', {
         runId: row.runId || '',
         tabId: row.tabId,
         windowId: row.windowId,
         nextStartIndex: row.nextStartIndex,
-        autoStartTitle
+        autoStartTitle,
+        composerThinkingEffort: composerThinkingEffort || ''
       });
       const startResult = await resumeFromStageOnTab(row.tabId, row.windowId, row.nextStartIndex, {
         processTitle: autoStartTitle,
         detach: true,
         // Tab is already hard-reloaded in the detection phase.
-        reloadBeforeResume: false
+        reloadBeforeResume: false,
+        composerThinkingEffort
       });
 
       if (startResult.success) {
@@ -7220,11 +7270,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       ? message.scope.trim()
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
     const forceRepeatLastPrompt = message?.forceRepeatLastPrompt === true;
-    runResetScanStartAllTabs({
-      origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
-      scope: resumeScope,
-      forceRepeatLastPrompt
-    })
+    const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
+    (async () => {
+      let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
+      if (resolvedComposerThinkingEffort) {
+        await setStoredResumeComposerThinkingEffort(resolvedComposerThinkingEffort);
+      } else {
+        resolvedComposerThinkingEffort = await getStoredResumeComposerThinkingEffort();
+      }
+      return runResetScanStartAllTabs({
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        scope: resumeScope,
+        forceRepeatLastPrompt,
+        composerThinkingEffort: resolvedComposerThinkingEffort
+      });
+    })()
       .then((result) => sendResponse(result))
       .catch((error) => {
         console.warn('[monitor] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', error);
@@ -9991,6 +10051,16 @@ async function injectToChat(
     const totalPromptsForRun = Number.isInteger(totalPromptsOverride)
       ? Math.max(totalPromptsOverride, promptOffset + localPromptCount)
       : (promptOffset + localPromptCount);
+    const normalizeThinkingEffortLocal = (value) => {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      if (!normalized) return '';
+      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+        return normalized;
+      }
+      return '';
+    };
+    const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort);
+    let composerThinkingEffortApplied = false;
     const payloadTextForMode = typeof payload === 'string' ? payload : '';
     const isResumeModeFromPayload = payloadTextForMode.trim() === ''
       || payloadTextForMode.includes('Resume from stage');
@@ -10819,6 +10889,264 @@ async function injectToChat(
       } catch (error) {
         // Ignore messaging errors in injected context.
       }
+    }
+
+    function normalizeDomText(value) {
+      return compactText(typeof value === 'string' ? value : '').toLowerCase();
+    }
+
+    function getThinkingEffortKeywords(effort) {
+      if (effort === 'light') return ['light', 'lekki'];
+      if (effort === 'standard') return ['standard'];
+      if (effort === 'extended') return ['extended', 'rozszerzony'];
+      if (effort === 'heavy') return ['heavy', 'ciezki', 'ciężki'];
+      return [];
+    }
+
+    function matchesThinkingEffortLabel(text, effort) {
+      if (!effort) return false;
+      const normalizedText = normalizeDomText(text);
+      if (!normalizedText) return false;
+      const keywords = getThinkingEffortKeywords(effort);
+      return keywords.some((keyword) => normalizedText.includes(keyword));
+    }
+
+    function getThinkingPillCandidates() {
+      const selector = [
+        'button.__composer-pill[aria-haspopup="menu"]',
+        'button.__composer-pill',
+        'button[aria-haspopup="menu"][class*="composer-pill"]'
+      ].join(', ');
+      const candidates = Array.from(document.querySelectorAll(selector));
+      return candidates.filter((button) => {
+        if (!(button instanceof HTMLElement)) return false;
+        return button.getClientRects().length > 0;
+      });
+    }
+
+    function findThinkingEffortPillButton(targetEffort = '') {
+      const candidates = getThinkingPillCandidates();
+      if (!candidates.length) return null;
+
+      let fallback = null;
+      for (const button of candidates) {
+        const text = normalizeDomText(button.innerText || button.textContent || '');
+        const hasThinkingLabel = text.includes('thinking') || text.includes('myslen') || text.includes('myślen');
+        const hasEffortLabel = (
+          matchesThinkingEffortLabel(text, 'light')
+          || matchesThinkingEffortLabel(text, 'standard')
+          || matchesThinkingEffortLabel(text, 'extended')
+          || matchesThinkingEffortLabel(text, 'heavy')
+        );
+
+        if (targetEffort && matchesThinkingEffortLabel(text, targetEffort)) {
+          return button;
+        }
+        if (!fallback && (hasThinkingLabel || hasEffortLabel)) {
+          fallback = button;
+        }
+      }
+
+      return fallback || candidates[0] || null;
+    }
+
+    function getThinkingEffortMenuItems() {
+      const items = Array.from(
+        document.querySelectorAll('[role="menuitemradio"], [role="menu"] [data-state]')
+      );
+      return items.filter((item) => {
+        if (!(item instanceof HTMLElement)) return false;
+        const role = String(item.getAttribute('role') || '').toLowerCase();
+        if (role === 'menuitemradio') return true;
+        const text = normalizeDomText(item.innerText || item.textContent || '');
+        if (!text) return false;
+        return (
+          matchesThinkingEffortLabel(text, 'light')
+          || matchesThinkingEffortLabel(text, 'standard')
+          || matchesThinkingEffortLabel(text, 'extended')
+          || matchesThinkingEffortLabel(text, 'heavy')
+        );
+      });
+    }
+
+    function findThinkingEffortMenuItem(targetEffort) {
+      if (!targetEffort) return null;
+      const items = getThinkingEffortMenuItems();
+      for (const item of items) {
+        const text = normalizeDomText(item.innerText || item.textContent || '');
+        if (matchesThinkingEffortLabel(text, targetEffort)) {
+          return item;
+        }
+      }
+      return null;
+    }
+
+    function isThinkingEffortSelected(targetEffort) {
+      if (!targetEffort) return false;
+
+      const checkedItems = getThinkingEffortMenuItems().filter(
+        (item) => String(item.getAttribute('aria-checked') || '').toLowerCase() === 'true'
+      );
+      for (const item of checkedItems) {
+        const text = normalizeDomText(item.innerText || item.textContent || '');
+        if (matchesThinkingEffortLabel(text, targetEffort)) {
+          return true;
+        }
+      }
+
+      const pillButton = findThinkingEffortPillButton(targetEffort);
+      if (!pillButton) return false;
+      const buttonText = normalizeDomText(pillButton.innerText || pillButton.textContent || '');
+      return matchesThinkingEffortLabel(buttonText, targetEffort);
+    }
+
+    function closeThinkingEffortMenuBestEffort() {
+      try {
+        const activeEl = document.activeElement instanceof HTMLElement ? document.activeElement : null;
+        if (activeEl) activeEl.blur();
+      } catch (_) {
+        // Ignore blur failures.
+      }
+      try {
+        document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape', code: 'Escape', bubbles: true }));
+      } catch (_) {
+        // Ignore escape dispatch failures.
+      }
+    }
+
+    async function openThinkingEffortMenu(targetEffort, maxWaitMs = 2800) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < maxWaitMs) {
+        if (getThinkingEffortMenuItems().length > 0) {
+          return true;
+        }
+
+        const button = findThinkingEffortPillButton(targetEffort);
+        if (button) {
+          try {
+            button.click();
+          } catch (_) {
+            // Ignore click errors and keep retrying.
+          }
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 160));
+        if (getThinkingEffortMenuItems().length > 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    async function ensureComposerThinkingEffort(targetEffort, options = {}) {
+      const effort = normalizeThinkingEffortLocal(targetEffort);
+      if (!effort) {
+        return { success: true, skipped: true };
+      }
+
+      const maxAttempts = Number.isInteger(options?.maxAttempts) && options.maxAttempts > 0
+        ? Math.min(options.maxAttempts, 6)
+        : 4;
+      const retryDelayMs = Number.isInteger(options?.retryDelayMs) && options.retryDelayMs >= 0
+        ? Math.min(options.retryDelayMs, 3000)
+        : 280;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        if (isThinkingEffortSelected(effort)) {
+          return { success: true, effort, attempt, alreadySelected: true };
+        }
+
+        const menuOpened = await openThinkingEffortMenu(effort, 3200);
+        if (!menuOpened) {
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+
+        if (isThinkingEffortSelected(effort)) {
+          closeThinkingEffortMenuBestEffort();
+          return { success: true, effort, attempt, alreadySelected: true };
+        }
+
+        const targetItem = findThinkingEffortMenuItem(effort);
+        if (!targetItem) {
+          closeThinkingEffortMenuBestEffort();
+          await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+          continue;
+        }
+
+        try {
+          targetItem.click();
+        } catch (_) {
+          // Keep retrying in next attempt.
+        }
+        await new Promise((resolve) => setTimeout(resolve, 240));
+
+        const selected = isThinkingEffortSelected(effort);
+        closeThinkingEffortMenuBestEffort();
+        if (selected) {
+          return { success: true, effort, attempt, changed: true };
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
+      }
+
+      return {
+        success: false,
+        error: 'thinking_effort_not_set',
+        effort
+      };
+    }
+
+    async function ensureRequestedComposerThinkingEffort(counterRef = null) {
+      if (!requestedComposerThinkingEffort) {
+        return { success: true, skipped: true };
+      }
+      if (composerThinkingEffortApplied) {
+        return { success: true, effort: requestedComposerThinkingEffort, cached: true };
+      }
+
+      updateCounter(
+        counterRef,
+        promptOffset,
+        totalPromptsForRun,
+        `Ustawiam thinking: ${requestedComposerThinkingEffort}...`
+      );
+      notifyProcess('PROCESS_PROGRESS', {
+        status: 'running',
+        currentPrompt: promptOffset,
+        totalPrompts: totalPromptsForRun,
+        statusText: `Ustawiam thinking: ${requestedComposerThinkingEffort}`,
+        reason: 'set_thinking_effort',
+        needsAction: false
+      });
+
+      const result = await ensureComposerThinkingEffort(requestedComposerThinkingEffort, {
+        maxAttempts: 4,
+        retryDelayMs: 320
+      });
+
+      if (result?.success) {
+        composerThinkingEffortApplied = true;
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          statusText: `Thinking ustawiony: ${requestedComposerThinkingEffort}`,
+          reason: 'thinking_effort_set',
+          needsAction: false
+        });
+        return {
+          success: true,
+          effort: requestedComposerThinkingEffort,
+          details: result
+        };
+      }
+
+      return {
+        success: false,
+        effort: requestedComposerThinkingEffort,
+        error: result?.error || 'thinking_effort_not_set'
+      };
     }
 
 
@@ -12632,7 +12960,32 @@ async function injectToChat(
       
       // Stwórz licznik
       const counter = createCounter();
-      
+      const thinkingEffortResult = await ensureRequestedComposerThinkingEffort(counter);
+      if (shouldStopNow()) {
+        return forceStopResult();
+      }
+      if (!thinkingEffortResult?.success) {
+        const effortLabel = requestedComposerThinkingEffort || 'unknown';
+        const effortError = thinkingEffortResult?.error || 'thinking_effort_not_set';
+        updateCounter(counter, promptOffset, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'failed',
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          statusText: `Nie ustawiono trybu thinking (${effortLabel})`,
+          reason: 'thinking_effort_not_set',
+          error: effortError,
+          needsAction: false
+        });
+        return {
+          success: false,
+          lastResponse: '',
+          error: 'thinking_effort_not_set',
+          details: effortError,
+          metrics: buildMetricsSnapshot({ completed: false, reason: 'thinking_effort_not_set' })
+        };
+      }
+
       if (!isResume) {
         if (manualPdfAttachment?.enabled) {
           updateCounter(counter, promptOffset, totalPromptsForRun, 'Zalaczam PDF...');

@@ -37,6 +37,8 @@ const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn')
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
+const resumeAllExtendedBtn = document.getElementById('resumeAllExtendedBtn');
+const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
@@ -429,20 +431,33 @@ function getResumeAllSummary(response) {
 async function executeResumeAllFromPopup(button, options = {}) {
   if (!button) return;
 
+  const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
+    ? options.composerThinkingEffort.trim().toLowerCase()
+    : '';
+  const effortSuffix = composerThinkingEffort ? ` (${composerThinkingEffort})` : '';
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Reload + wznawiam...';
-  setRunStatus('Reload + wznowienie aktywnych procesow company (INVEST)...');
+  button.textContent = `Reload + wznawiam${effortSuffix}...`;
+  setRunStatus(
+    composerThinkingEffort
+      ? `Reload + wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
+      : 'Reload + wznowienie aktywnych procesow company (INVEST)...'
+  );
 
   try {
     const response = await sendRuntimeMessage({
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
       origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all',
       scope: 'active_company_invest_processes',
+      composerThinkingEffort,
     });
 
     if (!response || Object.keys(response).length === 0) {
-      setRunStatus('Polecenie reload + wznowienia zostalo wyslane.');
+      setRunStatus(
+        composerThinkingEffort
+          ? `Polecenie reload + wznowienia (${composerThinkingEffort}) zostalo wyslane.`
+          : 'Polecenie reload + wznowienia zostalo wyslane.'
+      );
       return;
     }
 
@@ -451,7 +466,11 @@ async function executeResumeAllFromPopup(button, options = {}) {
       return;
     }
 
-    setRunStatus(getResumeAllSummary(response));
+    setRunStatus(
+      composerThinkingEffort
+        ? `Tryb ${composerThinkingEffort}: ${getResumeAllSummary(response)}`
+        : getResumeAllSummary(response)
+    );
   } catch (error) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
   } finally {
@@ -749,6 +768,24 @@ if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllBtn, {
       origin: 'popup-resume-all',
+    });
+  });
+}
+
+if (resumeAllExtendedBtn) {
+  resumeAllExtendedBtn.addEventListener('click', () => {
+    void executeResumeAllFromPopup(resumeAllExtendedBtn, {
+      origin: 'popup-resume-all-extended',
+      composerThinkingEffort: 'extended',
+    });
+  });
+}
+
+if (resumeAllHeavyBtn) {
+  resumeAllHeavyBtn.addEventListener('click', () => {
+    void executeResumeAllFromPopup(resumeAllHeavyBtn, {
+      origin: 'popup-resume-all-heavy',
+      composerThinkingEffort: 'heavy',
     });
   });
 }
