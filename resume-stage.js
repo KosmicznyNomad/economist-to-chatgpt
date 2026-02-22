@@ -121,7 +121,8 @@ startBtn.addEventListener('click', () => {
       type: 'RESUME_STAGE_START',
       startIndex: selectedIndex,
       title: resumeTitle,
-      analysisType: resumeAnalysisType
+      analysisType: resumeAnalysisType,
+      reloadBeforeResume: true
     });
     window.close();
   }

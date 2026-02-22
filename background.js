@@ -19,11 +19,12 @@ const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
 const RETRY_INTERVAL_MS = 500;
-// Auto start over existing chats: one mode only (hard reset + scan + start).
+// Auto start over active process contexts.
 const RESET_SCAN_DEFAULT_PASSES = 3;
 const RESET_SCAN_PASS_DELAY_MS = 500;
 const RESET_SCAN_PER_TAB_BUDGET_MS = 6000;
 const RESET_SCAN_MIN_RUNTIME_MS = 90 * 1000;
+const RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST = 'active_company_invest_processes';
 const AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const AUTO_RECOVERY_DELAY_MS = 2000;
 const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
@@ -1059,13 +1060,24 @@ async function stopSingleProcess(process, options = {}) {
     });
   }
 
-  let windowClosed = false;
-  if (processWindowId !== null && processWindowId !== preserveWindowId) {
-    windowClosed = await removeWindowSafe(processWindowId);
+  let tabClosed = false;
+  if (processTabId !== null) {
+    tabClosed = await removeTabSafe(processTabId);
   }
 
-  if (!windowClosed && processTabId !== null) {
-    await removeTabSafe(processTabId);
+  // Fallback: close the whole window only when it is a dedicated process window
+  // with no extra tabs (to avoid closing source/info windows).
+  if (!tabClosed && processWindowId !== null && processWindowId !== preserveWindowId) {
+    const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
+    const validTabs = Array.isArray(tabsInWindow?.tabs)
+      ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
+      : [];
+    const hasOnlyProcessTab = validTabs.length === 1
+      && processTabId !== null
+      && validTabs[0].id === processTabId;
+    if (hasOnlyProcessTab) {
+      await removeWindowSafe(processWindowId);
+    }
   }
 
   const stopPatch = {
@@ -1807,7 +1819,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     return { success: false, error: 'tab_not_found' };
   }
 
-  const targetTabUrl = getTabEffectiveUrl(targetTab);
+  let targetTabUrl = getTabEffectiveUrl(targetTab);
   if (!isChatGptUrl(targetTabUrl)) {
     return { success: false, error: 'tab_not_chatgpt' };
   }
@@ -1820,6 +1832,32 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   }
   if (normalizedStartIndex >= PROMPTS_COMPANY.length) {
     return { success: false, error: 'start_index_out_of_range' };
+  }
+
+  const targetWindowId = Number.isInteger(windowId) ? windowId : targetTab.windowId;
+  const reloadBeforeResume = options?.reloadBeforeResume !== false;
+  if (reloadBeforeResume) {
+    const prepareResult = await prepareTabForResume(tabId, targetWindowId, {
+      timeoutMs: 15000,
+      bypassCache: true
+    });
+    if (!prepareResult?.ok) {
+      return {
+        success: false,
+        error: 'reload_failed',
+        reason: prepareResult?.reason || 'reload_failed',
+        details: prepareResult?.error || ''
+      };
+    }
+    const refreshedTab = await getTabByIdSafe(tabId);
+    if (!refreshedTab) {
+      return { success: false, error: 'tab_not_found' };
+    }
+    targetTab = refreshedTab;
+    targetTabUrl = getTabEffectiveUrl(targetTab);
+    if (!isChatGptUrl(targetTabUrl)) {
+      return { success: false, error: 'tab_not_chatgpt' };
+    }
   }
 
   const promptsToSend = PROMPTS_COMPANY.slice(normalizedStartIndex);
@@ -1855,7 +1893,6 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   });
 
   try {
-    const targetWindowId = Number.isInteger(windowId) ? windowId : targetTab.windowId;
     if (Number.isInteger(targetWindowId)) {
       await chrome.windows.update(targetWindowId, { focused: true });
     }
@@ -2060,7 +2097,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
           : 'Zakonczono (pusta odpowiedz)',
         tone: persistenceSummary.tone,
         lines: persistenceSummary.logLines,
-        autoCloseMs: persistenceSummary.saveOk ? 10000 : 14000
+        autoCloseMs: 0
       });
 
       const MAX_COMPLETED_RESPONSE_CHARS = 180000;
@@ -2184,16 +2221,24 @@ async function runResetScanStartAllTabs(options = {}) {
     const origin = typeof options?.origin === 'string' && options.origin.trim()
       ? options.origin.trim()
       : 'reset-scan-start';
+    const requestedScope = typeof options?.scope === 'string' && options.scope.trim()
+      ? options.scope.trim()
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+    const scope = requestedScope === RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
+      ? requestedScope
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
 
-    // Legacy request flags (resetProcesses/clearHistory) are intentionally ignored:
-    // this endpoint now always runs as hard reset + scan + start.
-    const resetSummary = await resetTrackedProcessesForBulkRun({
-      clearHistory: true,
-      reason: 'bulk_reset_before_scan_start',
-      statusText: 'Reset przed skanowaniem',
-      origin
-    });
-    await sleep(200);
+    const emptySummary = {
+      started: 0,
+      detect_failed: 0,
+      reload_failed: 0,
+      skipped_non_company: 0,
+      skipped_outside_invest: 0
+    };
+    const resetSummary = {
+      mode: 'scoped_active_processes',
+      scope
+    };
 
     if (PROMPTS_COMPANY.length === 0) {
       await loadPrompts();
@@ -2205,6 +2250,10 @@ async function runResetScanStartAllTabs(options = {}) {
         matchedTabs: 0,
         startedTabs: 0,
         resumedTabs: 0,
+        requestedProcesses: 0,
+        eligibleProcesses: 0,
+        summary: { ...emptySummary },
+        scope,
         results: [],
         resetSummary,
         error: 'prompts_not_loaded'
@@ -2213,18 +2262,16 @@ async function runResetScanStartAllTabs(options = {}) {
 
     const catalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
     const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
-    const tabsRaw = await chrome.tabs.query({});
-    const chatTabs = tabsRaw
-      .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
-      .sort(compareTabsByWindowAndIndex);
-    const resultsByTabId = new Map();
-    const matchedTabIds = new Set();
-    const startedTabIds = new Set();
-    const pendingTabIds = new Set(
-      chatTabs
-        .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
-        .filter((id) => Number.isInteger(id))
-    );
+    const processSnapshot = await getProcessSnapshot();
+    const activeProcesses = processSnapshot
+      .filter((process) => process && !isClosedProcessStatus(process.status))
+      .sort(compareProcessesForRestore);
+    const resultsByKey = new Map();
+    const orderedResultKeys = [];
+    const scanTargets = [];
+    const matchedKeys = new Set();
+    const startedKeys = new Set();
+    const preparedKeys = new Set();
 
     const startedAt = Date.now();
     const maxPasses = Number.isInteger(options?.maxPasses) && options.maxPasses > 0
@@ -2232,7 +2279,7 @@ async function runResetScanStartAllTabs(options = {}) {
       : RESET_SCAN_DEFAULT_PASSES;
     const maxRuntimeMs = Math.max(
       RESET_SCAN_MIN_RUNTIME_MS,
-      chatTabs.length * RESET_SCAN_PER_TAB_BUDGET_MS,
+      activeProcesses.length * RESET_SCAN_PER_TAB_BUDGET_MS,
       Number.isInteger(options?.maxRuntimeMs) && options.maxRuntimeMs > 0
         ? options.maxRuntimeMs
         : 0
@@ -2247,13 +2294,120 @@ async function runResetScanStartAllTabs(options = {}) {
       if (compact.length <= maxLen) return compact;
       return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
     };
+    const getResultKey = (process, index) => {
+      const processId = process?.id ? String(process.id).trim() : '';
+      if (processId) return `run:${processId}`;
+      return `idx:${index}`;
+    };
+
+    for (let index = 0; index < activeProcesses.length; index += 1) {
+      const process = activeProcesses[index];
+      const key = getResultKey(process, index);
+      const analysisType = typeof process?.analysisType === 'string' && process.analysisType.trim()
+        ? process.analysisType.trim()
+        : 'company';
+      const row = {
+        key,
+        runId: typeof process?.id === 'string' && process.id.trim() ? process.id.trim() : '',
+        analysisType,
+        processTitle: typeof process?.title === 'string' ? process.title : '',
+        tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+        windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+        title: typeof process?.title === 'string' ? process.title : '',
+        url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+          ? process.chatUrl.trim()
+          : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
+        userMessageCount: null,
+        lastUserMessageLength: null,
+        detectedPromptIndex: null,
+        detectedPromptNumber: null,
+        detectedStageName: null,
+        detectedMethod: '',
+        detectedSignature: '',
+        detectedHasAssistantReply: null,
+        progressPromptNumber: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null,
+        progressStageName: typeof process?.stageName === 'string' ? process.stageName : '',
+        stageConsistency: '',
+        stageDelta: null,
+        nextStartIndex: null,
+        action: 'queued',
+        reason: '',
+        attempts: 0,
+        lastPass: 0,
+        retryExhausted: false,
+        stopSignalSent: false,
+        stopSignalAck: false,
+        stopSignalReason: '',
+        reloadMethod: ''
+      };
+
+      if (analysisType !== 'company') {
+        row.action = 'skipped_non_company';
+        row.reason = `analysis_type:${analysisType || 'unknown'}`;
+        orderedResultKeys.push(key);
+        resultsByKey.set(key, row);
+        continue;
+      }
+
+      let tab = Number.isInteger(row.tabId) ? await getTabByIdSafe(row.tabId) : null;
+      if (!tab && Number.isInteger(row.windowId)) {
+        try {
+          const tabsInWindow = await chrome.tabs.query({ windowId: row.windowId });
+          const investTab = tabsInWindow.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate)));
+          if (investTab && Number.isInteger(investTab.id)) {
+            tab = investTab;
+          }
+        } catch (error) {
+          // Best effort only.
+        }
+      }
+
+      if (tab) {
+        row.tabId = Number.isInteger(tab?.id) ? tab.id : row.tabId;
+        row.windowId = Number.isInteger(tab?.windowId) ? tab.windowId : row.windowId;
+        row.title = typeof tab?.title === 'string' ? tab.title : row.title;
+        row.url = getTabEffectiveUrl(tab) || row.url;
+      }
+
+      if (!isInvestGptUrl(row.url)) {
+        row.action = 'skipped_outside_invest';
+        row.reason = `outside_invest:${row.url || 'empty'}`;
+        orderedResultKeys.push(key);
+        resultsByKey.set(key, row);
+        continue;
+      }
+
+      if (!Number.isInteger(row.tabId)) {
+        row.action = 'detect_failed';
+        row.reason = 'tab_not_found_for_process';
+        orderedResultKeys.push(key);
+        resultsByKey.set(key, row);
+        continue;
+      }
+
+      row.action = 'queued_for_detection';
+      row.reason = 'queued_for_detection';
+      orderedResultKeys.push(key);
+      resultsByKey.set(key, row);
+      scanTargets.push({
+        key,
+        runId: row.runId,
+        tabId: row.tabId,
+        windowId: row.windowId,
+        process
+      });
+    }
+
+    const pendingKeys = new Set(scanTargets.map((target) => target.key));
 
     console.log('[reset-scan-start] Init', {
       origin,
+      scope,
       promptsCompanyCount: PROMPTS_COMPANY.length,
       signatureCatalogCount: catalog.length,
       promptRecordsCount: promptRecords.length,
-      chatTabsCount: chatTabs.length,
+      activeProcessesCount: activeProcesses.length,
+      eligibleProcessesCount: scanTargets.length,
       maxPasses,
       maxRuntimeMs,
       passDelayMs,
@@ -2261,47 +2415,31 @@ async function runResetScanStartAllTabs(options = {}) {
     });
 
     while (
-      pendingTabIds.size > 0 &&
+      pendingKeys.size > 0 &&
       passCount < maxPasses &&
       (Date.now() - startedAt) < maxRuntimeMs
     ) {
       passCount += 1;
       console.log('[reset-scan-start] Pass start', {
         pass: passCount,
-        pending: pendingTabIds.size,
-        scanned: chatTabs.length
+        pending: pendingKeys.size,
+        scanned: scanTargets.length
       });
 
-      for (const tab of chatTabs) {
-        if (!Number.isInteger(tab?.id) || !pendingTabIds.has(tab.id)) continue;
+      for (const target of scanTargets) {
+        if (!pendingKeys.has(target.key)) continue;
 
-        const previous = resultsByTabId.get(tab.id) || null;
+        const previous = resultsByKey.get(target.key) || null;
         const row = {
-          tabId: Number.isInteger(tab?.id) ? tab.id : null,
-          windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
-          title: typeof tab?.title === 'string' ? tab.title : '',
-          url: getTabEffectiveUrl(tab),
-          userMessageCount: null,
-          lastUserMessageLength: null,
-          detectedPromptIndex: null,
-          detectedPromptNumber: null,
-          detectedStageName: null,
-          detectedMethod: '',
-          detectedSignature: '',
-          detectedHasAssistantReply: null,
-          progressPromptNumber: null,
-          progressStageName: '',
-          stageConsistency: '',
-          stageDelta: null,
-          nextStartIndex: null,
-          action: 'no_match',
-          reason: '',
+          ...(previous || {}),
           attempts: previous?.attempts ? (previous.attempts + 1) : 1,
           lastPass: passCount
         };
+        resultsByKey.set(target.key, row);
 
-        console.log('[reset-scan-start] Inspect tab', {
+        console.log('[reset-scan-start] Inspect process', {
           pass: passCount,
+          runId: row.runId || '',
           tabId: row.tabId,
           windowId: row.windowId,
           attempt: row.attempts,
@@ -2309,22 +2447,69 @@ async function runResetScanStartAllTabs(options = {}) {
           title: truncateForLog(row.title, 100)
         });
 
-        if (!Number.isInteger(tab?.id)) {
-          row.action = 'inject_failed';
+        if (!Number.isInteger(row.tabId)) {
+          row.action = 'detect_failed';
           row.reason = 'invalid_tab_id';
-          resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
+          resultsByKey.set(target.key, row);
+          pendingKeys.delete(target.key);
           continue;
         }
 
-        let currentTab = null;
-        try {
-          currentTab = await chrome.tabs.get(tab.id);
-        } catch (error) {
-          row.action = 'inject_failed';
+        if (!preparedKeys.has(target.key)) {
+          const stopResult = await requestProcessForceStopOnTab(row.tabId, {
+            runId: row.runId,
+            reason: 'bulk_resume_reload',
+            origin
+          });
+          row.stopSignalSent = stopResult?.sent === true;
+          row.stopSignalAck = stopResult?.acknowledged === true;
+          row.stopSignalReason = stopResult?.reason || '';
+
+          const prepareResult = await prepareTabForResume(row.tabId, row.windowId, {
+            timeoutMs: 15000,
+            bypassCache: true
+          });
+          if (!prepareResult?.ok) {
+            row.action = 'reload_failed';
+            row.reason = prepareResult?.reason || 'reload_failed';
+            row.reloadDetails = prepareResult?.error || '';
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            console.warn('[reset-scan-start] Reload failed for process context', {
+              runId: row.runId || '',
+              tabId: row.tabId,
+              windowId: row.windowId,
+              reason: row.reason,
+              details: row.reloadDetails || ''
+            });
+            continue;
+          }
+          row.reloadMethod = typeof prepareResult?.reloadResult?.method === 'string'
+            ? prepareResult.reloadResult.method
+            : '';
+          preparedKeys.add(target.key);
+
+          if (row.runId) {
+            await upsertProcess(row.runId, {
+              status: 'stopped',
+              statusText: 'Zatrzymany przed wznowieniem zbiorczym',
+              reason: 'bulk_resume_reload',
+              needsAction: false,
+              autoRecovery: null,
+              finishedAt: Date.now(),
+              timestamp: Date.now()
+            });
+          }
+        } else {
+          await prepareTabForDetection(row.tabId, row.windowId);
+        }
+
+        const currentTab = await getTabByIdSafe(row.tabId);
+        if (!currentTab) {
+          row.action = 'detect_failed';
           row.reason = 'tab_not_found';
-          resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
+          resultsByKey.set(target.key, row);
+          pendingKeys.delete(target.key);
           continue;
         }
 
@@ -2333,37 +2518,40 @@ async function runResetScanStartAllTabs(options = {}) {
         row.windowId = Number.isInteger(currentTab?.windowId) ? currentTab.windowId : row.windowId;
 
         if (!isInvestGptUrl(row.url)) {
-          row.action = 'no_match';
+          row.action = 'skipped_outside_invest';
           row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
-          resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
-          console.warn('[reset-scan-start] Skip tab (url outside inwestycje GPT)', {
+          resultsByKey.set(target.key, row);
+          pendingKeys.delete(target.key);
+          console.warn('[reset-scan-start] Skip process (url outside inwestycje GPT)', {
+            runId: row.runId || '',
             tabId: row.tabId,
             reason: row.reason
           });
           continue;
         }
 
-        await prepareTabForDetection(tab.id, row.windowId);
-        console.log('[reset-scan-start] Tab prepared for detection', {
+        console.log('[reset-scan-start] Context prepared for detection', {
+          runId: row.runId || '',
           tabId: row.tabId,
           windowId: row.windowId
         });
 
-        let extraction = await extractLastUserMessageFromTab(tab.id);
+        let extraction = await extractLastUserMessageFromTab(row.tabId);
         if (!extraction.success) {
           console.warn('[reset-scan-start] Extraction failed, retrying', {
+            runId: row.runId || '',
             tabId: row.tabId,
             error: extraction.error || 'unknown_error'
           });
           await sleep(350);
-          extraction = await extractLastUserMessageFromTab(tab.id);
+          extraction = await extractLastUserMessageFromTab(row.tabId);
         }
         if (!extraction.success) {
-          row.action = 'inject_failed';
+          row.action = 'detect_failed';
           row.reason = extraction.error || 'extract_last_user_message_failed';
-          resultsByTabId.set(tab.id, row);
+          resultsByKey.set(target.key, row);
           console.warn('[reset-scan-start] Extraction failed after retry', {
+            runId: row.runId || '',
             tabId: row.tabId,
             reason: row.reason
           });
@@ -2374,25 +2562,12 @@ async function runResetScanStartAllTabs(options = {}) {
         row.userMessageCount = Number.isInteger(extraction.count) ? extraction.count : 0;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
         console.log('[reset-scan-start] Extraction success', {
+          runId: row.runId || '',
           tabId: row.tabId,
           userMessageCount: row.userMessageCount,
           lastUserMessageLength: row.lastUserMessageLength,
           lastUserMessagePreview: truncateForLog(extraction.text, 220)
         });
-
-        const activeProcess = await getActiveProcessForTab(tab.id);
-        if (activeProcess) {
-          row.progressPromptNumber = Number.isInteger(activeProcess.currentPrompt) ? activeProcess.currentPrompt : null;
-          row.progressStageName = typeof activeProcess.stageName === 'string' ? activeProcess.stageName : '';
-          console.log('[reset-scan-start] Active process detected on tab', {
-            tabId: row.tabId,
-            processId: activeProcess.id,
-            status: activeProcess.status,
-            currentPrompt: activeProcess.currentPrompt,
-            totalPrompts: activeProcess.totalPrompts,
-            stageName: activeProcess.stageName || ''
-          });
-        }
 
         const lastUserText = typeof extraction.text === 'string' ? extraction.text.trim() : '';
         let detection = null;
@@ -2403,6 +2578,7 @@ async function runResetScanStartAllTabs(options = {}) {
           if (directDetection.matched && Number.isInteger(directDetection.index)) {
             detection = directDetection;
             console.log('[reset-scan-start] Direct detection matched', {
+              runId: row.runId || '',
               tabId: row.tabId,
               method: directDetection.method || 'unknown',
               index: directDetection.index,
@@ -2416,6 +2592,7 @@ async function runResetScanStartAllTabs(options = {}) {
           } else {
             directDetectionReason = directDetection.reason || 'signature_not_found';
             console.log('[reset-scan-start] Direct detection failed', {
+              runId: row.runId || '',
               tabId: row.tabId,
               reason: directDetectionReason,
               signatureLength: typeof directDetection.messageSignature === 'string'
@@ -2426,18 +2603,20 @@ async function runResetScanStartAllTabs(options = {}) {
           }
         } else {
           console.log('[reset-scan-start] Direct detection skipped (empty last user text)', {
+            runId: row.runId || '',
             tabId: row.tabId
           });
         }
 
         let recentMatch = null;
         if (promptRecords.length > 0) {
-          const recent = await extractRecentUserPromptsFromTab(tab.id, 4000);
+          const recent = await extractRecentUserPromptsFromTab(row.tabId, 4000);
           const recentEntries = Array.isArray(recent?.messageMeta) && recent.messageMeta.length > 0
             ? recent.messageMeta
             : (Array.isArray(recent?.messages) ? recent.messages : []);
           recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
           console.log('[reset-scan-start] Recent history fallback evaluated', {
+            runId: row.runId || '',
             tabId: row.tabId,
             recentMessageCount: recentEntries.length,
             recentUrl: truncateForLog(recent?.url || '', 140),
@@ -2476,6 +2655,7 @@ async function runResetScanStartAllTabs(options = {}) {
               hasAssistantReplyAfter: recentMatch.hasAssistantReplyAfter
             };
             console.log('[reset-scan-start] Detection recovered from recent history', {
+              runId: row.runId || '',
               tabId: row.tabId,
               index: detection.index,
               promptNumber: detection.promptNumber,
@@ -2490,16 +2670,17 @@ async function runResetScanStartAllTabs(options = {}) {
 
         if (!detection || !Number.isInteger(detection.index)) {
           if (lastUserText.length === 0) {
-            row.action = 'no_user_message';
+            row.action = 'detect_failed';
             row.reason = 'empty_user_message';
           } else {
-            row.action = 'no_match';
+            row.action = 'detect_failed';
             row.reason = directDetectionReason || 'signature_not_found';
           }
-          resultsByTabId.set(tab.id, row);
+          resultsByKey.set(target.key, row);
           // Signature matching may fail during early page hydration; retry in next pass.
-          console.log('[reset-scan-start] Detection unresolved for tab (will retry)', {
+          console.log('[reset-scan-start] Detection unresolved for process (will retry)', {
             pass: passCount,
+            runId: row.runId || '',
             tabId: row.tabId,
             action: row.action,
             reason: row.reason,
@@ -2509,7 +2690,7 @@ async function runResetScanStartAllTabs(options = {}) {
           continue;
         }
 
-        matchedTabIds.add(tab.id);
+        matchedKeys.add(target.key);
         row.detectedPromptIndex = detection.index;
         row.detectedPromptNumber = detection.promptNumber;
         row.detectedStageName = detection.stageName;
@@ -2532,6 +2713,7 @@ async function runResetScanStartAllTabs(options = {}) {
           row.stageConsistency = Math.abs(delta) <= 1 ? 'ok' : 'drift';
         }
         console.log('[reset-scan-start] Detection resolved', {
+          runId: row.runId || '',
           tabId: row.tabId,
           detectedPromptIndex: row.detectedPromptIndex,
           detectedPromptNumber: row.detectedPromptNumber,
@@ -2547,25 +2729,13 @@ async function runResetScanStartAllTabs(options = {}) {
         if (!Number.isInteger(row.nextStartIndex)) {
           row.action = 'final_stage_already_sent';
           row.reason = 'already_at_last_stage';
-          resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
+          resultsByKey.set(target.key, row);
+          pendingKeys.delete(target.key);
           console.log('[reset-scan-start] Final stage already sent for tab', {
+            runId: row.runId || '',
             tabId: row.tabId,
             detectedPromptNumber: row.detectedPromptNumber,
             nextStartIndex: row.nextStartIndex
-          });
-          await sleep(250);
-          continue;
-        }
-
-        if (activeProcess) {
-          row.action = 'active_process_exists';
-          row.reason = 'active_process_on_tab';
-          resultsByTabId.set(tab.id, row);
-          pendingTabIds.delete(tab.id);
-          console.log('[reset-scan-start] Skip start due to active process', {
-            tabId: row.tabId,
-            reason: row.reason
           });
           await sleep(250);
           continue;
@@ -2575,9 +2745,10 @@ async function runResetScanStartAllTabs(options = {}) {
         row.reason = row.detectedHasAssistantReply === false
           ? 'retry_same_prompt_no_assistant_reply'
           : 'ready_to_start';
-        resultsByTabId.set(tab.id, row);
-        pendingTabIds.delete(tab.id);
-        console.log('[reset-scan-start] Tab queued for sequential start', {
+        resultsByKey.set(target.key, row);
+        pendingKeys.delete(target.key);
+        console.log('[reset-scan-start] Process queued for sequential start', {
+          runId: row.runId || '',
           tabId: row.tabId,
           nextStartIndex: row.nextStartIndex,
           startPromptNumber: row.nextStartIndex + 1,
@@ -2587,13 +2758,13 @@ async function runResetScanStartAllTabs(options = {}) {
       }
 
       if (
-        pendingTabIds.size > 0 &&
+        pendingKeys.size > 0 &&
         passCount < maxPasses &&
         (Date.now() - startedAt) < maxRuntimeMs
       ) {
         console.log('[reset-scan-start] Pass delay', {
           pass: passCount,
-          pending: pendingTabIds.size,
+          pending: pendingKeys.size,
           delayMs: passDelayMs
         });
         await sleep(passDelayMs);
@@ -2602,24 +2773,25 @@ async function runResetScanStartAllTabs(options = {}) {
 
     const runtimeLimitHit = (Date.now() - startedAt) >= maxRuntimeMs;
     const passLimitHit = passCount >= maxPasses;
-    if (pendingTabIds.size > 0) {
-      for (const tabId of pendingTabIds) {
-        const row = resultsByTabId.get(tabId);
+    if (pendingKeys.size > 0) {
+      for (const key of pendingKeys) {
+        const row = resultsByKey.get(key);
         if (!row) continue;
         const suffix = runtimeLimitHit
           ? 'runtime_limit_reached'
           : (passLimitHit ? 'pass_limit_reached' : 'retry_budget_exhausted');
         row.reason = row.reason ? `${row.reason}|${suffix}` : suffix;
         row.retryExhausted = true;
+        row.action = 'detect_failed';
+        resultsByKey.set(key, row);
       }
     }
 
     // Start phase: execute queued starts sequentially after full scan pass.
     // This avoids interleaving scan/start on the same pass and makes behavior deterministic.
-    const startQueue = chatTabs
-      .map((tab) => {
-        if (!Number.isInteger(tab?.id)) return null;
-        const row = resultsByTabId.get(tab.id);
+    const startQueue = scanTargets
+      .map((target) => {
+        const row = resultsByKey.get(target.key);
         if (!row || row.action !== 'ready_to_start') return null;
         return row;
       })
@@ -2627,6 +2799,7 @@ async function runResetScanStartAllTabs(options = {}) {
     console.log('[reset-scan-start] Start queue prepared', {
       queueSize: startQueue.length,
       queue: startQueue.map((row) => ({
+        runId: row.runId || '',
         tabId: row.tabId,
         windowId: row.windowId,
         nextStartIndex: row.nextStartIndex,
@@ -2640,7 +2813,8 @@ async function runResetScanStartAllTabs(options = {}) {
       if (!Number.isInteger(row.tabId) || !Number.isInteger(row.nextStartIndex)) continue;
 
       const autoStartTitle = `Auto Start: Prompt ${row.nextStartIndex + 1}`;
-      console.log('[reset-scan-start] Starting tab from queue', {
+      console.log('[reset-scan-start] Starting process from queue', {
+        runId: row.runId || '',
         tabId: row.tabId,
         windowId: row.windowId,
         nextStartIndex: row.nextStartIndex,
@@ -2648,50 +2822,55 @@ async function runResetScanStartAllTabs(options = {}) {
       });
       const startResult = await resumeFromStageOnTab(row.tabId, row.windowId, row.nextStartIndex, {
         processTitle: autoStartTitle,
-        detach: true
+        detach: true,
+        reloadBeforeResume: true
       });
 
       if (startResult.success) {
-        startedTabIds.add(row.tabId);
+        startedKeys.add(row.key);
         row.action = 'started';
         row.reason = startResult.detached ? 'start_dispatched' : 'start_started';
         console.log('[reset-scan-start] Start success', {
+          runId: row.runId || '',
           tabId: row.tabId,
           processId: startResult.processId || '',
           detached: !!startResult.detached,
           action: row.action
         });
       } else {
-        row.action = 'start_failed';
+        row.action = startResult?.error === 'reload_failed' ? 'reload_failed' : 'start_failed';
         row.reason = startResult.error || 'start_failed';
         console.warn('[reset-scan-start] Start failed', {
+          runId: row.runId || '',
           tabId: row.tabId,
           action: row.action,
           reason: row.reason
         });
       }
-      resultsByTabId.set(row.tabId, row);
+      resultsByKey.set(row.key, row);
       await sleep(250);
     }
 
-    const results = chatTabs.map((tab) => {
-      const row = Number.isInteger(tab?.id) ? resultsByTabId.get(tab.id) : null;
+    const results = orderedResultKeys.map((key) => {
+      const row = resultsByKey.get(key);
       if (row) return row;
       return {
-        tabId: Number.isInteger(tab?.id) ? tab.id : null,
-        windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
-        title: typeof tab?.title === 'string' ? tab.title : '',
-        url: typeof tab?.url === 'string' ? tab.url : '',
+        key,
+        runId: '',
+        tabId: null,
+        windowId: null,
+        title: '',
+        url: '',
         detectedPromptIndex: null,
         detectedPromptNumber: null,
         detectedStageName: null,
         nextStartIndex: null,
-        action: 'no_match',
+        action: 'detect_failed',
         reason: runtimeLimitHit ? 'runtime_limit_reached_before_processing' : 'not_processed'
       };
     });
 
-    const startedCount = startedTabIds.size;
+    const startedCount = startedKeys.size;
     const actionCounts = results.reduce((acc, row) => {
       const key = typeof row?.action === 'string' && row.action
         ? row.action
@@ -2699,42 +2878,66 @@ async function runResetScanStartAllTabs(options = {}) {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
+    const summary = {
+      started: actionCounts.started || 0,
+      detect_failed: actionCounts.detect_failed || 0,
+      reload_failed: actionCounts.reload_failed || 0,
+      skipped_non_company: actionCounts.skipped_non_company || 0,
+      skipped_outside_invest: actionCounts.skipped_outside_invest || 0
+    };
     console.log('[reset-scan-start] Summary', {
-      targetUrlPrefix: INVEST_GPT_URL_PREFIX,
+      scope,
       maxPasses,
       maxRuntimeMs,
       passCount,
-      pendingAfterLoop: pendingTabIds.size,
-      scannedTabs: chatTabs.length,
-      matchedTabs: matchedTabIds.size,
+      pendingAfterLoop: pendingKeys.size,
+      scannedTabs: scanTargets.length,
+      matchedTabs: matchedKeys.size,
       startedTabs: startedCount,
+      requestedProcesses: activeProcesses.length,
+      summary,
       actionCounts
     });
     results.forEach((item) => {
-      console.log('[reset-scan-start] Tab result', item);
+      console.log('[reset-scan-start] Process result', item);
     });
 
     return {
       success: true,
-      scannedTabs: chatTabs.length,
-      matchedTabs: matchedTabIds.size,
+      scope,
+      scannedTabs: scanTargets.length,
+      matchedTabs: matchedKeys.size,
       startedTabs: startedCount,
       // Legacy alias for compatibility.
       resumedTabs: startedCount,
+      requestedProcesses: activeProcesses.length,
+      eligibleProcesses: scanTargets.length,
       passCount,
       maxPasses,
       maxRuntimeMs,
-      pendingAfterLoop: pendingTabIds.size,
+      pendingAfterLoop: pendingKeys.size,
+      summary,
       resetSummary,
       results
     };
   } catch (error) {
+    const summary = {
+      started: 0,
+      detect_failed: 0,
+      reload_failed: 0,
+      skipped_non_company: 0,
+      skipped_outside_invest: 0
+    };
     return {
       success: false,
       scannedTabs: 0,
       matchedTabs: 0,
       startedTabs: 0,
       resumedTabs: 0,
+      requestedProcesses: 0,
+      eligibleProcesses: 0,
+      summary,
+      scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
       results: [],
       error: error?.message || String(error)
     };
@@ -3283,6 +3486,51 @@ async function prepareTabForDetection(tabId, windowId = null) {
   await waitForTabCompleteWithTimeout(tabId, 12000);
   await sleep(250);
   return true;
+}
+
+async function prepareTabForResume(tabId, windowId = null, options = {}) {
+  if (!Number.isInteger(tabId)) {
+    return { ok: false, reason: 'invalid_tab_id' };
+  }
+
+  const prepared = await prepareTabForDetection(tabId, windowId);
+  if (!prepared) {
+    return { ok: false, reason: 'prepare_detection_failed' };
+  }
+
+  const timeoutMs = Number.isInteger(options?.timeoutMs) && options.timeoutMs > 0
+    ? options.timeoutMs
+    : 15000;
+  const bypassCache = options?.bypassCache !== false;
+
+  const reloadResult = await forceReloadTab(tabId, {
+    timeoutMs,
+    bypassCache
+  });
+  if (!reloadResult?.ok) {
+    return {
+      ok: false,
+      reason: reloadResult?.reason || 'reload_failed',
+      error: reloadResult?.error || '',
+      reloadResult
+    };
+  }
+
+  const completed = await waitForTabCompleteWithTimeout(tabId, timeoutMs);
+  if (!completed) {
+    return {
+      ok: false,
+      reason: 'reload_complete_timeout',
+      reloadResult
+    };
+  }
+
+  await sleep(250);
+  return {
+    ok: true,
+    reason: 'prepared',
+    reloadResult
+  };
 }
 
 function normalizeSignatureText(text) {
@@ -4126,7 +4374,13 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
     : [];
   const autoCloseMs = Number.isInteger(options?.autoCloseMs)
     ? Math.max(0, Math.min(options.autoCloseMs, 60000))
-    : 10000;
+    : 0;
+  const currentPrompt = Number.isInteger(options?.currentPrompt) && options.currentPrompt >= 0
+    ? options.currentPrompt
+    : null;
+  const totalPrompts = Number.isInteger(options?.totalPrompts) && options.totalPrompts >= 0
+    ? options.totalPrompts
+    : null;
 
   try {
     await chrome.scripting.executeScript({
@@ -4146,6 +4400,81 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
           });
         }
 
+        const normalizeTone = (value = '') => {
+          if (value === 'success' || value === 'warn' || value === 'error') return value;
+          return 'neutral';
+        };
+
+        const toneToDotColor = (value = 'neutral') => {
+          if (value === 'success') return '#22c55e';
+          if (value === 'warn') return '#f59e0b';
+          if (value === 'error') return '#ef4444';
+          return 'rgba(255,255,255,0.85)';
+        };
+
+        const ensureMiniStage = () => {
+          const header = counter.firstElementChild;
+          if (!header) return null;
+
+          let miniStage = header.querySelector('#economist-counter-mini-stage');
+          if (miniStage) return miniStage;
+
+          miniStage = document.createElement('div');
+          miniStage.id = 'economist-counter-mini-stage';
+    miniStage.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-left: 8px;
+      margin-right: auto;
+      min-width: 72px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.26);
+      background: rgba(15,23,42,0.22);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      opacity: 0.98;
+      white-space: nowrap;
+    `;
+
+          const dot = document.createElement('span');
+          dot.className = 'economist-counter-mini-dot';
+    dot.style.cssText = `
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      display: inline-block;
+      background: rgba(255,255,255,0.85);
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 1px rgba(15,23,42,0.25);
+    `;
+
+          const label = document.createElement('span');
+          label.className = 'economist-counter-mini-label';
+          label.textContent = 'P0/0';
+    label.style.cssText = `
+      letter-spacing: 0.01em;
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-variant-numeric: tabular-nums;
+    `;
+
+          miniStage.appendChild(dot);
+          miniStage.appendChild(label);
+
+          const controls = header.querySelector('#economist-counter-controls');
+          if (controls) {
+            header.insertBefore(miniStage, controls);
+          } else {
+            header.appendChild(miniStage);
+          }
+
+          return miniStage;
+        };
+
         let content = counter.querySelector('#economist-counter-content');
         if (!content) {
           content = document.createElement('div');
@@ -4156,6 +4485,17 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
         const header = counter.firstElementChild;
         if (header && header.style) {
           header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
+        }
+
+        const minimizeBtn = counter.querySelector('#economist-counter-minimize');
+        if (minimizeBtn) {
+          minimizeBtn.textContent = '-';
+        }
+
+        try {
+          localStorage.setItem('economist-counter-minimized', 'false');
+        } catch (_) {
+          // ignore localStorage failures
         }
 
         content.style.display = 'block';
@@ -4192,12 +4532,48 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
           content.appendChild(row);
         });
 
+        const datasetCurrent = Number.parseInt(counter.dataset.economistCurrent || '', 10);
+        const datasetTotal = Number.parseInt(counter.dataset.economistTotal || '', 10);
+        const safeCurrentRaw = Number.isInteger(payload.currentPrompt)
+          ? payload.currentPrompt
+          : (Number.isInteger(datasetCurrent) ? datasetCurrent : 0);
+        const safeTotalRaw = Number.isInteger(payload.totalPrompts)
+          ? payload.totalPrompts
+          : (Number.isInteger(datasetTotal) ? datasetTotal : 0);
+        const safeTotal = safeTotalRaw > 0 ? safeTotalRaw : 0;
+        const boundedCurrent = safeTotal > 0
+          ? Math.min(Math.max(safeCurrentRaw, 0), safeTotal)
+          : Math.max(safeCurrentRaw, 0);
+        const miniTone = normalizeTone(payload.tone || counter.dataset.economistMiniTone || 'neutral');
+        const progressText = safeTotal > 0
+          ? `P${boundedCurrent}/${safeTotal}`
+          : `P${boundedCurrent}/0`;
+
+        const miniStage = ensureMiniStage();
+        if (miniStage) {
+          const dot = miniStage.querySelector('.economist-counter-mini-dot');
+          const label = miniStage.querySelector('.economist-counter-mini-label');
+          if (dot) {
+            dot.style.background = toneToDotColor(miniTone);
+          }
+          if (label) {
+            label.textContent = progressText;
+          } else {
+            miniStage.textContent = progressText;
+          }
+        }
+
+        counter.dataset.economistCurrent = String(boundedCurrent);
+        counter.dataset.economistTotal = String(safeTotal);
+        counter.dataset.economistMiniTone = miniTone;
+
         const existingTimerId = Number.parseInt(counter.dataset.economistCloseTimerId || '', 10);
         if (Number.isInteger(existingTimerId)) {
           clearTimeout(existingTimerId);
+          delete counter.dataset.economistCloseTimerId;
         }
 
-        if (Number.isInteger(payload.autoCloseMs) && payload.autoCloseMs >= 0) {
+        if (Number.isInteger(payload.autoCloseMs) && payload.autoCloseMs > 0) {
           const timerId = window.setTimeout(() => {
             const activeCounters = Array.from(document.querySelectorAll('#economist-prompt-counter'));
             activeCounters.forEach((node) => {
@@ -4217,7 +4593,9 @@ async function renderFinalCounterStatusOnTab(tabId, options = {}) {
         heading,
         tone,
         lines,
-        autoCloseMs
+        autoCloseMs,
+        currentPrompt,
+        totalPrompts
       }]
     });
   } catch (error) {
@@ -5431,40 +5809,36 @@ async function runAutoRestoreWindowsCycle(options = {}) {
   }
 }
 
-// Funkcja wczytująca prompty z plików txt
+// Load prompts from txt files.
 async function loadPrompts() {
   try {
-    console.log("📝 Wczytuję prompty z plików...");
-    
-    // Wczytaj prompts-company.txt
+    console.log('[prompts] Loading prompts from files...');
+
     const companyUrl = chrome.runtime.getURL('prompts-company.txt');
     const companyResponse = await fetch(companyUrl);
     const companyText = await companyResponse.text();
-    
-    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
+
+    // Parse by PROMPT_SEPARATOR token in an encoding-safe way.
     PROMPTS_COMPANY = companyText
-      .split('◄PROMPT_SEPARATOR►')
-      .map(p => p.trim())
-      .filter(p => p.length > 0);
-    
-    console.log(`✅ Wczytano ${PROMPTS_COMPANY.length} promptów dla analizy spółki`);
-    
-    // Wczytaj prompts-portfolio.txt
+      .split(/\W+PROMPT_SEPARATOR\W+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
+    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}`);
+
     const portfolioUrl = chrome.runtime.getURL('prompts-portfolio.txt');
     const portfolioResponse = await fetch(portfolioUrl);
     const portfolioText = await portfolioResponse.text();
-    
-    // Parsuj prompty (oddzielone ◄PROMPT_SEPARATOR►)
+
+    // Parse by PROMPT_SEPARATOR token in an encoding-safe way.
     PROMPTS_PORTFOLIO = portfolioText
-      .split('◄PROMPT_SEPARATOR►')
-      .map(p => p.trim())
-      .filter(p => p.length > 0);
-    
-    console.log(`✅ Wczytano ${PROMPTS_PORTFOLIO.length} promptów dla analizy portfela`);
-    
+      .split(/\W+PROMPT_SEPARATOR\W+/)
+      .map((p) => p.trim())
+      .filter((p) => p.length > 0);
+
+    console.log(`[prompts] Loaded portfolio prompts: ${PROMPTS_PORTFOLIO.length}`);
   } catch (error) {
-    console.error('❌ Błąd wczytywania promptów:', error);
-    // Ustaw puste tablice jako fallback
+    console.error('[prompts] Failed loading prompts:', error);
     PROMPTS_COMPANY = [];
     PROMPTS_PORTFOLIO = [];
   }
@@ -5487,6 +5861,8 @@ flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
 // Obsługiwane źródła artykułów
 const SUPPORTED_SOURCES = [
   { pattern: "https://*.economist.com/*", name: "The Economist" },
+  { pattern: "https://epoch.ai/*", name: "Epoch AI" },
+  { pattern: "https://*.epoch.ai/*", name: "Epoch AI" },
   { pattern: "https://asia.nikkei.com/*", name: "Nikkei Asia" },
   { pattern: "https://*.caixinglobal.com/*", name: "Caixin Global" },
   { pattern: "https://*.theafricareport.com/*", name: "The Africa Report" },
@@ -5513,7 +5889,7 @@ function getSupportedSourcesQuery() {
 chrome.runtime.onInstalled.addListener(() => {
   chrome.contextMenus.create({
     id: "view-responses",
-    title: "Pokaż zebrane odpowiedzi",
+    title: "Pokaz zebrane odpowiedzi",
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
@@ -6126,8 +6502,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   } else if (message.type === 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME') {
+    const resumeScope = typeof message?.scope === 'string' && message.scope.trim()
+      ? message.scope.trim()
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
     runResetScanStartAllTabs({
-      origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+      origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+      scope: resumeScope
     })
       .then((result) => sendResponse(result))
       .catch((error) => {
@@ -6138,6 +6518,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           matchedTabs: 0,
           startedTabs: 0,
           resumedTabs: 0,
+          scope: resumeScope,
+          summary: {
+            started: 0,
+            detect_failed: 0,
+            reload_failed: 0,
+            skipped_non_company: 0,
+            skipped_outside_invest: 0
+          },
           resetSummary: null,
           results: [],
           error: error?.message || String(error)
@@ -6181,10 +6569,17 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'RESUME_STAGE_START') {
     // Uruchom analizę od konkretnego etapu
     console.log('📩 Otrzymano RESUME_STAGE_START:', { startIndex: message.startIndex });
-    const resumeOptions = {};
+    const reloadBeforeResume = message?.reloadBeforeResume !== false;
+    const resumeOptions = {
+      reloadBeforeResume
+    };
     if (typeof message?.title === 'string' && message.title.trim()) {
       resumeOptions.processTitle = message.title.trim();
     }
+    console.log('[resume] RESUME_STAGE_START options', {
+      startIndex: message.startIndex,
+      reloadBeforeResume
+    });
     resumeFromStage(message.startIndex, resumeOptions)
       .then((result) => sendResponse(result || { success: false, error: 'resume_result_missing' }))
       .catch((error) => {
@@ -6277,9 +6672,11 @@ async function resumeFromStage(startIndex, options = {}) {
     const processTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
       ? options.processTitle.trim()
       : `Resume from Stage ${startIndex + 1}`;
+    const reloadBeforeResume = options?.reloadBeforeResume !== false;
 
     const resumed = await resumeFromStageOnTab(activeTab.id, activeTab.windowId, startIndex, {
-      processTitle
+      processTitle,
+      reloadBeforeResume
     });
 
     if (!resumed?.success) {
@@ -6291,6 +6688,8 @@ async function resumeFromStage(startIndex, options = {}) {
           notifyAlert('Blad: Nieprawidlowy indeks etapu.');
         } else if (errorCode === 'tab_not_chatgpt') {
           notifyAlert('Blad: Docelowa karta nie jest ChatGPT.');
+        } else if (errorCode === 'reload_failed') {
+          notifyAlert('Blad: Nie udalo sie przeladowac karty przed wznowieniem.');
         } else {
           notifyAlert('Blad wznowienia procesu.');
         }
@@ -7433,7 +7832,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           heading: persistenceSummary.saveOk ? 'Zakonczono' : 'Zakonczono (blad zapisu)',
           tone: persistenceSummary.tone,
           lines: persistenceSummary.logLines,
-          autoCloseMs: persistenceSummary.saveOk ? 10000 : 14000
+          autoCloseMs: 0
         });
         
         console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
@@ -7464,7 +7863,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           heading: 'Zakonczono (pusta odpowiedz)',
           tone: persistenceSummary.tone,
           lines: persistenceSummary.logLines,
-          autoCloseMs: 10000
+          autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
@@ -7482,7 +7881,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           heading: 'Blad procesu',
           tone: 'error',
           lines: [`Powod: ${finalError || finalReason}`],
-          autoCloseMs: 14000
+          autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
       } else {
@@ -7497,7 +7896,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           heading: 'Blad procesu',
           tone: 'error',
           lines: ['Powod: invalid_result'],
-          autoCloseMs: 14000
+          autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
       }
@@ -7767,7 +8166,12 @@ function normalizeManualPdfFiles(rawFiles) {
     .filter((item) => item && typeof item === 'object')
     .map((item, index) => {
       const token = typeof item.token === 'string' ? item.token.trim() : '';
-      const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : `source-${index + 1}.pdf`;
+      const rawName = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : `source-${index + 1}`;
+      const loweredMimeType = typeof item.mimeType === 'string' ? item.mimeType.trim().toLowerCase() : '';
+      const isPdfByMime = loweredMimeType === 'application/pdf' || loweredMimeType === 'application/x-pdf';
+      const isPdfByName = rawName.toLowerCase().endsWith('.pdf');
+      const isPdf = isPdfByMime || isPdfByName;
+      const name = isPdfByName ? rawName : `${rawName}.pdf`;
       const size = Number.isFinite(item.size) ? Math.max(0, Math.floor(item.size)) : 0;
       const mimeType = 'application/pdf';
       const lastModified = Number.isInteger(item.lastModified) ? item.lastModified : Date.now();
@@ -7776,10 +8180,18 @@ function normalizeManualPdfFiles(rawFiles) {
         name,
         size,
         mimeType,
-        lastModified
+        lastModified,
+        isPdf
       };
     })
-    .filter((item) => item.token && item.name.toLowerCase().endsWith('.pdf'));
+    .filter((item) => item.token && item.isPdf)
+    .map(({ token, name, size, mimeType, lastModified }) => ({
+      token,
+      name,
+      size,
+      mimeType,
+      lastModified
+    }));
 }
 
 async function sendManualPdfProviderMessage(payload, timeoutMs = MANUAL_PDF_PROVIDER_TIMEOUT_MS) {
@@ -8395,6 +8807,15 @@ async function extractText() {
       '.content-body',
       'main'
     ],
+    'epoch.ai': [
+      'article',
+      'main article',
+      '[data-mdx-content]',
+      '[class*="article-content"]',
+      '[class*="post-content"]',
+      '[class*="prose"]',
+      'main'
+    ],
     'open.spotify.com': [
       '[data-testid*="transcript" i]',
       '[aria-label*="transcript" i]',
@@ -8421,26 +8842,61 @@ async function extractText() {
   const universalSelectors = [
     'main article',
     'main',
+    '[role="main"]',
     '.article-content',
+    '[class*="article-content"]',
+    '[class*="post-content"]',
+    '[class*="prose"]',
+    '[data-mdx-content]',
     '#content'
   ];
   selectorsToTry = [...selectorsToTry, ...universalSelectors];
   
   // Próbuj ekstrahować tekst
+  const minTextLength = 100;
   for (const selector of selectorsToTry) {
-    const element = document.querySelector(selector);
-    if (element) {
-      const text = element.innerText || element.textContent;
-      if (text && text.length > 100) {
-        console.log(`Znaleziono tekst przez selector: ${selector}, długość: ${text.length}`);
-        return text;
+    let elements = [];
+    try {
+      elements = Array.from(document.querySelectorAll(selector));
+    } catch (_) {
+      // Ignore invalid selector and continue.
+      continue;
+    }
+
+    let bestText = '';
+    for (const element of elements) {
+      const text = normalizeText(element.innerText || element.textContent || '');
+      if (text.length > bestText.length) {
+        bestText = text;
+      }
+    }
+
+    if (bestText.length > minTextLength) {
+      console.log(`Found text via selector: ${selector}, length: ${bestText.length}`);
+      return bestText;
+    }
+  }
+
+  // Broad fallback: pick the largest text block from common containers.
+  const broadFallbackSelectors = ['article', 'main', '[role="main"]'];
+  let broadBestText = '';
+  for (const selector of broadFallbackSelectors) {
+    const elements = Array.from(document.querySelectorAll(selector));
+    for (const element of elements) {
+      const text = normalizeText(element.innerText || element.textContent || '');
+      if (text.length > broadBestText.length) {
+        broadBestText = text;
       }
     }
   }
-  
-  // Fallback: cała strona
-  const bodyText = document.body.innerText || document.body.textContent;
-  console.log(`Fallback do body, długość: ${bodyText.length}`);
+  if (broadBestText.length > minTextLength) {
+    console.log(`Fallback container extraction length: ${broadBestText.length}`);
+    return broadBestText;
+  }
+
+  // Final fallback: full body.
+  const bodyText = normalizeText(document.body.innerText || document.body.textContent || '');
+  console.log(`Fallback to body, length: ${bodyText.length}`);
   return bodyText;
 }
 
@@ -8759,6 +9215,11 @@ async function injectToChat(
     const MANUAL_PDF_ATTACH_MAX_ATTEMPTS = 2;
     const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
     const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
+    // Limit "wait for ready" to a short window so resume/start cannot freeze for hours.
+    const INTERFACE_READY_MAX_WAIT_MS = 3 * 60 * 1000;
+    const interfaceReadyWaitMs = Number.isFinite(responseWaitMs) && responseWaitMs > 0
+      ? Math.max(15000, Math.min(responseWaitMs, INTERFACE_READY_MAX_WAIT_MS))
+      : INTERFACE_READY_MAX_WAIT_MS;
     const manualPdfAttachment = (() => {
       const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
         ? manualPdfAttachmentContext
@@ -9522,9 +9983,152 @@ async function injectToChat(
   }
     
   // Funkcja tworząca licznik promptów
+  function getCounterMiniToneFromStatus(status = '') {
+    const normalized = String(status || '').toLowerCase().trim();
+    if (!normalized) return 'neutral';
+
+    if (
+      normalized.includes('wymaga decyzji')
+      || normalized.includes('wymaga akcji')
+      || normalized.includes('needs action')
+      || normalized.includes('decision')
+    ) {
+      return 'warn';
+    }
+
+    if (
+      normalized.includes('blad')
+      || normalized.includes('błąd')
+      || normalized.includes('error')
+      || normalized.includes('failed')
+      || normalized.includes('timeout')
+      || normalized.includes('nie gotowy')
+      || normalized.includes('krytyczny')
+    ) {
+      return 'error';
+    }
+
+    if (
+      normalized.includes('zakoncz')
+      || normalized.includes('zakończ')
+      || normalized.includes('completed')
+      || normalized.includes('gotowe')
+      || normalized.includes('saved')
+      || normalized.includes('zapis')
+    ) {
+      return 'success';
+    }
+
+    return 'neutral';
+  }
+
+  function getCounterMiniDotColor(tone = 'neutral') {
+    if (tone === 'success') return '#22c55e';
+    if (tone === 'warn') return '#f59e0b';
+    if (tone === 'error') return '#ef4444';
+    return 'rgba(255,255,255,0.85)';
+  }
+
+  function ensureCounterMiniStageElement(counter) {
+    if (!counter) return null;
+    const header = counter.firstElementChild;
+    if (!header) return null;
+
+    let miniStage = header.querySelector('#economist-counter-mini-stage');
+    if (miniStage) return miniStage;
+
+    miniStage = document.createElement('div');
+    miniStage.id = 'economist-counter-mini-stage';
+    miniStage.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-left: 8px;
+      margin-right: auto;
+      min-width: 72px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.26);
+      background: rgba(15,23,42,0.22);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      opacity: 0.98;
+      white-space: nowrap;
+    `;
+
+    const dot = document.createElement('span');
+    dot.className = 'economist-counter-mini-dot';
+    dot.style.cssText = `
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      display: inline-block;
+      background: rgba(255,255,255,0.85);
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 1px rgba(15,23,42,0.25);
+    `;
+
+    const label = document.createElement('span');
+    label.className = 'economist-counter-mini-label';
+    label.textContent = 'P0/0';
+    label.style.cssText = `
+      letter-spacing: 0.01em;
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-variant-numeric: tabular-nums;
+    `;
+
+    miniStage.appendChild(dot);
+    miniStage.appendChild(label);
+
+    const controls = header.querySelector('#economist-counter-controls');
+    if (controls) {
+      header.insertBefore(miniStage, controls);
+    } else {
+      header.appendChild(miniStage);
+    }
+
+    return miniStage;
+  }
+
+  function setCounterMiniStage(counter, current, total, tone = 'neutral') {
+    if (!counter) return;
+    const miniStage = ensureCounterMiniStageElement(counter);
+    if (!miniStage) return;
+
+    const safeTotal = Number.isInteger(total) && total > 0 ? total : 0;
+    const safeCurrentRaw = Number.isInteger(current) ? current : 0;
+    const boundedCurrent = safeTotal > 0
+      ? Math.min(Math.max(safeCurrentRaw, 0), safeTotal)
+      : Math.max(safeCurrentRaw, 0);
+    const progressText = safeTotal > 0
+      ? `P${boundedCurrent}/${safeTotal}`
+      : `P${boundedCurrent}/0`;
+
+    const dot = miniStage.querySelector('.economist-counter-mini-dot');
+    const label = miniStage.querySelector('.economist-counter-mini-label');
+
+    if (dot) {
+      dot.style.background = getCounterMiniDotColor(tone);
+    }
+
+    if (label) {
+      label.textContent = progressText;
+    } else {
+      miniStage.textContent = progressText;
+    }
+  }
+
+  // Funkcja tworzaca licznik promptow
   function createCounter() {
     const existingCounters = Array.from(document.querySelectorAll('#economist-prompt-counter'));
     existingCounters.forEach((node) => {
+      const timerId = Number.parseInt(node?.dataset?.economistCloseTimerId || '', 10);
+      if (Number.isInteger(timerId)) {
+        clearTimeout(timerId);
+      }
       try {
         node.remove();
       } catch (_) {
@@ -9534,11 +10138,33 @@ async function injectToChat(
 
     const counter = document.createElement('div');
     counter.id = 'economist-prompt-counter';
-    
-    // Pobierz zapisaną pozycję i stan z localStorage
-    const savedPosition = JSON.parse(localStorage.getItem('economist-counter-position') || '{"top": "20px", "right": "20px"}');
+
+    let savedPosition = { top: '20px', right: '20px', left: '' };
+    try {
+      const rawSaved = JSON.parse(localStorage.getItem('economist-counter-position') || '{}');
+      if (rawSaved && typeof rawSaved === 'object') {
+        savedPosition = {
+          top: typeof rawSaved.top === 'string' && rawSaved.top.trim()
+            ? rawSaved.top.trim()
+            : '20px',
+          left: typeof rawSaved.left === 'string' && rawSaved.left.trim()
+            ? rawSaved.left.trim()
+            : '',
+          right: typeof rawSaved.right === 'string' && rawSaved.right.trim()
+            ? rawSaved.right.trim()
+            : ''
+        };
+      }
+    } catch (_) {
+      savedPosition = { top: '20px', right: '20px', left: '' };
+    }
+    if (!savedPosition.left && !savedPosition.right) {
+      savedPosition.right = '20px';
+    }
     const isMinimized = localStorage.getItem('economist-counter-minimized') === 'true';
-    
+    const expandedMinWidthPx = 220;
+    const minimizedMinWidthPx = 140;
+
     counter.style.cssText = `
       position: fixed;
       top: ${savedPosition.top};
@@ -9552,52 +10178,130 @@ async function injectToChat(
       font-weight: 600;
       box-shadow: 0 4px 12px rgba(0, 0, 0, 0.15);
       z-index: 10000;
-      min-width: ${isMinimized ? '60px' : '200px'};
+      min-width: ${isMinimized ? `${minimizedMinWidthPx}px` : `${expandedMinWidthPx}px`};
       cursor: ${isMinimized ? 'pointer' : 'default'};
       transition: all 0.3s ease;
     `;
-    
-    // Utwórz kontener nagłówka (dla przeciągania)
+
     const header = document.createElement('div');
     header.style.cssText = `
       padding: 8px 12px;
       cursor: move;
       display: flex;
-      justify-content: space-between;
       align-items: center;
+      gap: 8px;
       border-bottom: ${isMinimized ? 'none' : '1px solid rgba(255,255,255,0.3)'};
       user-select: none;
     `;
-    
+
     const dragHandle = document.createElement('span');
-    dragHandle.textContent = '⋮⋮';
-    dragHandle.style.cssText = 'opacity: 0.7; font-size: 16px;';
-    
+    dragHandle.textContent = '::';
+    dragHandle.style.cssText = 'opacity: 0.7; font-size: 14px; line-height: 1;';
+
+    const miniStage = document.createElement('div');
+    miniStage.id = 'economist-counter-mini-stage';
+    miniStage.style.cssText = `
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      gap: 6px;
+      margin-left: 2px;
+      margin-right: auto;
+      min-width: 72px;
+      padding: 2px 8px;
+      border-radius: 999px;
+      border: 1px solid rgba(255,255,255,0.26);
+      background: rgba(15,23,42,0.22);
+      font-size: 11px;
+      font-weight: 700;
+      line-height: 1;
+      opacity: 0.98;
+      white-space: nowrap;
+    `;
+    const miniDot = document.createElement('span');
+    miniDot.className = 'economist-counter-mini-dot';
+    miniDot.style.cssText = `
+      width: 7px;
+      height: 7px;
+      border-radius: 999px;
+      display: inline-block;
+      background: rgba(255,255,255,0.85);
+      flex: 0 0 auto;
+      box-shadow: 0 0 0 1px rgba(15,23,42,0.25);
+    `;
+    const miniLabel = document.createElement('span');
+    miniLabel.className = 'economist-counter-mini-label';
+    miniLabel.textContent = 'P0/0';
+    miniLabel.style.cssText = `
+      letter-spacing: 0.01em;
+      font-size: 11px;
+      font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace;
+      font-variant-numeric: tabular-nums;
+    `;
+    miniStage.appendChild(miniDot);
+    miniStage.appendChild(miniLabel);
+
+    const controls = document.createElement('div');
+    controls.id = 'economist-counter-controls';
+    controls.style.cssText = `
+      display: inline-flex;
+      align-items: center;
+      gap: 4px;
+      margin-left: 2px;
+    `;
+
     const minimizeBtn = document.createElement('button');
-    minimizeBtn.textContent = isMinimized ? '□' : '−';
+    minimizeBtn.id = 'economist-counter-minimize';
+    minimizeBtn.textContent = isMinimized ? '+' : '-';
     minimizeBtn.style.cssText = `
       background: none;
       border: none;
       color: white;
-      font-size: 18px;
+      font-size: 17px;
+      line-height: 1;
       cursor: pointer;
       padding: 0;
-      width: 20px;
-      height: 20px;
+      width: 18px;
+      height: 18px;
       display: flex;
       align-items: center;
       justify-content: center;
-      opacity: 0.7;
+      opacity: 0.75;
       transition: opacity 0.2s;
     `;
-    minimizeBtn.onmouseover = () => minimizeBtn.style.opacity = '1';
-    minimizeBtn.onmouseout = () => minimizeBtn.style.opacity = '0.7';
-    
+    minimizeBtn.onmouseover = () => { minimizeBtn.style.opacity = '1'; };
+    minimizeBtn.onmouseout = () => { minimizeBtn.style.opacity = '0.75'; };
+
+    const closeBtn = document.createElement('button');
+    closeBtn.id = 'economist-counter-close';
+    closeBtn.textContent = 'x';
+    closeBtn.style.cssText = `
+      background: none;
+      border: none;
+      color: white;
+      font-size: 13px;
+      line-height: 1;
+      cursor: pointer;
+      padding: 0;
+      width: 18px;
+      height: 18px;
+      display: flex;
+      align-items: center;
+      justify-content: center;
+      opacity: 0.75;
+      transition: opacity 0.2s;
+    `;
+    closeBtn.onmouseover = () => { closeBtn.style.opacity = '1'; };
+    closeBtn.onmouseout = () => { closeBtn.style.opacity = '0.75'; };
+
+    controls.appendChild(minimizeBtn);
+    controls.appendChild(closeBtn);
+
     header.appendChild(dragHandle);
-    header.appendChild(minimizeBtn);
+    header.appendChild(miniStage);
+    header.appendChild(controls);
     counter.appendChild(header);
-    
-    // Utwórz kontener zawartości
+
     const content = document.createElement('div');
     content.id = 'economist-counter-content';
     content.style.cssText = `
@@ -9606,89 +10310,135 @@ async function injectToChat(
       display: ${isMinimized ? 'none' : 'block'};
     `;
     counter.appendChild(content);
-    
-    // Obsługa minimalizacji
-    minimizeBtn.addEventListener('click', (e) => {
-      e.stopPropagation();
-      const isCurrentlyMinimized = content.style.display === 'none';
-      
-      if (isCurrentlyMinimized) {
-        content.style.display = 'block';
-        counter.style.minWidth = '200px';
-        counter.style.cursor = 'default';
-        header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
-        content.style.padding = '8px 24px 16px 24px';
-        minimizeBtn.textContent = '−';
-        localStorage.setItem('economist-counter-minimized', 'false');
-      } else {
+
+    const applyMinimizedState = (nextMinimized) => {
+      if (nextMinimized) {
+        header.style.padding = '8px 10px';
         content.style.display = 'none';
-        counter.style.minWidth = '60px';
+        content.style.padding = '0';
+        counter.style.minWidth = `${minimizedMinWidthPx}px`;
         counter.style.cursor = 'pointer';
         header.style.borderBottom = 'none';
-        content.style.padding = '0';
-        minimizeBtn.textContent = '□';
+        minimizeBtn.textContent = '+';
         localStorage.setItem('economist-counter-minimized', 'true');
+      } else {
+        header.style.padding = '8px 12px';
+        content.style.display = 'block';
+        content.style.padding = '8px 24px 16px 24px';
+        counter.style.minWidth = `${expandedMinWidthPx}px`;
+        counter.style.cursor = 'default';
+        header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
+        minimizeBtn.textContent = '-';
+        localStorage.setItem('economist-counter-minimized', 'false');
       }
+    };
+
+    applyMinimizedState(isMinimized);
+
+    minimizeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const isCurrentlyMinimized = content.style.display === 'none';
+      applyMinimizedState(!isCurrentlyMinimized);
     });
-    
-    // Obsługa przeciągania
+
+    closeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      const timerId = Number.parseInt(counter.dataset.economistCloseTimerId || '', 10);
+      if (Number.isInteger(timerId)) {
+        clearTimeout(timerId);
+      }
+      counter.remove();
+    });
+
     let isDragging = false;
-    let startX, startY, startLeft, startTop;
-    
-    header.addEventListener('mousedown', (e) => {
-      if (e.target === minimizeBtn) return;
+    let startX = 0;
+    let startY = 0;
+    let startLeft = 0;
+    let startTop = 0;
+
+    header.addEventListener('mousedown', (event) => {
+      if (controls.contains(event.target)) return;
       isDragging = true;
-      startX = e.clientX;
-      startY = e.clientY;
-      
+      startX = event.clientX;
+      startY = event.clientY;
+
       const rect = counter.getBoundingClientRect();
       startLeft = rect.left;
       startTop = rect.top;
-      
+
       counter.style.transition = 'none';
-      e.preventDefault();
+      event.preventDefault();
     });
-    
-    document.addEventListener('mousemove', (e) => {
+
+    document.addEventListener('mousemove', (event) => {
       if (!isDragging) return;
-      
-      const deltaX = e.clientX - startX;
-      const deltaY = e.clientY - startY;
-      
-      const newLeft = startLeft + deltaX;
-      const newTop = startTop + deltaY;
-      
-      counter.style.left = `${newLeft}px`;
+
+      const deltaX = event.clientX - startX;
+      const deltaY = event.clientY - startY;
+      counter.style.left = `${startLeft + deltaX}px`;
       counter.style.right = 'auto';
-      counter.style.top = `${newTop}px`;
+      counter.style.top = `${startTop + deltaY}px`;
     });
-    
+
     document.addEventListener('mouseup', () => {
-      if (isDragging) {
-        isDragging = false;
-        counter.style.transition = 'all 0.3s ease';
-        
-        // Zapisz pozycję do localStorage
-        const position = {
-          top: counter.style.top,
-          left: counter.style.left
-        };
-        localStorage.setItem('economist-counter-position', JSON.stringify(position));
-      }
+      if (!isDragging) return;
+      isDragging = false;
+      counter.style.transition = 'all 0.3s ease';
+      const position = {
+        top: counter.style.top,
+        left: counter.style.left
+      };
+      localStorage.setItem('economist-counter-position', JSON.stringify(position));
     });
-    
-    // Kliknięcie w zminimalizowany licznik rozwinięć
-    counter.addEventListener('click', () => {
-      if (content.style.display === 'none') {
-        minimizeBtn.click();
-      }
+
+    counter.addEventListener('click', (event) => {
+      if (content.style.display !== 'none') return;
+      if (controls.contains(event.target)) return;
+      minimizeBtn.click();
     });
-    
+
     document.body.appendChild(counter);
+
+    const ensureCounterVisibleOnScreen = () => {
+      if (!counter || !counter.isConnected) return;
+      const rect = counter.getBoundingClientRect();
+      if (!Number.isFinite(rect.left) || !Number.isFinite(rect.top)) {
+        counter.style.top = '20px';
+        counter.style.right = '20px';
+        counter.style.left = 'auto';
+        localStorage.setItem('economist-counter-position', JSON.stringify({
+          top: '20px',
+          right: '20px'
+        }));
+        return;
+      }
+
+      const marginPx = 8;
+      const viewportWidth = Math.max(document.documentElement?.clientWidth || 0, window.innerWidth || 0);
+      const viewportHeight = Math.max(document.documentElement?.clientHeight || 0, window.innerHeight || 0);
+      if (viewportWidth <= 0 || viewportHeight <= 0) return;
+
+      const maxLeft = Math.max(marginPx, viewportWidth - rect.width - marginPx);
+      const maxTop = Math.max(marginPx, viewportHeight - rect.height - marginPx);
+      const clampedLeft = Math.min(Math.max(rect.left, marginPx), maxLeft);
+      const clampedTop = Math.min(Math.max(rect.top, marginPx), maxTop);
+      const moved = Math.abs(clampedLeft - rect.left) > 1 || Math.abs(clampedTop - rect.top) > 1;
+
+      if (!moved) return;
+      counter.style.left = `${Math.round(clampedLeft)}px`;
+      counter.style.right = 'auto';
+      counter.style.top = `${Math.round(clampedTop)}px`;
+      localStorage.setItem('economist-counter-position', JSON.stringify({
+        top: counter.style.top,
+        left: counter.style.left
+      }));
+    };
+    ensureCounterVisibleOnScreen();
+    setCounterMiniStage(counter, 0, 0, 'neutral');
     return counter;
   }
-  
-  // Funkcja aktualizująca licznik
+
+  // Funkcja aktualizujaca licznik
   function updateCounter(counter, current, total, status = '') {
     const activeCounter = (counter && counter.isConnected)
       ? counter
@@ -9705,6 +10455,12 @@ async function injectToChat(
     if (!content) return;
 
     const summary = buildCounterSummary(current, total, status);
+    const miniTone = getCounterMiniToneFromStatus(summary.status);
+    setCounterMiniStage(activeCounter, summary.boundedCurrent, summary.safeTotal, miniTone);
+    activeCounter.dataset.economistCurrent = String(summary.boundedCurrent);
+    activeCounter.dataset.economistTotal = String(summary.safeTotal);
+    activeCounter.dataset.economistMiniTone = miniTone;
+
     const safeStatus = String(summary.status || '')
       .replace(/&/g, '&amp;')
       .replace(/</g, '&lt;')
@@ -9747,31 +10503,57 @@ async function injectToChat(
       <div style="font-size: 12px; opacity: 0.95;">${safeStatus}</div>
     `;
   }
-  
-  // Funkcja usuwająca licznik
+
+  // Funkcja usuwajaca licznik
   function removeCounter(counter, success = true) {
     const activeCounter = (counter && counter.isConnected)
       ? counter
       : Array.from(document.querySelectorAll('#economist-prompt-counter')).pop();
     if (!activeCounter) return;
+
+    const existingTimerId = Number.parseInt(activeCounter.dataset.economistCloseTimerId || '', 10);
+    if (Number.isInteger(existingTimerId)) {
+      clearTimeout(existingTimerId);
+      delete activeCounter.dataset.economistCloseTimerId;
+    }
+
     if (success) {
       const content = activeCounter.querySelector('#economist-counter-content');
       if (content) {
         content.innerHTML = `
-          <div style="font-size: 18px;">🎉 Zakończono!</div>
+          <div style="font-size: 18px;">Zakonczono!</div>
         `;
         content.style.display = 'block';
         content.style.padding = '8px 24px 16px 24px';
-        activeCounter.style.minWidth = '200px';
       }
-      setTimeout(() => {
-        if (activeCounter.isConnected) activeCounter.remove();
-      }, 3000);
+
+      const header = activeCounter.firstElementChild;
+      if (header && header.style) {
+        header.style.borderBottom = '1px solid rgba(255,255,255,0.3)';
+      }
+      activeCounter.style.minWidth = '200px';
+      activeCounter.style.cursor = 'default';
+
+      const minimizeBtn = activeCounter.querySelector('#economist-counter-minimize');
+      if (minimizeBtn) {
+        minimizeBtn.textContent = '-';
+      }
+      localStorage.setItem('economist-counter-minimized', 'false');
+
+      const currentPrompt = Number.parseInt(activeCounter.dataset.economistCurrent || '', 10);
+      const totalPrompts = Number.parseInt(activeCounter.dataset.economistTotal || '', 10);
+      setCounterMiniStage(
+        activeCounter,
+        Number.isInteger(currentPrompt) ? currentPrompt : 0,
+        Number.isInteger(totalPrompts) ? totalPrompts : 0,
+        'success'
+      );
+      activeCounter.dataset.economistMiniTone = 'success';
     } else {
       activeCounter.remove();
     }
   }
-  
+
   // Edit+Send jest celowo wyłączony; recovery działa przez ponowne wysłanie promptu.
   async function tryEditResend() {
     console.warn('[tryEditResend] Disabled: workflow uses prompt resend only.');
@@ -10702,7 +11484,7 @@ async function injectToChat(
   }
 
   // Funkcja wysyłania pojedynczego prompta
-  async function sendPrompt(promptText, maxWaitForReady = responseWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
+  async function sendPrompt(promptText, maxWaitForReady = interfaceReadyWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     if (shouldStopNow()) return false;
     runMetrics.sendAttempts += 1;
     registerPromptAttempt(promptIndex);
@@ -10740,7 +11522,7 @@ async function injectToChat(
     
     // KROK 1: Czekaj aż interface będzie gotowy (jeśli poprzednia odpowiedź się jeszcze generuje)
     console.log("🔍 Sprawdzam gotowość interfejsu przed wysłaniem...");
-    const interfaceReady = await waitForInterfaceReady(maxWaitForReady, counter, promptIndex, promptTotal); // Pełny timeout (domyślnie 60 minut)
+    const interfaceReady = await waitForInterfaceReady(maxWaitForReady, counter, promptIndex, promptTotal);
     
     if (!interfaceReady) {
       console.error(`❌ Interface nie stał się gotowy po ${Math.round(maxWaitForReady/1000)}s`);
@@ -11023,7 +11805,7 @@ async function injectToChat(
         updateCounter(counter, promptOffset, totalPromptsForRun, 'Wysylam artykul...');
 
         console.log('Wysylam artykul do ChatGPT...');
-        await sendPrompt(payload, responseWaitMs, counter, promptOffset, totalPromptsForRun);
+        await sendPrompt(payload, interfaceReadyWaitMs, counter, promptOffset, totalPromptsForRun);
         if (shouldStopNow()) {
           return forceStopResult();
         }
@@ -11061,7 +11843,7 @@ async function injectToChat(
         console.log("🔍 Sprawdzam gotowość interfejsu przed rozpoczęciem resume chain...");
         updateCounter(counter, promptOffset, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
         
-        const resumeInterfaceReady = await waitForInterfaceReady(responseWaitMs, counter, promptOffset, totalPromptsForRun);
+        const resumeInterfaceReady = await waitForInterfaceReady(interfaceReadyWaitMs, counter, promptOffset, totalPromptsForRun);
         if (shouldStopNow()) {
           return forceStopResult();
         }
@@ -11138,7 +11920,7 @@ async function injectToChat(
           
           // Wyślij prompt
           console.log(`[${i + 1}/${promptChain.length}] Wywołuję sendPrompt()...`);
-          const sent = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
+          const sent = await sendPrompt(prompt, interfaceReadyWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
           if (shouldStopNow()) {
             return forceStopResult();
           }
@@ -11181,7 +11963,7 @@ async function injectToChat(
             
               // User naprawił, spróbuj wysłać ponownie ten sam prompt
               console.log(`🔄 Kontynuacja po naprawie - ponowne wysyłanie prompta ${i + 1}...`);
-              const retried = await sendPrompt(prompt, responseWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
+              const retried = await sendPrompt(prompt, interfaceReadyWaitMs, counter, absoluteCurrentPrompt, totalPromptsForRun);
               if (shouldStopNow()) {
                 return forceStopResult();
               }
@@ -11216,7 +11998,7 @@ async function injectToChat(
           }
           
           // Aktualizuj licznik - czekanie
-          updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedź...');
+          updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
           
           // Pętla czekania na odpowiedź - powtarzaj aż się uda
           let responseCompleted = false;
@@ -11234,7 +12016,7 @@ async function injectToChat(
               // Timeout - pokaż przyciski i czekaj na user
               console.error(`❌ Timeout przy promptcie ${i + 1}/${promptChain.length}`);
               console.log(`⏸️ ChatGPT nie odpowiedział w czasie - czekam na interwencję użytkownika`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '⏱️ Timeout - czekam...');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Timeout - czekam...');
               const timeoutOutcome = await classifyTimeoutOutcome(promptSnapshotBeforeSend, prompt);
               if (timeoutOutcome === 'response_ready') {
                 console.warn(`⚠️ Timeout heurystyki, ale wykryto odpowiedź - pomijam auto-reload dla prompta ${absoluteCurrentPrompt}`);
@@ -11243,7 +12025,7 @@ async function injectToChat(
               }
               if (timeoutOutcome === 'still_generating') {
                 console.warn(`⚠️ Timeout heurystyki, ale ChatGPT nadal generuje - kontynuuję czekanie bez auto-reload`);
-                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '⏳ ChatGPT nadal generuje...');
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'ChatGPT nadal generuje...');
                 await new Promise((resolve) => setTimeout(resolve, 1500));
                 continue;
               }
@@ -11270,7 +12052,7 @@ async function injectToChat(
               
               // User kliknął "Czekaj na odpowiedź" - czekaj ponownie
               console.log(`🔄 Kontynuacja po timeout - ponowne czekanie na odpowiedź...`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedź...');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
               continue; // Powtórz pętlę waitForResponse
             }
             
@@ -11293,7 +12075,7 @@ async function injectToChat(
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
               console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, '❌ Odpowiedź za krótka');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Odpowiedz za krotka');
               const trimmedResponse = compactText(responseText);
               const assistantAdvanced = hasAssistantAdvancedSince(promptSnapshotBeforeSend, 10);
               const allowAutoRecoveryForInvalid = hasHardGenerationErrorMessage() || (!assistantAdvanced && trimmedResponse.length === 0);
@@ -11322,7 +12104,7 @@ async function injectToChat(
               
               // User kliknął "Czekaj na odpowiedź" - może ChatGPT jeszcze generuje
               console.log(`🔄 Kontynuacja po naprawie - czekam na zakończenie generowania...`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedź...');
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
               
               // Poczekaj na zakończenie odpowiedzi ChatGPT
               await waitForResponse(responseWaitMs);

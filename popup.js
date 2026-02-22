@@ -40,44 +40,44 @@ const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindo
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 
+function setStatusElement(element, text, isError = false) {
+  if (!element) return;
+  const safeText = typeof text === 'string' ? text.trim() : '';
+  if (!safeText) {
+    element.textContent = '';
+    element.hidden = true;
+    return;
+  }
+  element.hidden = false;
+  element.textContent = safeText;
+  element.style.color = isError ? '#b91c1c' : '#374151';
+  element.style.borderColor = isError ? '#fecaca' : '#d1d5db';
+  element.style.background = isError ? '#fef2f2' : '#f3f4f6';
+}
+
 function setRunStatus(text, isError = false) {
-  if (!runStatus) return;
-  runStatus.textContent = text;
-  runStatus.style.color = isError ? '#b91c1c' : '#374151';
-  runStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
-  runStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+  setStatusElement(runStatus, text, isError);
 }
 
 function setYouTubeTranscriptStatus(text, isError = false) {
-  if (!youtubeTranscriptStatus) return;
-  youtubeTranscriptStatus.textContent = text;
-  youtubeTranscriptStatus.style.color = isError ? '#b91c1c' : '#374151';
-  youtubeTranscriptStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
-  youtubeTranscriptStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+  const compactText = String(text || '').replace(/^YouTube transcript:\s*/i, 'YT: ');
+  if (youtubeTranscriptStatus) {
+    setStatusElement(youtubeTranscriptStatus, compactText, isError);
+    return;
+  }
+  setRunStatus(compactText, isError);
 }
 
 function setDispatchStatus(text, isError = false) {
-  if (!watchlistDispatchStatus) return;
-  watchlistDispatchStatus.textContent = text;
-  watchlistDispatchStatus.style.color = isError ? '#b91c1c' : '#374151';
-  watchlistDispatchStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
-  watchlistDispatchStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+  setStatusElement(watchlistDispatchStatus, text, isError);
 }
 
 function setRestoreProcessWindowsStatus(text, isError = false) {
-  if (!restoreProcessWindowsStatus) return;
-  restoreProcessWindowsStatus.textContent = text;
-  restoreProcessWindowsStatus.style.color = isError ? '#b91c1c' : '#374151';
-  restoreProcessWindowsStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
-  restoreProcessWindowsStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+  setStatusElement(restoreProcessWindowsStatus, text, isError);
 }
 
 function setAutoRestoreStatus(text, isError = false) {
-  if (!autoRestoreStatus) return;
-  autoRestoreStatus.textContent = text;
-  autoRestoreStatus.style.color = isError ? '#b91c1c' : '#374151';
-  autoRestoreStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
-  autoRestoreStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+  setStatusElement(autoRestoreStatus, text, isError);
 }
 
 function applyAutoRestoreUi(status) {
@@ -236,19 +236,36 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
 }
 
 function getResumeAllSummary(response) {
-  const scannedTabs = Number.isInteger(response?.scannedTabs) ? response.scannedTabs : 0;
-  const startedTabs = Number.isInteger(response?.startedTabs)
-    ? response.startedTabs
-    : Number.isInteger(response?.resumedTabs)
-      ? response.resumedTabs
-      : 0;
+  const summary = response?.summary && typeof response.summary === 'object'
+    ? response.summary
+    : {};
   const rows = Array.isArray(response?.results) ? response.results : [];
-  const unresolvedCount = rows.filter((row) => {
-    const action = row?.action || '';
-    return action !== 'started' && action !== 'resumed' && action !== 'final_stage_already_sent';
-  }).length;
+  const scannedTabs = Number.isInteger(response?.scannedTabs)
+    ? response.scannedTabs
+    : Number.isInteger(response?.eligibleProcesses)
+      ? response.eligibleProcesses
+      : rows.length;
+  const startedTabs = Number.isInteger(summary?.started)
+    ? summary.started
+    : Number.isInteger(response?.startedTabs)
+      ? response.startedTabs
+      : Number.isInteger(response?.resumedTabs)
+        ? response.resumedTabs
+        : 0;
+  const detectFailed = Number.isInteger(summary?.detect_failed)
+    ? summary.detect_failed
+    : rows.filter((row) => row?.action === 'detect_failed').length;
+  const reloadFailed = Number.isInteger(summary?.reload_failed)
+    ? summary.reload_failed
+    : rows.filter((row) => row?.action === 'reload_failed').length;
+  const skippedNonCompany = Number.isInteger(summary?.skipped_non_company)
+    ? summary.skipped_non_company
+    : rows.filter((row) => row?.action === 'skipped_non_company').length;
+  const skippedOutsideInvest = Number.isInteger(summary?.skipped_outside_invest)
+    ? summary.skipped_outside_invest
+    : rows.filter((row) => row?.action === 'skipped_outside_invest').length;
 
-  return `Skan: ${scannedTabs}, uruchomione: ${startedTabs}, niewystartowane: ${unresolvedCount}`;
+  return `Procesy: ${scannedTabs}, started: ${startedTabs}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, skipped_non_company: ${skippedNonCompany}, skipped_outside_invest: ${skippedOutsideInvest}`;
 }
 
 async function executeResumeAllFromPopup(button, options = {}) {
@@ -256,22 +273,23 @@ async function executeResumeAllFromPopup(button, options = {}) {
 
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Wznawiam...';
-  setRunStatus('Wznawiam wszystkie procesy...');
+  button.textContent = 'Reload + wznawiam...';
+  setRunStatus('Reload + wznowienie aktywnych procesow company (INVEST)...');
 
   try {
     const response = await sendRuntimeMessage({
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
       origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all',
+      scope: 'active_company_invest_processes',
     });
 
     if (!response || Object.keys(response).length === 0) {
-      setRunStatus('Polecenie wznowienia zostalo wyslane.');
+      setRunStatus('Polecenie reload + wznowienia zostalo wyslane.');
       return;
     }
 
     if (response.success === false) {
-      setRunStatus(`Blad: ${response.error || 'Nie udalo sie wznowic procesow.'}`, true);
+      setRunStatus(`Blad: ${response.error || 'Nie udalo sie wykonac reload + wznowienia procesow.'}`, true);
       return;
     }
 
@@ -726,5 +744,3 @@ void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
 ]);
-
-void refreshYouTubeTranscriptHint();

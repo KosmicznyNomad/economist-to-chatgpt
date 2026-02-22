@@ -101,11 +101,13 @@ function renderPdfList() {
 }
 
 function syncPdfSelection() {
-  pdfFileByToken.clear();
-  selectedPdfFiles = [];
-
   const chosen = Array.from(pdfInput.files || []);
   let rejectedCount = 0;
+  let duplicateCount = 0;
+  let addedCount = 0;
+  const existingFileKeys = new Set(
+    selectedPdfFiles.map((entry) => `${entry.name}::${entry.size}::${entry.lastModified}`)
+  );
 
   chosen.forEach((file, index) => {
     const name = String(file?.name || '');
@@ -113,6 +115,12 @@ function syncPdfSelection() {
     const isPdf = type === 'application/pdf' || name.toLowerCase().endsWith('.pdf');
     if (!isPdf) {
       rejectedCount += 1;
+      return;
+    }
+
+    const fileKey = `${file.name || `source-${index + 1}.pdf`}::${Number.isFinite(file.size) ? file.size : 0}::${Number.isInteger(file.lastModified) ? file.lastModified : 0}`;
+    if (existingFileKeys.has(fileKey)) {
+      duplicateCount += 1;
       return;
     }
 
@@ -125,13 +133,29 @@ function syncPdfSelection() {
       mimeType: 'application/pdf',
       lastModified: Number.isInteger(file.lastModified) ? file.lastModified : Date.now(),
     });
+    existingFileKeys.add(fileKey);
+    addedCount += 1;
   });
+
+  // Allow selecting additional files in subsequent picker opens.
+  pdfInput.value = '';
 
   renderPdfList();
   updateSubmitButton();
 
-  if (rejectedCount > 0) {
-    setProviderStatus(`Pominieto ${rejectedCount} plik(ow), bo nie sa PDF.`, 'error');
+  if (rejectedCount > 0 || duplicateCount > 0) {
+    const parts = [];
+    if (addedCount > 0) {
+      parts.push(`Dodano ${addedCount} PDF.`);
+    }
+    if (duplicateCount > 0) {
+      parts.push(`Pominieto ${duplicateCount} duplikat(ow).`);
+    }
+    if (rejectedCount > 0) {
+      parts.push(`Pominieto ${rejectedCount} plik(ow), bo nie sa PDF.`);
+    }
+    parts.push(`Razem: ${selectedPdfFiles.length}.`);
+    setProviderStatus(parts.join(' '), rejectedCount > 0 ? 'error' : 'info');
   } else if (selectedPdfFiles.length > 0) {
     setProviderStatus(`Wybrano ${selectedPdfFiles.length} PDF.`, 'info');
   } else {
@@ -288,7 +312,11 @@ submitBtn.addEventListener('click', () => {
     }
 
     submitBtn.textContent = 'Uruchomiono';
-    setTimeout(() => window.close(), 450);
+    setProviderStatus('Analiza uruchomiona. Okno pozostaje otwarte.', 'success');
+    setTimeout(() => {
+      submitBtn.textContent = 'Uruchom';
+      updateSubmitButton();
+    }, 900);
   });
 });
 

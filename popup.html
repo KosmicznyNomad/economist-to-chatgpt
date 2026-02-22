@@ -23,7 +23,7 @@
     }
 
     body {
-      width: 332px;
+      width: 336px;
       margin: 0;
       padding: 12px;
       font-family: 'Segoe UI', Tahoma, sans-serif;
@@ -75,6 +75,11 @@
 
     .row:last-child {
       margin-bottom: 0;
+    }
+
+    .row-2 .btn {
+      width: auto;
+      flex: 1;
     }
 
     .btn {
@@ -158,6 +163,16 @@
       white-space: pre-line;
     }
 
+    .status[hidden] {
+      display: none;
+    }
+
+    .status-compact {
+      margin-bottom: 10px;
+      font-size: 11px;
+      padding: 7px 9px;
+    }
+
     .details {
       margin-bottom: 10px;
       background: var(--card);
@@ -210,44 +225,38 @@
 <body>
   <div class="header">
     <p class="title">Iskra</p>
-    <p class="subtitle">Szybkie akcje. Skroty: 1-7</p>
+    <p class="subtitle">Skroty: 1-7</p>
   </div>
 
   <div class="card">
     <p class="card-title">Analiza</p>
-    <div class="row">
+    <div class="row row-2">
       <button class="btn" id="manualSourceBtn">Wklej zrodlo <span class="shortcut">1</span></button>
+      <button class="btn" id="copyYouTubeTranscriptBtn">Kopiuj YT</button>
     </div>
-    <div class="row">
-      <button class="btn" id="copyYouTubeTranscriptBtn">Kopiuj transkrypcje (YouTube)</button>
-    </div>
-    <p class="status" id="youtubeTranscriptStatus" aria-live="polite">YouTube transcript: gotowy do pobrania.</p>
     <div class="row">
       <button class="btn btn-primary" id="runBtn">Uruchom analizy <span class="shortcut">2</span></button>
     </div>
-    <div class="row">
+    <div class="row row-2">
       <button class="btn" id="resumeStageBtn">Wznow od etapu <span class="shortcut">3</span></button>
-    </div>
-    <div class="row">
-      <button class="btn" id="resumeAllBtn">Wznow wszystkie <span class="shortcut">4</span></button>
+      <button class="btn" id="resumeAllBtn">Reload + wznow wszystkie <span class="shortcut">4</span></button>
     </div>
   </div>
 
   <div class="card">
     <p class="card-title">Wyniki i kontrola</p>
-    <div class="row">
+    <div class="row row-2">
       <button class="btn" id="responsesBtn">Odpowiedzi <span class="shortcut">5</span></button>
-    </div>
-    <div class="row">
       <button class="btn" id="decisionPanelBtn">Panel procesow <span class="shortcut">6</span></button>
     </div>
     <div class="row">
       <button class="btn btn-danger" id="stopBtn">Przerwij w tym oknie <span class="shortcut">7</span></button>
     </div>
   </div>
+  <p class="status status-compact" id="runStatus" aria-live="polite" hidden></p>
 
   <details class="details">
-    <summary>Watchlist intake</summary>
+    <summary>Watchlist</summary>
     <div class="details-content">
       <input
         class="dispatch-input"
@@ -280,20 +289,16 @@
   </details>
 
   <details class="details">
-    <summary>Dodatkowe narzedzia</summary>
+    <summary>Narzedzia</summary>
     <div class="details-content">
       <div class="row">
-        <button class="btn btn-center" id="restoreProcessWindowsBtn">Przywroc okna procesow (workflow)</button>
+        <button class="btn btn-center" id="restoreProcessWindowsBtn">Przywroc okna procesow</button>
       </div>
       <div class="row">
         <button class="btn btn-center" id="autoRestoreToggleBtn">Auto co 15 min: OFF</button>
       </div>
-      <p class="status" id="restoreProcessWindowsStatus" aria-live="polite">
-        Przywraca aktywne karty procesu na ekran w trybie normalnym (bez maksymalizacji).
-      </p>
-      <p class="status" id="autoRestoreStatus" aria-live="polite">
-        Automatyzacja: wylaczona.
-      </p>
+      <p class="status" id="restoreProcessWindowsStatus" aria-live="polite" hidden></p>
+      <p class="status" id="autoRestoreStatus" aria-live="polite" hidden></p>
     </div>
   </details>
 

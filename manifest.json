@@ -1,4 +1,4 @@
-﻿{
+{
   "manifest_version": 3,
   "name": "Iskra",
   "version": "2.0",
@@ -13,6 +13,8 @@
   ],
   "host_permissions": [
     "https://*.economist.com/*",
+    "https://epoch.ai/*",
+    "https://*.epoch.ai/*",
     "https://asia.nikkei.com/*",
     "https://*.caixinglobal.com/*",
     "https://*.theafricareport.com/*",
@@ -62,7 +64,7 @@
       "suggested_key": {
         "default": "Ctrl+Shift+R"
       },
-      "description": "OtwĂłrz zebrane odpowiedzi"
+      "description": "Otworz zebrane odpowiedzi"
     }
   },
   "web_accessible_resources": [
