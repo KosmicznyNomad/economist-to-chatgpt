@@ -76,9 +76,9 @@ const reasonLabels = {
   invalid_response: 'Za krotka odpowiedz',
   save_failed: 'Blad zapisu do bazy',
   empty_response: 'Pusta odpowiedz (bez zapisu)',
-  auto_recovery_send_failed: 'Auto-recovery po bledzie wysylania',
-  auto_recovery_timeout: 'Auto-recovery po timeout',
-  auto_recovery_invalid_response: 'Auto-recovery po niepoprawnej odpowiedzi'
+  auto_recovery_send_failed: 'Auto-resend po bledzie wysylania',
+  auto_recovery_timeout: 'Auto-resend po timeout',
+  auto_recovery_invalid_response: 'Auto-resend po niepoprawnej odpowiedzi'
 };
 const RESPONSE_STORAGE_KEY = 'responses';
 

@@ -5,6 +5,7 @@
   "description": "Analyze news in ChatGPT and sync final responses to Watchlist.",
   "permissions": [
     "tabs",
+    "tabGroups",
     "scripting",
     "contextMenus",
     "storage",
@@ -18,6 +19,8 @@
     "https://*.nzz.ch/*",
     "https://*.project-syndicate.org/*",
     "https://the-ken.com/*",
+    "https://*.lazard.com/*",
+    "https://*.rand.org/*",
     "https://www.youtube.com/*",
     "https://youtu.be/*",
     "https://*.wsj.com/*",

@@ -46,11 +46,31 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 3. Choose tabs for portfolio analysis.
 4. Let both flows run.
 
+### YouTube transcript copy (one click)
+1. Open a YouTube video tab.
+2. Open popup and click `Kopiuj transkrypcje (YouTube)`.
+3. Transcript is copied to clipboard immediately (without running ChatGPT chain).
+
+Transcript fetch behavior:
+- Language priority: `pl` -> `en` -> next available track.
+- Within preferred language, manual captions are preferred over auto-generated (`asr`) tracks.
+- Fetch order: `json3` -> `srv3` -> default XML.
+- If content script is missing in an already-open YouTube tab, worker attempts runtime re-injection and retries automatically.
+- Short-lived transcript cache (`videoId + languages`) reduces duplicate fetches across repeated runs/copy actions.
+- If a video has no captions, popup shows a controlled error instead of fallbacking to external API.
+
 ### Manual source flow
 1. Open popup.
 2. Open manual source dialog.
-3. Paste title and text.
+3. Paste title and text, or attach one/many PDF files.
 4. Start selected number of instances.
+
+Manual PDF mode behavior:
+- If at least one PDF is selected, text field is ignored.
+- Each PDF is processed as a separate run (separate ChatGPT window).
+- Instances multiply each file (e.g. 2 files and 3 instances = 6 runs).
+- PDF queue runs sequentially (1 by 1).
+- Keep `Wklej zrodlo` window open during PDF queue. It provides PDF chunks to active runs.
 
 ### Responses view
 - Open from popup or shortcut `Ctrl+Shift+R`.
@@ -77,5 +97,7 @@ Keep these in sync when adding/removing domains:
 - Keep `STAGE_NAMES_COMPANY` aligned with company prompt order/count.
 - `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
 - Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
+- YouTube transcript support is best-effort and depends on caption availability for a given video.
+- On restart/restore flows, ChatGPT tabs are automatically ungrouped from Chrome tab groups to keep workflow tabs independent.
 
 

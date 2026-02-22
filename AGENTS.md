@@ -12,7 +12,7 @@
 - `background.js` - runtime orchestration: prompt loading, extraction, ChatGPT automation, process monitor state, local save.
 - `popup.html` / `popup.js` - run, stop, resume, manual source, monitor and responses navigation.
 - `article-selector.html` / `article-selector.js` - portfolio selection.
-- `manual-source.html` / `manual-source.js` - pseudo-source submission.
+- `manual-source.html` / `manual-source.js` - pseudo-source submission (text + manual PDF provider).
 - `resume-stage.html` / `resume-stage.js` - resume company chain from selected stage.
 - `process-monitor.html` / `process-monitor.js` - process panel and decisions.
 - `responses.html` / `responses.js` - local responses UI with copy/clear.
@@ -29,6 +29,13 @@ Detailed:
 3. Prompt #1 receives `{{articlecontent}}` payload.
 4. Remaining prompts are executed in ChatGPT.
 5. Final chain response is stored as result.
+
+Manual PDF flow:
+1. `manual-source.js` sends `MANUAL_SOURCE_SUBMIT` with `mode='pdf'` and file metadata.
+2. Worker builds queue (`files x instances`) and runs each item in a separate ChatGPT window, sequentially.
+3. Injected `injectToChat()` requests chunks via `MANUAL_PDF_GET_CHUNK`.
+4. Worker forwards to provider message `MANUAL_PDF_PROVIDER_READ_CHUNK`.
+5. ChatGPT receives actual file attachment before payload send.
 
 ## Storage model
 - Writer path (`background.js`): `chrome.storage.session.responses`.
@@ -60,6 +67,13 @@ Response fields in use:
 - `RESUME_STAGE_OPEN` opens stage picker.
 - `RESUME_STAGE_START` resumes company chain from selected index.
 - Inject path supports prompt offset and resume mode.
+
+## Manual PDF message types
+- `MANUAL_SOURCE_SUBMIT` (`mode='text' | 'pdf'`)
+- `MANUAL_PDF_GET_CHUNK`
+- `MANUAL_PDF_PROVIDER_READ_CHUNK`
+- `MANUAL_PDF_PROVIDER_STATUS`
+- `MANUAL_PDF_PROVIDER_RELEASE`
 
 ## Integrations currently in repo
 - Google Sheets bridge in `content-script.js` remains independent from main response pipeline.

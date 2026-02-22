@@ -26,6 +26,8 @@ function sendRuntimeMessage(payload) {
 }
 
 const runStatus = document.getElementById('runStatus');
+const copyYouTubeTranscriptBtn = document.getElementById('copyYouTubeTranscriptBtn');
+const youtubeTranscriptStatus = document.getElementById('youtubeTranscriptStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
 const watchlistIntakeUrlInput = document.getElementById('watchlistIntakeUrlInput');
 const watchlistKeyIdInput = document.getElementById('watchlistKeyIdInput');
@@ -44,6 +46,14 @@ function setRunStatus(text, isError = false) {
   runStatus.style.color = isError ? '#b91c1c' : '#374151';
   runStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
   runStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
+}
+
+function setYouTubeTranscriptStatus(text, isError = false) {
+  if (!youtubeTranscriptStatus) return;
+  youtubeTranscriptStatus.textContent = text;
+  youtubeTranscriptStatus.style.color = isError ? '#b91c1c' : '#374151';
+  youtubeTranscriptStatus.style.borderColor = isError ? '#fecaca' : '#d1d5db';
+  youtubeTranscriptStatus.style.background = isError ? '#fef2f2' : '#f3f4f6';
 }
 
 function setDispatchStatus(text, isError = false) {
@@ -274,7 +284,141 @@ async function executeResumeAllFromPopup(button, options = {}) {
   }
 }
 
+function isYouTubeUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    const host = String(parsed.hostname || '').toLowerCase();
+    return host.includes('youtube.com') || host.includes('youtu.be');
+  } catch (error) {
+    return false;
+  }
+}
+
+async function getActiveTabInCurrentWindow() {
+  const tabs = await new Promise((resolve) => {
+    chrome.tabs.query({ active: true, currentWindow: true }, (rows) => resolve(Array.isArray(rows) ? rows : []));
+  });
+  return tabs.length > 0 ? tabs[0] : null;
+}
+
+async function refreshYouTubeTranscriptHint() {
+  try {
+    const activeTab = await getActiveTabInCurrentWindow();
+    if (!activeTab || !Number.isInteger(activeTab.id)) {
+      setYouTubeTranscriptStatus('YouTube transcript: brak aktywnej karty.', false);
+      return;
+    }
+    if (!isYouTubeUrl(activeTab.url || '')) {
+      setYouTubeTranscriptStatus('YouTube transcript: otworz karte YouTube i kliknij "Kopiuj".', false);
+      return;
+    }
+    setYouTubeTranscriptStatus('YouTube transcript: gotowy do pobrania.', false);
+  } catch (error) {
+    setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
+  }
+}
+
+async function fallbackCopyText(text) {
+  const textarea = document.createElement('textarea');
+  textarea.value = text;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+  try {
+    const copied = document.execCommand('copy');
+    if (!copied) throw new Error('execCommand_copy_failed');
+  } finally {
+    textarea.remove();
+  }
+}
+
+async function copyTextToClipboard(text) {
+  if (navigator?.clipboard?.writeText) {
+    await navigator.clipboard.writeText(text);
+    return;
+  }
+  await fallbackCopyText(text);
+}
+
+function formatTranscriptFetchError(response) {
+  const errorCode = typeof response?.errorCode === 'string' ? response.errorCode.trim() : '';
+  const errorMessage = typeof response?.error === 'string' ? response.error.trim() : '';
+  if (errorCode === 'not_youtube_tab') return 'Aktywna karta nie jest YouTube.';
+  if (errorCode === 'tab_id_missing' || errorCode === 'tab_not_found') return 'Nie znaleziono aktywnej karty.';
+  if (errorCode === 'not_video_page') return 'To nie jest strona filmu YouTube (watch/shorts/live).';
+  if (errorCode === 'caption_tracks_missing') return 'Ten film nie ma dostepnych napisow.';
+  if (errorCode === 'caption_tracks_timeout' || errorCode === 'player_response_missing') return 'Nie udalo sie zaladowac napisow. Sprobuj ponownie za chwile.';
+  if (errorCode === 'timedtext_list_fetch_failed') return 'Nie udalo sie pobrac listy napisow z YouTube.';
+  if (errorCode === 'transcript_fetch_failed') return 'Nie udalo sie pobrac transkrypcji z YouTube.';
+  if (errorCode === 'transcript_too_short') return 'Pobrana transkrypcja jest zbyt krotka.';
+  if (errorCode === 'content_script_unreachable') return 'Content script YouTube nie jest gotowy. Odswiez karte i sproboj ponownie.';
+  if (errorCode === 'content_script_injection_failed') return 'Nie udalo sie uruchomic modulu YouTube na tej karcie.';
+  if (errorCode === 'content_script_injection_blocked') return 'Przegladarka zablokowala dostep do tej strony.';
+  if (errorCode === 'invalid_transcript_response') return 'Otrzymano niepoprawna odpowiedz z modulu YouTube.';
+  if (errorCode === 'runtime_timeout') return 'Przekroczono czas oczekiwania na transkrypcje.';
+  return errorMessage || errorCode || 'transcript_unavailable';
+}
+
+async function executeCopyYouTubeTranscriptFromPopup(button) {
+  if (!button) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Pobieram...';
+  setYouTubeTranscriptStatus('YouTube transcript: pobieram...', false);
+
+  try {
+    const activeTab = await getActiveTabInCurrentWindow();
+    if (!activeTab || !Number.isInteger(activeTab.id)) {
+      setYouTubeTranscriptStatus('YouTube transcript: brak aktywnej karty.', true);
+      return;
+    }
+    if (!isYouTubeUrl(activeTab.url || '')) {
+      setYouTubeTranscriptStatus('YouTube transcript: aktywna karta nie jest YouTube.', true);
+      return;
+    }
+
+    const response = await sendRuntimeMessage({
+      type: 'YT_FETCH_TRANSCRIPT_FOR_TAB',
+      tabId: activeTab.id,
+      preferredLanguages: ['pl', 'en'],
+    });
+
+    if (!response?.success || typeof response?.transcript !== 'string' || !response.transcript.trim()) {
+      setYouTubeTranscriptStatus(`YouTube transcript: ${formatTranscriptFetchError(response)}`, true);
+      return;
+    }
+
+    await copyTextToClipboard(response.transcript);
+    const transcriptLength = response.transcript.trim().length;
+    const transcriptLang = typeof response.lang === 'string' && response.lang.trim() ? response.lang.trim() : 'unknown';
+    const method = typeof response.method === 'string' && response.method.trim() ? response.method.trim() : 'unknown';
+    const cacheHint = response.cacheHit ? ', cache' : '';
+    const attemptHint = Number.isInteger(response.attemptUsed) && Number.isInteger(response.attempts)
+      ? `, proba ${response.attemptUsed}/${response.attempts}`
+      : '';
+    setYouTubeTranscriptStatus(
+      `YouTube transcript: skopiowano (${transcriptLang}, ${transcriptLength} znakow, ${method}${cacheHint}${attemptHint}).`,
+      false
+    );
+  } catch (error) {
+    setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText;
+  }
+}
+
 const runBtn = document.getElementById('runBtn');
+if (copyYouTubeTranscriptBtn) {
+  copyYouTubeTranscriptBtn.addEventListener('click', () => {
+    void executeCopyYouTubeTranscriptFromPopup(copyYouTubeTranscriptBtn);
+  });
+}
+
 if (runBtn) {
   runBtn.addEventListener('click', () => {
     withActiveWindowContext(({ windowId }) => {
@@ -582,3 +726,5 @@ void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
 ]);
+
+void refreshYouTubeTranscriptHint();

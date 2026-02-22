@@ -3,40 +3,41 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>Wklej źródło</title>
+  <title>Wklej zrodlo</title>
   <style>
     * {
       margin: 0;
       padding: 0;
       box-sizing: border-box;
     }
-    
+
     body {
-      font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Oxygen, Ubuntu, Cantarell, sans-serif;
       padding: 20px;
       background: #f5f5f5;
     }
-    
+
     .container {
-      max-width: 800px;
-      background: white;
+      max-width: 860px;
+      background: #fff;
       border-radius: 8px;
       padding: 24px;
-      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      box-shadow: 0 2px 8px rgba(0, 0, 0, 0.1);
     }
-    
+
     h1 {
       font-size: 20px;
       margin-bottom: 8px;
       color: #333;
     }
-    
+
     .description {
       font-size: 14px;
       color: #666;
       margin-bottom: 20px;
+      line-height: 1.45;
     }
-    
+
     label {
       display: block;
       font-size: 14px;
@@ -44,7 +45,7 @@
       color: #333;
       margin-bottom: 8px;
     }
-    
+
     input[type="text"] {
       width: 100%;
       padding: 10px 12px;
@@ -54,15 +55,16 @@
       font-size: 14px;
       margin-bottom: 16px;
     }
-    
-    input[type="text"]:focus {
+
+    input[type="text"]:focus,
+    textarea:focus {
       outline: none;
       border-color: #4285f4;
     }
-    
+
     textarea {
       width: 100%;
-      min-height: 350px;
+      min-height: 300px;
       padding: 12px;
       border: 1px solid #ddd;
       border-radius: 4px;
@@ -71,39 +73,80 @@
       resize: vertical;
       margin-bottom: 16px;
     }
-    
-    textarea:focus {
-      outline: none;
-      border-color: #4285f4;
+
+    .pdf-section {
+      margin-bottom: 16px;
+      padding: 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      background: #fafafa;
     }
-    
+
+    input[type="file"] {
+      width: 100%;
+      margin-bottom: 8px;
+      font-family: inherit;
+      font-size: 13px;
+    }
+
+    .pdf-list {
+      border: 1px solid #e5e7eb;
+      border-radius: 4px;
+      background: #fff;
+      max-height: 180px;
+      overflow-y: auto;
+      padding: 8px;
+      margin-top: 8px;
+    }
+
+    .pdf-item {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      font-size: 13px;
+      color: #334155;
+      padding: 4px 0;
+      border-bottom: 1px solid #f1f5f9;
+    }
+
+    .pdf-item:last-child {
+      border-bottom: none;
+    }
+
+    .pdf-item-name {
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+      max-width: 560px;
+    }
+
     .instances-control {
       display: flex;
       align-items: center;
       gap: 12px;
-      margin-bottom: 20px;
+      margin-bottom: 18px;
       padding: 12px;
       background: #f8f9fa;
       border-radius: 4px;
     }
-    
+
     .instances-label {
       font-size: 14px;
       font-weight: 500;
       color: #333;
     }
-    
+
     .instances-input-group {
       display: flex;
       align-items: center;
       gap: 8px;
     }
-    
+
     .instances-btn {
       width: 32px;
       height: 32px;
       border: 1px solid #ddd;
-      background: white;
+      background: #fff;
       border-radius: 4px;
       cursor: pointer;
       font-size: 16px;
@@ -112,20 +155,20 @@
       justify-content: center;
       transition: background 0.2s;
     }
-    
+
     .instances-btn:hover {
       background: #f0f0f0;
     }
-    
+
     .instances-btn:active {
       background: #e0e0e0;
     }
-    
+
     .instances-btn:disabled {
       opacity: 0.3;
       cursor: not-allowed;
     }
-    
+
     .instances-value {
       font-size: 18px;
       font-weight: 600;
@@ -133,20 +176,19 @@
       min-width: 30px;
       text-align: center;
     }
-    
+
     .info {
       font-size: 13px;
-      color: #888;
-      margin-bottom: 16px;
+      color: #64748b;
       line-height: 1.4;
     }
-    
+
     .buttons {
       display: flex;
       gap: 12px;
       justify-content: flex-end;
     }
-    
+
     button {
       padding: 10px 20px;
       border: none;
@@ -156,67 +198,84 @@
       cursor: pointer;
       transition: background 0.2s;
     }
-    
+
     .cancel-btn {
       background: #f1f3f4;
       color: #5f6368;
     }
-    
+
     .cancel-btn:hover {
       background: #e8eaed;
     }
-    
+
     .submit-btn {
       background: #4285f4;
-      color: white;
+      color: #fff;
     }
-    
+
     .submit-btn:hover {
       background: #3367d6;
     }
-    
+
     .submit-btn:disabled {
       background: #ccc;
       cursor: not-allowed;
+    }
+
+    .provider-status {
+      margin-top: 10px;
+      min-height: 18px;
+      font-size: 13px;
+    }
+
+    .provider-status.info {
+      color: #1d4ed8;
+    }
+
+    .provider-status.success {
+      color: #166534;
+    }
+
+    .provider-status.error {
+      color: #b91c1c;
     }
   </style>
 </head>
 <body>
   <div class="container">
-    <h1>Wklej źródło do analizy</h1>
-    <p class="description">Wklej tekst artykułu lub źródła, które chcesz przeanalizować. Możesz uruchomić analizę wielokrotnie równolegle.</p>
-    
-    <label for="titleInput">Tytuł (opcjonalnie)</label>
-    <input 
-      type="text" 
-      id="titleInput" 
-      placeholder="Opcjonalnie: tytuł artykułu"
-    >
-    
-    <label for="sourceInput">Tekst źródła *</label>
-    <textarea 
-      id="sourceInput" 
-      placeholder="Wklej tutaj tekst artykułu lub źródła..."
-      autofocus
-    ></textarea>
-    
+    <h1>Wklej zrodlo do analizy</h1>
+    <p class="description">Wklej tekst zrodla lub zalacz PDF-y. Kazdy PDF uruchomi osobny proces i osobne okno ChatGPT.</p>
+
+    <label for="titleInput">Tytul (opcjonalnie)</label>
+    <input type="text" id="titleInput" placeholder="Opcjonalnie: tytul artykulu">
+
+    <label for="sourceInput">Tekst zrodla</label>
+    <textarea id="sourceInput" placeholder="Wklej tutaj tekst artykulu lub zrodla..." autofocus></textarea>
+
+    <div class="pdf-section">
+      <label for="pdfInput">Zalacz PDF (opcjonalnie)</label>
+      <input type="file" id="pdfInput" accept=".pdf,application/pdf" multiple>
+      <p class="info">Gdy wybierzesz PDF, pole "Tekst zrodla" zostanie zignorowane. Kazdy PDF jest wysylany oddzielnie.</p>
+      <div id="pdfList" class="pdf-list" hidden></div>
+    </div>
+
     <div class="instances-control">
       <span class="instances-label">Liczba instancji:</span>
       <div class="instances-input-group">
-        <button class="instances-btn" id="decreaseBtn">−</button>
+        <button class="instances-btn" id="decreaseBtn">-</button>
         <span class="instances-value" id="instancesValue">1</span>
         <button class="instances-btn" id="increaseBtn">+</button>
       </div>
-      <span class="info" style="margin: 0;">(1-10 równoległych analiz)</span>
+      <span class="info">(1-10; dla PDF mnozy kazdy plik)</span>
     </div>
-    
+
     <div class="buttons">
       <button class="cancel-btn" id="cancelBtn">Anuluj</button>
       <button class="submit-btn" id="submitBtn" disabled>Uruchom</button>
     </div>
+    <p id="providerStatus" class="provider-status" aria-live="polite"></p>
   </div>
 
   <script src="manual-source.js"></script>
 </body>
 </html>
-

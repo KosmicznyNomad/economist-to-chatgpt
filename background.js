@@ -24,10 +24,20 @@ const RESET_SCAN_DEFAULT_PASSES = 3;
 const RESET_SCAN_PASS_DELAY_MS = 500;
 const RESET_SCAN_PER_TAB_BUDGET_MS = 6000;
 const RESET_SCAN_MIN_RUNTIME_MS = 90 * 1000;
-const AUTO_RECOVERY_MAX_ATTEMPTS = 4;
-const AUTO_RECOVERY_DELAY_MS = 8000;
+const AUTO_RECOVERY_MAX_ATTEMPTS = 2;
+const AUTO_RECOVERY_DELAY_MS = 2000;
 const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
 const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout', 'invalid_response'];
+const YT_TRANSCRIPT_PREFERRED_LANGUAGES = ['pl', 'en'];
+const YT_TRANSCRIPT_REQUEST_TIMEOUT_MS = 9000;
+const YT_TRANSCRIPT_MAX_RETRIES = 3;
+const YT_TRANSCRIPT_RETRY_DELAY_MS = 900;
+const YT_TRANSCRIPT_MIN_CHARS = 50;
+const YT_TRANSCRIPT_CACHE_TTL_MS = 10 * 60 * 1000;
+const YT_TRANSCRIPT_CACHE_MAX_ITEMS = 60;
+const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
+const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
+const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 
 // Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
 const WATCHLIST_DISPATCH = {
@@ -76,8 +86,12 @@ const CLOSED_PROCESS_STATUSES = new Set([
   'interrupted'
 ]);
 const processRegistry = new Map();
+const ytTranscriptInFlightRequests = new Map();
+const ytTranscriptCache = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
+let watchlistDispatchFlushPending = false;
+let watchlistDispatchFlushPendingReason = '';
 let watchlistDispatchCredentialsCache = null;
 let autoRestoreWindowsInProgress = false;
 
@@ -534,6 +548,167 @@ function removeTabSafe(tabId) {
   });
 }
 
+function getTabGroupIdNone() {
+  return Number.isInteger(chrome?.tabGroups?.TAB_GROUP_ID_NONE)
+    ? chrome.tabGroups.TAB_GROUP_ID_NONE
+    : -1;
+}
+
+async function ungroupTabsById(tabIds, options = {}) {
+  const requestedTabIds = Array.from(
+    new Set(
+      (Array.isArray(tabIds) ? tabIds : [tabIds])
+        .map((value) => (Number.isInteger(value) ? value : null))
+        .filter((value) => value !== null)
+    )
+  );
+
+  const baseResult = {
+    ok: false,
+    reason: 'unknown',
+    requested: requestedTabIds.length,
+    groupedCount: 0,
+    ungroupedCount: 0,
+    skippedCount: 0,
+    error: '',
+    requestedTabIds,
+    groupedTabIds: [],
+    origin: typeof options?.origin === 'string' ? options.origin : ''
+  };
+
+  if (requestedTabIds.length === 0) {
+    return {
+      ...baseResult,
+      reason: 'no_tab_ids',
+      ok: true,
+      skippedCount: 0
+    };
+  }
+
+  if (!chrome?.tabs?.ungroup) {
+    return {
+      ...baseResult,
+      reason: 'ungroup_api_unavailable',
+      error: 'chrome.tabs.ungroup is not available'
+    };
+  }
+
+  const noneGroupId = getTabGroupIdNone();
+  const tabLookups = await Promise.all(requestedTabIds.map((tabId) => getTabByIdSafe(tabId)));
+  const groupedTabIds = tabLookups
+    .map((tab) => (Number.isInteger(tab?.id) && Number.isInteger(tab?.groupId) && tab.groupId !== noneGroupId ? tab.id : null))
+    .filter((tabId) => Number.isInteger(tabId));
+  const uniqueGroupedTabIds = Array.from(new Set(groupedTabIds));
+
+  if (uniqueGroupedTabIds.length === 0) {
+    return {
+      ...baseResult,
+      reason: 'already_ungrouped',
+      ok: true,
+      groupedCount: 0,
+      ungroupedCount: 0,
+      skippedCount: requestedTabIds.length,
+      groupedTabIds: []
+    };
+  }
+
+  const ungroupResult = await new Promise((resolve) => {
+    try {
+      chrome.tabs.ungroup(uniqueGroupedTabIds, () => {
+        if (chrome.runtime.lastError) {
+          resolve({
+            ok: false,
+            reason: 'ungroup_runtime_error',
+            error: chrome.runtime.lastError.message || 'ungroup_runtime_error'
+          });
+          return;
+        }
+        resolve({
+          ok: true,
+          reason: 'ungrouped',
+          error: ''
+        });
+      });
+    } catch (error) {
+      resolve({
+        ok: false,
+        reason: 'ungroup_exception',
+        error: error?.message || String(error)
+      });
+    }
+  });
+
+  return {
+    ...baseResult,
+    ...ungroupResult,
+    groupedCount: uniqueGroupedTabIds.length,
+    ungroupedCount: ungroupResult.ok ? uniqueGroupedTabIds.length : 0,
+    skippedCount: requestedTabIds.length - uniqueGroupedTabIds.length,
+    groupedTabIds: uniqueGroupedTabIds
+  };
+}
+
+async function ungroupChatGptTabsInWindow(windowId, options = {}) {
+  const origin = typeof options?.origin === 'string' ? options.origin : '';
+  if (!Number.isInteger(windowId)) {
+    return {
+      ok: false,
+      reason: 'invalid_window_id',
+      windowId: null,
+      requested: 0,
+      groupedCount: 0,
+      ungroupedCount: 0,
+      skippedCount: 0,
+      error: '',
+      origin
+    };
+  }
+
+  const queryResult = await queryTabsInWindowSafe(windowId);
+  if (!queryResult.ok) {
+    return {
+      ok: false,
+      reason: queryResult.reason || 'query_tabs_failed',
+      windowId,
+      requested: 0,
+      groupedCount: 0,
+      ungroupedCount: 0,
+      skippedCount: 0,
+      error: queryResult.reason || '',
+      origin
+    };
+  }
+
+  const tabs = Array.isArray(queryResult.tabs) ? queryResult.tabs : [];
+  const chatTabIds = tabs
+    .filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)))
+    .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
+    .filter((tabId) => Number.isInteger(tabId));
+
+  if (chatTabIds.length === 0) {
+    return {
+      ok: true,
+      reason: 'no_chat_tabs',
+      windowId,
+      requested: 0,
+      groupedCount: 0,
+      ungroupedCount: 0,
+      skippedCount: 0,
+      error: '',
+      origin
+    };
+  }
+
+  const ungroupResult = await ungroupTabsById(chatTabIds, { origin });
+  return {
+    ...ungroupResult,
+    windowId,
+    requested: chatTabIds.length,
+    reason: ungroupResult.reason || 'ungroup_result_missing_reason',
+    origin
+  };
+}
+
 function matchesWindowScope(process, windowId) {
   if (!Number.isInteger(windowId)) return true;
   if (!process || typeof process !== 'object') return false;
@@ -845,6 +1020,20 @@ async function stopSingleProcess(process, options = {}) {
   const replayOnRestart = options?.replayLatestResponse === true
     || reason === 'restarted_in_same_window';
   let replayResult = null;
+
+  if (reason === 'restarted_in_same_window' && processTabId !== null) {
+    const restartUngroup = await ungroupTabsById([processTabId], {
+      origin: 'restart-stop-single-process'
+    });
+    if (!restartUngroup.ok && restartUngroup.reason !== 'already_ungrouped') {
+      console.warn('[restart] ungroup process tab failed:', {
+        runId,
+        tabId: processTabId,
+        reason: restartUngroup.reason,
+        error: restartUngroup.error || ''
+      });
+    }
+  }
 
   if (replayOnRestart) {
     replayResult = await replayCompletedResponseForProcess(process, {
@@ -1641,7 +1830,6 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
 
   const payload = '';
   const restOfPrompts = cleanedPrompts;
-  const companyPromptCatalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
   const processTitle = typeof options.processTitle === 'string' && options.processTitle.trim()
     ? options.processTitle.trim()
     : `Auto Resume from Stage ${normalizedStartIndex + 1}`;
@@ -1774,7 +1962,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         needsAction: false,
         currentPrompt: recoveryCurrentPrompt,
         totalPrompts: PROMPTS_COMPANY.length,
-        statusText: `Auto-reload ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
+        statusText: `Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
         reason: recoveryReason,
         autoRecovery: {
           attempt: autoRecoveryAttempt,
@@ -1793,58 +1981,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       }
       await upsertProcess(processId, recoveryPatch);
 
-      const reloadResult = await forceReloadTab(tabId, {
-        timeoutMs: AUTO_RECOVERY_RELOAD_TIMEOUT_MS,
-        bypassCache: true
-      });
-      if (!reloadResult.ok) {
-        console.warn('[auto-resume] Nie udalo sie potwierdzic reloadu karty:', reloadResult);
-      }
       await sleep(AUTO_RECOVERY_DELAY_MS);
 
-      const detectedRecoveryPoint = await detectCompanyRecoveryPointFromLastMessage(
-        tabId,
-        nextPromptOffset,
-        companyPromptCatalog
-      );
-      const alignedState = alignExecutionStateWithDetectedPrompt(
-        nextPromptOffset,
-        nextRemainingPrompts,
-        detectedRecoveryPoint
-      );
-
-      if (alignedState.applied) {
-        const syncedCurrentPrompt = Number.isInteger(alignedState.promptOffset) && alignedState.promptOffset >= 0
-          ? alignedState.promptOffset + 1
-          : recoveryCurrentPrompt;
-        const syncedStageIndex = syncedCurrentPrompt > 0 ? (syncedCurrentPrompt - 1) : null;
-        await upsertProcess(processId, {
-          title: processTitle,
-          analysisType: 'company',
-          status: 'running',
-          needsAction: false,
-          currentPrompt: syncedCurrentPrompt,
-          totalPrompts: PROMPTS_COMPANY.length,
-          ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
-          ...(syncedCurrentPrompt > 0 ? { stageName: `Prompt ${syncedCurrentPrompt}` } : {}),
-          statusText: `Auto-recovery sync: prompt ${syncedCurrentPrompt}`,
-          reason: 'auto_recovery_sync_last_message',
-          autoRecovery: {
-            attempt: autoRecoveryAttempt,
-            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-            delayMs: AUTO_RECOVERY_DELAY_MS,
-            reason: recoveryReasonBase,
-            currentPrompt: syncedCurrentPrompt,
-            ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
-            updatedAt: Date.now()
-          },
-          timestamp: Date.now()
-        });
-      }
-
       executionPayload = '';
-      executionPromptChain = alignedState.remainingPrompts;
-      executionPromptOffset = alignedState.promptOffset;
+      executionPromptChain = nextRemainingPrompts;
+      executionPromptOffset = nextPromptOffset;
     }
 
     if (result?.success) {
@@ -2843,6 +2984,16 @@ async function restoreProcessWindows(options = {}) {
 
     let tabActivated = false;
     if (Number.isInteger(tab?.id)) {
+      const restoreUngroup = await ungroupTabsById([tab.id], {
+        origin: 'restore-process-windows'
+      });
+      if (!restoreUngroup.ok && restoreUngroup.reason !== 'already_ungrouped') {
+        console.warn('[restore] ungroup tab failed:', {
+          tabId: tab.id,
+          reason: restoreUngroup.reason,
+          error: restoreUngroup.error || ''
+        });
+      }
       try {
         await chrome.tabs.update(tab.id, { active: true });
         tabActivated = true;
@@ -3436,6 +3587,16 @@ async function resolveChatTabForProcess(process, message = {}) {
   for (const tabId of candidateTabIds) {
     const tab = await getTabByIdSafe(tabId);
     if (tab && isChatGptUrl(getTabEffectiveUrl(tab))) {
+      const directUngroup = await ungroupTabsById([tab.id], {
+        origin: 'resume-direct-chat-tab'
+      });
+      if (!directUngroup.ok && directUngroup.reason !== 'already_ungrouped') {
+        console.warn('[resume] ungroup direct chat tab failed:', {
+          tabId: tab.id,
+          reason: directUngroup.reason,
+          error: directUngroup.error || ''
+        });
+      }
       return tab;
     }
   }
@@ -3452,6 +3613,16 @@ async function resolveChatTabForProcess(process, message = {}) {
     const existingTabs = await chrome.tabs.query({ url: chatUrlRaw });
     const candidate = Array.isArray(existingTabs) ? existingTabs[0] : null;
     if (candidate && Number.isInteger(candidate.id)) {
+      const existingUngroup = await ungroupTabsById([candidate.id], {
+        origin: 'resume-existing-chat-tab'
+      });
+      if (!existingUngroup.ok && existingUngroup.reason !== 'already_ungrouped') {
+        console.warn('[resume] ungroup existing chat tab failed:', {
+          tabId: candidate.id,
+          reason: existingUngroup.reason,
+          error: existingUngroup.error || ''
+        });
+      }
       return candidate;
     }
   } catch (error) {
@@ -3465,6 +3636,16 @@ async function resolveChatTabForProcess(process, message = {}) {
     }
     const createdTab = await chrome.tabs.create(createOptions);
     if (createdTab && Number.isInteger(createdTab.id)) {
+      const createdUngroup = await ungroupTabsById([createdTab.id], {
+        origin: 'resume-created-chat-tab'
+      });
+      if (!createdUngroup.ok && createdUngroup.reason !== 'already_ungrouped') {
+        console.warn('[resume] ungroup created chat tab failed:', {
+          tabId: createdTab.id,
+          reason: createdUngroup.reason,
+          error: createdUngroup.error || ''
+        });
+      }
       await waitForTabComplete(createdTab.id);
     }
     return createdTab || null;
@@ -4945,6 +5126,10 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     return { skipped: true, reason: 'dispatch_disabled' };
   }
   if (watchlistDispatchFlushInProgress) {
+    watchlistDispatchFlushPending = true;
+    if (!watchlistDispatchFlushPendingReason) {
+      watchlistDispatchFlushPendingReason = normalizedReason;
+    }
     appendWatchlistDispatchHistory({
       ts,
       kind: 'flush',
@@ -4957,7 +5142,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       deferred: 0,
       remaining: 0
     }).catch(() => {});
-    return { skipped: true, reason: 'flush_in_progress' };
+    return {
+      skipped: true,
+      reason: 'flush_in_progress',
+      followUpScheduled: true
+    };
   }
 
   watchlistDispatchFlushInProgress = true;
@@ -5062,6 +5251,23 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     };
   } finally {
     watchlistDispatchFlushInProgress = false;
+    if (watchlistDispatchFlushPending) {
+      const pendingReason = normalizeWatchlistFlushReason(
+        `follow_up:${watchlistDispatchFlushPendingReason || normalizedReason}`,
+        'follow_up'
+      );
+      watchlistDispatchFlushPending = false;
+      watchlistDispatchFlushPendingReason = '';
+      console.log(`[copy-flow] [dispatch:flush-follow-up] reason=${pendingReason}`);
+      Promise.resolve()
+        .then(() => flushWatchlistDispatchOutbox(pendingReason))
+        .catch((error) => {
+          console.warn('[copy-flow] [dispatch:flush-follow-up-failed]', {
+            reason: pendingReason,
+            error: error?.message || String(error)
+          });
+        });
+    }
   }
 }
 
@@ -5287,6 +5493,8 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://*.nzz.ch/*", name: "NZZ" },
   { pattern: "https://*.project-syndicate.org/*", name: "Project Syndicate" },
   { pattern: "https://the-ken.com/*", name: "The Ken" },
+  { pattern: "https://*.lazard.com/*", name: "Lazard" },
+  { pattern: "https://*.rand.org/*", name: "RAND Corporation" },
   { pattern: "https://www.youtube.com/*", name: "YouTube" },
   { pattern: "https://youtu.be/*", name: "YouTube" },
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
@@ -5493,6 +5701,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       queueSkipReason: '',
       flushSkipped: false,
       flushSkipReason: '',
+      flushFollowUpScheduled: false,
       sent: 0,
       failed: 0,
       deferred: 0,
@@ -5509,10 +5718,13 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       );
       const flushResult = await flushWatchlistDispatchOutbox('save_response');
       if (flushResult?.skipped) {
+        const flushSkipReason = typeof flushResult?.reason === 'string' ? flushResult.reason : 'unknown';
+        const flushLogMethod = flushSkipReason === 'flush_in_progress' ? 'log' : 'warn';
         dispatchOutcome.flushSkipped = true;
-        dispatchOutcome.flushSkipReason = typeof flushResult?.reason === 'string' ? flushResult.reason : 'unknown';
-        console.warn(
-          `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${flushResult?.reason || 'unknown'}`
+        dispatchOutcome.flushSkipReason = flushSkipReason;
+        dispatchOutcome.flushFollowUpScheduled = flushResult?.followUpScheduled === true;
+        console[flushLogMethod](
+          `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${flushSkipReason} followUpScheduled=${dispatchOutcome.flushFollowUpScheduled}`
         );
       } else {
         dispatchOutcome.sent = Number.isInteger(flushResult?.sent) ? flushResult.sent : 0;
@@ -5614,6 +5826,76 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }).catch((error) => {
       console.error('[run] RUN_ANALYSIS failed:', error);
     });
+  } else if (message.type === 'YT_FETCH_TRANSCRIPT_FOR_TAB') {
+    (async () => {
+      const targetTabId = Number.isInteger(message?.tabId)
+        ? message.tabId
+        : (Number.isInteger(sender?.tab?.id) ? sender.tab.id : null);
+
+      if (!Number.isInteger(targetTabId)) {
+        sendResponse({
+          success: false,
+          transcript: '',
+          lang: '',
+          method: 'none',
+          errorCode: 'tab_id_missing',
+          error: 'Missing target tab id',
+        });
+        return;
+      }
+
+      let targetTab;
+      try {
+        targetTab = await chrome.tabs.get(targetTabId);
+      } catch (error) {
+        sendResponse({
+          success: false,
+          transcript: '',
+          lang: '',
+          method: 'none',
+          errorCode: 'tab_not_found',
+          error: error?.message || 'Unable to get tab info',
+        });
+        return;
+      }
+
+      const targetUrl = typeof targetTab?.url === 'string' ? targetTab.url : '';
+      if (!isYouTubeTabUrl(targetUrl)) {
+        sendResponse({
+          success: false,
+          transcript: '',
+          lang: '',
+          method: 'none',
+          errorCode: 'not_youtube_tab',
+          error: 'Active tab is not a YouTube page',
+          tabId: targetTabId,
+          tabUrl: targetUrl,
+        });
+        return;
+      }
+
+      const preferredLanguages = Array.isArray(message?.preferredLanguages) && message.preferredLanguages.length > 0
+        ? message.preferredLanguages
+        : YT_TRANSCRIPT_PREFERRED_LANGUAGES;
+      const timeoutMs = Number.isInteger(message?.timeoutMs) ? message.timeoutMs : YT_TRANSCRIPT_REQUEST_TIMEOUT_MS;
+      const maxRetries = Number.isInteger(message?.maxRetries) ? message.maxRetries : YT_TRANSCRIPT_MAX_RETRIES;
+      const result = await fetchYouTubeTranscriptForTab(targetTabId, preferredLanguages, { timeoutMs, maxRetries });
+      sendResponse({
+        ...result,
+        tabId: targetTabId,
+        tabUrl: targetUrl,
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        transcript: '',
+        lang: '',
+        method: 'none',
+        errorCode: 'runtime_error',
+        error: error?.message || 'runtime_error',
+      });
+    });
+    return true;
   } else if (message.type === 'STOP_PROCESS') {
     (async () => {
       const targetWindowId = Number.isInteger(message?.windowId)
@@ -5649,14 +5931,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
-    console.log('📩 Otrzymano MANUAL_SOURCE_SUBMIT:', { 
-      titleLength: message.title?.length, 
-      textLength: message.text?.length, 
-      instances: message.instances 
+    const mode = message?.mode === 'pdf' ? 'pdf' : 'text';
+    const normalizedInstances = Math.max(1, Math.min(10, Number.isInteger(message?.instances) ? message.instances : 1));
+    console.log('[manual-source] MANUAL_SOURCE_SUBMIT:', {
+      mode,
+      titleLength: typeof message?.title === 'string' ? message.title.length : 0,
+      textLength: typeof message?.text === 'string' ? message.text.length : 0,
+      instances: normalizedInstances,
+      pdfProviderId: typeof message?.pdfProviderId === 'string' ? message.pdfProviderId : '',
+      pdfFiles: Array.isArray(message?.pdfFiles) ? message.pdfFiles.length : 0
     });
-    runManualSourceAnalysis(message.text, message.title, message.instances);
-    sendResponse({ success: true });
-    return true; // Utrzymuj kanał otwarty dla async
+
+    if (mode === 'pdf') {
+      const providerId = typeof message?.pdfProviderId === 'string' ? message.pdfProviderId.trim() : '';
+      const pdfFiles = Array.isArray(message?.pdfFiles) ? message.pdfFiles : [];
+      if (!providerId || pdfFiles.length === 0) {
+        sendResponse({ success: false, error: 'invalid_pdf_payload' });
+        return true;
+      }
+
+      runManualPdfAnalysisQueue({
+        title: typeof message?.title === 'string' ? message.title : '',
+        instances: normalizedInstances,
+        providerId,
+        pdfFiles
+      }).catch((error) => {
+        console.warn('[manual-pdf] queue failed:', error?.message || String(error));
+      });
+
+      sendResponse({ success: true, mode: 'pdf', queued: pdfFiles.length * normalizedInstances });
+      return true;
+    }
+
+    runManualSourceAnalysis(message.text, message.title, normalizedInstances).catch((error) => {
+      console.warn('[manual-source] text mode failed:', error?.message || String(error));
+    });
+    sendResponse({ success: true, mode: 'text' });
+    return true;
+  } else if (message.type === 'MANUAL_PDF_GET_CHUNK') {
+    (async () => {
+      const providerId = typeof message?.providerId === 'string' ? message.providerId.trim() : '';
+      const token = typeof message?.token === 'string' ? message.token.trim() : '';
+      const offset = Number.isInteger(message?.offset) && message.offset >= 0 ? message.offset : 0;
+      const chunkSize = Number.isInteger(message?.chunkSize) && message.chunkSize > 0
+        ? message.chunkSize
+        : MANUAL_PDF_CHUNK_SIZE;
+
+      if (!providerId || !token) {
+        sendResponse({ success: false, error: 'invalid_chunk_request' });
+        return;
+      }
+
+      const chunkResult = await requestManualPdfProviderChunk({
+        providerId,
+        token,
+        offset,
+        chunkSize
+      });
+      sendResponse(chunkResult);
+    })().catch((error) => {
+      sendResponse({ success: false, error: error?.message || 'chunk_read_failed' });
+    });
+    return true;
   } else if (message.type === 'GET_PROCESSES') {
     (async () => {
       const processes = await getProcessSnapshot();
@@ -6120,6 +6456,431 @@ async function getArticleSelection(articles) {
 }
 
 // Funkcja przetwarzająca artykuły z danym prompt chain i URL
+function isYouTubeTabUrl(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
+  try {
+    const parsed = new URL(rawUrl);
+    const host = String(parsed.hostname || '').toLowerCase();
+    return host.includes('youtube.com') || host.includes('youtu.be');
+  } catch (error) {
+    return false;
+  }
+}
+
+function extractYouTubeVideoId(rawUrl) {
+  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return '';
+  try {
+    const parsed = new URL(rawUrl);
+    const host = String(parsed.hostname || '').toLowerCase();
+    if (host.includes('youtube.com')) {
+      const queryVideoId = String(parsed.searchParams.get('v') || '').trim();
+      if (queryVideoId) return queryVideoId;
+      const pathParts = String(parsed.pathname || '').split('/').filter(Boolean);
+      if (pathParts[0] === 'shorts' || pathParts[0] === 'live') {
+        return String(pathParts[1] || '').trim();
+      }
+      return '';
+    }
+    if (host.includes('youtu.be')) {
+      return String(parsed.pathname || '').replace(/^\/+/, '').split('/')[0].trim();
+    }
+    return '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function normalizePreferredTranscriptLanguages(preferredLanguages) {
+  const fallback = Array.isArray(YT_TRANSCRIPT_PREFERRED_LANGUAGES) && YT_TRANSCRIPT_PREFERRED_LANGUAGES.length > 0
+    ? YT_TRANSCRIPT_PREFERRED_LANGUAGES
+    : ['pl', 'en'];
+  const source = Array.isArray(preferredLanguages) && preferredLanguages.length > 0
+    ? preferredLanguages
+    : fallback;
+
+  return Array.from(
+    new Set(
+      source
+        .map((item) => String(item || '').trim().toLowerCase().split('-')[0])
+        .filter(Boolean)
+    )
+  );
+}
+
+function buildYouTubeTranscriptCacheKey(videoId, preferredLanguages) {
+  const normalizedVideoId = String(videoId || '').trim();
+  if (!normalizedVideoId) return '';
+  const languages = normalizePreferredTranscriptLanguages(preferredLanguages);
+  return `${normalizedVideoId}::${languages.join(',') || 'default'}`;
+}
+
+function pruneYouTubeTranscriptCache() {
+  const now = Date.now();
+  for (const [cacheKey, cacheEntry] of ytTranscriptCache.entries()) {
+    if (!cacheEntry || !Number.isFinite(cacheEntry.expiresAt) || cacheEntry.expiresAt <= now) {
+      ytTranscriptCache.delete(cacheKey);
+    }
+  }
+  while (ytTranscriptCache.size > YT_TRANSCRIPT_CACHE_MAX_ITEMS) {
+    const oldestKey = ytTranscriptCache.keys().next().value;
+    if (!oldestKey) break;
+    ytTranscriptCache.delete(oldestKey);
+  }
+}
+
+function getCachedYouTubeTranscript(videoId, preferredLanguages) {
+  const cacheKey = buildYouTubeTranscriptCacheKey(videoId, preferredLanguages);
+  if (!cacheKey) return null;
+  pruneYouTubeTranscriptCache();
+  const cacheEntry = ytTranscriptCache.get(cacheKey);
+  if (!cacheEntry || !cacheEntry.result) {
+    return null;
+  }
+  return {
+    ...cacheEntry.result,
+    cacheHit: true,
+  };
+}
+
+function setCachedYouTubeTranscript(videoId, preferredLanguages, result) {
+  const cacheKey = buildYouTubeTranscriptCacheKey(videoId, preferredLanguages);
+  if (!cacheKey || !result || result.success !== true) return;
+  pruneYouTubeTranscriptCache();
+  if (ytTranscriptCache.has(cacheKey)) {
+    ytTranscriptCache.delete(cacheKey);
+  }
+  ytTranscriptCache.set(cacheKey, {
+    expiresAt: Date.now() + YT_TRANSCRIPT_CACHE_TTL_MS,
+    result: {
+      ...result,
+      cacheHit: false,
+    },
+  });
+  pruneYouTubeTranscriptCache();
+}
+
+function isRetryableYouTubeTranscriptError(errorCode) {
+  const normalized = String(errorCode || '').trim().toLowerCase();
+  return normalized === 'content_script_unreachable'
+    || normalized === 'caption_tracks_timeout'
+    || normalized === 'caption_tracks_missing'
+    || normalized === 'player_response_missing'
+    || normalized === 'timedtext_list_fetch_failed'
+    || normalized === 'runtime_error'
+    || normalized === 'runtime_timeout'
+    || normalized === 'invalid_transcript_response'
+    || normalized === 'transcript_fetch_failed';
+}
+
+function normalizeYouTubeTranscriptResponse(response) {
+  const hasObjectPayload = !!(response && typeof response === 'object');
+  const payload = hasObjectPayload ? response : {};
+  const transcript = typeof payload.transcript === 'string' ? payload.transcript.trim() : '';
+  const success = payload.success === true && transcript.length >= YT_TRANSCRIPT_MIN_CHARS;
+  const rawErrorCode = typeof payload.errorCode === 'string' && payload.errorCode.trim()
+    ? payload.errorCode.trim().toLowerCase()
+    : '';
+  const errorCode = success
+    ? ''
+    : (
+      rawErrorCode
+      || (!hasObjectPayload ? 'invalid_transcript_response' : '')
+      || (transcript.length > 0 && transcript.length < YT_TRANSCRIPT_MIN_CHARS ? 'transcript_too_short' : 'transcript_unavailable')
+    );
+  const error = success
+    ? ''
+    : (
+      typeof payload.error === 'string' && payload.error.trim()
+        ? payload.error.trim()
+        : (errorCode === 'invalid_transcript_response' ? 'Invalid response from YouTube content script' : (errorCode || 'transcript_unavailable'))
+    );
+
+  return {
+    success,
+    transcript: success ? transcript : '',
+    lang: typeof payload.lang === 'string' ? payload.lang.trim() : '',
+    method: typeof payload.method === 'string' ? payload.method.trim() : 'none',
+    videoId: typeof payload.videoId === 'string' ? payload.videoId.trim() : '',
+    title: typeof payload.title === 'string' ? payload.title : '',
+    errorCode,
+    error,
+    retryable: !success && isRetryableYouTubeTranscriptError(errorCode),
+    cacheHit: payload.cacheHit === true,
+  };
+}
+
+function normalizeYouTubeSendMessageError(error) {
+  const message = String(error?.message || error || '').trim();
+  const lowered = message.toLowerCase();
+  if (lowered.includes('no tab with id')) {
+    return {
+      errorCode: 'tab_not_found',
+      error: message || 'tab_not_found',
+      retryable: false,
+    };
+  }
+  if (
+    lowered.includes('cannot access contents of url')
+    || lowered.includes('cannot access a chrome://')
+    || lowered.includes('extensions gallery cannot be scripted')
+    || lowered.includes('missing host permission')
+  ) {
+    return {
+      errorCode: 'content_script_injection_blocked',
+      error: message || 'content_script_injection_blocked',
+      retryable: false,
+    };
+  }
+  if (
+    lowered.includes('receiving end does not exist')
+    || lowered.includes('could not establish connection')
+    || lowered.includes('message port closed')
+  ) {
+    return {
+      errorCode: 'content_script_unreachable',
+      error: message || 'content_script_unreachable',
+      retryable: true,
+    };
+  }
+  if (lowered.includes('timeout')) {
+    return {
+      errorCode: 'runtime_timeout',
+      error: message || 'runtime_timeout',
+      retryable: true,
+    };
+  }
+  return {
+    errorCode: 'runtime_error',
+    error: message || 'runtime_error',
+    retryable: true,
+  };
+}
+
+async function ensureYouTubeContentScriptInjected(tabId) {
+  try {
+    const probeResults = await chrome.scripting.executeScript({
+      target: { tabId },
+      func: () => Boolean(window.__iskraYtTranscriptScriptReady),
+    });
+    if (Array.isArray(probeResults) && probeResults.some((row) => row?.result === true)) {
+      return {
+        success: true,
+        errorCode: '',
+        error: '',
+      };
+    }
+
+    await chrome.scripting.executeScript({
+      target: { tabId },
+      files: ['youtube-content.js'],
+    });
+    return {
+      success: true,
+      errorCode: '',
+      error: '',
+    };
+  } catch (error) {
+    const message = String(error?.message || error || '').trim();
+    const lowered = message.toLowerCase();
+    const blocked = lowered.includes('cannot access contents of url')
+      || lowered.includes('cannot access a chrome://')
+      || lowered.includes('extensions gallery cannot be scripted')
+      || lowered.includes('missing host permission');
+    return {
+      success: false,
+      errorCode: blocked ? 'content_script_injection_blocked' : 'content_script_injection_failed',
+      error: message || (blocked ? 'content_script_injection_blocked' : 'content_script_injection_failed'),
+    };
+  }
+}
+
+async function fetchYouTubeTranscriptForTabInternal(tabId, preferredLanguages = YT_TRANSCRIPT_PREFERRED_LANGUAGES, options = {}) {
+  const maxRetriesRaw = Number.isInteger(options?.maxRetries) ? options.maxRetries : YT_TRANSCRIPT_MAX_RETRIES;
+  const timeoutMsRaw = Number.isInteger(options?.timeoutMs) ? options.timeoutMs : YT_TRANSCRIPT_REQUEST_TIMEOUT_MS;
+  const maxRetries = Math.max(1, Math.min(6, maxRetriesRaw));
+  const timeoutMs = Math.max(1000, Math.min(30000, timeoutMsRaw));
+  const preferred = normalizePreferredTranscriptLanguages(preferredLanguages);
+  const useCache = options?.useCache !== false;
+  let tabUrl = '';
+
+  try {
+    const tab = await chrome.tabs.get(tabId);
+    tabUrl = typeof tab?.url === 'string' ? tab.url : '';
+  } catch (error) {
+    return {
+      success: false,
+      transcript: '',
+      lang: '',
+      method: 'none',
+      videoId: '',
+      title: '',
+      errorCode: 'tab_not_found',
+      error: error?.message || 'tab_not_found',
+      retryable: false,
+      attempts: maxRetries,
+      attemptUsed: 0,
+      cacheHit: false,
+    };
+  }
+
+  if (!isYouTubeTabUrl(tabUrl)) {
+    return {
+      success: false,
+      transcript: '',
+      lang: '',
+      method: 'none',
+      videoId: '',
+      title: '',
+      errorCode: 'not_youtube_tab',
+      error: 'Active tab is not a YouTube page',
+      retryable: false,
+      attempts: maxRetries,
+      attemptUsed: 0,
+      cacheHit: false,
+    };
+  }
+
+  const initialVideoId = extractYouTubeVideoId(tabUrl);
+  if (useCache && initialVideoId) {
+    const cached = getCachedYouTubeTranscript(initialVideoId, preferred);
+    if (cached && cached.success) {
+      return {
+        ...cached,
+        attempts: maxRetries,
+        attemptUsed: 0,
+      };
+    }
+  }
+
+  let lastResult = {
+    success: false,
+    transcript: '',
+    lang: '',
+    method: 'none',
+    videoId: '',
+    title: '',
+    errorCode: 'transcript_unavailable',
+    error: 'transcript_unavailable',
+    retryable: true,
+    cacheHit: false,
+  };
+  let injectionAttempted = false;
+  let attemptUsed = 0;
+
+  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
+    attemptUsed = attempt;
+    try {
+      const response = await chrome.tabs.sendMessage(tabId, {
+        type: 'GET_TRANSCRIPT',
+        preferredLanguages: preferred,
+        timeoutMs,
+      });
+
+      const normalized = normalizeYouTubeTranscriptResponse(response);
+      if (normalized.success) {
+        const resolvedVideoId = String(normalized.videoId || initialVideoId || '').trim();
+        const normalizedSuccess = {
+          ...normalized,
+          videoId: resolvedVideoId,
+          cacheHit: normalized.cacheHit === true,
+        };
+        if (useCache && resolvedVideoId) {
+          setCachedYouTubeTranscript(resolvedVideoId, preferred, normalizedSuccess);
+        }
+        return {
+          ...normalizedSuccess,
+          attempts: maxRetries,
+          attemptUsed: attempt,
+        };
+      }
+
+      lastResult = {
+        ...normalized,
+        videoId: normalized.videoId || initialVideoId || '',
+      };
+    } catch (error) {
+      const normalizedError = normalizeYouTubeSendMessageError(error);
+      lastResult = {
+        success: false,
+        transcript: '',
+        lang: '',
+        method: 'none',
+        videoId: initialVideoId,
+        title: '',
+        errorCode: normalizedError.errorCode,
+        error: normalizedError.error,
+        retryable: normalizedError.retryable,
+        cacheHit: false,
+      };
+    }
+
+    if (attempt < maxRetries && lastResult.retryable) {
+      if (lastResult.errorCode === 'content_script_unreachable' && !injectionAttempted) {
+        injectionAttempted = true;
+        const injectResult = await ensureYouTubeContentScriptInjected(tabId);
+        if (!injectResult.success) {
+          return {
+            success: false,
+            transcript: '',
+            lang: '',
+            method: 'none',
+            videoId: initialVideoId || '',
+            title: '',
+            errorCode: injectResult.errorCode || 'content_script_injection_failed',
+            error: injectResult.error || injectResult.errorCode || 'content_script_injection_failed',
+            retryable: false,
+            attempts: maxRetries,
+            attemptUsed: attempt,
+            cacheHit: false,
+          };
+        }
+        await sleep(YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS);
+        continue;
+      }
+      await sleep(YT_TRANSCRIPT_RETRY_DELAY_MS * attempt);
+      continue;
+    }
+    break;
+  }
+
+  return {
+    ...lastResult,
+    attempts: maxRetries,
+    attemptUsed: Math.max(1, attemptUsed || maxRetries),
+    videoId: lastResult.videoId || initialVideoId || '',
+    cacheHit: false,
+  };
+}
+
+async function fetchYouTubeTranscriptForTab(tabId, preferredLanguages = YT_TRANSCRIPT_PREFERRED_LANGUAGES, options = {}) {
+  const preferred = normalizePreferredTranscriptLanguages(preferredLanguages);
+  const useCache = options?.useCache !== false;
+  const inFlightKey = `${tabId}::${preferred.join(',') || 'default'}::${useCache ? 'cache' : 'nocache'}`;
+  const existingRequest = ytTranscriptInFlightRequests.get(inFlightKey);
+  if (existingRequest) {
+    return existingRequest;
+  }
+
+  let requestPromise = null;
+  requestPromise = fetchYouTubeTranscriptForTabInternal(tabId, preferred, options)
+    .finally(() => {
+      if (ytTranscriptInFlightRequests.get(inFlightKey) === requestPromise) {
+        ytTranscriptInFlightRequests.delete(inFlightKey);
+      }
+    });
+
+  ytTranscriptInFlightRequests.set(inFlightKey, requestPromise);
+  return requestPromise;
+}
+
+chrome.tabs.onRemoved.addListener((tabId) => {
+  for (const [cacheKey, requestPromise] of ytTranscriptInFlightRequests.entries()) {
+    if (cacheKey.startsWith(`${tabId}::`) && ytTranscriptInFlightRequests.get(cacheKey) === requestPromise) {
+      ytTranscriptInFlightRequests.delete(cacheKey);
+    }
+  }
+});
+
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
@@ -6145,10 +6906,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       await sleep(index * 500);
       
       // Sprawdź czy to pseudo-tab (ręcznie wklejone źródło)
-      const isManualSource = tab.url === "manual://source";
+      const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
+      const isManualSource = manualUrl.startsWith('manual://');
+      const isManualPdf = manualUrl === 'manual://pdf';
       let extractedText;
-      let transcriptLang = null; // Może być ustawiony przez YouTube content script
-      
+      let transcriptLang = null; // Moze byc ustawiony przez YouTube content script
+      const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
+        ? tab.manualPdfAttachment
+        : null;      
       if (isManualSource) {
         // Użyj tekstu przekazanego bezpośrednio
         extractedText = tab.manualText;
@@ -6157,44 +6922,47 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         // Dla manual source: brak walidacji długości (zgodnie z planem)
         if (!extractedText || extractedText.length === 0) {
           console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - pusty tekst`);
-          return { success: false, reason: 'pusty tekst' };
+          return { success: false, title: processTitle, reason: 'pusty tekst', error: 'manual_source_empty' };
         }
       } else {
         // Wykryj źródło najpierw, aby wiedzieć czy to YouTube
-        const url = new URL(tab.url);
-        const hostname = url.hostname;
-        let isYouTube = hostname.includes('youtube.com') || hostname.includes('youtu.be');
+        const isYouTube = isYouTubeTabUrl(tab.url);
         
         if (isYouTube) {
-          // === YOUTUBE: Użyj content script przez sendMessage ===
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube wykryty - używam content script`);
-          
-          try {
-            const response = await chrome.tabs.sendMessage(tab.id, {
-              type: 'GET_TRANSCRIPT'
-            });
-            
-            console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Odpowiedź z content script:`, {
-              length: response.transcript?.length || 0,
-              method: response.method,
-              error: response.error
-            });
-            
-            if (!response.transcript) {
-              console.error(`[${analysisType}] [${index + 1}/${tabs.length}] Brak transkrypcji: ${response.error || 'unknown'}`);
-              return { success: false, reason: `YouTube: ${response.error || 'no transcript'}` };
-            }
-            
-            extractedText = response.transcript;
-            transcriptLang = response.lang || response.langName || 'unknown';
-            
-            console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✓ Transkrypcja: ${extractedText.length} znaków, język: ${transcriptLang}, metoda: ${response.method}`);
-            
-          } catch (e) {
-            console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd komunikacji z content script:`, e);
-            return { success: false, reason: 'YouTube: content script error' };
+          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube detected - fetching transcript`);
+          const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
+            timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
+            maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
+          });
+
+          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript result:`, {
+            success: transcriptResult.success,
+            length: transcriptResult.transcript?.length || 0,
+            lang: transcriptResult.lang,
+            method: transcriptResult.method,
+            cacheHit: transcriptResult.cacheHit,
+            errorCode: transcriptResult.errorCode,
+            error: transcriptResult.error,
+            attemptUsed: transcriptResult.attemptUsed,
+            attempts: transcriptResult.attempts,
+          });
+
+          if (!transcriptResult.success || !transcriptResult.transcript) {
+            const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
+            const ytError = transcriptResult.error || ytReason;
+            console.warn(
+              `[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript failed: reason=${ytReason} retryable=${transcriptResult.retryable === true} attempt=${transcriptResult.attemptUsed || 0}/${transcriptResult.attempts || YT_TRANSCRIPT_MAX_RETRIES} error=${truncateDispatchLogText(ytError, 220)}`
+            );
+            return {
+              success: false,
+              title: processTitle,
+              reason: `youtube_${ytReason}`,
+              error: ytError
+            };
           }
-          
+
+          extractedText = transcriptResult.transcript;
+          transcriptLang = transcriptResult.lang || 'unknown';
         } else {
           // === NON-YOUTUBE: Użyj executeScript z extractText ===
           const results = await chrome.scripting.executeScript({
@@ -6208,7 +6976,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         // Dla automatycznych źródeł: walidacja minimum 50 znaków
         if (!extractedText || extractedText.length < 50) {
           console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - za mało tekstu`);
-          return { success: false, reason: 'za mało tekstu' };
+          return {
+            success: false,
+            title: processTitle,
+            reason: 'za mało tekstu',
+            error: `text_too_short_${extractedText?.length || 0}`
+          };
         }
       }
 
@@ -6220,7 +6993,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       let sourceName;
       
       if (isManualSource) {
-        sourceName = "Manual Source";
+        sourceName = isManualPdf ? "Manual PDF" : "Manual Source";
       } else {
         const url = new URL(tab.url);
         const hostname = url.hostname;
@@ -6244,10 +7017,6 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       const restOfPrompts = promptChain.slice(1);
       processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
       const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
-      const companyPromptCatalog = (analysisType === 'company')
-        ? buildPromptSignatureCatalog(PROMPTS_COMPANY)
-        : null;
-
       await upsertProcess(processId, {
         title,
         analysisType,
@@ -6258,7 +7027,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
-        sourceUrl: isManualSource ? 'manual://source' : (tab.url || ''),
+        sourceUrl: isManualSource ? (tab.url || 'manual://source') : (tab.url || ''),
         chatUrl,
         ...(invocationWindowId !== null ? { invocationWindowId } : {}),
         ...(sourceWindowId !== null ? { sourceWindowId } : {}),
@@ -6273,6 +7042,17 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       });
 
       const chatTabId = window.tabs[0].id;
+
+      const createdChatUngroup = await ungroupTabsById([chatTabId], {
+        origin: 'process-chat-tab-created'
+      });
+      if (!createdChatUngroup.ok && createdChatUngroup.reason !== 'already_ungrouped') {
+        console.warn('[run] chat tab ungroup failed:', {
+          tabId: chatTabId,
+          reason: createdChatUngroup.reason,
+          error: createdChatUngroup.error || ''
+        });
+      }
 
       // POPRAWKA: Upewnij się że okno jest aktywne i karta ma fokus
       await chrome.windows.update(window.id, { focused: true });
@@ -6327,7 +7107,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
               persistFinalResponseViaMessage: true,
               mode: 'runtime_message',
               saveTimeoutMs: 15000
-            }
+            },
+            manualPdfAttachmentContext
           ]
         });
         console.log(`✅ executeScript zakończony pomyślnie`);
@@ -6400,7 +7181,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           needsAction: false,
           currentPrompt: recoveryCurrentPrompt,
           totalPrompts: processTotalPrompts,
-          statusText: `Auto-reload ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
+          statusText: `Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
           reason: recoveryReason,
           autoRecovery: {
             attempt: autoRecoveryAttempt,
@@ -6419,67 +7200,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         }
         await upsertProcess(processId, recoveryPatch);
 
-        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Auto-recovery ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS} (${recoveryReasonBase}) dla prompta ${recoveryCurrentPrompt}`);
-        const reloadResult = await forceReloadTab(chatTabId, {
-          timeoutMs: AUTO_RECOVERY_RELOAD_TIMEOUT_MS,
-          bypassCache: true
-        });
-        if (!reloadResult.ok) {
-          console.warn('[auto-recovery] Nie udalo sie potwierdzic reloadu karty:', reloadResult);
-        }
+        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS} (${recoveryReasonBase}) dla prompta ${recoveryCurrentPrompt}`);
         await sleep(AUTO_RECOVERY_DELAY_MS);
 
-        let alignedState = {
-          applied: false,
-          reason: 'base_state',
-          promptOffset: nextPromptOffset,
-          remainingPrompts: nextRemainingPrompts
-        };
-        if (analysisType === 'company') {
-          const detectedRecoveryPoint = await detectCompanyRecoveryPointFromLastMessage(
-            chatTabId,
-            nextPromptOffset,
-            companyPromptCatalog
-          );
-          alignedState = alignExecutionStateWithDetectedPrompt(
-            nextPromptOffset,
-            nextRemainingPrompts,
-            detectedRecoveryPoint
-          );
-
-          if (alignedState.applied) {
-            const syncedCurrentPrompt = Number.isInteger(alignedState.promptOffset) && alignedState.promptOffset >= 0
-              ? alignedState.promptOffset + 1
-              : recoveryCurrentPrompt;
-            const syncedStageIndex = syncedCurrentPrompt > 0 ? (syncedCurrentPrompt - 1) : null;
-            await upsertProcess(processId, {
-              title: processTitle,
-              analysisType,
-              status: 'running',
-              needsAction: false,
-              currentPrompt: syncedCurrentPrompt,
-              totalPrompts: processTotalPrompts,
-              ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
-              ...(syncedCurrentPrompt > 0 ? { stageName: `Prompt ${syncedCurrentPrompt}` } : {}),
-              statusText: `Auto-recovery sync: prompt ${syncedCurrentPrompt}`,
-              reason: 'auto_recovery_sync_last_message',
-              autoRecovery: {
-                attempt: autoRecoveryAttempt,
-                maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-                delayMs: AUTO_RECOVERY_DELAY_MS,
-                reason: recoveryReasonBase,
-                currentPrompt: syncedCurrentPrompt,
-                ...(Number.isInteger(syncedStageIndex) ? { stageIndex: syncedStageIndex } : {}),
-                updatedAt: Date.now()
-              },
-              timestamp: Date.now()
-            });
-          }
-        }
-
         executionPayload = '';
-        executionPromptChain = alignedState.remainingPrompts;
-        executionPromptOffset = alignedState.promptOffset;
+        executionPromptChain = nextRemainingPrompts;
+        executionPromptOffset = nextPromptOffset;
       }
 
       // Zapisz ostatnią odpowiedź zwróconą z injectToChat
@@ -6744,9 +7470,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
         finalStatus = 'failed';
-        finalStatusText = 'Blad procesu';
-        finalReason = 'inject_failed';
         finalError = result?.error || '';
+        if (finalError === 'pdf_attach_failed') {
+          finalStatusText = 'pdf_attach_failed';
+          finalReason = 'pdf_attach_failed';
+        } else {
+          finalStatusText = 'Blad procesu';
+          finalReason = 'inject_failed';
+        }
         await renderFinalCounterStatusOnTab(chatTabId, {
           heading: 'Blad procesu',
           tone: 'error',
@@ -6803,8 +7534,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         timestamp: Date.now()
       });
 
-      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ✅ Rozpoczęto przetwarzanie: ${title}`);
-      return { success: true, title };
+      const processSuccess = finalStatus === 'completed';
+      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
+      return {
+        success: processSuccess,
+        title,
+        reason: finalReason || '',
+        error: finalError || ''
+      };
 
     } catch (error) {
       console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd:`, error);
@@ -6829,6 +7566,33 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
   
   const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
   console.log(`\n[${analysisType}] 🎉 Uruchomiono ${successful}/${tabs.length} procesów ChatGPT`);
+  const failedEntries = results
+    .map((result, index) => {
+      if (result.status === 'fulfilled') {
+        if (result.value?.success) return null;
+        return {
+          index,
+          title: result.value?.title || tabs[index]?.title || 'Bez tytulu',
+          reason: result.value?.reason || 'failed',
+          error: result.value?.error || ''
+        };
+      }
+      return {
+        index,
+        title: tabs[index]?.title || 'Bez tytulu',
+        reason: 'promise_rejected',
+        error: result.reason?.message || String(result.reason || '')
+      };
+    })
+    .filter(Boolean);
+  if (failedEntries.length > 0) {
+    console.warn(`[${analysisType}] ⚠️ Nieudane procesy: ${failedEntries.length}`);
+    for (const failed of failedEntries) {
+      console.warn(
+        `[${analysisType}] [${failed.index + 1}/${tabs.length}] title="${failed.title}" reason=${failed.reason} error=${truncateDispatchLogText(failed.error || '', 220)}`
+      );
+    }
+  }
   
   return results;
 }
@@ -6842,6 +7606,20 @@ async function runAnalysis(options = {}) {
       ? options.invocationWindowId
       : null;
     if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId)) {
+      const preUngroupResult = await ungroupChatGptTabsInWindow(invocationWindowId, {
+        origin: 'run-analysis-restart-pre-stop'
+      });
+      console.log('[restart] pre-stop ungroup chat tabs:', {
+        windowId: invocationWindowId,
+        ok: preUngroupResult.ok,
+        reason: preUngroupResult.reason,
+        requested: preUngroupResult.requested,
+        groupedCount: preUngroupResult.groupedCount,
+        ungroupedCount: preUngroupResult.ungroupedCount,
+        skippedCount: preUngroupResult.skippedCount,
+        error: preUngroupResult.error || ''
+      });
+
       const stopResult = await stopActiveProcesses({
         windowId: invocationWindowId,
         reason: 'restarted_in_same_window',
@@ -6854,6 +7632,20 @@ async function runAnalysis(options = {}) {
         console.log(`[run] Zatrzymano ${stopResult.stopped} aktywnych procesow w oknie ${invocationWindowId}`);
         await sleep(250);
       }
+
+      const postUngroupResult = await ungroupChatGptTabsInWindow(invocationWindowId, {
+        origin: 'run-analysis-restart-post-stop'
+      });
+      console.log('[restart] post-stop ungroup chat tabs:', {
+        windowId: invocationWindowId,
+        ok: postUngroupResult.ok,
+        reason: postUngroupResult.reason,
+        requested: postUngroupResult.requested,
+        groupedCount: postUngroupResult.groupedCount,
+        ungroupedCount: postUngroupResult.ungroupedCount,
+        skippedCount: postUngroupResult.skippedCount,
+        error: postUngroupResult.error || ''
+      });
     }
     
     // KROK 1: Sprawdź czy prompty są wczytane
@@ -6896,7 +7688,7 @@ async function runAnalysis(options = {}) {
 
     if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
-      alert("Nie znaleziono otwartych kart z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Wall Street Journal\n- Foreign Affairs\n- Barron's\n- Spotify\n- YouTube\n- Gmail");
+      alert("Nie znaleziono otwartych kart z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Lazard\n- RAND Corporation\n- Wall Street Journal\n- Foreign Affairs\n- Barron's\n- Spotify\n- YouTube\n- Gmail");
       return;
     }
 
@@ -6960,44 +7752,361 @@ async function runAnalysis(options = {}) {
 }
 
 // Funkcja uruchamiająca analizę z ręcznie wklejonego źródła
+function normalizeManualInstances(instances) {
+  return Math.max(1, Math.min(10, Number.isInteger(instances) ? instances : 1));
+}
+
+function buildManualPdfPayload(fileName) {
+  const safeName = typeof fileName === 'string' && fileName.trim() ? fileName.trim() : 'source.pdf';
+  return `Nazwa pliku: ${safeName}\nPrzeanalizuj zalaczony PDF.`;
+}
+
+function normalizeManualPdfFiles(rawFiles) {
+  if (!Array.isArray(rawFiles)) return [];
+  return rawFiles
+    .filter((item) => item && typeof item === 'object')
+    .map((item, index) => {
+      const token = typeof item.token === 'string' ? item.token.trim() : '';
+      const name = typeof item.name === 'string' && item.name.trim() ? item.name.trim() : `source-${index + 1}.pdf`;
+      const size = Number.isFinite(item.size) ? Math.max(0, Math.floor(item.size)) : 0;
+      const mimeType = 'application/pdf';
+      const lastModified = Number.isInteger(item.lastModified) ? item.lastModified : Date.now();
+      return {
+        token,
+        name,
+        size,
+        mimeType,
+        lastModified
+      };
+    })
+    .filter((item) => item.token && item.name.toLowerCase().endsWith('.pdf'));
+}
+
+async function sendManualPdfProviderMessage(payload, timeoutMs = MANUAL_PDF_PROVIDER_TIMEOUT_MS) {
+  const timeoutMarker = '__manual_pdf_provider_timeout__';
+  const safeTimeout = Math.max(2000, Math.min(60000, Number.isInteger(timeoutMs) ? timeoutMs : MANUAL_PDF_PROVIDER_TIMEOUT_MS));
+  try {
+    const response = await Promise.race([
+      chrome.runtime.sendMessage(payload),
+      new Promise((resolve) => setTimeout(() => resolve(timeoutMarker), safeTimeout))
+    ]);
+
+    if (response === timeoutMarker) {
+      return { success: false, error: 'provider_timeout' };
+    }
+
+    if (response && typeof response === 'object') {
+      if (response.success === false) {
+        return { success: false, error: response.error || 'provider_error', response };
+      }
+      return { success: true, response };
+    }
+
+    return { success: false, error: 'provider_invalid_response' };
+  } catch (error) {
+    const lowered = String(error?.message || error || '').toLowerCase();
+    if (lowered.includes('receiving end does not exist') || lowered.includes('could not establish connection')) {
+      return { success: false, error: 'provider_unavailable' };
+    }
+    return { success: false, error: error?.message || 'provider_message_failed' };
+  }
+}
+
+async function notifyManualPdfProviderStatus(providerId, status, message, extra = {}) {
+  if (typeof providerId !== 'string' || !providerId.trim()) return;
+  const payload = {
+    type: 'MANUAL_PDF_PROVIDER_STATUS',
+    providerId: providerId.trim(),
+    status: typeof status === 'string' ? status : 'running',
+    message: typeof message === 'string' ? message : '',
+    ...extra
+  };
+  const sent = await sendManualPdfProviderMessage(payload, 5000);
+  if (!sent.success) {
+    console.warn('[manual-pdf] provider status push failed:', {
+      status,
+      error: sent.error
+    });
+  }
+}
+
+async function releaseManualPdfProvider(providerId, message, extra = {}) {
+  if (typeof providerId !== 'string' || !providerId.trim()) return;
+  const payload = {
+    type: 'MANUAL_PDF_PROVIDER_RELEASE',
+    providerId: providerId.trim(),
+    message: typeof message === 'string' ? message : '',
+    ...extra
+  };
+  const sent = await sendManualPdfProviderMessage(payload, 5000);
+  if (!sent.success) {
+    console.warn('[manual-pdf] provider release failed:', {
+      error: sent.error
+    });
+  }
+}
+
+async function requestManualPdfProviderChunk({ providerId, token, offset = 0, chunkSize = MANUAL_PDF_CHUNK_SIZE }) {
+  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  const safeToken = typeof token === 'string' ? token.trim() : '';
+  const safeOffset = Number.isInteger(offset) && offset >= 0 ? offset : 0;
+  const safeChunkSize = Number.isInteger(chunkSize) && chunkSize > 0
+    ? Math.max(64 * 1024, Math.min(2 * 1024 * 1024, chunkSize))
+    : MANUAL_PDF_CHUNK_SIZE;
+
+  if (!safeProviderId || !safeToken) {
+    return { success: false, error: 'invalid_chunk_request' };
+  }
+
+  const providerResult = await sendManualPdfProviderMessage({
+    type: 'MANUAL_PDF_PROVIDER_READ_CHUNK',
+    providerId: safeProviderId,
+    token: safeToken,
+    offset: safeOffset,
+    chunkSize: safeChunkSize
+  }, MANUAL_PDF_PROVIDER_TIMEOUT_MS);
+
+  if (!providerResult.success) {
+    const normalizedError = providerResult.error || 'chunk_read_failed';
+    return {
+      success: false,
+      error: normalizedError === 'provider_timeout' ? 'provider_unavailable' : normalizedError
+    };
+  }
+
+  const response = providerResult.response && typeof providerResult.response === 'object'
+    ? providerResult.response
+    : {};
+
+  return {
+    success: true,
+    eof: response.eof === true,
+    base64Chunk: typeof response.base64Chunk === 'string' ? response.base64Chunk : '',
+    nextOffset: Number.isInteger(response.nextOffset) ? response.nextOffset : safeOffset
+  };
+}
+
+// Funkcja uruchamiajaca analize z recznie wklejonego zrodla
 async function runManualSourceAnalysis(text, title, instances) {
   try {
-    console.log("\n=== ROZPOCZYNAM ANALIZĘ Z RĘCZNEGO ŹRÓDŁA ===");
-    console.log(`Tytuł: ${title}`);
-    console.log(`Tekst: ${text.length} znaków`);
-    console.log(`Instancje: ${instances}`);
-    
-    // Sprawdź czy prompty są wczytane
+    const safeText = typeof text === 'string' ? text : '';
+    const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
+    const safeInstances = normalizeManualInstances(instances);
+
+    console.log('\n=== ROZPOCZYNAM ANALIZE Z RECZNEGO ZRODLA ===');
+    console.log(`Tytul: ${safeTitle}`);
+    console.log(`Tekst: ${safeText.length} znakow`);
+    console.log(`Instancje: ${safeInstances}`);
+
     if (PROMPTS_COMPANY.length === 0) {
-      console.error("❌ Brak promptów dla analizy spółki");
-      alert("Błąd: Brak promptów dla analizy spółki. Sprawdź plik prompts-company.txt");
+      console.error('[manual-source] Brak promptow dla analizy spolki');
       return;
     }
-    
-    console.log(`✅ Prompty załadowane: ${PROMPTS_COMPANY.length}`);
-    
-    // Stwórz pseudo-taby (N kopii tego samego źródła)
+
     const timestamp = Date.now();
     const pseudoTabs = [];
-    
-    for (let i = 0; i < instances; i++) {
+    for (let i = 0; i < safeInstances; i += 1) {
       pseudoTabs.push({
         id: `manual-${timestamp}-${i}`,
-        title: title,
-        url: "manual://source",
-        manualText: text  // Przechowuj tekst bezpośrednio
+        title: safeTitle,
+        url: 'manual://source',
+        manualText: safeText
       });
     }
-    
-    console.log(`✅ Utworzono ${pseudoTabs.length} pseudo-tabów`);
-    
-    // Uruchom proces analizy
+
     await processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company');
-    
-    console.log("\n✅ ZAKOŃCZONO URUCHAMIANIE ANALIZY Z RĘCZNEGO ŹRÓDŁA");
-    
+    console.log('\n[manual-source] Zakonczono uruchamianie analizy recznego zrodla.');
   } catch (error) {
-    console.error("❌ Błąd w runManualSourceAnalysis:", error);
+    console.error('[manual-source] Blad runManualSourceAnalysis:', error);
+  }
+}
+
+async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFiles }) {
+  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  const safeInstances = normalizeManualInstances(instances);
+  const normalizedFiles = normalizeManualPdfFiles(pdfFiles);
+
+  if (!safeProviderId) {
+    console.warn('[manual-pdf] Missing providerId, queue skipped.');
+    return;
+  }
+
+  if (PROMPTS_COMPANY.length === 0) {
+    console.error('[manual-pdf] Brak promptow dla analizy spolki');
+    await notifyManualPdfProviderStatus(safeProviderId, 'failed', 'Brak promptow company. Kolejka przerwana.');
+    await releaseManualPdfProvider(safeProviderId, 'Kolejka PDF przerwana: brak promptow.', { success: false });
+    return;
+  }
+
+  if (normalizedFiles.length === 0) {
+    console.warn('[manual-pdf] Empty PDF list, queue skipped.');
+    await notifyManualPdfProviderStatus(safeProviderId, 'failed', 'Brak poprawnych PDF do przetworzenia.');
+    await releaseManualPdfProvider(safeProviderId, 'Kolejka PDF przerwana: brak poprawnych plikow.', { success: false });
+    return;
+  }
+
+  const queueJobs = [];
+  for (const file of normalizedFiles) {
+    for (let instanceIndex = 1; instanceIndex <= safeInstances; instanceIndex += 1) {
+      queueJobs.push({
+        file,
+        instanceIndex,
+        instanceTotal: safeInstances
+      });
+    }
+  }
+
+  const timestamp = Date.now();
+  let completedJobs = 0;
+  let failedJobs = 0;
+
+  console.log('[manual-pdf] Queue start:', {
+    providerId: safeProviderId,
+    files: normalizedFiles.length,
+    instances: safeInstances,
+    jobs: queueJobs.length
+  });
+
+  await notifyManualPdfProviderStatus(
+    safeProviderId,
+    'running',
+    `Start kolejki PDF: ${queueJobs.length} zadan (${normalizedFiles.length} plikow x ${safeInstances} instancji).`,
+    { totalJobs: queueJobs.length, completedJobs: 0, failedJobs: 0 }
+  );
+
+  try {
+    for (let jobIndex = 0; jobIndex < queueJobs.length; jobIndex += 1) {
+      const job = queueJobs[jobIndex];
+      const isMultiInstance = job.instanceTotal > 1;
+      const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : job.file.name;
+      const runTitle = isMultiInstance
+        ? `${baseTitle} [${job.file.name}] [instancja ${job.instanceIndex}/${job.instanceTotal}]`
+        : `${baseTitle} [${job.file.name}]`;
+
+      console.log('[manual-pdf] job:start', {
+        index: jobIndex + 1,
+        total: queueJobs.length,
+        file: job.file.name,
+        instance: `${job.instanceIndex}/${job.instanceTotal}`
+      });
+
+      await notifyManualPdfProviderStatus(
+        safeProviderId,
+        'running',
+        `Start ${jobIndex + 1}/${queueJobs.length}: ${job.file.name} (instancja ${job.instanceIndex}/${job.instanceTotal}).`,
+        {
+          currentJob: jobIndex + 1,
+          totalJobs: queueJobs.length,
+          completedJobs,
+          failedJobs
+        }
+      );
+
+      const pseudoTab = {
+        id: `manual-pdf-${timestamp}-${jobIndex}`,
+        title: runTitle,
+        url: 'manual://pdf',
+        manualText: buildManualPdfPayload(job.file.name),
+        manualPdfAttachment: {
+          enabled: true,
+          providerId: safeProviderId,
+          token: job.file.token,
+          name: job.file.name,
+          mimeType: 'application/pdf',
+          size: job.file.size,
+          instanceIndex: job.instanceIndex,
+          instanceTotal: job.instanceTotal
+        }
+      };
+
+      const settled = await processArticles([pseudoTab], PROMPTS_COMPANY, CHAT_URL, 'company');
+      const firstResult = Array.isArray(settled) && settled.length > 0 ? settled[0] : null;
+
+      let jobSuccess = false;
+      let jobReason = '';
+      if (firstResult?.status === 'fulfilled') {
+        jobSuccess = !!firstResult.value?.success;
+        jobReason = firstResult.value?.reason || firstResult.value?.error || '';
+      } else if (firstResult?.status === 'rejected') {
+        jobSuccess = false;
+        jobReason = firstResult.reason?.message || String(firstResult.reason || 'promise_rejected');
+      }
+
+      if (jobSuccess) {
+        completedJobs += 1;
+        console.log('[manual-pdf] job:ok', {
+          index: jobIndex + 1,
+          total: queueJobs.length,
+          file: job.file.name
+        });
+      } else {
+        failedJobs += 1;
+        console.warn('[manual-pdf] job:failed', {
+          index: jobIndex + 1,
+          total: queueJobs.length,
+          file: job.file.name,
+          reason: truncateDispatchLogText(jobReason || 'unknown', 220)
+        });
+      }
+
+      await notifyManualPdfProviderStatus(
+        safeProviderId,
+        jobSuccess ? 'running' : 'failed',
+        jobSuccess
+          ? `Gotowe ${jobIndex + 1}/${queueJobs.length}: ${job.file.name}.`
+          : `Blad ${jobIndex + 1}/${queueJobs.length}: ${job.file.name} (${jobReason || 'unknown'}).`,
+        {
+          currentJob: jobIndex + 1,
+          totalJobs: queueJobs.length,
+          completedJobs,
+          failedJobs,
+          success: jobSuccess,
+          reason: jobReason || ''
+        }
+      );
+    }
+
+    const finalMessage = `Kolejka PDF zakonczona. Sukces: ${completedJobs}, bledy: ${failedJobs}, razem: ${queueJobs.length}.`;
+    await notifyManualPdfProviderStatus(
+      safeProviderId,
+      'completed',
+      finalMessage,
+      {
+        totalJobs: queueJobs.length,
+        completedJobs,
+        failedJobs,
+        success: failedJobs === 0
+      }
+    );
+    await releaseManualPdfProvider(safeProviderId, finalMessage, {
+      totalJobs: queueJobs.length,
+      completedJobs,
+      failedJobs,
+      success: failedJobs === 0
+    });
+  } catch (error) {
+    const finalError = error?.message || String(error);
+    console.warn('[manual-pdf] Queue runtime error:', finalError);
+    const finalMessage = `Kolejka PDF przerwana: ${finalError}`;
+    await notifyManualPdfProviderStatus(
+      safeProviderId,
+      'failed',
+      finalMessage,
+      {
+        totalJobs: queueJobs.length,
+        completedJobs,
+        failedJobs,
+        success: false,
+        reason: finalError
+      }
+    );
+    await releaseManualPdfProvider(safeProviderId, finalMessage, {
+      totalJobs: queueJobs.length,
+      completedJobs,
+      failedJobs,
+      success: false,
+      reason: finalError
+    });
   }
 }
 
@@ -7268,6 +8377,24 @@ async function extractText() {
       '[itemprop="articleBody"]',
       '.article-content'
     ],
+    'lazard.com': [
+      'article',
+      '[itemprop="articleBody"]',
+      '.article-content',
+      '.post-content',
+      '.entry-content',
+      '.content-body',
+      'main'
+    ],
+    'rand.org': [
+      'article',
+      '[itemprop="articleBody"]',
+      '.article-content',
+      '.post-content',
+      '.entry-content',
+      '.content-body',
+      'main'
+    ],
     'open.spotify.com': [
       '[data-testid*="transcript" i]',
       '[aria-label*="transcript" i]',
@@ -7329,7 +8456,8 @@ async function injectToChat(
   runId = null,
   progressContext = null,
   autoRecoveryContext = null,
-  persistenceContext = null
+  persistenceContext = null,
+  manualPdfAttachmentContext = null
 ) {
   let forceStopRequested = false;
   let forceStopReason = 'force_stop';
@@ -7628,6 +8756,35 @@ async function injectToChat(
     const persistenceTimeoutMs = Number.isInteger(persistenceContext?.saveTimeoutMs) && persistenceContext.saveTimeoutMs > 0
       ? Math.max(1000, Math.min(persistenceContext.saveTimeoutMs, 60000))
       : 18000;
+    const MANUAL_PDF_ATTACH_MAX_ATTEMPTS = 2;
+    const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
+    const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
+    const manualPdfAttachment = (() => {
+      const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
+        ? manualPdfAttachmentContext
+        : null;
+      if (!ctx || ctx.enabled !== true) return null;
+      const providerId = typeof ctx.providerId === 'string' ? ctx.providerId.trim() : '';
+      const token = typeof ctx.token === 'string' ? ctx.token.trim() : '';
+      const name = typeof ctx.name === 'string' && ctx.name.trim() ? ctx.name.trim() : 'source.pdf';
+      const mimeType = typeof ctx.mimeType === 'string' && ctx.mimeType.trim()
+        ? ctx.mimeType.trim()
+        : 'application/pdf';
+      const size = Number.isInteger(ctx.size) && ctx.size >= 0 ? ctx.size : 0;
+      const instanceIndex = Number.isInteger(ctx.instanceIndex) && ctx.instanceIndex > 0 ? ctx.instanceIndex : 1;
+      const instanceTotal = Number.isInteger(ctx.instanceTotal) && ctx.instanceTotal > 0 ? ctx.instanceTotal : 1;
+      if (!providerId || !token) return null;
+      return {
+        enabled: true,
+        providerId,
+        token,
+        name,
+        mimeType,
+        size,
+        instanceIndex,
+        instanceTotal
+      };
+    })();
 
     function getAbsolutePromptIndex(localPromptNumber) {
       if (!Number.isInteger(localPromptNumber) || localPromptNumber <= 0) return 0;
@@ -7739,6 +8896,274 @@ async function injectToChat(
       };
     }
 
+    function decodeBase64Chunk(base64Chunk = '') {
+      const normalized = typeof base64Chunk === 'string' ? base64Chunk.trim() : '';
+      if (!normalized) return new Uint8Array(0);
+      const binary = atob(normalized);
+      const bytes = new Uint8Array(binary.length);
+      for (let i = 0; i < binary.length; i += 1) {
+        bytes[i] = binary.charCodeAt(i);
+      }
+      return bytes;
+    }
+
+    async function fetchManualPdfFileFromProvider(attachment) {
+      if (!attachment?.enabled) {
+        return { success: false, error: 'attachment_disabled' };
+      }
+
+      const parts = [];
+      let offset = 0;
+      let guard = 0;
+      const maxGuard = 200000;
+
+      while (guard < maxGuard) {
+        guard += 1;
+        const chunkAttempt = await sendRuntimeMessageWithTimeout({
+          type: 'MANUAL_PDF_GET_CHUNK',
+          providerId: attachment.providerId,
+          token: attachment.token,
+          offset,
+          chunkSize: MANUAL_PDF_CHUNK_SIZE_INJECT
+        }, 30000);
+
+        if (!chunkAttempt.ok) {
+          const mappedError = chunkAttempt.error === 'runtime_timeout'
+            ? 'provider_unavailable'
+            : (chunkAttempt.error || 'chunk_read_failed');
+          return { success: false, error: mappedError };
+        }
+
+        const chunkResponse = chunkAttempt.response && typeof chunkAttempt.response === 'object'
+          ? chunkAttempt.response
+          : null;
+        if (!chunkResponse?.success) {
+          return {
+            success: false,
+            error: chunkResponse?.error || 'chunk_read_failed'
+          };
+        }
+
+        const base64Chunk = typeof chunkResponse.base64Chunk === 'string' ? chunkResponse.base64Chunk : '';
+        if (base64Chunk) {
+          try {
+            const bytes = decodeBase64Chunk(base64Chunk);
+            if (bytes.length > 0) parts.push(bytes);
+          } catch (error) {
+            return { success: false, error: 'chunk_decode_failed' };
+          }
+        }
+
+        const nextOffset = Number.isInteger(chunkResponse.nextOffset)
+          ? chunkResponse.nextOffset
+          : offset;
+        const eof = chunkResponse.eof === true;
+        if (eof) {
+          offset = nextOffset;
+          break;
+        }
+        if (nextOffset <= offset) {
+          return { success: false, error: 'invalid_next_offset' };
+        }
+        offset = nextOffset;
+      }
+
+      if (guard >= maxGuard) {
+        return { success: false, error: 'chunk_guard_exceeded' };
+      }
+
+      if (parts.length === 0) {
+        return { success: false, error: 'pdf_empty' };
+      }
+
+      try {
+        const file = new File(parts, attachment.name || 'source.pdf', {
+          type: attachment.mimeType || 'application/pdf'
+        });
+        return { success: true, file };
+      } catch (error) {
+        return { success: false, error: 'file_build_failed' };
+      }
+    }
+
+    function findFileInputElement() {
+      const inputs = Array.from(document.querySelectorAll('input[type="file"]'));
+      if (inputs.length === 0) return null;
+      const preferred = inputs.find((input) => {
+        if (!input || input.disabled) return false;
+        const accept = String(input.getAttribute('accept') || '').toLowerCase();
+        return !accept || accept.includes('pdf') || accept.includes('application/pdf');
+      });
+      return preferred || inputs.find((input) => input && !input.disabled) || inputs[0];
+    }
+
+    function findAttachmentTrigger() {
+      const triggerPattern = /(attach|attachment|upload|file|paperclip|zalacz|za\u0142acz|dodaj plik|add files?)/i;
+      const candidates = Array.from(document.querySelectorAll('button, [role="button"], label, a'));
+      for (const candidate of candidates) {
+        if (!candidate) continue;
+        const label = compactText([
+          candidate.innerText || candidate.textContent || '',
+          candidate.getAttribute?.('aria-label') || '',
+          candidate.getAttribute?.('title') || '',
+          candidate.getAttribute?.('data-testid') || ''
+        ].join(' '));
+        if (triggerPattern.test(label)) {
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    async function resolveFileInput(maxWaitMs = 8000) {
+      const startedAt = Date.now();
+      let lastClickAt = 0;
+      while (Date.now() - startedAt < maxWaitMs) {
+        const directInput = findFileInputElement();
+        if (directInput) return directInput;
+
+        const trigger = findAttachmentTrigger();
+        if (trigger && Date.now() - lastClickAt > 700) {
+          try {
+            trigger.click();
+            lastClickAt = Date.now();
+          } catch (error) {
+            // Ignore click issues and keep polling.
+          }
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      return null;
+    }
+
+    function assignFileToInput(input, file) {
+      const dataTransfer = new DataTransfer();
+      dataTransfer.items.add(file);
+      input.files = dataTransfer.files;
+      input.dispatchEvent(new Event('input', { bubbles: true }));
+      input.dispatchEvent(new Event('change', { bubbles: true }));
+    }
+
+    async function waitForAttachmentConfirmation(fileName, maxWaitMs = 15000) {
+      const normalizedFileName = compactText(fileName || '').toLowerCase();
+      const startedAt = Date.now();
+      const errorPattern = /(upload failed|failed to upload|couldn['\u2019]?t upload|nie udalo sie przeslac|blad przesylania)/i;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        const pageText = compactText(document.body?.innerText || '');
+        if (normalizedFileName && pageText.toLowerCase().includes(normalizedFileName)) {
+          return { success: true };
+        }
+
+        const chips = document.querySelectorAll(
+          '[data-testid*="attachment" i], [data-testid*="file" i], [class*="attachment" i], [class*="file" i], [aria-label*="attachment" i], [aria-label*="file" i]'
+        );
+        for (const chip of chips) {
+          const chipText = compactText(chip?.textContent || '');
+          if (normalizedFileName && chipText.toLowerCase().includes(normalizedFileName)) {
+            return { success: true };
+          }
+        }
+
+        if (errorPattern.test(pageText)) {
+          return { success: false, error: 'upload_failed_ui' };
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 250));
+      }
+
+      return { success: false, error: 'attachment_not_confirmed' };
+    }
+
+    async function attachManualPdfOnce(attachment) {
+      const fileResult = await fetchManualPdfFileFromProvider(attachment);
+      if (!fileResult.success || !fileResult.file) {
+        return { success: false, error: fileResult.error || 'provider_unavailable' };
+      }
+
+      const input = await resolveFileInput(9000);
+      if (!input) {
+        return { success: false, error: 'file_input_not_found' };
+      }
+
+      try {
+        assignFileToInput(input, fileResult.file);
+      } catch (error) {
+        return { success: false, error: 'file_input_assignment_failed' };
+      }
+
+      return waitForAttachmentConfirmation(fileResult.file.name, 15000);
+    }
+
+    async function attachManualPdfWithRetry(attachment) {
+      for (let attempt = 1; attempt <= MANUAL_PDF_ATTACH_MAX_ATTEMPTS; attempt += 1) {
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          statusText: attempt === 1 ? 'uploading_pdf' : 'pdf_attach_retry',
+          reason: attempt === 1 ? 'uploading_pdf' : 'pdf_attach_retry',
+          needsAction: false
+        });
+
+        console.log('[manual-pdf][attach] attempt start', {
+          attempt,
+          maxAttempts: MANUAL_PDF_ATTACH_MAX_ATTEMPTS,
+          file: attachment.name,
+          runId: runId || 'n/a'
+        });
+
+        const attemptResult = await attachManualPdfOnce(attachment);
+        if (attemptResult.success) {
+          notifyProcess('PROCESS_PROGRESS', {
+            status: 'running',
+            currentPrompt: promptOffset,
+            totalPrompts: totalPromptsForRun,
+            statusText: 'pdf_attached',
+            reason: 'pdf_attached',
+            needsAction: false
+          });
+          console.log('[manual-pdf][attach] success', {
+            attempt,
+            file: attachment.name,
+            runId: runId || 'n/a'
+          });
+          return { success: true };
+        }
+
+        console.warn('[manual-pdf][attach] failed', {
+          attempt,
+          maxAttempts: MANUAL_PDF_ATTACH_MAX_ATTEMPTS,
+          file: attachment.name,
+          error: attemptResult.error || 'unknown',
+          runId: runId || 'n/a'
+        });
+
+        if (attempt < MANUAL_PDF_ATTACH_MAX_ATTEMPTS) {
+          await new Promise((resolve) => setTimeout(resolve, MANUAL_PDF_ATTACH_RETRY_DELAY_MS));
+          continue;
+        }
+
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'failed',
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          statusText: 'pdf_attach_failed',
+          reason: 'pdf_attach_failed',
+          error: attemptResult.error || 'pdf_attach_failed',
+          needsAction: false
+        });
+        return {
+          success: false,
+          error: 'pdf_attach_failed',
+          details: attemptResult.error || ''
+        };
+      }
+
+      return { success: false, error: 'pdf_attach_failed' };
+    }
+
     async function captureLastResponseWithRetries(initialText = '', promptNumber = 0) {
       const maxAttempts = 5;
       const retryDelayMs = 700;
@@ -7845,7 +9270,7 @@ async function injectToChat(
         counterRef,
         safePrompt,
         totalPromptsForRun,
-        `Auto-reload ${nextAttempt}/${autoRecoveryMaxAttempts} za ${delaySec}s...`
+        `Auto-resend ${nextAttempt}/${autoRecoveryMaxAttempts} za ${delaySec}s...`
       );
       notifyProcess('PROCESS_PROGRESS', {
         status: 'running',
@@ -7853,7 +9278,7 @@ async function injectToChat(
         totalPrompts: totalPromptsForRun,
         stageIndex: safeStageIndex,
         stageName,
-        statusText: `Auto-reload ${nextAttempt}/${autoRecoveryMaxAttempts}`,
+        statusText: `Auto-resend ${nextAttempt}/${autoRecoveryMaxAttempts}`,
         reason: `auto_recovery_${reason}`,
         needsAction: false
       });
@@ -7866,16 +9291,68 @@ async function injectToChat(
       return compactText(promptText).slice(0, 60);
     }
 
-    function getPromptDomSnapshot() {
+    function getLastTurnContainer(node) {
+      if (!node) return null;
+      return node.closest('[data-testid^="conversation-turn-"]')
+        || node.closest('article')
+        || node.closest('[class*="turn"]')
+        || node.closest('[class*="message"]')
+        || null;
+    }
+
+    function isHardGenerationErrorText(text) {
+      const lowered = compactText(text || '').toLowerCase();
+      if (!lowered) return false;
+      return (
+        lowered.includes('something went wrong while generating the response') ||
+        lowered === 'something went wrong' ||
+        lowered.includes('an error occurred while generating') ||
+        lowered.includes('network error') ||
+        (
+          lowered.includes('streaming interrupted') &&
+          lowered.includes('waiting for the complete message')
+        )
+      );
+    }
+
+    function getLastTurnState() {
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const lastUser = userMessages.length > 0 ? userMessages[userMessages.length - 1] : null;
       const lastAssistant = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
+      const lastUserContainer = getLastTurnContainer(lastUser);
+      const lastAssistantContainer = getLastTurnContainer(lastAssistant);
+      const alerts = [
+        ...document.querySelectorAll('[role="alert"]'),
+        ...document.querySelectorAll('[role="status"]')
+      ];
+      const lastAlert = alerts.length > 0 ? alerts[alerts.length - 1] : null;
+
       return {
         userCount: userMessages.length,
         assistantCount: assistantMessages.length,
+        lastUser,
+        lastAssistant,
+        lastUserContainer,
+        lastAssistantContainer,
         lastUserText: compactText(lastUser ? (lastUser.innerText || lastUser.textContent || '') : ''),
-        lastAssistantText: compactText(lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : '')
+        lastAssistantText: compactText(lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : ''),
+        lastUserTurnText: compactText(lastUserContainer ? (lastUserContainer.innerText || lastUserContainer.textContent || '') : ''),
+        lastAssistantTurnText: compactText(lastAssistantContainer ? (lastAssistantContainer.innerText || lastAssistantContainer.textContent || '') : ''),
+        lastAlertText: compactText(lastAlert ? (lastAlert.innerText || lastAlert.textContent || '') : ''),
+        turnLikelyCurrent: assistantMessages.length >= userMessages.length
+      };
+    }
+
+    function getPromptDomSnapshot() {
+      const state = getLastTurnState();
+      return {
+        userCount: state.userCount,
+        assistantCount: state.assistantCount,
+        lastUserText: state.lastUserText,
+        lastAssistantText: state.lastAssistantText,
+        lastUserTurnText: state.lastUserTurnText,
+        lastAssistantTurnText: state.lastAssistantTurnText
       };
     }
 
@@ -7887,8 +9364,12 @@ async function injectToChat(
       }
       const prevText = typeof base.lastAssistantText === 'string' ? base.lastAssistantText : '';
       const nextText = typeof current.lastAssistantText === 'string' ? current.lastAssistantText : '';
-      if (!prevText && !nextText) return false;
+      const prevTurnText = typeof base.lastAssistantTurnText === 'string' ? base.lastAssistantTurnText : '';
+      const nextTurnText = typeof current.lastAssistantTurnText === 'string' ? current.lastAssistantTurnText : '';
       if (prevText !== nextText && Math.abs(nextText.length - prevText.length) >= minDelta) {
+        return true;
+      }
+      if (prevTurnText !== nextTurnText && Math.abs(nextTurnText.length - prevTurnText.length) >= minDelta) {
         return true;
       }
       return false;
@@ -7933,28 +9414,34 @@ async function injectToChat(
       if (hasStreamingInterruptedState()) {
         return true;
       }
-      const errorCandidates = [
-        ...document.querySelectorAll('[class*="text"]'),
-        ...document.querySelectorAll('[role="alert"]'),
-        ...document.querySelectorAll('[class*="error"]')
-      ];
-      for (const node of errorCandidates) {
-        const text = compactText(node?.textContent || '');
-        if (!text) continue;
-        const lowered = text.toLowerCase();
-        if (
-          lowered.includes('something went wrong while generating the response') ||
-          lowered === 'something went wrong' ||
-          lowered.includes('an error occurred while generating') ||
-          lowered.includes('network error') ||
-          (
-            lowered.includes('streaming interrupted') &&
-            lowered.includes('waiting for the complete message')
-          )
-        ) {
-          return true;
+
+      const state = getLastTurnState();
+      if (!state.turnLikelyCurrent) {
+        return false;
+      }
+
+      if (isHardGenerationErrorText(state.lastAssistantText)) {
+        return true;
+      }
+      if (isHardGenerationErrorText(state.lastAlertText)) {
+        return true;
+      }
+
+      const scopedContainers = [state.lastAssistant, state.lastAssistantContainer].filter(Boolean);
+      for (const container of scopedContainers) {
+        const scopedCandidates = [
+          ...container.querySelectorAll('[role="alert"]'),
+          ...container.querySelectorAll('[class*="error"]'),
+          ...container.querySelectorAll('[class*="text"]')
+        ];
+        for (const node of scopedCandidates) {
+          const text = compactText(node?.textContent || '');
+          if (isHardGenerationErrorText(text)) {
+            return true;
+          }
         }
       }
+
       return false;
     }
 
@@ -7967,16 +9454,13 @@ async function injectToChat(
         const current = getPromptDomSnapshot();
         const userAdvanced = current.userCount > (Number.isInteger(base.userCount) ? base.userCount : 0);
         const userMatchesPrompt = !promptFragment || current.lastUserText.includes(promptFragment);
-        if (userAdvanced && userMatchesPrompt) {
-          return true;
-        }
-
-        if (hasAssistantAdvancedSince(base, 20)) {
-          return true;
-        }
-
-        const generation = isGenerating();
-        if (generation.generating) {
+        const userMessageChanged =
+          !!current.lastUserText &&
+          current.lastUserText !== (typeof base.lastUserText === 'string' ? base.lastUserText : '');
+        const userTurnChanged =
+          !!current.lastUserTurnText &&
+          current.lastUserTurnText !== (typeof base.lastUserTurnText === 'string' ? base.lastUserTurnText : '');
+        if ((userAdvanced || userMessageChanged || userTurnChanged) && userMatchesPrompt) {
           return true;
         }
 
@@ -7996,7 +9480,7 @@ async function injectToChat(
 
       if (hasAssistantAdvancedSince(base, 20)) {
         const extracted = await getLastResponseText();
-        if (validateResponse(extracted) || compactText(extracted).length > 0) {
+        if (!hasHardGenerationErrorMessage() && validateResponse(extracted)) {
           return 'response_ready';
         }
       }
@@ -8288,284 +9772,13 @@ async function injectToChat(
     }
   }
   
-  // Funkcja próbująca naprawić błąd przez Edit+Resend
+  // Edit+Send jest celowo wyłączony; recovery działa przez ponowne wysłanie promptu.
   async function tryEditResend() {
-    try {
-      console.log('🔧 [tryEditResend] Próbuję naprawić przez Edit+Resend...');
-      
-      // === 1. ZNAJDŹ OSTATNIĄ WIADOMOŚĆ UŻYTKOWNIKA ===
-      console.log('🔍 [tryEditResend] Szukam ostatniej wiadomości użytkownika...');
-      
-      // Próba 1: standardowy selektor
-      let userMessages = document.querySelectorAll('[data-message-author-role="user"]');
-      console.log(`  Próba 1: [data-message-author-role="user"] → ${userMessages.length} wyników`);
-      
-      // Fallback 1: conversation-turn containers
-      if (userMessages.length === 0) {
-        console.log('  Próba 2: szukam w conversation-turn containers...');
-        const turns = document.querySelectorAll('[data-testid^="conversation-turn-"]');
-        console.log(`    Znaleziono ${turns.length} conversation turns`);
-        userMessages = Array.from(turns).filter(turn => 
-          turn.querySelector('[data-message-author-role="user"]')
-        );
-        console.log(`    Znaleziono ${userMessages.length} user turns`);
-      }
-      
-      // Fallback 2: szukaj przez article + klasy
-      if (userMessages.length === 0) {
-        console.log('  Próba 3: szukam przez article[class*="message"]...');
-        const allMessages = document.querySelectorAll('article, [class*="message"], [class*="Message"]');
-        console.log(`    Znaleziono ${allMessages.length} potencjalnych wiadomości`);
-        userMessages = Array.from(allMessages).filter(msg => {
-          const role = msg.getAttribute('data-message-author-role');
-          const hasUserIndicator = msg.querySelector('[data-message-author-role="user"]') ||
-                                   msg.textContent?.includes('You') ||
-                                   msg.classList.toString().includes('user');
-          return role === 'user' || hasUserIndicator;
-        });
-        console.log(`    Znaleziono ${userMessages.length} user messages`);
-      }
-      
-      if (userMessages.length === 0) {
-        console.warn('❌ [tryEditResend] Brak wiadomości użytkownika - nie mogę znaleźć Edit');
-        return false;
-      }
-      
-      const lastUserMessage = userMessages[userMessages.length - 1];
-      console.log(`✓ [tryEditResend] Znaleziono ostatnią wiadomość użytkownika (${userMessages.length} total)`);
-      
-      // === 2. SYMULUJ HOVER ŻEBY POKAZAĆ EDIT ===
-      console.log('🖱️ [tryEditResend] Symuluję hover aby pokazać Edit...');
-      lastUserMessage.dispatchEvent(new MouseEvent('mouseenter', { 
-        view: window,
-        bubbles: true, 
-        cancelable: true 
-      }));
-      lastUserMessage.dispatchEvent(new MouseEvent('mouseover', { 
-        view: window,
-        bubbles: true, 
-        cancelable: true 
-      }));
-      await new Promise(resolve => setTimeout(resolve, 300));
-      
-      // === 3. ZNAJDŹ PRZYCISK EDIT ===
-      console.log('🔍 [tryEditResend] Szukam przycisku Edit...');
-      
-      let editButton = null;
-      const editSelectors = [
-        'button[aria-label="Edit message"]',
-        'button[aria-label*="Edit"]',
-        'button.right-full[aria-label*="Edit"]',
-        'button[aria-label*="Edytuj"]',  // Polska lokalizacja
-        'button[title*="Edit"]',
-        'button[title*="edit"]'
-      ];
-      
-      for (const selector of editSelectors) {
-        editButton = lastUserMessage.querySelector(selector);
-        if (editButton) {
-          console.log(`✓ [tryEditResend] Znaleziono Edit przez: ${selector}`);
-          break;
-        }
-      }
-      
-      // Fallback 1: conversation-turn container
-      if (!editButton) {
-        console.log('  Fallback 1: szukam w conversation-turn container...');
-        const turnContainer = lastUserMessage.closest('[data-testid^="conversation-turn-"]');
-        if (turnContainer) {
-          for (const selector of editSelectors) {
-            editButton = turnContainer.querySelector(selector);
-            if (editButton) {
-              console.log(`✓ [tryEditResend] Znaleziono Edit w turn container przez: ${selector}`);
-              break;
-            }
-          }
-        }
-      }
-      
-      // Fallback 2: toolbar
-      if (!editButton) {
-        console.log('  Fallback 2: szukam w toolbar...');
-        const toolbar = lastUserMessage.querySelector('[role="toolbar"]') ||
-                       lastUserMessage.querySelector('[class*="toolbar"]');
-        if (toolbar) {
-          for (const selector of editSelectors) {
-            editButton = toolbar.querySelector(selector);
-            if (editButton) {
-              console.log(`✓ [tryEditResend] Znaleziono Edit w toolbar przez: ${selector}`);
-              break;
-            }
-          }
-        }
-      }
-      
-      if (!editButton) {
-        console.warn('❌ [tryEditResend] Nie znaleziono przycisku Edit');
-        return false;
-      }
-      
-      // Usuń klasy ukrywające i wymuś widoczność
-      if (editButton.classList.contains('invisible')) {
-        editButton.classList.remove('invisible');
-        console.log('  ✓ Usunięto klasę invisible');
-      }
-      if (editButton.classList.contains('hidden')) {
-        editButton.classList.remove('hidden');
-        console.log('  ✓ Usunięto klasę hidden');
-      }
-      
-      const originalStyle = editButton.style.cssText;
-      editButton.style.visibility = 'visible';
-      editButton.style.display = 'block';
-      
-      console.log('👆 [tryEditResend] Klikam przycisk Edit...');
-      editButton.click();
-      
-      setTimeout(() => {
-        editButton.style.cssText = originalStyle;
-      }, 100);
-      
-      // === 4. CZEKAJ NA EDYTOR I ZNAJDŹ SEND W KONTEKŚCIE ===
-      console.log('⏳ [tryEditResend] Czekam na pojawienie się edytora po Edit...');
-      await new Promise(resolve => setTimeout(resolve, 1000));
-      
-      // Znajdź conversation turn container dla kontekstu
-      const turnContainer = lastUserMessage.closest('[data-testid^="conversation-turn-"]') ||
-                           lastUserMessage.closest('[class*="turn"]') ||
-                           lastUserMessage.closest('article') ||
-                           lastUserMessage.parentElement;
-      
-      console.log('🔍 [tryEditResend] Szukam przycisku Send w kontekście edytowanej wiadomości...');
-      
-      const sendSelectors = [
-        '[data-testid="send-button"]',
-        'button[aria-label="Send"]',
-        'button[aria-label*="Send"]',
-        'button[name="Send"]',
-        'button[type="submit"]',
-        '#composer-submit-button',
-        'button[data-testid*="send"]'
-      ];
-      
-      // Aktywne czekanie na Send button (max 10s)
-      let sendButton = null;
-      const maxWaitForSend = 10000;
-      const checkInterval = 100;
-      const maxIterations = maxWaitForSend / checkInterval;
-      
-      for (let iteration = 0; iteration < maxIterations; iteration++) {
-        // Najpierw szukaj w turn container
-        for (const selector of sendSelectors) {
-          sendButton = turnContainer.querySelector(selector);
-          if (sendButton && !sendButton.disabled) {
-            console.log(`✓ [tryEditResend] Znaleziono Send w turn container po ${iteration * checkInterval}ms: ${selector}`);
-            break;
-          }
-        }
-        
-        // Jeśli nie znaleziono, szukaj w całym dokumencie
-        if (!sendButton) {
-          for (const selector of sendSelectors) {
-            sendButton = document.querySelector(selector);
-            if (sendButton && !sendButton.disabled) {
-              console.log(`✓ [tryEditResend] Znaleziono Send globalnie po ${iteration * checkInterval}ms: ${selector}`);
-              break;
-            }
-          }
-        }
-        
-        if (sendButton) break;
-        
-        if (iteration > 0 && iteration % 10 === 0) {
-          console.log(`  ⏳ Czekam na Send... ${iteration * checkInterval}ms / ${maxWaitForSend}ms`);
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, checkInterval));
-      }
-      
-      if (!sendButton) {
-        console.warn('❌ [tryEditResend] Nie znaleziono przycisku Send po Edit');
-        return false;
-      }
-      
-      if (sendButton.disabled) {
-        console.warn('⚠️ [tryEditResend] Przycisk Send jest disabled');
-        return false;
-      }
-      
-      console.log('👆 [tryEditResend] Klikam przycisk Send...');
-      sendButton.click();
-      
-      // === 5. WERYFIKACJA WYSŁANIA ===
-      console.log('🔍 [tryEditResend] Weryfikuję czy prompt został wysłany...');
-      let verified = false;
-      const maxVerifyTime = 3000;
-      const verifyInterval = 100;
-      const maxVerifyIterations = maxVerifyTime / verifyInterval;
-      
-      for (let iteration = 0; iteration < maxVerifyIterations; iteration++) {
-        const editor = document.querySelector('[role="textbox"]') || 
-                      document.querySelector('[contenteditable]');
-        
-        // Fallbacki dla stopButton
-        const stopBtn = document.querySelector('button[aria-label*="Stop"]') || 
-                       document.querySelector('[data-testid="stop-button"]') ||
-                       document.querySelector('button[aria-label*="stop"]') ||
-                       document.querySelector('button[aria-label="Zatrzymaj"]');
-        
-        const currentSendBtn = document.querySelector('[data-testid="send-button"]') ||
-                              document.querySelector('button[aria-label="Send"]');
-        
-        const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
-        const editorEmpty = editor && (editor.textContent || '').trim().length === 0;
-        const sendDisabled = currentSendBtn && currentSendBtn.disabled;
-        
-        // Weryfikacja DOM
-        const messages = document.querySelectorAll('[data-message-author-role]');
-        const hasMessages = messages.length > 0;
-        
-        // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
-        const hasStopButton = !!stopBtn;
-        
-        // ALTERNATYWNY: interface zablokowany + wiadomości w DOM
-        const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
-        
-        if (hasStopButton || interfaceBlocked) {
-          verified = true;
-          console.log(`✅ [tryEditResend] Weryfikacja SUKCES po ${iteration * verifyInterval}ms:`, {
-            stopBtn: !!stopBtn,
-            editorDisabled,
-            editorEmpty,
-            sendDisabled,
-            hasMessages,
-            msgCount: messages.length
-          });
-          break;
-        }
-        
-        if (iteration > 0 && iteration % 5 === 0) {
-          console.log(`  ⏳ Weryfikacja... ${iteration * verifyInterval}ms / ${maxVerifyTime}ms`);
-        }
-        
-        await new Promise(resolve => setTimeout(resolve, verifyInterval));
-      }
-      
-      if (!verified) {
-        console.warn(`⚠️ [tryEditResend] Weryfikacja FAILED - prompt może nie zostać wysłany po ${maxVerifyTime}ms`);
-        return false;
-      }
-      
-      console.log('✅ [tryEditResend] Edit+Resend wykonane pomyślnie i zweryfikowane');
-      return true;
-      
-    } catch (error) {
-      console.error('❌ [tryEditResend] Błąd:', error);
-      return false;
-    }
+    console.warn('[tryEditResend] Disabled: workflow uses prompt resend only.');
+    return false;
   }
-  
-  // Funkcja sprawdzająca czy ChatGPT generuje odpowiedź (rozszerzona detekcja)
+
+  // Funkcja sprawdzajaca czy ChatGPT generuje odpowiedz (rozszerzona detekcja)
   function isGenerating() {
     // 1. Stop button (klasyczne selektory)
     const stopButton = document.querySelector('button[aria-label*="Stop"]') || 
@@ -8646,147 +9859,21 @@ async function injectToChat(
     const initialAssistantLength = initialAssistantText.length;
     const MIN_RESPONSE_DELTA = 30;
     let responseSeenInDOM = false;
-    console.log("⏳ Czekam na odpowiedź ChatGPT...");
-    
-    // ===== FAZA 1: Detekcja STARTU odpowiedzi =====
-    // Czekaj aż ChatGPT zacznie generować odpowiedź
-    // Chain-of-thought model może myśleć 4-5 min przed startem
-    const phase1StartTime = Date.now(); // ✅ OSOBNY timer dla FAZY 1
+    console.log('Czekam na odpowiedz ChatGPT...');
+
+    // Faza 1: wykryj start odpowiedzi.
+    const phase1StartTime = Date.now();
+    const startTimeout = Math.min(maxWaitMs, 7200000);
     let responseStarted = false;
-    let editAttemptedPhase1 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
-    const checkedFixedErrorsPhase1 = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
-    const startTimeout = Math.min(maxWaitMs, 7200000); // 120 minut na start (zwiększono dla długich deep thinking sessions)
-    
-    console.log(`📊 [FAZA 1] Timeout dla detekcji startu: ${Math.round(startTimeout/1000)}s (${Math.round(startTimeout/60000)} min)`);
-    
+
     while (Date.now() - phase1StartTime < startTimeout) {
       if (shouldStopNow()) return false;
-      if (hasStreamingInterruptedState()) {
-        console.error('❌ [FAZA 1] Wykryto przerwany stream odpowiedzi (Stopped thinking / Streaming interrupted).');
+      if (hasHardGenerationErrorMessage()) {
+        console.error('[FAZA 1] Wykryto hard error na ostatnim turnie.');
         return false;
       }
 
-      // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
-      const errorMessages = document.querySelectorAll('[class*="text"]');
-      
-      // Znajdź ostatni komunikat błędu (od końca)
-      let lastErrorMsg = null;
-      let lastErrorIndex = -1;
-      for (let i = errorMessages.length - 1; i >= 0; i--) {
-        const msg = errorMessages[i];
-        if (msg.textContent.includes('Something went wrong while generating the response') || 
-            msg.textContent.includes('Something went wrong')) {
-          lastErrorMsg = msg;
-          lastErrorIndex = i;
-          break; // Zatrzymaj się na pierwszym (ostatnim) znalezionym
-        }
-      }
-      
-      // Jeśli znaleziono błąd, sprawdź czy nie został już naprawiony
-      if (lastErrorMsg) {
-        // Unikalne ID błędu (pozycja + fragment tekstu)
-        const errorId = `${lastErrorIndex}_${lastErrorMsg.textContent.substring(0, 50)}`;
-        
-        // Jeśli już sprawdzaliśmy ten błąd i był naprawiony - pomiń bez logowania
-        if (checkedFixedErrorsPhase1.has(errorId)) {
-          // Ciche pominięcie - nie spamuj logów
-        } else {
-          // Pierwszy raz widzimy ten błąd - sprawdź go
-          console.log(`🔍 [FAZA 1] Znaleziono ostatni komunikat błędu (${lastErrorIndex + 1}/${errorMessages.length})`);
-          
-          // Znajdź kontener błędu w strukturze DOM
-          const errorContainer = lastErrorMsg.closest('article') || 
-                                lastErrorMsg.closest('[data-testid^="conversation-turn-"]') ||
-                                lastErrorMsg.closest('[class*="message"]') ||
-                                lastErrorMsg.parentElement;
-          
-          // Sprawdź czy po błędzie jest już nowa odpowiedź assistant
-          const allMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-          let errorAlreadyFixed = false;
-          
-          if (errorContainer && allMessages.length > 0) {
-            const lastAssistantMsg = allMessages[allMessages.length - 1];
-            
-            // Porównaj pozycję błędu z ostatnią odpowiedzią
-            try {
-              const errorPosition = errorContainer.compareDocumentPosition(lastAssistantMsg);
-              
-              // Jeśli ostatnia odpowiedź jest AFTER błędu (Node.DOCUMENT_POSITION_FOLLOWING = 4)
-              if (errorPosition & Node.DOCUMENT_POSITION_FOLLOWING) {
-                errorAlreadyFixed = true;
-                console.log('✓ [FAZA 1] Błąd już naprawiony - jest nowa odpowiedź po nim, pomijam');
-                // Dodaj do cache żeby nie sprawdzać ponownie
-                checkedFixedErrorsPhase1.add(errorId);
-              }
-            } catch (e) {
-              console.warn('⚠️ [FAZA 1] Nie udało się porównać pozycji błędu:', e);
-            }
-          }
-          
-          // Jeśli błąd został naprawiony, pomiń całą logikę Edit/Retry
-          if (!errorAlreadyFixed) {
-          // Jeśli już próbowaliśmy Edit - NIE próbuj ponownie
-          if (editAttemptedPhase1) {
-            console.log('⚠️ [FAZA 1] Błąd wykryty ale editAttempted=true - pomijam Edit, szukam Retry...');
-          } else {
-            console.log('⚠️ [FAZA 1] Znaleziono komunikat błędu - uruchamiam retry loop Edit+Resend...');
-            editAttemptedPhase1 = true; // Oznacz że próbujemy
-            
-            // Retry loop: max 3 próby Edit+Resend
-            let editSuccess = false;
-            for (let attempt = 1; attempt <= 3 && !editSuccess; attempt++) {
-              console.log(`🔧 [FAZA 1] Próba ${attempt}/3 wywołania tryEditResend()...`);
-              editSuccess = await tryEditResend();
-              console.log(`📊 [FAZA 1] Próba ${attempt}/3: ${editSuccess ? '✅ SUKCES' : '❌ PORAŻKA'}`);
-              
-              if (editSuccess) {
-                console.log('✅ [FAZA 1] Edit+Resend SUKCES - przerywam retry loop');
-                break;
-              }
-              
-              if (!editSuccess && attempt < 3) {
-                console.log(`⏳ [FAZA 1] Próba ${attempt} nieudana, czekam 2s przed kolejną...`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-            }
-            
-            if (editSuccess) {
-              console.log('✅ [FAZA 1] Naprawiono przez Edit+Resend - kontynuuję czekanie...');
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              continue; // Kontynuuj czekanie w tej samej pętli
-            }
-            
-            console.log('⚠️ [FAZA 1] Wszystkie 3 próby Edit+Resend nieudane, próbuję Retry button...');
-          }
-          
-          // Jeśli Edit nie zadziałał (lub już próbowaliśmy), spróbuj Retry
-          console.log('🔍 [FAZA 1] Szukam przycisku Retry...');
-          let retryButton = lastErrorMsg.parentElement?.querySelector('button[aria-label="Retry"]');
-          if (!retryButton) {
-            retryButton = lastErrorMsg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
-          }
-          if (!retryButton) {
-            // Szukaj w całym dokumencie jako fallback
-            retryButton = document.querySelector('button[aria-label="Retry"]');
-          }
-          
-          if (retryButton) {
-            console.log('🔄 [FAZA 1] Klikam przycisk Retry - wznawiam czekanie na odpowiedź...');
-            retryButton.click();
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            // Zwróć false aby zewnętrzna pętla wywołała waitForResponse ponownie (jak Continue)
-            return false;
-          } else {
-            console.warn('⚠️ [FAZA 1] Nie znaleziono przycisku Retry');
-          }
-          }
-        }
-      }
-      
-      // Użyj rozszerzonej funkcji wykrywania generowania
       const genStatus = isGenerating();
-      
-      // Weryfikacja: Czy faktycznie jest nowa aktywność w DOM?
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const hasNewContent = assistantMessages.length > initialAssistantCount;
       const lastAssistantMsg = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
@@ -8794,250 +9881,91 @@ async function injectToChat(
       const lastTextChanged = lastAssistantText && lastAssistantText !== initialAssistantText;
       const lengthDelta = Math.abs(lastAssistantText.length - initialAssistantLength);
       const meaningfulTextChange = lastTextChanged && lengthDelta >= MIN_RESPONSE_DELTA;
+
       if (hasNewContent || meaningfulTextChange) {
         responseSeenInDOM = true;
       }
-      
-      // ChatGPT zaczął odpowiadać jeśli:
-      // 1. isGenerating() wykryło wskaźniki generowania (stop/thinking/update/streaming)
-      // 2. LUB jest nowa treść w DOM (faktyczna odpowiedź)
-      
+
       if (genStatus.generating || hasNewContent || meaningfulTextChange) {
-        console.log("✓ ChatGPT zaczął odpowiadać", {
-          generating: genStatus.generating,
-          reason: genStatus.reason,
-          hasNewContent: hasNewContent,
-          lastTextChanged: lastTextChanged,
-          lengthDelta: lengthDelta,
-          meaningfulTextChange: meaningfulTextChange,
-          initialAssistantCount: initialAssistantCount,
-          assistantMsgCount: assistantMessages.length
-        });
         responseStarted = true;
         break;
       }
-      
-      // Loguj co 30s że czekamy z rozszerzonym statusem
+
       if ((Date.now() - phase1StartTime) % 30000 < 500) {
         const elapsed = Math.round((Date.now() - phase1StartTime) / 1000);
-        const currentGenStatus = isGenerating();
-        console.log(`⏳ [FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`, {
-          generating: currentGenStatus.generating,
-          reason: currentGenStatus.reason,
-          hasNewContent: hasNewContent,
-          lastTextChanged: lastTextChanged,
-          lengthDelta: lengthDelta,
-          meaningfulTextChange: meaningfulTextChange,
-          assistantMsgCount: assistantMessages.length,
-          initialAssistantCount: initialAssistantCount
-        });
+        console.log(`[FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`);
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    
-    const phase1Duration = Math.round((Date.now() - phase1StartTime) / 1000);
-    console.log(`📊 [FAZA 1] Zakończona po ${phase1Duration}s (${Math.round(phase1Duration/60)} min)`);
-    
+
     if (!responseStarted) {
-      console.error(`❌ [FAZA 1] ChatGPT nie zaczął odpowiadać po ${Math.round(startTimeout/1000)}s - prompt prawdopodobnie nie został wysłany!`);
+      console.error(`[FAZA 1] Timeout startu odpowiedzi po ${Math.round(startTimeout / 1000)}s.`);
       return false;
     }
-    
-    // ===== FAZA 2: Detekcja ZAKOŃCZENIA odpowiedzi =====
-    // Czekaj aż ChatGPT skończy i interface będzie gotowy na kolejny prompt
-    const phase2StartTime = Date.now(); // ✅ NOWY timer dla FAZY 2 (niezależny od FAZY 1!)
-    const phase2Timeout = Math.min(maxWaitMs, 7200000); // 120 minut na zakończenie (zwiększono dla długich deep thinking sessions)
+
+    // Faza 2: wykryj stabilne zakonczenie odpowiedzi.
+    const phase2StartTime = Date.now();
+    const phase2Timeout = Math.min(maxWaitMs, 7200000);
     let consecutiveReady = 0;
     let logInterval = 0;
     let lastAssistantText = initialAssistantText;
     let lastAssistantChangeAt = Date.now();
-    let editAttemptedPhase2 = false; // Flaga: czy już próbowaliśmy Edit w tej fazie
-    const checkedFixedErrors = new Set(); // Cache dla już sprawdzonych i naprawionych błędów
-    
-    console.log(`📊 [FAZA 2] Timeout dla detekcji zakończenia: ${Math.round(phase2Timeout/1000)}s (${Math.round(phase2Timeout/60000)} min)`);
-    
+
     while (Date.now() - phase2StartTime < phase2Timeout) {
       if (shouldStopNow()) return false;
-      if (hasStreamingInterruptedState()) {
-        console.error('❌ [FAZA 2] Wykryto przerwany stream odpowiedzi (Stopped thinking / Streaming interrupted).');
+      if (hasHardGenerationErrorMessage()) {
+        console.error('[FAZA 2] Wykryto hard error na ostatnim turnie.');
         return false;
       }
 
-      // Sprawdź czy pojawił się komunikat błędu - TYLKO OSTATNI
-      const errorMessages = document.querySelectorAll('[class*="text"]');
-      
-      // Znajdź ostatni komunikat błędu (od końca)
-      let lastErrorMsg = null;
-      let lastErrorIndex = -1;
-      for (let i = errorMessages.length - 1; i >= 0; i--) {
-        const msg = errorMessages[i];
-        if (msg.textContent.includes('Something went wrong while generating the response') || 
-            msg.textContent.includes('Something went wrong')) {
-          lastErrorMsg = msg;
-          lastErrorIndex = i;
-          break; // Zatrzymaj się na pierwszym (ostatnim) znalezionym
-        }
-      }
-      
-      // Jeśli znaleziono błąd, sprawdź czy nie został już naprawiony
-      if (lastErrorMsg) {
-        // Unikalne ID błędu (pozycja + fragment tekstu)
-        const errorId = `${lastErrorIndex}_${lastErrorMsg.textContent.substring(0, 50)}`;
-        
-        // Jeśli już sprawdzaliśmy ten błąd i był naprawiony - pomiń bez logowania
-        if (checkedFixedErrors.has(errorId)) {
-          // Ciche pominięcie - nie spamuj logów
-        } else {
-          // Pierwszy raz widzimy ten błąd - sprawdź go
-          console.log(`🔍 [FAZA 2] Znaleziono ostatni komunikat błędu (${lastErrorIndex + 1}/${errorMessages.length})`);
-          
-          // Znajdź kontener błędu w strukturze DOM
-          const errorContainer = lastErrorMsg.closest('article') || 
-                                lastErrorMsg.closest('[data-testid^="conversation-turn-"]') ||
-                                lastErrorMsg.closest('[class*="message"]') ||
-                                lastErrorMsg.parentElement;
-          
-          // Sprawdź czy po błędzie jest już nowa odpowiedź assistant
-          const allMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-          let errorAlreadyFixed = false;
-          
-          if (errorContainer && allMessages.length > 0) {
-            const lastAssistantMsg = allMessages[allMessages.length - 1];
-            
-            // Porównaj pozycję błędu z ostatnią odpowiedzią
-            try {
-              const errorPosition = errorContainer.compareDocumentPosition(lastAssistantMsg);
-              
-              // Jeśli ostatnia odpowiedź jest AFTER błędu (Node.DOCUMENT_POSITION_FOLLOWING = 4)
-              if (errorPosition & Node.DOCUMENT_POSITION_FOLLOWING) {
-                errorAlreadyFixed = true;
-                console.log('✓ [FAZA 2] Błąd już naprawiony - jest nowa odpowiedź po nim, pomijam');
-                // Dodaj do cache żeby nie sprawdzać ponownie
-                checkedFixedErrors.add(errorId);
-              }
-            } catch (e) {
-              console.warn('⚠️ [FAZA 2] Nie udało się porównać pozycji błędu:', e);
-            }
-          }
-          
-          // Jeśli błąd został naprawiony, pomiń całą logikę Edit/Retry
-          if (!errorAlreadyFixed) {
-          // Jeśli już próbowaliśmy Edit - NIE próbuj ponownie
-          if (editAttemptedPhase2) {
-            console.log('⚠️ [FAZA 2] Błąd wykryty ale editAttempted=true - pomijam Edit, szukam Retry...');
-          } else {
-            console.log('⚠️ [FAZA 2] Znaleziono komunikat błędu - uruchamiam retry loop Edit+Resend...');
-            editAttemptedPhase2 = true; // Oznacz że próbujemy
-            
-            // Retry loop: max 3 próby Edit+Resend
-            let editSuccess = false;
-            for (let attempt = 1; attempt <= 3 && !editSuccess; attempt++) {
-              console.log(`🔧 [FAZA 2] Próba ${attempt}/3 wywołania tryEditResend()...`);
-              editSuccess = await tryEditResend();
-              console.log(`📊 [FAZA 2] Próba ${attempt}/3: ${editSuccess ? '✅ SUKCES' : '❌ PORAŻKA'}`);
-              
-              if (editSuccess) {
-                console.log('✅ [FAZA 2] Edit+Resend SUKCES - przerywam retry loop');
-                break;
-              }
-              
-              if (!editSuccess && attempt < 3) {
-                console.log(`⏳ [FAZA 2] Próba ${attempt} nieudana, czekam 2s przed kolejną...`);
-                await new Promise(resolve => setTimeout(resolve, 2000));
-              }
-            }
-            
-            if (editSuccess) {
-              console.log('✅ [FAZA 2] Naprawiono przez Edit+Resend - kontynuuję czekanie...');
-              await new Promise(resolve => setTimeout(resolve, 2000));
-              continue; // Kontynuuj czekanie w tej samej pętli
-            }
-            
-            console.log('⚠️ [FAZA 2] Wszystkie 3 próby Edit+Resend nieudane, próbuję Retry button...');
-          }
-          
-          // Jeśli Edit nie zadziałał (lub już próbowaliśmy), spróbuj Retry
-          console.log('🔍 [FAZA 2] Szukam przycisku Retry...');
-          let retryButton = lastErrorMsg.parentElement?.querySelector('button[aria-label="Retry"]');
-          if (!retryButton) {
-            retryButton = lastErrorMsg.closest('[class*="group"]')?.querySelector('button[aria-label="Retry"]');
-          }
-          if (!retryButton) {
-            // Szukaj w całym dokumencie jako fallback
-            retryButton = document.querySelector('button[aria-label="Retry"]');
-          }
-          
-          if (retryButton) {
-            console.log('🔄 [FAZA 2] Klikam przycisk Retry - wznawiam czekanie na odpowiedź...');
-            retryButton.click();
-            await new Promise(resolve => setTimeout(resolve, 2000));
-            // Zwróć false aby zewnętrzna pętla wywołała waitForResponse ponownie (jak Continue)
-            return false;
-          } else {
-            console.warn('⚠️ [FAZA 2] Nie znaleziono przycisku Retry');
-          }
-          }
-        }
-      }
-      
-      // Szukaj wszystkich elementów interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
                      document.querySelector('div[contenteditable="true"]') ||
                      document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
-      
+
       const sendButton = document.querySelector('[data-testid="send-button"]') ||
                         document.querySelector('#composer-submit-button') ||
                         document.querySelector('button[aria-label="Send"]') ||
                         document.querySelector('button[aria-label*="Send"]');
-      
-      // Użyj rozszerzonej funkcji wykrywania generowania
+
       const genStatus = isGenerating();
-      
-      // Co 10 iteracji (5s) loguj stan
+
       if (logInterval % 10 === 0) {
         const phase2Elapsed = Math.round((Date.now() - phase2StartTime) / 1000);
-        console.log(`🔍 [FAZA 2] Stan interfejsu:`, {
+        console.log('[FAZA 2] Stan interfejsu:', {
           editor_exists: !!editor,
           editor_enabled: editor?.getAttribute('contenteditable') === 'true',
           generating: genStatus.generating,
           genReason: genStatus.reason,
           sendButton_exists: !!sendButton,
           sendButton_disabled: sendButton?.disabled,
-          consecutiveReady: consecutiveReady,
-          elapsed: phase2Elapsed + 's'
+          consecutiveReady,
+          elapsed: `${phase2Elapsed}s`
         });
       }
-      logInterval++;
-      
-      // ===== WARUNKI GOTOWOŚCI =====
-      // Interface jest gotowy gdy ChatGPT skończył generować:
-      // 1. BRAK wskaźników generowania (isGenerating() == false)
-      // 2. Editor ISTNIEJE i jest ENABLED (contenteditable="true")
-      // 3. BRAK wskaźników "thinking" w ostatniej wiadomości
-      // 
-      // UWAGA: SendButton może nie istnieć gdy editor jest pusty - sprawdzimy go dopiero w sendPrompt()
-      
+      logInterval += 1;
+
       const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
       const noGeneration = !genStatus.generating;
-      
-      // Sprawdź czy nie ma wskaźników "thinking" w ostatniej wiadomości
-      const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-      const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
+
+      const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+      const lastAssistantMsg = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
       const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
       if (currentLastText && currentLastText !== lastAssistantText) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
       }
-      const hasNewAssistantMessage = lastMessages.length > initialAssistantCount;
-      const lastTextChanged = currentLastText && currentLastText !== initialAssistantText;
-      const lengthDelta = Math.abs(currentLastText.length - initialAssistantLength);
-      const meaningfulTextChange = lastTextChanged && lengthDelta >= MIN_RESPONSE_DELTA;
+
+      const hasNewAssistantMessage = assistantMessages.length > initialAssistantCount;
+      const phase2TextChanged = currentLastText && currentLastText !== initialAssistantText;
+      const phase2LengthDelta = Math.abs(currentLastText.length - initialAssistantLength);
+      const meaningfulTextChange = phase2TextChanged && phase2LengthDelta >= MIN_RESPONSE_DELTA;
       if (hasNewAssistantMessage || meaningfulTextChange) {
         responseSeenInDOM = true;
       }
+
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const hasThinkingInMessage = lastAssistantMsg && lastAssistantMsg.querySelector('[class*="thinking"]');
+      const hasThinkingInMessage = !!(lastAssistantMsg && lastAssistantMsg.querySelector('[class*="thinking"]'));
       const progressText = (currentLastText || '').toLowerCase();
       const hasProgressText = progressText.includes('research in progress') ||
         progressText.includes('deep research') ||
@@ -9049,65 +9977,36 @@ async function injectToChat(
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
       const minResponseLengthReached = currentLastText.length >= 50;
-      
+
       const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && minResponseLengthReached && !hasProgressText;
-      
+
       if (isReady) {
-        consecutiveReady++;
-        console.log(`✓ [FAZA 2] Interface ready (${consecutiveReady}/1) - warunki OK`);
-        
-        // Potwierdź stan przez 1 sprawdzenie (0.5s)
-        // Zmniejszono z 3 do 1 dla szybszej reakcji (oszczędza 1s na każdy prompt)
+        consecutiveReady += 1;
         if (consecutiveReady >= 1) {
-          console.log("✅ ChatGPT zakończył odpowiedź - interface gotowy");
-          // Dodatkowe czekanie dla stabilizacji UI
-          await new Promise(resolve => setTimeout(resolve, 1000));
-          
-          // WERYFIKACJA: Sprawdź czy faktycznie jest jakaś odpowiedź w DOM (max 1 próba)
-          console.log("🔍 Weryfikuję obecność odpowiedzi w DOM...");
-          let domCheckAttempts = 0;
-          const MAX_DOM_CHECKS = 1;
-          
-          while (domCheckAttempts < MAX_DOM_CHECKS) {
-            const messages = document.querySelectorAll('[data-message-author-role="assistant"]');
-            const articles = document.querySelectorAll('article');
-            
-            if (messages.length > 0 || articles.length > 0) {
-              console.log(`✓ Znaleziono ${messages.length} wiadomości assistant i ${articles.length} articles`);
-              return true;
-            }
-            
-            domCheckAttempts++;
-            console.warn(`⚠️ DOM check ${domCheckAttempts}/${MAX_DOM_CHECKS} - brak odpowiedzi, czekam 1s...`);
-            await new Promise(resolve => setTimeout(resolve, 1000));
+          await new Promise((resolve) => setTimeout(resolve, 1000));
+
+          const domMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+          const domArticles = document.querySelectorAll('article');
+          if (domMessages.length > 0 || domArticles.length > 0) {
+            return true;
           }
-          
-          // Po 1 próbie (1s) - zakładamy że OK, walidacja później wyłapie błąd
-          console.warn("⚠️ DOM nie gotowy po 1 próbie (1s), ale kontynuuję - walidacja tekstu wyłapie jeśli faktyczny błąd");
+
+          console.warn('[FAZA 2] DOM odpowiedzi nie jest jeszcze stabilny, ale kontynuuje.');
           return true;
         }
       } else {
-        // Reset licznika jeśli którykolwiek warunek nie jest spełniony
-        if (consecutiveReady > 0) {
-          console.log(`⚠️ Interface NOT ready, resetuję licznik (był: ${consecutiveReady})`);
-          console.log(`  Powód: noGeneration=${noGeneration}, editorReady=${editorReady}, hasThinkingInMessage=${hasThinkingInMessage}, responseSeenInDOM=${responseSeenInDOM}, textStable=${textStable}, minResponseLengthReached=${minResponseLengthReached}, hasProgressText=${hasProgressText}`);
-          if (genStatus.generating) {
-            console.log(`  Detekcja generowania: ${genStatus.reason}`);
-          }
-        }
         consecutiveReady = 0;
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 500));
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
     }
-    
+
     const phase2Duration = Math.round((Date.now() - phase2StartTime) / 1000);
-    console.error(`❌ [FAZA 2] TIMEOUT czekania na zakończenie odpowiedzi po ${phase2Duration}s (${Math.round(phase2Duration/60)} min)`);
-    console.error(`📊 Łączny czas (FAZA 1 + FAZA 2): ${phase1Duration + phase2Duration}s (${Math.round((phase1Duration + phase2Duration)/60)} min)`);
+    console.error(`[FAZA 2] Timeout zakonczenia odpowiedzi po ${phase2Duration}s.`);
     return false;
   }
 
-  // Funkcja sprawdzająca czy ChatGPT działa (brak błędów połączenia)
+  // Funkcja sprawdzajaca czy ChatGPT dziala (brak bledow polaczenia)
   async function checkChatGPTConnection() {
     console.log("🔍 Sprawdzam połączenie z ChatGPT...");
     
@@ -10104,41 +11003,51 @@ async function injectToChat(
       const counter = createCounter();
       
       if (!isResume) {
-        // Normalny tryb - wyślij payload (artykuł)
-        updateCounter(counter, promptOffset, totalPromptsForRun, 'Wysyłam artykuł...');
-        
-        // Wyślij tekst Economist
-        console.log("📤 Wysyłam artykuł do ChatGPT...");
+        if (manualPdfAttachment?.enabled) {
+          updateCounter(counter, promptOffset, totalPromptsForRun, 'Zalaczam PDF...');
+          const attachResult = await attachManualPdfWithRetry(manualPdfAttachment);
+          if (!attachResult.success) {
+            return {
+              success: false,
+              lastResponse: '',
+              error: 'pdf_attach_failed',
+              metrics: buildMetricsSnapshot({
+                completed: false,
+                reason: 'pdf_attach_failed',
+                pdfAttachError: attachResult.details || attachResult.error || ''
+              })
+            };
+          }
+        }
+
+        updateCounter(counter, promptOffset, totalPromptsForRun, 'Wysylam artykul...');
+
+        console.log('Wysylam artykul do ChatGPT...');
         await sendPrompt(payload, responseWaitMs, counter, promptOffset, totalPromptsForRun);
         if (shouldStopNow()) {
           return forceStopResult();
         }
-        
-        // Czekaj na odpowiedź ChatGPT
-        updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedź...');
+
+        updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedz...');
         await waitForResponse(responseWaitMs);
         if (shouldStopNow()) {
           return forceStopResult();
         }
-        console.log("✅ Artykuł przetworzony");
+        console.log('Artykul przetworzony');
 
-        // Pobierz odpowiedź Stage 0 do wstawienia w kolejne prompty
         stage0Response = await getLastResponseText();
         const stage0PromptIndex = normalizePromptMetricIndex(promptOffset);
         const stage0Validated = validateResponse(stage0Response);
         registerStageCompletion(stage0PromptIndex, stage0Response, stage0Validated);
         if (stage0Response && stage0Response.trim().length > 0) {
-          console.log(`🧩 Stage 0 captured (${stage0Response.length} znaków) - będzie wstawione w prompt chain`);
+          console.log(`Stage 0 captured (${stage0Response.length} znakow) - bedzie wstawione w prompt chain`);
         } else {
-          console.warn('⚠️ Nie udało się pobrać Stage 0 (pusty tekst) - prompt chain bez wstawienia');
+          console.warn('Nie udalo sie pobrac Stage 0 (pusty tekst) - prompt chain bez wstawienia');
           stage0Response = '';
         }
-        
-        // NIE zapisujemy początkowej odpowiedzi - zapisujemy tylko ostatnią z prompt chain
-        
-        // Anti-automation delay przed prompt chain - czekanie na gotowość jest w sendPrompt
+
         const delay = getRandomDelay();
-        console.log(`⏸️ Anti-automation delay: ${(delay/1000).toFixed(1)}s przed rozpoczęciem prompt chain...`);
+        console.log(`Anti-automation delay: ${(delay / 1000).toFixed(1)}s przed prompt chain...`);
         await new Promise(resolve => setTimeout(resolve, delay));
         if (shouldStopNow()) {
           return forceStopResult();
@@ -10649,6 +11558,12 @@ function waitForTabComplete(tabId) {
     });
   });
 }
+
+
+
+
+
+
 
 
 
