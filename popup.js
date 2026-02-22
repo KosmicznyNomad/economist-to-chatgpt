@@ -40,6 +40,31 @@ const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindo
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 
+const POPUP_SHORTCUTS = Object.freeze({
+  manualSource: '1',
+  runAnalysis: '2',
+  resumeStage: '3',
+  resumeAll: '4',
+  responses: '5',
+  processPanel: '6',
+  stop: '7',
+  copyYouTube: '8',
+  restoreWindows: '9',
+  autoRestoreToggle: '0'
+});
+
+function buildShortcutButtonHtml(label, shortcutKey) {
+  const safeLabel = typeof label === 'string' ? label.trim() : '';
+  const safeShortcut = typeof shortcutKey === 'string' ? shortcutKey.trim() : '';
+  if (!safeShortcut) return safeLabel;
+  return `${safeLabel} <span class="shortcut">${safeShortcut}</span>`;
+}
+
+function setShortcutButtonLabel(button, label, shortcutKey) {
+  if (!button) return;
+  button.innerHTML = buildShortcutButtonHtml(label, shortcutKey);
+}
+
 function setStatusElement(element, text, isError = false) {
   if (!element) return;
   const safeText = typeof text === 'string' ? text.trim() : '';
@@ -82,10 +107,61 @@ function setAutoRestoreStatus(text, isError = false) {
 
 function applyAutoRestoreUi(status) {
   const enabled = !!status?.enabled;
+  const periodInMinutes = Number.isInteger(status?.periodInMinutes) && status.periodInMinutes > 0
+    ? status.periodInMinutes
+    : 5;
   if (autoRestoreToggleBtn) {
-    autoRestoreToggleBtn.textContent = enabled ? 'Auto co 15 min: ON' : 'Auto co 15 min: OFF';
+    setShortcutButtonLabel(
+      autoRestoreToggleBtn,
+      enabled ? `Auto co ${periodInMinutes} min: ON` : `Auto co ${periodInMinutes} min: OFF`,
+      POPUP_SHORTCUTS.autoRestoreToggle
+    );
     autoRestoreToggleBtn.dataset.enabled = enabled ? 'true' : 'false';
   }
+}
+
+const AUTO_RESTORE_ISSUE_LABELS = {
+  needs_action: 'wymaga akcji',
+  failed_status: 'status blad',
+  missing_tab_context: 'brak kontekstu tab',
+  tab_not_found: 'tab nieznaleziony',
+  tab_not_chatgpt: 'tab poza ChatGPT',
+  metrics_unavailable: 'brak metryk DOM',
+  missing_assistant_reply: 'brak odpowiedzi assistant',
+  assistant_reply_empty: 'pusta odpowiedz',
+  assistant_reply_too_short: 'odpowiedz za krotka'
+};
+
+function getAutoRestoreIssueLabel(code) {
+  const normalized = typeof code === 'string' ? code.trim() : '';
+  if (!normalized) return '';
+  return AUTO_RESTORE_ISSUE_LABELS[normalized] || normalized;
+}
+
+function formatAutoRestoreReasonCounts(reasonCounts) {
+  if (!reasonCounts || typeof reasonCounts !== 'object') return '';
+  const entries = Object.entries(reasonCounts)
+    .filter((entry) => Number.isInteger(entry[1]) && entry[1] > 0)
+    .sort((left, right) => right[1] - left[1])
+    .slice(0, 4);
+  if (entries.length === 0) return '';
+  return entries
+    .map((entry) => `${getAutoRestoreIssueLabel(entry[0])}: ${entry[1]}`)
+    .join(', ');
+}
+
+function formatAutoRestoreIssueItem(item) {
+  if (!item || typeof item !== 'object') return '';
+  const title = safePreview(item.title || item.runId || 'process', 'process');
+  const flags = Array.isArray(item.issueFlags)
+    ? item.issueFlags.map(getAutoRestoreIssueLabel).filter(Boolean)
+    : [];
+  const words = Number.isInteger(item.lastAssistantWordCount) ? item.lastAssistantWordCount : 0;
+  const sentences = Number.isInteger(item.lastAssistantSentenceCount) ? item.lastAssistantSentenceCount : 0;
+  const promptInfo = Number.isInteger(item.currentPrompt) && Number.isInteger(item.totalPrompts) && item.totalPrompts > 0
+    ? `P${item.currentPrompt}/${item.totalPrompts}`
+    : 'P?';
+  return `${title} -> ${flags.join(', ') || 'issue'} | ${promptInfo} | odp: ${words} slow, ${sentences} zdan`;
 }
 
 function formatAutoRestoreStatus(status) {
@@ -93,12 +169,64 @@ function formatAutoRestoreStatus(status) {
     return 'Automatyzacja: blad odczytu.';
   }
   const enabled = !!status.enabled;
+  const periodInMinutes = Number.isInteger(status?.periodInMinutes) && status.periodInMinutes > 0
+    ? status.periodInMinutes
+    : 5;
   const nextRunAt = Number.isInteger(status.nextRunAt) ? new Date(status.nextRunAt).toLocaleString() : 'brak';
   const alarmActive = !!status.alarmActive;
   if (!enabled) {
     return 'Automatyzacja: wylaczona.';
   }
-  return `Automatyzacja: WLACZONA (co 15 min). Alarm: ${alarmActive ? 'aktywny' : 'brak'}. Nastepne uruchomienie: ${nextRunAt}.`;
+  const lines = [
+    `Automatyzacja: WLACZONA (co ${periodInMinutes} min). Alarm: ${alarmActive ? 'aktywny' : 'brak'}. Nastepne uruchomienie: ${nextRunAt}.`
+  ];
+
+  const lastCycle = status?.lastCycle && typeof status.lastCycle === 'object'
+    ? status.lastCycle
+    : null;
+  if (!lastCycle) {
+    return lines.join('\n');
+  }
+
+  const check = lastCycle?.check && typeof lastCycle.check === 'object'
+    ? lastCycle.check
+    : {};
+  const restore = lastCycle?.restore && typeof lastCycle.restore === 'object'
+    ? lastCycle.restore
+    : {};
+  const scan = lastCycle?.scan && typeof lastCycle.scan === 'object'
+    ? lastCycle.scan
+    : {};
+  const checkedAt = Number.isInteger(check?.checkedAt)
+    ? new Date(check.checkedAt).toLocaleString()
+    : (Number.isInteger(lastCycle?.ts) ? new Date(lastCycle.ts).toLocaleString() : 'brak');
+  const checkedProcesses = Number.isInteger(check?.checkedProcesses) ? check.checkedProcesses : 0;
+  const issueProcesses = Number.isInteger(check?.issueProcesses) ? check.issueProcesses : 0;
+  const totalProcesses = Number.isInteger(check?.totalActiveProcesses) ? check.totalActiveProcesses : checkedProcesses;
+  const reasonSummary = formatAutoRestoreReasonCounts(check?.reasonCounts);
+
+  lines.push(`Ostatni check: ${checkedAt}. Procesy: ${checkedProcesses}/${totalProcesses}. Braki: ${issueProcesses}.`);
+  lines.push(`Restore: requested=${restore?.requested || 0}, restored=${restore?.restored || 0}, failed=${restore?.failed || 0}.`);
+  if (issueProcesses > 0) {
+    lines.push(`Czego brakuje: ${reasonSummary || 'szczegoly niedostepne'}.`);
+    const items = Array.isArray(check?.items) ? check.items.slice(0, 3) : [];
+    items.forEach((item) => {
+      const line = formatAutoRestoreIssueItem(item);
+      if (line) lines.push(`- ${line}`);
+    });
+  }
+
+  if (scan?.triggered) {
+    const scanStarted = Number.isInteger(scan?.startedTabs) ? scan.startedTabs : 0;
+    const scanMatched = Number.isInteger(scan?.matchedTabs) ? scan.matchedTabs : 0;
+    const scanSuccess = scan?.success === true ? 'OK' : 'BLAD';
+    const scanError = typeof scan?.error === 'string' && scan.error.trim()
+      ? ` (${scan.error.trim()})`
+      : '';
+    lines.push(`Auto-skan: ${scanSuccess}, matched=${scanMatched}, started=${scanStarted}${scanError}.`);
+  }
+
+  return lines.join('\n');
 }
 
 async function refreshAutoRestoreStatus(forceSync = false) {
@@ -268,8 +396,33 @@ function getResumeAllSummary(response) {
   const skippedOutsideInvest = Number.isInteger(summary?.skipped_outside_invest)
     ? summary.skipped_outside_invest
     : rows.filter((row) => row?.action === 'skipped_outside_invest').length;
+  const finalStageCompleted = Number.isInteger(summary?.final_stage_completed)
+    ? summary.final_stage_completed
+    : rows.filter((row) => row?.action === 'final_stage_already_sent').length;
+  const startFailed = Number.isInteger(summary?.start_failed)
+    ? summary.start_failed
+    : rows.filter((row) => row?.action === 'start_failed').length;
+  const reloadOk = Number.isInteger(summary?.reload_ok)
+    ? summary.reload_ok
+    : rows.filter((row) => typeof row?.reloadMethod === 'string' && row.reloadMethod.trim()).length;
+  const reloadTotal = Number.isInteger(summary?.reload_total)
+    ? summary.reload_total
+    : rows.filter((row) => row?.analysisType === 'company').length;
+  const promptBlocks = Number.isInteger(summary?.prompt_blocks)
+    ? summary.prompt_blocks
+    : rows.reduce((sum, row) => sum + (Number.isInteger(row?.userMessageCount) ? row.userMessageCount : 0), 0);
+  const responseBlocks = Number.isInteger(summary?.response_blocks)
+    ? summary.response_blocks
+    : rows.reduce((sum, row) => {
+      if (Number.isInteger(row?.responseBlockCount)) return sum + row.responseBlockCount;
+      if (Number.isInteger(row?.assistantMessageCount)) return sum + row.assistantMessageCount;
+      return sum;
+    }, 0);
+  const detectedPrompts = Number.isInteger(summary?.detected_prompts)
+    ? summary.detected_prompts
+    : rows.filter((row) => Number.isInteger(row?.detectedPromptNumber)).length;
 
-  return `Procesy: ${scannedTabs}, started: ${startedTabs}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, skipped_non_company: ${skippedNonCompany}, skipped_outside_invest: ${skippedOutsideInvest}`;
+  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_non_company: ${skippedNonCompany}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, detected_prompts: ${detectedPrompts}`;
 }
 
 async function executeResumeAllFromPopup(button, options = {}) {
@@ -300,6 +453,109 @@ async function executeResumeAllFromPopup(button, options = {}) {
     setRunStatus(getResumeAllSummary(response));
   } catch (error) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
+function formatSmartResumeStatus(response) {
+  const startPromptNumber = Number.isInteger(response?.startPromptNumber)
+    ? response.startPromptNumber
+    : null;
+  const detectedPromptNumber = Number.isInteger(response?.detectedPromptNumber)
+    ? response.detectedPromptNumber
+    : null;
+  const retrySamePrompt = response?.retrySamePrompt === true;
+  const retryReason = typeof response?.retryReason === 'string' ? response.retryReason : '';
+
+  if (response?.success) {
+    if (retrySamePrompt && startPromptNumber) {
+      if (retryReason === 'assistant_reply_too_short') {
+        return `Wznowiono ponownie Prompt ${startPromptNumber} (odpowiedz byla za krotka).`;
+      }
+      return `Wznowiono ponownie Prompt ${startPromptNumber} (brak odpowiedzi po ostatnim wyslaniu).`;
+    }
+    if (startPromptNumber && detectedPromptNumber) {
+      return `Wznowiono od Prompt ${startPromptNumber} (wykryto ostatni: ${detectedPromptNumber}).`;
+    }
+    if (startPromptNumber) {
+      return `Wznowiono od Prompt ${startPromptNumber}.`;
+    }
+    return 'Wznowiono automatycznie.';
+  }
+
+  const errorCode = typeof response?.error === 'string' ? response.error : '';
+  if (errorCode === 'already_at_last_prompt') {
+    return 'Proces wyglada na zakonczony (brak kolejnego promptu).';
+  }
+  if (errorCode === 'prompts_not_loaded') {
+    return 'Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.';
+  }
+  if (errorCode === 'chat_tab_not_found') {
+    return 'Aktywna karta nie jest ChatGPT.';
+  }
+  if (errorCode === 'signature_not_found' || errorCode === 'empty_user_message') {
+    return 'Nie wykryto etapu automatycznie. Otwieram wybor etapu...';
+  }
+  if (errorCode === 'run_not_found') {
+    return 'Brak aktywnego procesu dla tej karty. Otwieram wybor etapu...';
+  }
+  return `Nie udalo sie automatycznie wznowic (${errorCode || 'unknown'}). Otwieram wybor etapu...`;
+}
+
+async function executeSmartResumeStageFromPopup(button, options = {}) {
+  if (!button) return;
+
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  setShortcutButtonLabel(button, 'Wykrywam etap...', POPUP_SHORTCUTS.resumeStage);
+  setRunStatus('Wykrywam etap i status odpowiedzi...');
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'PROCESS_RESUME_NEXT_STAGE',
+      tabId: Number.isInteger(options?.tabId) ? options.tabId : null,
+      windowId: Number.isInteger(options?.windowId) ? options.windowId : null,
+      chatUrl: typeof options?.chatUrl === 'string' ? options.chatUrl : '',
+      title: typeof options?.title === 'string' ? options.title : '',
+      analysisType: 'company',
+      openDialogOnly: false
+    });
+
+    if (response?.success) {
+      setRunStatus(formatSmartResumeStatus(response), false);
+      return;
+    }
+
+    const statusText = formatSmartResumeStatus(response);
+    const errorCode = typeof response?.error === 'string' ? response.error : '';
+    const shouldFallbackToDialog = (
+      errorCode === 'signature_not_found'
+      || errorCode === 'empty_user_message'
+      || errorCode === 'run_not_found'
+    );
+
+    if (shouldFallbackToDialog) {
+      chrome.runtime.sendMessage({
+        type: 'RESUME_STAGE_OPEN',
+        title: typeof options?.title === 'string' ? options.title : '',
+        analysisType: 'company'
+      });
+      setRunStatus(statusText, true);
+      window.close();
+      return;
+    }
+
+    setRunStatus(statusText, true);
+  } catch (error) {
+    chrome.runtime.sendMessage({
+      type: 'RESUME_STAGE_OPEN',
+      title: typeof options?.title === 'string' ? options.title : '',
+      analysisType: 'company'
+    });
+    setRunStatus(`Blad auto-wznowienia: ${error?.message || String(error)}. Otwieram wybor etapu...`, true);
+    window.close();
   } finally {
     button.disabled = false;
     button.innerHTML = originalHtml;
@@ -387,9 +643,9 @@ function formatTranscriptFetchError(response) {
 
 async function executeCopyYouTubeTranscriptFromPopup(button) {
   if (!button) return;
-  const originalText = button.textContent;
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Pobieram...';
+  setShortcutButtonLabel(button, 'Pobieram...', POPUP_SHORTCUTS.copyYouTube);
   setYouTubeTranscriptStatus('YouTube transcript: pobieram...', false);
 
   try {
@@ -430,7 +686,7 @@ async function executeCopyYouTubeTranscriptFromPopup(button) {
     setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
   } finally {
     button.disabled = false;
-    button.textContent = originalText;
+    button.innerHTML = originalHtml;
   }
 }
 
@@ -504,8 +760,14 @@ if (manualSourceBtn) {
 const resumeStageBtn = document.getElementById('resumeStageBtn');
 if (resumeStageBtn) {
   resumeStageBtn.addEventListener('click', () => {
-    chrome.runtime.sendMessage({ type: 'RESUME_STAGE_OPEN' });
-    window.close();
+    withActiveWindowContext(({ activeTab, windowId }) => {
+      void executeSmartResumeStageFromPopup(resumeStageBtn, {
+        tabId: Number.isInteger(activeTab?.id) ? activeTab.id : null,
+        windowId: Number.isInteger(windowId) ? windowId : null,
+        chatUrl: typeof activeTab?.url === 'string' ? activeTab.url : '',
+        title: typeof activeTab?.title === 'string' ? activeTab.title : ''
+      });
+    });
   });
 }
 
@@ -527,9 +789,9 @@ if (responsesBtn) {
 
 if (restoreProcessWindowsBtn) {
   restoreProcessWindowsBtn.addEventListener('click', async () => {
-    const originalText = restoreProcessWindowsBtn.textContent;
+    const originalHtml = restoreProcessWindowsBtn.innerHTML;
     restoreProcessWindowsBtn.disabled = true;
-    restoreProcessWindowsBtn.textContent = 'Przywracam...';
+    setShortcutButtonLabel(restoreProcessWindowsBtn, 'Przywracam...', POPUP_SHORTCUTS.restoreWindows);
     setRestoreProcessWindowsStatus('Przywracam aktywne procesy na ekran...');
 
     try {
@@ -560,7 +822,7 @@ if (restoreProcessWindowsBtn) {
       setRestoreProcessWindowsStatus(`Blad przywracania: ${error?.message || String(error)}.`, true);
     } finally {
       restoreProcessWindowsBtn.disabled = false;
-      restoreProcessWindowsBtn.textContent = originalText;
+      restoreProcessWindowsBtn.innerHTML = originalHtml;
     }
   });
 }
@@ -569,10 +831,14 @@ if (autoRestoreToggleBtn) {
   autoRestoreToggleBtn.addEventListener('click', async () => {
     const currentlyEnabled = autoRestoreToggleBtn.dataset.enabled === 'true';
     const nextEnabled = !currentlyEnabled;
-    const originalText = autoRestoreToggleBtn.textContent;
+    const originalHtml = autoRestoreToggleBtn.innerHTML;
     autoRestoreToggleBtn.disabled = true;
-    autoRestoreToggleBtn.textContent = nextEnabled ? 'Wlaczam auto...' : 'Wylaczam auto...';
-    setAutoRestoreStatus(nextEnabled ? 'Wlaczam automatyzacje co 15 min...' : 'Wylaczam automatyzacje...');
+    setShortcutButtonLabel(
+      autoRestoreToggleBtn,
+      nextEnabled ? 'Wlaczam auto...' : 'Wylaczam auto...',
+      POPUP_SHORTCUTS.autoRestoreToggle
+    );
+    setAutoRestoreStatus(nextEnabled ? 'Wlaczam automatyzacje...' : 'Wylaczam automatyzacje...');
 
     try {
       const response = await sendRuntimeMessage({
@@ -591,7 +857,7 @@ if (autoRestoreToggleBtn) {
     } finally {
       autoRestoreToggleBtn.disabled = false;
       if (!autoRestoreToggleBtn.dataset.enabled) {
-        autoRestoreToggleBtn.textContent = originalText;
+        autoRestoreToggleBtn.innerHTML = originalHtml;
       }
     }
   });
@@ -610,21 +876,45 @@ function clickIfEnabled(button) {
 }
 
 const popupShortcutHandlers = {
-  '1': () => clickIfEnabled(manualSourceBtn),
-  '2': () => clickIfEnabled(runBtn),
-  '3': () => clickIfEnabled(resumeStageBtn),
-  '4': () => clickIfEnabled(resumeAllBtn),
-  '5': () => clickIfEnabled(responsesBtn),
-  '6': () => clickIfEnabled(decisionPanelBtn),
-  '7': () => clickIfEnabled(stopBtn),
+  [POPUP_SHORTCUTS.manualSource]: () => clickIfEnabled(manualSourceBtn),
+  [POPUP_SHORTCUTS.runAnalysis]: () => clickIfEnabled(runBtn),
+  [POPUP_SHORTCUTS.resumeStage]: () => clickIfEnabled(resumeStageBtn),
+  [POPUP_SHORTCUTS.resumeAll]: () => clickIfEnabled(resumeAllBtn),
+  [POPUP_SHORTCUTS.responses]: () => clickIfEnabled(responsesBtn),
+  [POPUP_SHORTCUTS.processPanel]: () => clickIfEnabled(decisionPanelBtn),
+  [POPUP_SHORTCUTS.stop]: () => clickIfEnabled(stopBtn),
+  [POPUP_SHORTCUTS.copyYouTube]: () => clickIfEnabled(copyYouTubeTranscriptBtn),
+  [POPUP_SHORTCUTS.restoreWindows]: () => clickIfEnabled(restoreProcessWindowsBtn),
+  [POPUP_SHORTCUTS.autoRestoreToggle]: () => clickIfEnabled(autoRestoreToggleBtn),
 };
+
+function resolvePopupShortcutKey(event) {
+  if (!event) return '';
+  const key = typeof event.key === 'string' ? event.key.trim() : '';
+  if (/^[0-9]$/.test(key)) return key;
+
+  const code = typeof event.code === 'string' ? event.code.trim() : '';
+  const digitMatch = code.match(/^Digit([0-9])$/);
+  if (digitMatch) return digitMatch[1];
+  const numpadMatch = code.match(/^Numpad([0-9])$/);
+  if (numpadMatch) return numpadMatch[1];
+
+  return '';
+}
 
 document.addEventListener('keydown', (event) => {
   if (event.defaultPrevented || event.repeat) return;
   if (event.ctrlKey || event.metaKey || event.altKey) return;
   if (isTextEntryElement(event.target)) return;
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    window.close();
+    return;
+  }
 
-  const handler = popupShortcutHandlers[event.key];
+  const shortcutKey = resolvePopupShortcutKey(event);
+  if (!shortcutKey) return;
+  const handler = popupShortcutHandlers[shortcutKey];
   if (!handler) return;
 
   event.preventDefault();
@@ -744,7 +1034,18 @@ if (flushWatchlistDispatchBtn) {
   });
 }
 
+if (chrome?.runtime?.onMessage?.addListener) {
+  chrome.runtime.onMessage.addListener((message) => {
+    if (message?.type !== 'AUTO_RESTORE_STATUS_UPDATED') return;
+    void refreshAutoRestoreStatus(false);
+  });
+}
+
 void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
 ]);
+
+setInterval(() => {
+  void refreshAutoRestoreStatus(false);
+}, 15000);

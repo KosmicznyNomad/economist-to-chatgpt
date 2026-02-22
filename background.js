@@ -39,6 +39,7 @@ const YT_TRANSCRIPT_CACHE_MAX_ITEMS = 60;
 const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
+const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 
 // Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
 const WATCHLIST_DISPATCH = {
@@ -69,8 +70,12 @@ const WATCHLIST_DISPATCH = {
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
+  lastCycleStorageKey: 'auto_restore_windows_last_cycle',
   alarmName: 'auto-restore-process-windows',
-  alarmPeriodMinutes: 15
+  alarmPeriodMinutes: 5,
+  minAssistantWords: 35,
+  minAssistantSentences: 2,
+  maxIssueItems: 12
 };
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
@@ -89,12 +94,34 @@ const CLOSED_PROCESS_STATUSES = new Set([
 const processRegistry = new Map();
 const ytTranscriptInFlightRequests = new Map();
 const ytTranscriptCache = new Map();
+const manualPdfProviderPorts = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
 let watchlistDispatchFlushPending = false;
 let watchlistDispatchFlushPendingReason = '';
 let watchlistDispatchCredentialsCache = null;
 let autoRestoreWindowsInProgress = false;
+
+function extractManualPdfProviderIdFromPort(port) {
+  const name = typeof port?.name === 'string' ? port.name.trim() : '';
+  const prefix = 'manual-pdf-provider:';
+  if (!name || !name.startsWith(prefix)) return '';
+  const providerId = name.slice(prefix.length).trim();
+  return providerId || '';
+}
+
+async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
+  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  if (!safeProviderId) return false;
+  if (manualPdfProviderPorts.has(safeProviderId)) return true;
+  const startedAt = Date.now();
+  const maxWaitMs = Math.max(500, Math.min(15000, Number.isInteger(timeoutMs) ? timeoutMs : 5000));
+  while (Date.now() - startedAt < maxWaitMs) {
+    if (manualPdfProviderPorts.has(safeProviderId)) return true;
+    await sleep(100);
+  }
+  return manualPdfProviderPorts.has(safeProviderId);
+}
 
 function isClosedProcessStatus(status) {
   return CLOSED_PROCESS_STATUSES.has(String(status || '').toLowerCase());
@@ -1780,13 +1807,16 @@ async function extractLastUserMessageFromTab(tabId) {
     const result = await chrome.scripting.executeScript({
       target: { tabId },
       function: () => {
-        const messages = document.querySelectorAll('[data-message-author-role="user"]');
-        const count = messages.length;
-        const last = count > 0 ? messages[count - 1] : null;
+        const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
+        const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
+        const count = userMessages.length;
+        const assistantCount = assistantMessages.length;
+        const last = count > 0 ? userMessages[count - 1] : null;
         const text = last ? (last.innerText || last.textContent || '') : '';
         return {
           text: typeof text === 'string' ? text : '',
           count,
+          assistantCount,
           title: document.title || '',
           url: location.href || ''
         };
@@ -1798,6 +1828,7 @@ async function extractLastUserMessageFromTab(tabId) {
       success: true,
       text: typeof payload.text === 'string' ? payload.text : '',
       count: Number.isInteger(payload.count) ? payload.count : 0,
+      assistantCount: Number.isInteger(payload.assistantCount) ? payload.assistantCount : 0,
       title: typeof payload.title === 'string' ? payload.title : '',
       url: typeof payload.url === 'string' ? payload.url : ''
     };
@@ -1880,7 +1911,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     statusText: 'Auto-resume przygotowanie',
     currentPrompt: normalizedStartIndex,
     totalPrompts: PROMPTS_COMPANY.length,
-    stageIndex: normalizedStartIndex > 0 ? (normalizedStartIndex - 1) : 0,
+    stageIndex: normalizedStartIndex > 0 ? (normalizedStartIndex - 1) : null,
     stageName: normalizedStartIndex > 0 ? `Prompt ${normalizedStartIndex}` : 'Start',
     needsAction: false,
     startedAt: Date.now(),
@@ -2233,7 +2264,14 @@ async function runResetScanStartAllTabs(options = {}) {
       detect_failed: 0,
       reload_failed: 0,
       skipped_non_company: 0,
-      skipped_outside_invest: 0
+      skipped_outside_invest: 0,
+      final_stage_completed: 0,
+      start_failed: 0,
+      reload_ok: 0,
+      reload_total: 0,
+      prompt_blocks: 0,
+      response_blocks: 0,
+      detected_prompts: 0
     };
     const resetSummary = {
       mode: 'scoped_active_processes',
@@ -2300,6 +2338,58 @@ async function runResetScanStartAllTabs(options = {}) {
       if (processId) return `run:${processId}`;
       return `idx:${index}`;
     };
+    const markProcessCompletedAfterFinalStage = async (row, reason = 'already_at_last_stage') => {
+      if (!row?.runId || PROMPTS_COMPANY.length <= 0) return false;
+      try {
+        const finalPromptNumber = PROMPTS_COMPANY.length;
+        const finalStageIndex = finalPromptNumber - 1;
+        await upsertProcess(row.runId, {
+          status: 'completed',
+          needsAction: false,
+          statusText: 'Zakonczono - wykryto finalny etap',
+          reason,
+          currentPrompt: finalPromptNumber,
+          totalPrompts: finalPromptNumber,
+          stageIndex: finalStageIndex,
+          stageName: STAGE_NAMES_COMPANY[finalStageIndex] || `Prompt ${finalPromptNumber}`,
+          autoRecovery: null,
+          finishedAt: Date.now(),
+          timestamp: Date.now()
+        });
+        return true;
+      } catch (error) {
+        console.warn('[reset-scan-start] Nie udalo sie oznaczyc procesu jako zakonczony', {
+          runId: row?.runId || '',
+          reason,
+          error: error?.message || String(error)
+        });
+        return false;
+      }
+    };
+    const computeFallbackResumeStartIndex = (row) => {
+      const promptCount = PROMPTS_COMPANY.length;
+      if (!Number.isInteger(promptCount) || promptCount <= 1) return null;
+
+      const progressPrompt = Number.isInteger(row?.progressPromptNumber)
+        ? row.progressPromptNumber
+        : null;
+      const hasCounters = Number.isInteger(row?.assistantMessageCount) && Number.isInteger(row?.userMessageCount);
+      const shouldAdvancePrompt = hasCounters
+        ? row.assistantMessageCount >= row.userMessageCount
+        : true;
+
+      if (Number.isInteger(progressPrompt) && progressPrompt > 0) {
+        const progressIndex = Math.min(Math.max(progressPrompt - 1, 0), promptCount - 1);
+        const computed = computeNextResumeIndex(progressIndex, promptCount, shouldAdvancePrompt);
+        if (Number.isInteger(computed)) {
+          return Math.min(Math.max(computed, 1), promptCount - 1);
+        }
+        return null;
+      }
+
+      // Last-resort fallback: start from Prompt 2 when counters are unavailable.
+      return 1;
+    };
 
     for (let index = 0; index < activeProcesses.length; index += 1) {
       const process = activeProcesses[index];
@@ -2319,6 +2409,8 @@ async function runResetScanStartAllTabs(options = {}) {
           ? process.chatUrl.trim()
           : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
         userMessageCount: null,
+        assistantMessageCount: null,
+        responseBlockCount: null,
         lastUserMessageLength: null,
         detectedPromptIndex: null,
         detectedPromptNumber: null,
@@ -2561,11 +2653,14 @@ async function runResetScanStartAllTabs(options = {}) {
         }
 
         row.userMessageCount = Number.isInteger(extraction.count) ? extraction.count : 0;
+        row.assistantMessageCount = Number.isInteger(extraction.assistantCount) ? extraction.assistantCount : 0;
+        row.responseBlockCount = row.assistantMessageCount;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
         console.log('[reset-scan-start] Extraction success', {
           runId: row.runId || '',
           tabId: row.tabId,
           userMessageCount: row.userMessageCount,
+          assistantMessageCount: row.assistantMessageCount,
           lastUserMessageLength: row.lastUserMessageLength,
           lastUserMessagePreview: truncateForLog(extraction.text, 220)
         });
@@ -2730,6 +2825,7 @@ async function runResetScanStartAllTabs(options = {}) {
         if (!Number.isInteger(row.nextStartIndex)) {
           row.action = 'final_stage_already_sent';
           row.reason = 'already_at_last_stage';
+          await markProcessCompletedAfterFinalStage(row, 'already_at_last_stage');
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
           console.log('[reset-scan-start] Final stage already sent for tab', {
@@ -2788,6 +2884,44 @@ async function runResetScanStartAllTabs(options = {}) {
       }
     }
 
+    // Fallback: ensure remaining company processes are resumed when signature detection failed.
+    for (const target of scanTargets) {
+      const row = resultsByKey.get(target.key);
+      if (!row || row.action !== 'detect_failed') continue;
+
+      const fallbackStartIndex = computeFallbackResumeStartIndex(row);
+      if (Number.isInteger(fallbackStartIndex)) {
+        row.nextStartIndex = fallbackStartIndex;
+        row.action = 'ready_to_start';
+        row.reason = 'fallback_progress_resume';
+        if (!row.detectedMethod) row.detectedMethod = 'progress_counter_fallback';
+        if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.progressPromptNumber)) {
+          row.detectedPromptNumber = row.progressPromptNumber;
+          row.detectedPromptIndex = Math.max(0, row.progressPromptNumber - 1);
+          row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${row.detectedPromptNumber}`;
+        }
+        resultsByKey.set(target.key, row);
+        console.log('[reset-scan-start] Fallback resume queued', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          fallbackStartIndex,
+          startPromptNumber: fallbackStartIndex + 1,
+          progressPromptNumber: row.progressPromptNumber
+        });
+        continue;
+      }
+
+      row.action = 'final_stage_already_sent';
+      row.reason = 'fallback_final_stage_completed';
+      await markProcessCompletedAfterFinalStage(row, 'fallback_final_stage_completed');
+      resultsByKey.set(target.key, row);
+      console.log('[reset-scan-start] Fallback detected completed process', {
+        runId: row.runId || '',
+        tabId: row.tabId,
+        progressPromptNumber: row.progressPromptNumber
+      });
+    }
+
     // Start phase: execute queued starts sequentially after full scan pass.
     // This avoids interleaving scan/start on the same pass and makes behavior deterministic.
     const startQueue = scanTargets
@@ -2824,7 +2958,8 @@ async function runResetScanStartAllTabs(options = {}) {
       const startResult = await resumeFromStageOnTab(row.tabId, row.windowId, row.nextStartIndex, {
         processTitle: autoStartTitle,
         detach: true,
-        reloadBeforeResume: true
+        // Tab is already hard-reloaded in the detection phase.
+        reloadBeforeResume: false
       });
 
       if (startResult.success) {
@@ -2862,6 +2997,9 @@ async function runResetScanStartAllTabs(options = {}) {
         windowId: null,
         title: '',
         url: '',
+        userMessageCount: null,
+        assistantMessageCount: null,
+        responseBlockCount: null,
         detectedPromptIndex: null,
         detectedPromptNumber: null,
         detectedStageName: null,
@@ -2879,12 +3017,32 @@ async function runResetScanStartAllTabs(options = {}) {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
+    const promptBlocks = results.reduce((sum, row) => (
+      sum + (Number.isInteger(row?.userMessageCount) ? row.userMessageCount : 0)
+    ), 0);
+    const responseBlocks = results.reduce((sum, row) => (
+      sum + (
+        Number.isInteger(row?.responseBlockCount)
+          ? row.responseBlockCount
+          : (Number.isInteger(row?.assistantMessageCount) ? row.assistantMessageCount : 0)
+      )
+    ), 0);
+    const detectedPrompts = results.reduce((sum, row) => (
+      sum + (Number.isInteger(row?.detectedPromptNumber) ? 1 : 0)
+    ), 0);
     const summary = {
       started: actionCounts.started || 0,
       detect_failed: actionCounts.detect_failed || 0,
       reload_failed: actionCounts.reload_failed || 0,
       skipped_non_company: actionCounts.skipped_non_company || 0,
-      skipped_outside_invest: actionCounts.skipped_outside_invest || 0
+      skipped_outside_invest: actionCounts.skipped_outside_invest || 0,
+      final_stage_completed: actionCounts.final_stage_already_sent || 0,
+      start_failed: actionCounts.start_failed || 0,
+      reload_ok: preparedKeys.size,
+      reload_total: scanTargets.length,
+      prompt_blocks: promptBlocks,
+      response_blocks: responseBlocks,
+      detected_prompts: detectedPrompts
     };
     console.log('[reset-scan-start] Summary', {
       scope,
@@ -2927,7 +3085,14 @@ async function runResetScanStartAllTabs(options = {}) {
       detect_failed: 0,
       reload_failed: 0,
       skipped_non_company: 0,
-      skipped_outside_invest: 0
+      skipped_outside_invest: 0,
+      final_stage_completed: 0,
+      start_failed: 0,
+      reload_ok: 0,
+      reload_total: 0,
+      prompt_blocks: 0,
+      response_blocks: 0,
+      detected_prompts: 0
     };
     return {
       success: false,
@@ -4053,7 +4218,123 @@ function openResumeStagePopup(startIndex, title = '', analysisType = 'company') 
 async function handleProcessResumeNextStageMessage(message) {
   const runId = await resolveProcessId(message, { tab: { id: message?.tabId } });
   if (!runId) {
-    return { success: false, error: 'run_not_found' };
+    const tabId = Number.isInteger(message?.tabId) ? message.tabId : null;
+    if (!Number.isInteger(tabId)) {
+      return { success: false, error: 'run_not_found' };
+    }
+
+    const promptsReady = await ensureCompanyPromptsReady();
+    if (!promptsReady) {
+      return { success: false, error: 'prompts_not_loaded' };
+    }
+
+    const chatTab = await getTabByIdSafe(tabId);
+    if (!chatTab || !isChatGptUrl(getTabEffectiveUrl(chatTab))) {
+      return { success: false, error: 'chat_tab_not_found' };
+    }
+
+    const recoveryPoint = await detectCompanyRecoveryPointFromLastMessage(chatTab.id, 1);
+    if (!recoveryPoint?.matched || !Number.isInteger(recoveryPoint?.promptOffset)) {
+      return {
+        success: false,
+        error: recoveryPoint?.reason || 'signature_not_found'
+      };
+    }
+
+    const promptCount = Number.isInteger(recoveryPoint?.promptCount) ? recoveryPoint.promptCount : PROMPTS_COMPANY.length;
+    let nextStartIndex = recoveryPoint.promptOffset;
+    const detectedPromptIndex = Number.isInteger(recoveryPoint?.detection?.index)
+      ? recoveryPoint.detection.index
+      : null;
+    const detectedMethod = typeof recoveryPoint?.detection?.method === 'string'
+      ? recoveryPoint.detection.method
+      : 'last_user_signature';
+    let retrySamePrompt = recoveryPoint?.detection?.hasAssistantReplyAfter === false;
+    let retryReason = retrySamePrompt ? 'missing_assistant_reply' : '';
+
+    if (!retrySamePrompt) {
+      const metrics = await collectTabConversationMetricsForAutoRestore(chatTab.id);
+      const assistantReplyTooShort = metrics.success
+        && metrics.hasAssistantAfterLastUser === true
+        && (
+          metrics.lastAssistantWordCount < AUTO_RESTORE_WINDOWS.minAssistantWords
+          || metrics.lastAssistantSentenceCount < AUTO_RESTORE_WINDOWS.minAssistantSentences
+        );
+      if (assistantReplyTooShort && Number.isInteger(detectedPromptIndex)) {
+        retrySamePrompt = true;
+        retryReason = 'assistant_reply_too_short';
+        nextStartIndex = detectedPromptIndex;
+      }
+    }
+
+    if (promptCount > 1) {
+      nextStartIndex = Math.min(Math.max(nextStartIndex, 1), promptCount - 1);
+    } else {
+      nextStartIndex = Math.max(nextStartIndex, 0);
+    }
+
+    if (recoveryPoint.finalStageReached || !Number.isInteger(nextStartIndex) || nextStartIndex >= promptCount) {
+      return {
+        success: false,
+        error: 'already_at_last_prompt',
+        detectedPromptIndex,
+        detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+        detectedMethod,
+        retrySamePrompt,
+        retryReason
+      };
+    }
+
+    if (message?.openDialogOnly) {
+      const title = typeof message?.title === 'string' ? message.title.trim() : '';
+      openResumeStagePopup(nextStartIndex, title || (chatTab.title || ''), 'company');
+      return {
+        success: true,
+        mode: 'dialog',
+        startIndex: nextStartIndex,
+        startPromptNumber: nextStartIndex + 1,
+        detectedPromptIndex,
+        detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+        detectedMethod,
+        retrySamePrompt,
+        retryReason
+      };
+    }
+
+    const resumeTitle = typeof message?.title === 'string' && message.title.trim()
+      ? message.title.trim()
+      : (typeof chatTab.title === 'string' ? chatTab.title : '');
+    const resumeResult = await resumeFromStage(nextStartIndex, {
+      targetTabId: chatTab.id,
+      suppressAlerts: true,
+      processTitle: resumeTitle || undefined
+    });
+
+    if (!resumeResult?.success) {
+      return {
+        success: false,
+        error: resumeResult?.error || 'resume_failed',
+        startIndex: nextStartIndex,
+        startPromptNumber: nextStartIndex + 1,
+        detectedPromptIndex,
+        detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+        detectedMethod,
+        retrySamePrompt,
+        retryReason
+      };
+    }
+
+    return {
+      success: true,
+      mode: 'direct',
+      startIndex: nextStartIndex,
+      startPromptNumber: nextStartIndex + 1,
+      detectedPromptIndex,
+      detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
+      detectedMethod,
+      retrySamePrompt,
+      retryReason
+    };
   }
 
   await ensureProcessRegistryReady();
@@ -4087,8 +4368,24 @@ async function handleProcessResumeNextStageMessage(message) {
     ? matched.index
     : getProgressPromptIndex(process);
   const detectedMethod = matched ? matched.method : 'progress_fallback';
-  const shouldAdvancePrompt = matched?.hasAssistantReplyAfter !== false;
-  const retrySamePrompt = matched?.hasAssistantReplyAfter === false;
+  let shouldAdvancePrompt = matched?.hasAssistantReplyAfter !== false;
+  let retrySamePrompt = matched?.hasAssistantReplyAfter === false;
+  let retryReason = retrySamePrompt ? 'missing_assistant_reply' : '';
+
+  if (shouldAdvancePrompt) {
+    const metrics = await collectTabConversationMetricsForAutoRestore(chatTab.id);
+    const assistantReplyTooShort = metrics.success
+      && metrics.hasAssistantAfterLastUser === true
+      && (
+        metrics.lastAssistantWordCount < AUTO_RESTORE_WINDOWS.minAssistantWords
+        || metrics.lastAssistantSentenceCount < AUTO_RESTORE_WINDOWS.minAssistantSentences
+      );
+    if (assistantReplyTooShort) {
+      shouldAdvancePrompt = false;
+      retrySamePrompt = true;
+      retryReason = 'assistant_reply_too_short';
+    }
+  }
 
   const nextStartIndex = computeNextResumeIndex(
     detectedPromptIndex,
@@ -4102,7 +4399,8 @@ async function handleProcessResumeNextStageMessage(message) {
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
-      retrySamePrompt
+      retrySamePrompt,
+      retryReason
     };
   }
 
@@ -4120,7 +4418,8 @@ async function handleProcessResumeNextStageMessage(message) {
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
-      retrySamePrompt
+      retrySamePrompt,
+      retryReason
     };
   }
 
@@ -4139,14 +4438,19 @@ async function handleProcessResumeNextStageMessage(message) {
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
-      retrySamePrompt
+      retrySamePrompt,
+      retryReason
     };
   }
 
   await upsertProcess(runId, {
     status: 'stopped',
     statusText: retrySamePrompt
-      ? `Ponowiono Prompt ${nextStartIndex + 1} (brak odpowiedzi)`
+      ? (
+        retryReason === 'assistant_reply_too_short'
+          ? `Ponowiono Prompt ${nextStartIndex + 1} (odpowiedz byla za krotka)`
+          : `Ponowiono Prompt ${nextStartIndex + 1} (brak odpowiedzi)`
+      )
       : `Wznowiono od Prompt ${nextStartIndex + 1}`,
     reason: 'resumed_from_decision_panel',
     needsAction: false,
@@ -4162,7 +4466,8 @@ async function handleProcessResumeNextStageMessage(message) {
     detectedPromptIndex,
     detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
     detectedMethod,
-    retrySamePrompt
+    retrySamePrompt,
+    retryReason
   };
 }
 
@@ -5702,13 +6007,264 @@ function clearAlarmSafe(alarmName) {
   });
 }
 
+async function readAutoRestoreWindowsLastCycle() {
+  try {
+    const key = AUTO_RESTORE_WINDOWS.lastCycleStorageKey;
+    const result = await chrome.storage.local.get([key]);
+    const record = result?.[key];
+    if (!record || typeof record !== 'object') return null;
+    return record;
+  } catch (error) {
+    return null;
+  }
+}
+
+async function writeAutoRestoreWindowsLastCycle(record) {
+  try {
+    const key = AUTO_RESTORE_WINDOWS.lastCycleStorageKey;
+    await chrome.storage.local.set({ [key]: record });
+  } catch (error) {
+    console.warn('[auto-restore] save last cycle failed:', error?.message || error);
+  }
+}
+
+async function notifyAutoRestoreStatusUpdated(payload = {}) {
+  if (!chrome?.runtime?.sendMessage) return;
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'AUTO_RESTORE_STATUS_UPDATED',
+      ts: Date.now(),
+      ...(payload && typeof payload === 'object' ? payload : {})
+    });
+  } catch (error) {
+    // No receiving side is expected when popup is closed.
+  }
+}
+
+async function collectTabConversationMetricsForAutoRestore(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return { success: false, error: 'invalid_tab_id' };
+  }
+
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: () => {
+        const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim();
+        const countWords = (text) => {
+          const normalized = normalize(text).toLowerCase();
+          if (!normalized) return 0;
+          return normalized
+            .split(/[\s,.;:!?()[\]{}"'<>\-_/\\|]+/)
+            .map((token) => token.trim())
+            .filter((token) => token.length > 0)
+            .length;
+        };
+        const countSentences = (text) => {
+          const normalized = normalize(text);
+          if (!normalized) return 0;
+          const parts = normalized.match(/[^.!?\n]+(?:[.!?]+|$)/g) || [];
+          return parts
+            .map((part) => normalize(part))
+            .filter((part) => part.length > 0 && countWords(part) > 0)
+            .length;
+        };
+
+        const messageNodes = Array.from(
+          document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+        );
+
+        let lastUserIndex = -1;
+        let lastAssistantIndex = -1;
+        let lastUserText = '';
+        let lastAssistantText = '';
+        let userBlocks = 0;
+        let assistantBlocks = 0;
+
+        messageNodes.forEach((node, index) => {
+          const role = String(node?.getAttribute?.('data-message-author-role') || '').trim();
+          const text = normalize(node?.innerText || node?.textContent || '');
+          if (role === 'user') {
+            userBlocks += 1;
+            lastUserIndex = index;
+            lastUserText = text;
+          } else if (role === 'assistant') {
+            assistantBlocks += 1;
+            lastAssistantIndex = index;
+            lastAssistantText = text;
+          }
+        });
+
+        const hasAssistantAfterLastUser = lastUserIndex >= 0
+          ? (lastAssistantIndex > lastUserIndex)
+          : null;
+        const assistantWordCount = countWords(lastAssistantText);
+        const assistantSentenceCount = countSentences(lastAssistantText);
+
+        return {
+          success: true,
+          userBlocks,
+          assistantBlocks,
+          lastUserIndex,
+          lastAssistantIndex,
+          hasAssistantAfterLastUser,
+          lastUserWordCount: countWords(lastUserText),
+          lastAssistantWordCount: assistantWordCount,
+          lastAssistantSentenceCount: assistantSentenceCount,
+          lastAssistantCharCount: lastAssistantText.length,
+          lastUserPreview: lastUserText.slice(0, 220),
+          lastAssistantPreview: lastAssistantText.slice(0, 220),
+          url: typeof location?.href === 'string' ? location.href : ''
+        };
+      }
+    });
+
+    const payload = result?.[0]?.result;
+    if (!payload || typeof payload !== 'object') {
+      return { success: false, error: 'invalid_payload' };
+    }
+
+    return {
+      success: payload.success === true,
+      userBlocks: Number.isInteger(payload.userBlocks) ? payload.userBlocks : 0,
+      assistantBlocks: Number.isInteger(payload.assistantBlocks) ? payload.assistantBlocks : 0,
+      lastUserIndex: Number.isInteger(payload.lastUserIndex) ? payload.lastUserIndex : -1,
+      lastAssistantIndex: Number.isInteger(payload.lastAssistantIndex) ? payload.lastAssistantIndex : -1,
+      hasAssistantAfterLastUser: typeof payload.hasAssistantAfterLastUser === 'boolean'
+        ? payload.hasAssistantAfterLastUser
+        : null,
+      lastUserWordCount: Number.isInteger(payload.lastUserWordCount) ? payload.lastUserWordCount : 0,
+      lastAssistantWordCount: Number.isInteger(payload.lastAssistantWordCount) ? payload.lastAssistantWordCount : 0,
+      lastAssistantSentenceCount: Number.isInteger(payload.lastAssistantSentenceCount) ? payload.lastAssistantSentenceCount : 0,
+      lastAssistantCharCount: Number.isInteger(payload.lastAssistantCharCount) ? payload.lastAssistantCharCount : 0,
+      lastUserPreview: typeof payload.lastUserPreview === 'string' ? payload.lastUserPreview : '',
+      lastAssistantPreview: typeof payload.lastAssistantPreview === 'string' ? payload.lastAssistantPreview : '',
+      url: typeof payload.url === 'string' ? payload.url : ''
+    };
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) };
+  }
+}
+
+async function collectAutoRestoreProcessHealthSnapshot(options = {}) {
+  await ensureProcessRegistryReady();
+  const processSnapshot = await getProcessSnapshot();
+  const activeProcesses = processSnapshot
+    .filter((process) => process && !isClosedProcessStatus(process.status))
+    .sort(compareProcessesForRestore);
+
+  const minAssistantWords = Number.isInteger(options?.minAssistantWords) && options.minAssistantWords > 0
+    ? options.minAssistantWords
+    : AUTO_RESTORE_WINDOWS.minAssistantWords;
+  const minAssistantSentences = Number.isInteger(options?.minAssistantSentences) && options.minAssistantSentences > 0
+    ? options.minAssistantSentences
+    : AUTO_RESTORE_WINDOWS.minAssistantSentences;
+  const maxIssueItems = Number.isInteger(options?.maxIssueItems) && options.maxIssueItems > 0
+    ? options.maxIssueItems
+    : AUTO_RESTORE_WINDOWS.maxIssueItems;
+
+  const reasonCounts = {};
+  const allItems = [];
+  const issueItems = [];
+
+  for (const process of activeProcesses) {
+    const processItem = {
+      runId: typeof process?.id === 'string' ? process.id : '',
+      title: typeof process?.title === 'string' ? process.title : '',
+      status: typeof process?.status === 'string' ? process.status : '',
+      analysisType: typeof process?.analysisType === 'string' ? process.analysisType : '',
+      tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+      windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+      currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0,
+      totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0,
+      issueFlags: [],
+      userBlocks: 0,
+      assistantBlocks: 0,
+      lastAssistantWordCount: 0,
+      lastAssistantSentenceCount: 0,
+      lastAssistantCharCount: 0,
+      lastAssistantPreview: '',
+      lastUserPreview: ''
+    };
+
+    if (!!process?.needsAction) processItem.issueFlags.push('needs_action');
+    if (isFailedProcessStatus(process?.status)) processItem.issueFlags.push('failed_status');
+
+    if (!Number.isInteger(processItem.tabId)) {
+      processItem.issueFlags.push('missing_tab_context');
+    } else {
+      const tab = await getTabByIdSafe(processItem.tabId);
+      if (!tab) {
+        processItem.issueFlags.push('tab_not_found');
+      } else if (!isChatGptUrl(getTabEffectiveUrl(tab))) {
+        processItem.issueFlags.push('tab_not_chatgpt');
+      } else {
+        const metrics = await collectTabConversationMetricsForAutoRestore(processItem.tabId);
+        if (!metrics.success) {
+          processItem.issueFlags.push('metrics_unavailable');
+        } else {
+          processItem.userBlocks = metrics.userBlocks;
+          processItem.assistantBlocks = metrics.assistantBlocks;
+          processItem.lastAssistantWordCount = metrics.lastAssistantWordCount;
+          processItem.lastAssistantSentenceCount = metrics.lastAssistantSentenceCount;
+          processItem.lastAssistantCharCount = metrics.lastAssistantCharCount;
+          processItem.lastAssistantPreview = metrics.lastAssistantPreview;
+          processItem.lastUserPreview = metrics.lastUserPreview;
+
+          if (metrics.hasAssistantAfterLastUser === false) {
+            processItem.issueFlags.push('missing_assistant_reply');
+          } else if (metrics.hasAssistantAfterLastUser === true) {
+            if (metrics.lastAssistantWordCount <= 0 || metrics.lastAssistantCharCount <= 0) {
+              processItem.issueFlags.push('assistant_reply_empty');
+            } else if (
+              metrics.lastAssistantWordCount < minAssistantWords
+              || metrics.lastAssistantSentenceCount < minAssistantSentences
+            ) {
+              processItem.issueFlags.push('assistant_reply_too_short');
+            }
+          }
+        }
+      }
+    }
+
+    processItem.issueFlags = Array.from(new Set(processItem.issueFlags));
+    allItems.push(processItem);
+
+    if (processItem.issueFlags.length > 0) {
+      issueItems.push(processItem);
+      processItem.issueFlags.forEach((flag) => {
+        reasonCounts[flag] = (reasonCounts[flag] || 0) + 1;
+      });
+    }
+  }
+
+  return {
+    checkedAt: Date.now(),
+    totalActiveProcesses: activeProcesses.length,
+    checkedProcesses: allItems.length,
+    issueProcesses: issueItems.length,
+    scanRecommended: issueItems.length > 0,
+    thresholds: {
+      minAssistantWords,
+      minAssistantSentences
+    },
+    reasonCounts,
+    items: issueItems.slice(0, maxIssueItems)
+  };
+}
+
 async function getAutoRestoreWindowsEnabled() {
   try {
     const key = AUTO_RESTORE_WINDOWS.enabledStorageKey;
     const result = await chrome.storage.local.get([key]);
-    return result?.[key] === true;
+    if (typeof result?.[key] === 'boolean') {
+      return result[key] === true;
+    }
+    // Default behavior: enabled unless explicitly disabled by user.
+    return true;
   } catch (error) {
-    return false;
+    // Fail-safe toward default ON.
+    return true;
   }
 }
 
@@ -5740,6 +6296,7 @@ async function syncAutoRestoreWindowsAlarm() {
 }
 
 async function getAutoRestoreWindowsStatus(options = {}) {
+  const lastCycle = await readAutoRestoreWindowsLastCycle();
   if (options?.forceSync) {
     const synced = await syncAutoRestoreWindowsAlarm();
     return {
@@ -5748,7 +6305,8 @@ async function getAutoRestoreWindowsStatus(options = {}) {
       alarmActive: !!synced.alarmActive,
       nextRunAt: synced.nextRunAt,
       periodInMinutes: AUTO_RESTORE_WINDOWS.alarmPeriodMinutes,
-      inProgress: autoRestoreWindowsInProgress
+      inProgress: autoRestoreWindowsInProgress,
+      lastCycle
     };
   }
 
@@ -5760,7 +6318,8 @@ async function getAutoRestoreWindowsStatus(options = {}) {
     alarmActive: !!alarm,
     nextRunAt: Number.isInteger(alarm?.scheduledTime) ? alarm.scheduledTime : null,
     periodInMinutes: AUTO_RESTORE_WINDOWS.alarmPeriodMinutes,
-    inProgress: autoRestoreWindowsInProgress
+    inProgress: autoRestoreWindowsInProgress,
+    lastCycle
   };
 }
 
@@ -5798,12 +6357,71 @@ async function runAutoRestoreWindowsCycle(options = {}) {
 
   autoRestoreWindowsInProgress = true;
   try {
+    const cycleStartedAt = Date.now();
     const restoreResult = await restoreProcessWindows({ origin });
+    const healthCheck = await collectAutoRestoreProcessHealthSnapshot({ origin });
+
+    let scanResult = null;
+    let scanTriggered = false;
+    if (healthCheck.scanRecommended) {
+      scanTriggered = true;
+      try {
+        scanResult = await runResetScanStartAllTabs({
+          origin: `${origin}:health_scan`,
+          scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
+        });
+      } catch (error) {
+        scanResult = {
+          success: false,
+          error: error?.message || String(error),
+          summary: null,
+          startedTabs: 0,
+          resumedTabs: 0,
+          matchedTabs: 0
+        };
+      }
+    }
+
+    const cycleRecord = {
+      ts: Date.now(),
+      origin,
+      durationMs: Date.now() - cycleStartedAt,
+      restore: {
+        requested: Number.isInteger(restoreResult?.requested) ? restoreResult.requested : 0,
+        restored: Number.isInteger(restoreResult?.restored) ? restoreResult.restored : 0,
+        failed: Number.isInteger(restoreResult?.failed) ? restoreResult.failed : 0,
+        skipped: Number.isInteger(restoreResult?.skipped) ? restoreResult.skipped : 0
+      },
+      check: healthCheck,
+      scan: {
+        triggered: scanTriggered,
+        success: scanResult ? (scanResult.success === true) : null,
+        startedTabs: Number.isInteger(scanResult?.startedTabs)
+          ? scanResult.startedTabs
+          : (Number.isInteger(scanResult?.resumedTabs) ? scanResult.resumedTabs : 0),
+        matchedTabs: Number.isInteger(scanResult?.matchedTabs) ? scanResult.matchedTabs : 0,
+        error: typeof scanResult?.error === 'string' ? scanResult.error : '',
+        summary: scanResult?.summary && typeof scanResult.summary === 'object'
+          ? scanResult.summary
+          : null
+      }
+    };
+    await writeAutoRestoreWindowsLastCycle(cycleRecord);
+    await notifyAutoRestoreStatusUpdated({
+      origin,
+      cycleTs: cycleRecord.ts,
+      issueProcesses: Number.isInteger(cycleRecord?.check?.issueProcesses) ? cycleRecord.check.issueProcesses : 0,
+      scanTriggered: cycleRecord?.scan?.triggered === true
+    });
+
     return {
       success: true,
       skipped: false,
       origin,
-      ...restoreResult
+      ...restoreResult,
+      healthCheck,
+      scan: cycleRecord.scan,
+      cycleTs: cycleRecord.ts
     };
   } finally {
     autoRestoreWindowsInProgress = false;
@@ -5913,6 +6531,46 @@ chrome.runtime.onStartup.addListener(() => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
   });
 });
+
+if (chrome?.runtime?.onConnect) {
+  chrome.runtime.onConnect.addListener((port) => {
+    const providerId = extractManualPdfProviderIdFromPort(port);
+    if (!providerId) return;
+
+    manualPdfProviderPorts.set(providerId, {
+      port,
+      lastSeenAt: Date.now()
+    });
+    console.log('[manual-pdf] provider keepalive connected:', {
+      providerId
+    });
+
+    if (port?.onMessage?.addListener) {
+      port.onMessage.addListener((message) => {
+        const incomingProviderId = typeof message?.providerId === 'string'
+          ? message.providerId.trim()
+          : '';
+        if (!incomingProviderId || incomingProviderId !== providerId) return;
+        const record = manualPdfProviderPorts.get(providerId);
+        if (!record || record.port !== port) return;
+        record.lastSeenAt = Date.now();
+        manualPdfProviderPorts.set(providerId, record);
+      });
+    }
+
+    if (port?.onDisconnect?.addListener) {
+      port.onDisconnect.addListener(() => {
+        const record = manualPdfProviderPorts.get(providerId);
+        if (record && record.port === port) {
+          manualPdfProviderPorts.delete(providerId);
+        }
+        console.log('[manual-pdf] provider keepalive disconnected:', {
+          providerId
+        });
+      });
+    }
+  });
+}
 
 if (chrome?.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
@@ -6557,7 +7215,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             detect_failed: 0,
             reload_failed: 0,
             skipped_non_company: 0,
-            skipped_outside_invest: 0
+            skipped_outside_invest: 0,
+            final_stage_completed: 0,
+            start_failed: 0,
+            reload_ok: 0,
+            reload_total: 0,
+            prompt_blocks: 0,
+            response_blocks: 0,
+            detected_prompts: 0
           },
           resetSummary: null,
           results: [],
@@ -6660,6 +7325,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 chrome.commands.onCommand.addListener((command) => {
   if (command === 'open_responses') {
     chrome.tabs.create({ url: chrome.runtime.getURL('responses.html') });
+    return;
+  }
+  if (command === 'open_process_monitor') {
+    chrome.tabs.create({ url: chrome.runtime.getURL('process-monitor.html') });
   }
 });
 
@@ -8376,6 +9045,18 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
     return;
   }
 
+  const providerPortReady = await waitForManualPdfProviderPort(safeProviderId, 7000);
+  if (!providerPortReady) {
+    console.warn('[manual-pdf] Provider keepalive port not connected. Queue may be interrupted by worker lifecycle.', {
+      providerId: safeProviderId
+    });
+    await notifyManualPdfProviderStatus(
+      safeProviderId,
+      'running',
+      'Uwaga: brak polaczenia keepalive z providerem PDF. Nie zamykaj okna i odswiez rozszerzenie, jesli kolejka zatrzyma sie po 1 pliku.'
+    );
+  }
+
   const promptsReady = await ensureCompanyPromptsReady();
   if (!promptsReady || PROMPTS_COMPANY.length === 0) {
     console.error('[manual-pdf] Brak promptow dla analizy spolki');
@@ -8420,9 +9101,28 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
     { totalJobs: queueJobs.length, completedJobs: 0, failedJobs: 0 }
   );
 
+  const queueConcurrency = Math.max(
+    1,
+    Math.min(
+      queueJobs.length,
+      Number.isInteger(MANUAL_PDF_QUEUE_MAX_CONCURRENCY) ? MANUAL_PDF_QUEUE_MAX_CONCURRENCY : 1
+    )
+  );
+
+  console.log('[manual-pdf] Queue concurrency:', {
+    providerId: safeProviderId,
+    jobs: queueJobs.length,
+    concurrency: queueConcurrency
+  });
+
   try {
-    for (let jobIndex = 0; jobIndex < queueJobs.length; jobIndex += 1) {
-      const job = queueJobs[jobIndex];
+    const queueState = {
+      nextJobIndex: 0,
+      completedJobs: 0,
+      failedJobs: 0
+    };
+
+    const runSingleJob = async (job, jobIndex, workerId) => {
       const isMultiInstance = job.instanceTotal > 1;
       const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : job.file.name;
       const runTitle = isMultiInstance
@@ -8433,7 +9133,8 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
         index: jobIndex + 1,
         total: queueJobs.length,
         file: job.file.name,
-        instance: `${job.instanceIndex}/${job.instanceTotal}`
+        instance: `${job.instanceIndex}/${job.instanceTotal}`,
+        workerId
       });
 
       await notifyManualPdfProviderStatus(
@@ -8443,8 +9144,9 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
         {
           currentJob: jobIndex + 1,
           totalJobs: queueJobs.length,
-          completedJobs,
-          failedJobs
+          completedJobs: queueState.completedJobs,
+          failedJobs: queueState.failedJobs,
+          workerId
         }
       );
 
@@ -8465,52 +9167,93 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
         }
       };
 
-      const settled = await processArticles([pseudoTab], PROMPTS_COMPANY, CHAT_URL, 'company');
-      const firstResult = Array.isArray(settled) && settled.length > 0 ? settled[0] : null;
+      try {
+        const settled = await processArticles([pseudoTab], PROMPTS_COMPANY, CHAT_URL, 'company');
+        const firstResult = Array.isArray(settled) && settled.length > 0 ? settled[0] : null;
 
-      let jobSuccess = false;
-      let jobReason = '';
-      if (firstResult?.status === 'fulfilled') {
-        jobSuccess = !!firstResult.value?.success;
-        jobReason = firstResult.value?.reason || firstResult.value?.error || '';
-      } else if (firstResult?.status === 'rejected') {
-        jobSuccess = false;
-        jobReason = firstResult.reason?.message || String(firstResult.reason || 'promise_rejected');
-      }
-
-      if (jobSuccess) {
-        completedJobs += 1;
-        console.log('[manual-pdf] job:ok', {
-          index: jobIndex + 1,
-          total: queueJobs.length,
-          file: job.file.name
-        });
-      } else {
-        failedJobs += 1;
-        console.warn('[manual-pdf] job:failed', {
-          index: jobIndex + 1,
-          total: queueJobs.length,
-          file: job.file.name,
-          reason: truncateDispatchLogText(jobReason || 'unknown', 220)
-        });
-      }
-
-      await notifyManualPdfProviderStatus(
-        safeProviderId,
-        jobSuccess ? 'running' : 'failed',
-        jobSuccess
-          ? `Gotowe ${jobIndex + 1}/${queueJobs.length}: ${job.file.name}.`
-          : `Blad ${jobIndex + 1}/${queueJobs.length}: ${job.file.name} (${jobReason || 'unknown'}).`,
-        {
-          currentJob: jobIndex + 1,
-          totalJobs: queueJobs.length,
-          completedJobs,
-          failedJobs,
-          success: jobSuccess,
-          reason: jobReason || ''
+        if (firstResult?.status === 'fulfilled') {
+          return {
+            jobSuccess: !!firstResult.value?.success,
+            jobReason: firstResult.value?.reason || firstResult.value?.error || ''
+          };
         }
-      );
+
+        if (firstResult?.status === 'rejected') {
+          return {
+            jobSuccess: false,
+            jobReason: firstResult.reason?.message || String(firstResult.reason || 'promise_rejected')
+          };
+        }
+
+        return {
+          jobSuccess: false,
+          jobReason: 'missing_result'
+        };
+      } catch (jobError) {
+        return {
+          jobSuccess: false,
+          jobReason: jobError?.message || String(jobError || 'process_articles_failed')
+        };
+      }
+    };
+
+    const runWorker = async (workerId) => {
+      while (true) {
+        const jobIndex = queueState.nextJobIndex;
+        if (jobIndex >= queueJobs.length) return;
+        queueState.nextJobIndex += 1;
+
+        const job = queueJobs[jobIndex];
+        const jobResult = await runSingleJob(job, jobIndex, workerId);
+        const jobSuccess = !!jobResult.jobSuccess;
+        const jobReason = jobResult.jobReason || '';
+
+        if (jobSuccess) {
+          queueState.completedJobs += 1;
+          console.log('[manual-pdf] job:ok', {
+            index: jobIndex + 1,
+            total: queueJobs.length,
+            file: job.file.name,
+            workerId
+          });
+        } else {
+          queueState.failedJobs += 1;
+          console.warn('[manual-pdf] job:failed', {
+            index: jobIndex + 1,
+            total: queueJobs.length,
+            file: job.file.name,
+            reason: truncateDispatchLogText(jobReason || 'unknown', 220),
+            workerId
+          });
+        }
+
+        await notifyManualPdfProviderStatus(
+          safeProviderId,
+          jobSuccess ? 'running' : 'failed',
+          jobSuccess
+            ? `Gotowe ${jobIndex + 1}/${queueJobs.length}: ${job.file.name}.`
+            : `Blad ${jobIndex + 1}/${queueJobs.length}: ${job.file.name} (${jobReason || 'unknown'}).`,
+          {
+            currentJob: jobIndex + 1,
+            totalJobs: queueJobs.length,
+            completedJobs: queueState.completedJobs,
+            failedJobs: queueState.failedJobs,
+            success: jobSuccess,
+            reason: jobReason || '',
+            workerId
+          }
+        );
+      }
+    };
+
+    const workers = [];
+    for (let workerId = 1; workerId <= queueConcurrency; workerId += 1) {
+      workers.push(runWorker(workerId));
     }
+    await Promise.all(workers);
+
+    completedJobs = queueState.completedJobs;
+    failedJobs = queueState.failedJobs;
 
     const finalMessage = `Kolejka PDF zakonczona. Sukces: ${completedJobs}, bledy: ${failedJobs}, razem: ${queueJobs.length}.`;
     await notifyManualPdfProviderStatus(
@@ -9223,6 +9966,53 @@ async function injectToChat(
     const totalPromptsForRun = Number.isInteger(totalPromptsOverride)
       ? Math.max(totalPromptsOverride, promptOffset + localPromptCount)
       : (promptOffset + localPromptCount);
+    const payloadTextForMode = typeof payload === 'string' ? payload : '';
+    const isResumeModeFromPayload = payloadTextForMode.trim() === ''
+      || payloadTextForMode.includes('Resume from stage');
+    const baselineCompletedStages = Number.isInteger(promptOffset) && promptOffset > 0
+      ? Math.min(
+        promptOffset,
+        Number.isInteger(totalPromptsForRun) && totalPromptsForRun > 0
+          ? totalPromptsForRun
+          : promptOffset
+      )
+      : 0;
+    const baselinePromptBlocks = isResumeModeFromPayload
+      ? baselineCompletedStages
+      : Math.max(0, baselineCompletedStages - 1);
+    const baselineResponseBlocks = isResumeModeFromPayload
+      ? baselineCompletedStages
+      : Math.max(0, baselineCompletedStages - 1);
+    if (baselineCompletedStages > 0) {
+      for (let promptNumber = 1; promptNumber <= baselineCompletedStages; promptNumber += 1) {
+        stageCompletedPromptIndexes.add(promptNumber);
+      }
+      runMetrics.stageCompleted = stageCompletedPromptIndexes.size;
+      for (let promptNumber = 1; promptNumber <= baselinePromptBlocks; promptNumber += 1) {
+        sendAttemptPromptIndexes.add(promptNumber);
+        sendOkPromptIndexes.add(promptNumber);
+        sendAttemptsByPrompt.set(promptNumber, 1);
+      }
+      runMetrics.sendAttempts = sendAttemptPromptIndexes.size;
+      runMetrics.sendOkVerified = sendOkPromptIndexes.size;
+
+      for (let responseNumber = 1; responseNumber <= baselineResponseBlocks; responseNumber += 1) {
+        responseFingerprintsAccepted.set(`baseline_response_${responseNumber}`, 1);
+      }
+      runMetrics.responseAccepted = responseFingerprintsAccepted.size;
+      runMetrics.responseDuplicateAccepted = 0;
+      console.log('[inject][metrics] Baseline stage completion from resume offset', {
+        isResumeModeFromPayload,
+        promptOffset,
+        baselineCompletedStages,
+        baselinePromptBlocks,
+        baselineResponseBlocks,
+        totalPromptsForRun,
+        stageCompleted: runMetrics.stageCompleted,
+        promptBlocks: runMetrics.sendAttempts,
+        responseBlocks: runMetrics.responseAccepted
+      });
+    }
     const autoRecoveryEnabled = autoRecoveryContext?.enabled === true;
     const autoRecoveryAttempt = Number.isInteger(autoRecoveryContext?.attempt) && autoRecoveryContext.attempt >= 0
       ? autoRecoveryContext.attempt

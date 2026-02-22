@@ -14,12 +14,15 @@ const cancelBtn = document.getElementById('cancelBtn');
 const MIN_INSTANCES = 1;
 const MAX_INSTANCES = 10;
 const DEFAULT_CHUNK_SIZE = 512 * 1024;
+const PROVIDER_KEEPALIVE_INTERVAL_MS = 15000;
 
 let instances = 1;
 let queueActive = false;
 const providerId = `manual-pdf-provider-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 const pdfFileByToken = new Map();
 let selectedPdfFiles = [];
+let providerPort = null;
+let providerKeepaliveTimer = null;
 
 const urlParams = new URLSearchParams(window.location.search);
 const presetTitle = urlParams.get('title') || '';
@@ -98,6 +101,66 @@ function renderPdfList() {
 
   pdfList.innerHTML = rows;
   pdfList.hidden = false;
+}
+
+function stopProviderKeepalive() {
+  if (providerKeepaliveTimer !== null) {
+    clearInterval(providerKeepaliveTimer);
+    providerKeepaliveTimer = null;
+  }
+  if (providerPort) {
+    try {
+      providerPort.disconnect();
+    } catch (_) {
+      // Ignore disconnect races.
+    }
+    providerPort = null;
+  }
+}
+
+function startProviderKeepalive() {
+  if (providerPort) return;
+  try {
+    providerPort = chrome.runtime.connect({ name: `manual-pdf-provider:${providerId}` });
+    providerPort.onDisconnect.addListener(() => {
+      providerPort = null;
+      if (providerKeepaliveTimer !== null) {
+        clearInterval(providerKeepaliveTimer);
+        providerKeepaliveTimer = null;
+      }
+      if (queueActive) {
+        setProviderStatus('Utracono polaczenie z workerem. Odswiez rozszerzenie i uruchom ponownie.', 'error');
+      }
+    });
+    providerPort.postMessage({
+      type: 'MANUAL_PDF_PROVIDER_KEEPALIVE',
+      providerId,
+      state: queueActive ? 'active' : 'idle',
+      timestamp: Date.now(),
+    });
+    providerKeepaliveTimer = setInterval(() => {
+      if (!providerPort) return;
+      try {
+        providerPort.postMessage({
+          type: 'MANUAL_PDF_PROVIDER_KEEPALIVE',
+          providerId,
+          state: queueActive ? 'active' : 'idle',
+          timestamp: Date.now(),
+        });
+      } catch (_) {
+        // onDisconnect listener handles cleanup.
+      }
+    }, PROVIDER_KEEPALIVE_INTERVAL_MS);
+  } catch (_) {
+    providerPort = null;
+    if (providerKeepaliveTimer !== null) {
+      clearInterval(providerKeepaliveTimer);
+      providerKeepaliveTimer = null;
+    }
+    if (queueActive) {
+      setProviderStatus('Nie udalo sie utrzymac polaczenia z workerem.', 'error');
+    }
+  }
 }
 
 function syncPdfSelection() {
@@ -226,6 +289,7 @@ async function handlePdfChunkRead(message) {
 
 function releasePdfProviderState(releaseMessage = '') {
   queueActive = false;
+  stopProviderKeepalive();
   pdfFileByToken.clear();
   selectedPdfFiles = [];
   pdfInput.value = '';
@@ -287,11 +351,18 @@ submitBtn.addEventListener('click', () => {
       instances,
     };
 
+  if (hasPdf) {
+    startProviderKeepalive();
+  }
+
   chrome.runtime.sendMessage(payload, (response) => {
     if (chrome.runtime.lastError) {
       submitBtn.textContent = 'Blad';
       submitBtn.disabled = false;
       setProviderStatus(`Blad wysylki: ${chrome.runtime.lastError.message || 'runtime_error'}`, 'error');
+      if (hasPdf) {
+        stopProviderKeepalive();
+      }
       return;
     }
 
@@ -303,11 +374,15 @@ submitBtn.addEventListener('click', () => {
       submitBtn.textContent = 'Blad';
       submitBtn.disabled = false;
       setProviderStatus(`Blad uruchomienia: ${launchMessage}`, 'error');
+      if (hasPdf) {
+        stopProviderKeepalive();
+      }
       return;
     }
 
     if (hasPdf) {
       queueActive = true;
+      startProviderKeepalive();
       setQueueUiLocked(true);
       submitBtn.disabled = true;
       submitBtn.textContent = 'Kolejka uruchomiona';
@@ -341,6 +416,10 @@ window.addEventListener('beforeunload', (event) => {
   if (!queueActive) return;
   event.preventDefault();
   event.returnValue = 'Aktywna kolejka PDF zostanie przerwana po zamknieciu okna.';
+});
+
+window.addEventListener('unload', () => {
+  stopProviderKeepalive();
 });
 
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {

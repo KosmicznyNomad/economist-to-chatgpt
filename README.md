@@ -69,7 +69,7 @@ Manual PDF mode behavior:
 - If at least one PDF is selected, text field is ignored.
 - Each PDF is processed as a separate run (separate ChatGPT window).
 - Instances multiply each file (e.g. 2 files and 3 instances = 6 runs).
-- PDF queue runs sequentially (1 by 1).
+- PDF queue runs with controlled parallelism (up to 3 workers).
 - Keep `Wklej zrodlo` window open during PDF queue. It provides PDF chunks to active runs.
 
 ### Responses view
