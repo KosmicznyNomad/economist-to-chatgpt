@@ -296,9 +296,13 @@ submitBtn.addEventListener('click', () => {
     }
 
     if (!response?.success) {
+      const launchError = response?.error || response?.reason || 'unknown';
+      const launchMessage = launchError === 'prompts_not_loaded'
+        ? 'Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.'
+        : launchError;
       submitBtn.textContent = 'Blad';
       submitBtn.disabled = false;
-      setProviderStatus(`Blad uruchomienia: ${response?.error || response?.reason || 'unknown'}`, 'error');
+      setProviderStatus(`Blad uruchomienia: ${launchMessage}`, 'error');
       return;
     }
 

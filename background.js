@@ -2240,7 +2240,8 @@ async function runResetScanStartAllTabs(options = {}) {
       scope
     };
 
-    if (PROMPTS_COMPANY.length === 0) {
+    const promptsReady = await ensureCompanyPromptsReady();
+    if (!promptsReady || PROMPTS_COMPANY.length === 0) {
       await loadPrompts();
     }
     if (PROMPTS_COMPANY.length === 0) {
@@ -6193,15 +6194,27 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     return true;
   } else if (message.type === 'RUN_ANALYSIS') {
-    const invocationWindowId = Number.isInteger(message?.windowId)
-      ? message.windowId
-      : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
-    runAnalysis({
-      invocationWindowId,
-      stopExistingInWindow: true
-    }).catch((error) => {
-      console.error('[run] RUN_ANALYSIS failed:', error);
+    (async () => {
+      const invocationWindowId = Number.isInteger(message?.windowId)
+        ? message.windowId
+        : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
+      const promptsReady = await ensureCompanyPromptsReady();
+      if (!promptsReady) {
+        sendResponse({ success: false, error: 'prompts_not_loaded' });
+        return;
+      }
+
+      runAnalysis({
+        invocationWindowId,
+        stopExistingInWindow: true
+      }).catch((error) => {
+        console.error('[run] RUN_ANALYSIS failed:', error);
+      });
+      sendResponse({ success: true, started: true });
+    })().catch((error) => {
+      sendResponse({ success: false, error: error?.message || 'run_analysis_start_failed' });
     });
+    return true;
   } else if (message.type === 'YT_FETCH_TRANSCRIPT_FOR_TAB') {
     (async () => {
       const targetTabId = Number.isInteger(message?.tabId)
@@ -6326,23 +6339,43 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         return true;
       }
 
-      runManualPdfAnalysisQueue({
-        title: typeof message?.title === 'string' ? message.title : '',
-        instances: normalizedInstances,
-        providerId,
-        pdfFiles
-      }).catch((error) => {
-        console.warn('[manual-pdf] queue failed:', error?.message || String(error));
-      });
+      (async () => {
+        const promptsReady = await ensureCompanyPromptsReady();
+        if (!promptsReady) {
+          sendResponse({ success: false, error: 'prompts_not_loaded' });
+          return;
+        }
 
-      sendResponse({ success: true, mode: 'pdf', queued: pdfFiles.length * normalizedInstances });
+        runManualPdfAnalysisQueue({
+          title: typeof message?.title === 'string' ? message.title : '',
+          instances: normalizedInstances,
+          providerId,
+          pdfFiles
+        }).catch((error) => {
+          console.warn('[manual-pdf] queue failed:', error?.message || String(error));
+        });
+
+        sendResponse({ success: true, mode: 'pdf', queued: pdfFiles.length * normalizedInstances });
+      })().catch((error) => {
+        sendResponse({ success: false, error: error?.message || 'manual_pdf_start_failed' });
+      });
       return true;
     }
 
-    runManualSourceAnalysis(message.text, message.title, normalizedInstances).catch((error) => {
-      console.warn('[manual-source] text mode failed:', error?.message || String(error));
+    (async () => {
+      const promptsReady = await ensureCompanyPromptsReady();
+      if (!promptsReady) {
+        sendResponse({ success: false, error: 'prompts_not_loaded' });
+        return;
+      }
+
+      runManualSourceAnalysis(message.text, message.title, normalizedInstances).catch((error) => {
+        console.warn('[manual-source] text mode failed:', error?.message || String(error));
+      });
+      sendResponse({ success: true, mode: 'text' });
+    })().catch((error) => {
+      sendResponse({ success: false, error: error?.message || 'manual_source_start_failed' });
     });
-    sendResponse({ success: true, mode: 'text' });
     return true;
   } else if (message.type === 'MANUAL_PDF_GET_CHUNK') {
     (async () => {
@@ -8049,9 +8082,9 @@ async function runAnalysis(options = {}) {
     
     // KROK 1: Sprawdź czy prompty są wczytane
     console.log("\n📝 Krok 1: Sprawdzanie promptów");
-    if (PROMPTS_COMPANY.length === 0) {
+    const promptsReady = await ensureCompanyPromptsReady();
+    if (!promptsReady || PROMPTS_COMPANY.length === 0) {
       console.error("❌ Brak promptów dla analizy spółki w prompts-company.txt");
-      alert("Błąd: Brak promptów dla analizy spółki. Sprawdź plik prompts-company.txt");
       return;
     }
     console.log(`✅ Analiza spółki: ${PROMPTS_COMPANY.length} promptów`);
@@ -8087,7 +8120,6 @@ async function runAnalysis(options = {}) {
 
     if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
-      alert("Nie znaleziono otwartych kart z obsługiwanych źródeł.\n\nObsługiwane źródła:\n- The Economist\n- Nikkei Asia\n- Caixin Global\n- The Africa Report\n- NZZ\n- Project Syndicate\n- The Ken\n- Lazard\n- RAND Corporation\n- Wall Street Journal\n- Foreign Affairs\n- Barron's\n- Spotify\n- YouTube\n- Gmail");
       return;
     }
 
@@ -8310,7 +8342,8 @@ async function runManualSourceAnalysis(text, title, instances) {
     console.log(`Tekst: ${safeText.length} znakow`);
     console.log(`Instancje: ${safeInstances}`);
 
-    if (PROMPTS_COMPANY.length === 0) {
+    const promptsReady = await ensureCompanyPromptsReady();
+    if (!promptsReady || PROMPTS_COMPANY.length === 0) {
       console.error('[manual-source] Brak promptow dla analizy spolki');
       return;
     }
@@ -8343,7 +8376,8 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
     return;
   }
 
-  if (PROMPTS_COMPANY.length === 0) {
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady || PROMPTS_COMPANY.length === 0) {
     console.error('[manual-pdf] Brak promptow dla analizy spolki');
     await notifyManualPdfProviderStatus(safeProviderId, 'failed', 'Brak promptow company. Kolejka przerwana.');
     await releaseManualPdfProvider(safeProviderId, 'Kolejka PDF przerwana: brak promptow.', { success: false });

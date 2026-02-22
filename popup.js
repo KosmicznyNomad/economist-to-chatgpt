@@ -222,7 +222,11 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
 
     const response = await sendRuntimeMessage(payload);
     if (response?.success === false) {
-      setRunStatus(`Blad: ${response.error || 'Nie udalo sie uruchomic analiz.'}`, true);
+      const runError = response.error || 'Nie udalo sie uruchomic analiz.';
+      const runMessage = runError === 'prompts_not_loaded'
+        ? 'Blad: Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.'
+        : `Blad: ${runError}`;
+      setRunStatus(runMessage, true);
       return;
     }
 
