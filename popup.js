@@ -36,6 +36,7 @@ const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
+const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
@@ -459,6 +460,41 @@ async function executeResumeAllFromPopup(button, options = {}) {
   }
 }
 
+async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
+  if (!button) return;
+
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Powtarzam...';
+  setRunStatus('Powtarzam ostatni prompt we wszystkich aktywnych procesach company...');
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
+      origin: typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all',
+      scope: 'active_company_invest_processes',
+      forceRepeatLastPrompt: true,
+    });
+
+    if (!response || Object.keys(response).length === 0) {
+      setRunStatus('Polecenie powtorzenia promptu zostalo wyslane.');
+      return;
+    }
+
+    if (response.success === false) {
+      setRunStatus(`Blad: ${response.error || 'Nie udalo sie powtorzyc ostatniego promptu we wszystkich procesach.'}`, true);
+      return;
+    }
+
+    setRunStatus(`Powtorzanie promptu: ${getResumeAllSummary(response)}`);
+  } catch (error) {
+    setRunStatus(`Blad: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText || 'Powtorz ostatni prompt (wszystkie)';
+  }
+}
+
 function formatSmartResumeStatus(response) {
   const startPromptNumber = Number.isInteger(response?.startPromptNumber)
     ? response.startPromptNumber
@@ -713,6 +749,14 @@ if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllBtn, {
       origin: 'popup-resume-all',
+    });
+  });
+}
+
+if (repeatLastPromptAllBtn) {
+  repeatLastPromptAllBtn.addEventListener('click', () => {
+    void executeRepeatLastPromptAllFromPopup(repeatLastPromptAllBtn, {
+      origin: 'popup-repeat-last-prompt-all',
     });
   });
 }

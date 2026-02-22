@@ -2252,6 +2252,7 @@ async function runResetScanStartAllTabs(options = {}) {
     const origin = typeof options?.origin === 'string' && options.origin.trim()
       ? options.origin.trim()
       : 'reset-scan-start';
+    const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
     const requestedScope = typeof options?.scope === 'string' && options.scope.trim()
       ? options.scope.trim()
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
@@ -2275,7 +2276,8 @@ async function runResetScanStartAllTabs(options = {}) {
     };
     const resetSummary = {
       mode: 'scoped_active_processes',
-      scope
+      scope,
+      forceRepeatLastPrompt
     };
 
     const promptsReady = await ensureCompanyPromptsReady();
@@ -2374,9 +2376,13 @@ async function runResetScanStartAllTabs(options = {}) {
         ? row.progressPromptNumber
         : null;
       const hasCounters = Number.isInteger(row?.assistantMessageCount) && Number.isInteger(row?.userMessageCount);
-      const shouldAdvancePrompt = hasCounters
-        ? row.assistantMessageCount >= row.userMessageCount
-        : true;
+      const shouldAdvancePrompt = forceRepeatLastPrompt
+        ? false
+        : (
+          hasCounters
+            ? row.assistantMessageCount >= row.userMessageCount
+            : true
+        );
 
       if (Number.isInteger(progressPrompt) && progressPrompt > 0) {
         const progressIndex = Math.min(Math.max(progressPrompt - 1, 0), promptCount - 1);
@@ -2497,6 +2503,7 @@ async function runResetScanStartAllTabs(options = {}) {
       origin,
       scope,
       promptsCompanyCount: PROMPTS_COMPANY.length,
+      forceRepeatLastPrompt,
       signatureCatalogCount: catalog.length,
       promptRecordsCount: promptRecords.length,
       activeProcessesCount: activeProcesses.length,
@@ -2797,12 +2804,22 @@ async function runResetScanStartAllTabs(options = {}) {
         row.detectedHasAssistantReply = typeof detection.hasAssistantReplyAfter === 'boolean'
           ? detection.hasAssistantReplyAfter
           : null;
-        const shouldAdvancePrompt = row.detectedHasAssistantReply !== false;
+        const shouldAdvancePrompt = forceRepeatLastPrompt
+          ? false
+          : (row.detectedHasAssistantReply !== false);
         row.nextStartIndex = computeNextResumeIndex(
           detection.index,
           PROMPTS_COMPANY.length,
           shouldAdvancePrompt
         );
+        if (
+          forceRepeatLastPrompt
+          && Number.isInteger(row.nextStartIndex)
+          && row.nextStartIndex < 1
+          && PROMPTS_COMPANY.length > 1
+        ) {
+          row.nextStartIndex = 1;
+        }
         if (Number.isInteger(row.progressPromptNumber) && Number.isInteger(row.detectedPromptNumber)) {
           const delta = row.detectedPromptNumber - row.progressPromptNumber;
           row.stageDelta = delta;
@@ -2839,9 +2856,13 @@ async function runResetScanStartAllTabs(options = {}) {
         }
 
         row.action = 'ready_to_start';
-        row.reason = row.detectedHasAssistantReply === false
-          ? 'retry_same_prompt_no_assistant_reply'
-          : 'ready_to_start';
+        row.reason = forceRepeatLastPrompt
+          ? 'force_repeat_last_prompt'
+          : (
+            row.detectedHasAssistantReply === false
+              ? 'retry_same_prompt_no_assistant_reply'
+              : 'ready_to_start'
+          );
         resultsByKey.set(target.key, row);
         pendingKeys.delete(target.key);
         console.log('[reset-scan-start] Process queued for sequential start', {
@@ -2893,7 +2914,7 @@ async function runResetScanStartAllTabs(options = {}) {
       if (Number.isInteger(fallbackStartIndex)) {
         row.nextStartIndex = fallbackStartIndex;
         row.action = 'ready_to_start';
-        row.reason = 'fallback_progress_resume';
+        row.reason = forceRepeatLastPrompt ? 'force_repeat_last_prompt_fallback' : 'fallback_progress_resume';
         if (!row.detectedMethod) row.detectedMethod = 'progress_counter_fallback';
         if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.progressPromptNumber)) {
           row.detectedPromptNumber = row.progressPromptNumber;
@@ -2947,7 +2968,9 @@ async function runResetScanStartAllTabs(options = {}) {
     for (const row of startQueue) {
       if (!Number.isInteger(row.tabId) || !Number.isInteger(row.nextStartIndex)) continue;
 
-      const autoStartTitle = `Auto Start: Prompt ${row.nextStartIndex + 1}`;
+      const autoStartTitle = forceRepeatLastPrompt
+        ? `Auto Repeat: Prompt ${row.nextStartIndex + 1}`
+        : `Auto Start: Prompt ${row.nextStartIndex + 1}`;
       console.log('[reset-scan-start] Starting process from queue', {
         runId: row.runId || '',
         tabId: row.tabId,
@@ -7196,9 +7219,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const resumeScope = typeof message?.scope === 'string' && message.scope.trim()
       ? message.scope.trim()
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+    const forceRepeatLastPrompt = message?.forceRepeatLastPrompt === true;
     runResetScanStartAllTabs({
       origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
-      scope: resumeScope
+      scope: resumeScope,
+      forceRepeatLastPrompt
     })
       .then((result) => sendResponse(result))
       .catch((error) => {
