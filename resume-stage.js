@@ -7,6 +7,10 @@ let prompts = [];
 let promptNames = [];
 const urlParams = new URLSearchParams(window.location.search);
 const presetStartIndex = Number.parseInt(urlParams.get('startIndex'), 10);
+const presetTargetTabIdRaw = Number.parseInt(urlParams.get('targetTabId'), 10);
+const presetTargetWindowIdRaw = Number.parseInt(urlParams.get('targetWindowId'), 10);
+const presetTargetTabId = Number.isInteger(presetTargetTabIdRaw) ? presetTargetTabIdRaw : null;
+const presetTargetWindowId = Number.isInteger(presetTargetWindowIdRaw) ? presetTargetWindowIdRaw : null;
 const resumeTitle = urlParams.get('title') || '';
 const resumeAnalysisType = urlParams.get('analysisType') || '';
 
@@ -117,14 +121,22 @@ startBtn.addEventListener('click', () => {
   const selectedIndex = parseInt(promptSelect.value);
   
   if (!isNaN(selectedIndex)) {
+    startBtn.disabled = true;
     chrome.runtime.sendMessage({
       type: 'RESUME_STAGE_START',
       startIndex: selectedIndex,
+      targetTabId: presetTargetTabId,
+      targetWindowId: presetTargetWindowId,
       title: resumeTitle,
       analysisType: resumeAnalysisType,
-      reloadBeforeResume: true
+      reloadBeforeResume: true,
+      detach: true
+    }, () => {
+      if (chrome.runtime.lastError) {
+        console.warn('RESUME_STAGE_START send failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
+      }
+      window.close();
     });
-    window.close();
   }
 });
 

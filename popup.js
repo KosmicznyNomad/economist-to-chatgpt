@@ -434,6 +434,12 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
+  const hasExplicitThinkingEffort = (
+    composerThinkingEffort === 'light'
+    || composerThinkingEffort === 'standard'
+    || composerThinkingEffort === 'extended'
+    || composerThinkingEffort === 'heavy'
+  );
   const effortSuffix = composerThinkingEffort ? ` (${composerThinkingEffort})` : '';
   const originalHtml = button.innerHTML;
   button.disabled = true;
@@ -445,12 +451,15 @@ async function executeResumeAllFromPopup(button, options = {}) {
   );
 
   try {
-    const response = await sendRuntimeMessage({
+    const message = {
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
       origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all',
       scope: 'active_company_invest_processes',
-      composerThinkingEffort,
-    });
+    };
+    if (hasExplicitThinkingEffort) {
+      message.composerThinkingEffort = composerThinkingEffort;
+    }
+    const response = await sendRuntimeMessage(message);
 
     if (!response || Object.keys(response).length === 0) {
       setRunStatus(
@@ -594,6 +603,8 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
     if (shouldFallbackToDialog) {
       chrome.runtime.sendMessage({
         type: 'RESUME_STAGE_OPEN',
+        tabId: Number.isInteger(options?.tabId) ? options.tabId : null,
+        windowId: Number.isInteger(options?.windowId) ? options.windowId : null,
         title: typeof options?.title === 'string' ? options.title : '',
         analysisType: 'company'
       });
@@ -606,6 +617,8 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
   } catch (error) {
     chrome.runtime.sendMessage({
       type: 'RESUME_STAGE_OPEN',
+      tabId: Number.isInteger(options?.tabId) ? options.tabId : null,
+      windowId: Number.isInteger(options?.windowId) ? options.windowId : null,
       title: typeof options?.title === 'string' ? options.title : '',
       analysisType: 'company'
     });

@@ -1,4 +1,4 @@
-const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
+﻿const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
 const CHAT_URL_PORTFOLIO = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
 const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
@@ -2287,14 +2287,111 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   return executeResumeFlow();
 }
 
+async function collectCompanyInvestContextSnapshot(options = {}) {
+  const includeClosedProcesses = options?.includeClosedProcesses === true;
+  const includeInvestTabs = options?.includeInvestTabs !== false;
+
+  const processSnapshot = await getProcessSnapshot();
+  const processCandidates = processSnapshot
+    .filter((process) => {
+      if (!process || typeof process !== 'object') return false;
+      const analysisType = typeof process?.analysisType === 'string'
+        ? process.analysisType.trim().toLowerCase()
+        : '';
+      if (analysisType && analysisType !== 'company') return false;
+      if (!includeClosedProcesses && isClosedProcessStatus(process?.status)) return false;
+      return Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+    })
+    .sort(compareProcessesForRestore);
+
+  const processByTabId = new Map();
+  const processByWindowId = new Map();
+  processCandidates.forEach((process) => {
+    if (Number.isInteger(process?.tabId) && !processByTabId.has(process.tabId)) {
+      processByTabId.set(process.tabId, process);
+    }
+    if (Number.isInteger(process?.windowId) && !processByWindowId.has(process.windowId)) {
+      processByWindowId.set(process.windowId, process);
+    }
+  });
+
+  const tabsRaw = includeInvestTabs ? await chrome.tabs.query({}) : [];
+  const investTabs = tabsRaw
+    .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
+    .sort(compareTabsByWindowAndIndex);
+
+  const targets = [];
+  const handledContextKeys = new Set();
+  let skipped = 0;
+
+  investTabs.forEach((tab) => {
+    const tabId = Number.isInteger(tab?.id) ? tab.id : null;
+    const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
+    if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) return;
+    const contextKey = `tab:${tabId}`;
+    if (handledContextKeys.has(contextKey)) {
+      skipped += 1;
+      return;
+    }
+    handledContextKeys.add(contextKey);
+
+    const process = processByTabId.get(tabId) || processByWindowId.get(windowId) || null;
+    targets.push({
+      source: 'tab_scan',
+      tabId,
+      windowId,
+      url: getTabEffectiveUrl(tab) || '',
+      title: typeof tab?.title === 'string' ? tab.title : '',
+      process
+    });
+  });
+
+  processCandidates.forEach((process) => {
+    const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+    const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+    if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
+    const contextKey = Number.isInteger(processTabId)
+      ? `tab:${processTabId}`
+      : `window:${processWindowId}`;
+    if (handledContextKeys.has(contextKey)) {
+      skipped += 1;
+      return;
+    }
+    handledContextKeys.add(contextKey);
+    targets.push({
+      source: 'process_context',
+      tabId: processTabId,
+      windowId: processWindowId,
+      url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+        ? process.chatUrl.trim()
+        : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
+      title: typeof process?.title === 'string' ? process.title : '',
+      process
+    });
+  });
+
+  return {
+    processSnapshot,
+    processCandidates,
+    investTabs,
+    processByTabId,
+    processByWindowId,
+    targets,
+    skipped
+  };
+}
+
 async function runResetScanStartAllTabs(options = {}) {
   try {
     const origin = typeof options?.origin === 'string' && options.origin.trim()
       ? options.origin.trim()
       : 'reset-scan-start';
     const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
+    const useStoredComposerThinkingEffort = options?.useStoredComposerThinkingEffort === true;
     let composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
-    if (!composerThinkingEffort) {
+    // Unified rule: thinking effort is applied only when explicitly provided.
+    // Legacy fallback to stored value can be enabled only by explicit opt-in.
+    if (!composerThinkingEffort && useStoredComposerThinkingEffort) {
       composerThinkingEffort = await getStoredResumeComposerThinkingEffort();
     }
     const requestedScope = typeof options?.scope === 'string' && options.scope.trim()
@@ -2319,7 +2416,7 @@ async function runResetScanStartAllTabs(options = {}) {
       detected_prompts: 0
     };
     const resetSummary = {
-      mode: 'scoped_active_processes',
+      mode: 'scoped_context_targets',
       scope,
       forceRepeatLastPrompt,
       composerThinkingEffort: composerThinkingEffort || ''
@@ -2348,10 +2445,12 @@ async function runResetScanStartAllTabs(options = {}) {
 
     const catalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
     const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
-    const processSnapshot = await getProcessSnapshot();
-    const activeProcesses = processSnapshot
-      .filter((process) => process && !isClosedProcessStatus(process.status))
-      .sort(compareProcessesForRestore);
+    const contextSnapshot = await collectCompanyInvestContextSnapshot({
+      includeClosedProcesses: options?.includeClosedProcesses === true,
+      includeInvestTabs: true
+    });
+    const activeProcesses = contextSnapshot.processCandidates;
+    const processContexts = contextSnapshot.targets;
     const resultsByKey = new Map();
     const orderedResultKeys = [];
     const scanTargets = [];
@@ -2365,7 +2464,7 @@ async function runResetScanStartAllTabs(options = {}) {
       : RESET_SCAN_DEFAULT_PASSES;
     const maxRuntimeMs = Math.max(
       RESET_SCAN_MIN_RUNTIME_MS,
-      activeProcesses.length * RESET_SCAN_PER_TAB_BUDGET_MS,
+      processContexts.length * RESET_SCAN_PER_TAB_BUDGET_MS,
       Number.isInteger(options?.maxRuntimeMs) && options.maxRuntimeMs > 0
         ? options.maxRuntimeMs
         : 0
@@ -2380,9 +2479,11 @@ async function runResetScanStartAllTabs(options = {}) {
       if (compact.length <= maxLen) return compact;
       return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
     };
-    const getResultKey = (process, index) => {
-      const processId = process?.id ? String(process.id).trim() : '';
+    const getResultKey = (context, index) => {
+      const processId = context?.process?.id ? String(context.process.id).trim() : '';
       if (processId) return `run:${processId}`;
+      if (Number.isInteger(context?.tabId)) return `tab:${context.tabId}`;
+      if (Number.isInteger(context?.windowId)) return `window:${context.windowId}`;
       return `idx:${index}`;
     };
     const markProcessCompletedAfterFinalStage = async (row, reason = 'already_at_last_stage') => {
@@ -2442,9 +2543,10 @@ async function runResetScanStartAllTabs(options = {}) {
       return 1;
     };
 
-    for (let index = 0; index < activeProcesses.length; index += 1) {
-      const process = activeProcesses[index];
-      const key = getResultKey(process, index);
+    for (let index = 0; index < processContexts.length; index += 1) {
+      const context = processContexts[index] || {};
+      const process = context?.process || null;
+      const key = getResultKey(context, index);
       const analysisType = typeof process?.analysisType === 'string' && process.analysisType.trim()
         ? process.analysisType.trim()
         : 'company';
@@ -2453,12 +2555,23 @@ async function runResetScanStartAllTabs(options = {}) {
         runId: typeof process?.id === 'string' && process.id.trim() ? process.id.trim() : '',
         analysisType,
         processTitle: typeof process?.title === 'string' ? process.title : '',
-        tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
-        windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
-        title: typeof process?.title === 'string' ? process.title : '',
-        url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
-          ? process.chatUrl.trim()
-          : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
+        source: typeof context?.source === 'string' ? context.source : '',
+        tabId: Number.isInteger(context?.tabId)
+          ? context.tabId
+          : (Number.isInteger(process?.tabId) ? process.tabId : null),
+        windowId: Number.isInteger(context?.windowId)
+          ? context.windowId
+          : (Number.isInteger(process?.windowId) ? process.windowId : null),
+        title: typeof context?.title === 'string' && context.title.trim()
+          ? context.title.trim()
+          : (typeof process?.title === 'string' ? process.title : ''),
+        url: typeof context?.url === 'string' && context.url.trim()
+          ? context.url.trim()
+          : (
+            typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+              ? process.chatUrl.trim()
+              : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : '')
+          ),
         userMessageCount: null,
         assistantMessageCount: null,
         responseBlockCount: null,
@@ -2538,7 +2651,8 @@ async function runResetScanStartAllTabs(options = {}) {
         runId: row.runId,
         tabId: row.tabId,
         windowId: row.windowId,
-        process
+        process,
+        context
       });
     }
 
@@ -2553,6 +2667,7 @@ async function runResetScanStartAllTabs(options = {}) {
       signatureCatalogCount: catalog.length,
       promptRecordsCount: promptRecords.length,
       activeProcessesCount: activeProcesses.length,
+      contextTargetsCount: processContexts.length,
       eligibleProcessesCount: scanTargets.length,
       maxPasses,
       maxRuntimeMs,
@@ -2858,6 +2973,20 @@ async function runResetScanStartAllTabs(options = {}) {
           PROMPTS_COMPANY.length,
           shouldAdvancePrompt
         );
+        const clampedFromPrompt1 = Number.isInteger(row.nextStartIndex)
+          && row.nextStartIndex < 1
+          && PROMPTS_COMPANY.length > 1;
+        if (clampedFromPrompt1) {
+          // Bulk resume is payloadless; Prompt 1 depends on article payload and is not safe to replay here.
+          row.nextStartIndex = 1;
+          console.log('[reset-scan-start] Clamped payloadless resume start to Prompt 2', {
+            runId: row.runId || '',
+            tabId: row.tabId,
+            detectedPromptIndex: detection.index,
+            detectedPromptNumber: detection.promptNumber,
+            detectedHasAssistantReply: row.detectedHasAssistantReply
+          });
+        }
         if (
           forceRepeatLastPrompt
           && Number.isInteger(row.nextStartIndex)
@@ -2903,10 +3032,10 @@ async function runResetScanStartAllTabs(options = {}) {
 
         row.action = 'ready_to_start';
         row.reason = forceRepeatLastPrompt
-          ? 'force_repeat_last_prompt'
+          ? (clampedFromPrompt1 ? 'force_repeat_last_prompt_clamped_to_prompt_2' : 'force_repeat_last_prompt')
           : (
             row.detectedHasAssistantReply === false
-              ? 'retry_same_prompt_no_assistant_reply'
+              ? (clampedFromPrompt1 ? 'retry_prompt_1_clamped_to_prompt_2' : 'retry_same_prompt_no_assistant_reply')
               : 'ready_to_start'
           );
         resultsByKey.set(target.key, row);
@@ -3126,7 +3255,8 @@ async function runResetScanStartAllTabs(options = {}) {
       scannedTabs: scanTargets.length,
       matchedTabs: matchedKeys.size,
       startedTabs: startedCount,
-      requestedProcesses: activeProcesses.length,
+      requestedProcesses: processContexts.length,
+      activeProcessRecords: activeProcesses.length,
       summary,
       actionCounts
     });
@@ -3142,7 +3272,8 @@ async function runResetScanStartAllTabs(options = {}) {
       startedTabs: startedCount,
       // Legacy alias for compatibility.
       resumedTabs: startedCount,
-      requestedProcesses: activeProcesses.length,
+      requestedProcesses: processContexts.length,
+      activeProcessRecords: activeProcesses.length,
       eligibleProcesses: scanTargets.length,
       passCount,
       maxPasses,
@@ -3295,27 +3426,17 @@ async function restoreProcessWindows(options = {}) {
     ? options.origin.trim()
     : 'restore-process-windows';
 
-  const snapshot = await getProcessSnapshot();
-  const activeProcesses = snapshot
-    .filter((process) => !isClosedProcessStatus(process?.status))
-    .sort(compareProcessesForRestore);
-  const activeProcessByTabId = new Map();
-  const activeProcessByWindowId = new Map();
-  activeProcesses.forEach((process) => {
-    if (Number.isInteger(process?.tabId) && !activeProcessByTabId.has(process.tabId)) {
-      activeProcessByTabId.set(process.tabId, process);
-    }
-    if (Number.isInteger(process?.windowId) && !activeProcessByWindowId.has(process.windowId)) {
-      activeProcessByWindowId.set(process.windowId, process);
-    }
+  const contextSnapshot = await collectCompanyInvestContextSnapshot({
+    includeClosedProcesses: false,
+    includeInvestTabs: true
   });
+  const activeProcesses = contextSnapshot.processCandidates;
+  const targets = contextSnapshot.targets;
+  const activeProcessByTabId = contextSnapshot.processByTabId;
+  const activeProcessByWindowId = contextSnapshot.processByWindowId;
+  let skipped = Number.isInteger(contextSnapshot.skipped) ? contextSnapshot.skipped : 0;
 
-  const tabsRaw = await chrome.tabs.query({});
-  const investTabs = tabsRaw
-    .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
-    .sort(compareTabsByWindowAndIndex);
-
-  if (investTabs.length === 0 && activeProcesses.length === 0) {
+  if (targets.length === 0 && activeProcesses.length === 0) {
     return {
       success: true,
       origin,
@@ -3327,49 +3448,6 @@ async function restoreProcessWindows(options = {}) {
       results: []
     };
   }
-
-  const targets = [];
-  const handledContextKeys = new Set();
-  let skipped = 0;
-
-  investTabs.forEach((tab) => {
-    const tabId = Number.isInteger(tab?.id) ? tab.id : null;
-    const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
-    if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) return;
-    const contextKey = `tab:${tabId}`;
-    if (handledContextKeys.has(contextKey)) {
-      skipped += 1;
-      return;
-    }
-    handledContextKeys.add(contextKey);
-    targets.push({
-      source: 'tab_scan',
-      tabId,
-      windowId,
-      url: getTabEffectiveUrl(tab) || ''
-    });
-  });
-
-  activeProcesses.forEach((process) => {
-    const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
-    const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
-    if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
-    const contextKey = Number.isInteger(processTabId)
-      ? `tab:${processTabId}`
-      : `window:${processWindowId}`;
-    if (handledContextKeys.has(contextKey)) {
-      skipped += 1;
-      return;
-    }
-    handledContextKeys.add(contextKey);
-    targets.push({
-      source: 'process_context',
-      tabId: processTabId,
-      windowId: processWindowId,
-      url: typeof process?.chatUrl === 'string' ? process.chatUrl.trim() : '',
-      process
-    });
-  });
 
   const results = [];
   let restored = 0;
@@ -4272,11 +4350,15 @@ function computeNextResumeIndex(lastPromptIndex, totalPrompts, shouldAdvanceProm
   return Math.max(1, nextIndex);
 }
 
-function openResumeStagePopup(startIndex, title = '', analysisType = 'company') {
+function openResumeStagePopup(startIndex, title = '', analysisType = 'company', options = {}) {
   const params = new URLSearchParams();
+  const targetTabId = Number.isInteger(options?.targetTabId) ? options.targetTabId : null;
+  const targetWindowId = Number.isInteger(options?.targetWindowId) ? options.targetWindowId : null;
   if (Number.isInteger(startIndex)) params.set('startIndex', String(startIndex));
   if (title) params.set('title', title);
   if (analysisType) params.set('analysisType', analysisType);
+  if (Number.isInteger(targetTabId)) params.set('targetTabId', String(targetTabId));
+  if (Number.isInteger(targetWindowId)) params.set('targetWindowId', String(targetWindowId));
   const query = params.toString();
   const targetUrl = chrome.runtime.getURL('resume-stage.html' + (query ? ('?' + query) : ''));
 
@@ -4360,7 +4442,10 @@ async function handleProcessResumeNextStageMessage(message) {
 
     if (message?.openDialogOnly) {
       const title = typeof message?.title === 'string' ? message.title.trim() : '';
-      openResumeStagePopup(nextStartIndex, title || (chatTab.title || ''), 'company');
+      openResumeStagePopup(nextStartIndex, title || (chatTab.title || ''), 'company', {
+        targetTabId: chatTab.id,
+        targetWindowId: chatTab.windowId
+      });
       return {
         success: true,
         mode: 'dialog',
@@ -4482,7 +4567,10 @@ async function handleProcessResumeNextStageMessage(message) {
     : (typeof process?.title === 'string' ? process.title : '');
 
   if (message?.openDialogOnly) {
-    openResumeStagePopup(nextStartIndex, title, analysisType);
+    openResumeStagePopup(nextStartIndex, title, analysisType, {
+      targetTabId: chatTab.id,
+      targetWindowId: chatTab.windowId
+    });
     return {
       success: true,
       mode: 'dialog',
@@ -7271,17 +7359,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
     const forceRepeatLastPrompt = message?.forceRepeatLastPrompt === true;
     const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
+    const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
     (async () => {
       let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
       if (resolvedComposerThinkingEffort) {
         await setStoredResumeComposerThinkingEffort(resolvedComposerThinkingEffort);
-      } else {
+      } else if (useStoredComposerThinkingEffort) {
         resolvedComposerThinkingEffort = await getStoredResumeComposerThinkingEffort();
       }
       return runResetScanStartAllTabs({
         origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
         scope: resumeScope,
         forceRepeatLastPrompt,
+        useStoredComposerThinkingEffort,
         composerThinkingEffort: resolvedComposerThinkingEffort
       });
     })()
@@ -7353,15 +7443,28 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     // Uruchom analizę od konkretnego etapu
     console.log('📩 Otrzymano RESUME_STAGE_START:', { startIndex: message.startIndex });
     const reloadBeforeResume = message?.reloadBeforeResume !== false;
+    const detach = message?.detach === true;
+    const targetTabId = Number.isInteger(message?.targetTabId) ? message.targetTabId : null;
+    const targetWindowId = Number.isInteger(message?.targetWindowId) ? message.targetWindowId : null;
     const resumeOptions = {
-      reloadBeforeResume
+      reloadBeforeResume,
+      detach
     };
+    if (Number.isInteger(targetTabId)) {
+      resumeOptions.targetTabId = targetTabId;
+    }
+    if (Number.isInteger(targetWindowId)) {
+      resumeOptions.targetWindowId = targetWindowId;
+    }
     if (typeof message?.title === 'string' && message.title.trim()) {
       resumeOptions.processTitle = message.title.trim();
     }
     console.log('[resume] RESUME_STAGE_START options', {
       startIndex: message.startIndex,
-      reloadBeforeResume
+      reloadBeforeResume,
+      detach,
+      targetTabId,
+      targetWindowId
     });
     resumeFromStage(message.startIndex, resumeOptions)
       .then((result) => sendResponse(result || { success: false, error: 'resume_result_missing' }))
@@ -7375,13 +7478,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const startIndex = Number.isInteger(message.startIndex) ? message.startIndex : null;
     const title = typeof message.title === 'string' ? message.title.trim() : '';
     const analysisType = typeof message.analysisType === 'string' ? message.analysisType.trim() : '';
+    const targetTabId = Number.isInteger(message?.tabId) ? message.tabId : null;
+    const targetWindowId = Number.isInteger(message?.windowId) ? message.windowId : null;
 
     console.log('[resume] Otrzymano RESUME_STAGE_OPEN', {
       startIndex,
       title,
-      analysisType
+      analysisType,
+      targetTabId,
+      targetWindowId
     });
-    openResumeStagePopup(startIndex, title, analysisType);
+    openResumeStagePopup(startIndex, title, analysisType, {
+      targetTabId,
+      targetWindowId
+    });
     sendResponse({ success: true });
     return false;
   } else if (message.type === 'ACTIVATE_TAB') {
@@ -7460,10 +7570,15 @@ async function resumeFromStage(startIndex, options = {}) {
       ? options.processTitle.trim()
       : `Resume from Stage ${startIndex + 1}`;
     const reloadBeforeResume = options?.reloadBeforeResume !== false;
+    const targetWindowId = Number.isInteger(options?.targetWindowId)
+      ? options.targetWindowId
+      : activeTab.windowId;
+    const detach = options?.detach === true;
 
-    const resumed = await resumeFromStageOnTab(activeTab.id, activeTab.windowId, startIndex, {
+    const resumed = await resumeFromStageOnTab(activeTab.id, targetWindowId, startIndex, {
       processTitle,
-      reloadBeforeResume
+      reloadBeforeResume,
+      detach
     });
 
     if (!resumed?.success) {
@@ -7487,6 +7602,7 @@ async function resumeFromStage(startIndex, options = {}) {
     return {
       success: true,
       processId: resumed.processId,
+      detached: resumed.detached === true,
       startIndex,
       startPromptNumber: startIndex + 1
     };
@@ -10891,16 +11007,67 @@ async function injectToChat(
       }
     }
 
-    function normalizeDomText(value) {
+        function normalizeDomText(value) {
       return compactText(typeof value === 'string' ? value : '').toLowerCase();
+    }
+
+    function isElementVisibleForInteraction(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const rect = element.getBoundingClientRect();
+      if (!rect || rect.width < 1 || rect.height < 1) return false;
+      const style = window.getComputedStyle(element);
+      if (!style) return false;
+      if (style.display === 'none') return false;
+      if (style.visibility === 'hidden') return false;
+      if (Number.parseFloat(style.opacity || '1') === 0) return false;
+      if (style.pointerEvents === 'none') return false;
+      if (element.closest('[aria-hidden="true"]')) return false;
+      return true;
+    }
+
+    function getElementMatchText(element) {
+      if (!(element instanceof HTMLElement)) return '';
+      const parts = [
+        element.innerText || '',
+        element.textContent || '',
+        element.getAttribute('aria-label') || '',
+        element.getAttribute('title') || '',
+        element.getAttribute('data-value') || '',
+        element.getAttribute('value') || ''
+      ];
+      return normalizeDomText(parts.join(' '));
+    }
+
+    function containsWord(text, word) {
+      const normalizedText = normalizeDomText(text);
+      const normalizedWord = normalizeDomText(word);
+      if (!normalizedText || !normalizedWord) return false;
+      const escaped = normalizedWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+      const regex = new RegExp(`\\b${escaped}\\b`, 'i');
+      return regex.test(normalizedText);
     }
 
     function getThinkingEffortKeywords(effort) {
       if (effort === 'light') return ['light', 'lekki'];
       if (effort === 'standard') return ['standard'];
       if (effort === 'extended') return ['extended', 'rozszerzony'];
-      if (effort === 'heavy') return ['heavy', 'ciezki', 'ciężki'];
+      if (effort === 'heavy') return ['heavy', 'ciezki'];
       return [];
+    }
+
+    function hasThinkingContextToken(text) {
+      const normalizedText = normalizeDomText(text);
+      if (!normalizedText) return false;
+      return (
+        normalizedText.includes('thinking effort')
+        || normalizedText.includes('heavy thinking')
+        || normalizedText.includes('extended thinking')
+        || normalizedText.includes('standard thinking')
+        || normalizedText.includes('light thinking')
+        || normalizedText.includes('thinking')
+        || normalizedText.includes('myslen')
+        || normalizedText.includes('wysilek')
+      );
     }
 
     function matchesThinkingEffortLabel(text, effort) {
@@ -10911,6 +11078,87 @@ async function injectToChat(
       return keywords.some((keyword) => normalizedText.includes(keyword));
     }
 
+    function isThinkingEffortMenuLabel(text) {
+      return (
+        matchesThinkingEffortLabel(text, 'light')
+        || matchesThinkingEffortLabel(text, 'standard')
+        || matchesThinkingEffortLabel(text, 'extended')
+        || matchesThinkingEffortLabel(text, 'heavy')
+      );
+    }
+
+    async function activateElement(element) {
+      if (!(element instanceof HTMLElement) || !isElementVisibleForInteraction(element)) return false;
+      try {
+        element.scrollIntoView({ block: 'center', inline: 'center' });
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        element.focus({ preventScroll: true });
+      } catch (_) {
+        // Best effort only.
+      }
+
+      const rect = element.getBoundingClientRect();
+      const clientX = Math.round(rect.left + rect.width / 2);
+      const clientY = Math.round(rect.top + rect.height / 2);
+      const pointerInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX,
+        clientY,
+        pointerType: 'mouse'
+      };
+      const mouseInit = {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+        clientX,
+        clientY,
+        button: 0
+      };
+
+      try {
+        if (typeof PointerEvent === 'function') {
+          element.dispatchEvent(new PointerEvent('pointerdown', pointerInit));
+        }
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        element.dispatchEvent(new MouseEvent('mousedown', mouseInit));
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        if (typeof PointerEvent === 'function') {
+          element.dispatchEvent(new PointerEvent('pointerup', pointerInit));
+        }
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        element.dispatchEvent(new MouseEvent('mouseup', mouseInit));
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        element.dispatchEvent(new MouseEvent('click', mouseInit));
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        element.click();
+      } catch (_) {
+        // Best effort only.
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 90));
+      return true;
+    }
+
     function getThinkingPillCandidates() {
       const selector = [
         'button.__composer-pill[aria-haspopup="menu"]',
@@ -10918,86 +11166,238 @@ async function injectToChat(
         'button[aria-haspopup="menu"][class*="composer-pill"]'
       ].join(', ');
       const candidates = Array.from(document.querySelectorAll(selector));
-      return candidates.filter((button) => {
-        if (!(button instanceof HTMLElement)) return false;
-        return button.getClientRects().length > 0;
-      });
+      return candidates.filter((button) => isElementVisibleForInteraction(button));
     }
 
     function findThinkingEffortPillButton(targetEffort = '') {
       const candidates = getThinkingPillCandidates();
       if (!candidates.length) return null;
 
-      let fallback = null;
+      let best = null;
+      let bestScore = -1;
       for (const button of candidates) {
-        const text = normalizeDomText(button.innerText || button.textContent || '');
-        const hasThinkingLabel = text.includes('thinking') || text.includes('myslen') || text.includes('myślen');
-        const hasEffortLabel = (
-          matchesThinkingEffortLabel(text, 'light')
-          || matchesThinkingEffortLabel(text, 'standard')
-          || matchesThinkingEffortLabel(text, 'extended')
-          || matchesThinkingEffortLabel(text, 'heavy')
-        );
+        const text = getElementMatchText(button);
+        const className = normalizeDomText(button.className || '');
+        const id = normalizeDomText(button.id || '');
+        let score = 0;
 
-        if (targetEffort && matchesThinkingEffortLabel(text, targetEffort)) {
-          return button;
-        }
-        if (!fallback && (hasThinkingLabel || hasEffortLabel)) {
-          fallback = button;
+        if (hasThinkingContextToken(text)) score += 120;
+        if (isThinkingEffortMenuLabel(text)) score += 80;
+        if (targetEffort && matchesThinkingEffortLabel(text, targetEffort)) score += 180;
+        if (className.includes('__composer-pill')) score += 30;
+        if (id.startsWith('radix-')) score += 8;
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = button;
         }
       }
 
-      return fallback || candidates[0] || null;
+      if (best) return best;
+      return candidates[0] || null;
     }
 
-    function getThinkingEffortMenuItems() {
-      const items = Array.from(
-        document.querySelectorAll('[role="menuitemradio"], [role="menu"] [data-state]')
-      );
-      return items.filter((item) => {
+    function isLikelyComposerButton(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const className = normalizeDomText(element.className || '');
+      if (className.includes('composer-pill')) return true;
+      if (element.closest('form')) return true;
+      if (element.closest('[data-testid*="composer"]')) return true;
+      if (element.closest('[id*="composer"]')) return true;
+      return false;
+    }
+
+    function getModelSwitcherCandidates() {
+      const candidates = Array.from(document.querySelectorAll('button[aria-haspopup="menu"]'));
+      return candidates.filter((button) => {
+        if (!(button instanceof HTMLElement)) return false;
+        if (!isElementVisibleForInteraction(button)) return false;
+        if (isLikelyComposerButton(button)) return false;
+        return true;
+      });
+    }
+
+    function getVisibleModelModeMenuItems() {
+      const all = Array.from(document.querySelectorAll('[role="menuitemradio"], [role="menuitem"]'));
+      return all.filter((item) => {
         if (!(item instanceof HTMLElement)) return false;
-        const role = String(item.getAttribute('role') || '').toLowerCase();
-        if (role === 'menuitemradio') return true;
-        const text = normalizeDomText(item.innerText || item.textContent || '');
+        if (!isElementVisibleForInteraction(item)) return false;
+        const text = getElementMatchText(item);
         if (!text) return false;
         return (
-          matchesThinkingEffortLabel(text, 'light')
-          || matchesThinkingEffortLabel(text, 'standard')
-          || matchesThinkingEffortLabel(text, 'extended')
-          || matchesThinkingEffortLabel(text, 'heavy')
+          containsWord(text, 'auto')
+          || containsWord(text, 'instant')
+          || containsWord(text, 'thinking')
+          || containsWord(text, 'pro')
         );
       });
     }
 
-    function findThinkingEffortMenuItem(targetEffort) {
-      if (!targetEffort) return null;
-      const items = getThinkingEffortMenuItems();
+    function findModelSwitcherButton() {
+      const candidates = getModelSwitcherCandidates();
+      if (!candidates.length) return null;
+
+      let best = null;
+      let bestScore = -1;
+      for (const button of candidates) {
+        const text = getElementMatchText(button);
+        const className = normalizeDomText(button.className || '');
+        let score = 0;
+
+        if (text.includes('chatgpt')) score += 180;
+        if (text.includes('gpt')) score += 120;
+        if (containsWord(text, 'thinking') || containsWord(text, 'instant') || containsWord(text, 'auto') || containsWord(text, 'pro')) score += 90;
+        if (containsWord(text, 'model')) score += 50;
+        if (button.closest('header') || button.closest('nav')) score += 30;
+        if (className.includes('model')) score += 25;
+
+        if (score > bestScore) {
+          bestScore = score;
+          best = button;
+        }
+      }
+
+      return best || candidates[0] || null;
+    }
+
+    function isMenuItemChecked(menuItem) {
+      if (!(menuItem instanceof HTMLElement)) return false;
+      if (String(menuItem.getAttribute('aria-checked') || '').toLowerCase() === 'true') return true;
+      if (String(menuItem.getAttribute('data-state') || '').toLowerCase() === 'checked') return true;
+      const checkedChild = menuItem.querySelector('[data-state="checked"]');
+      return !!checkedChild;
+    }
+
+    function findThinkingModeMenuItem() {
+      const items = getVisibleModelModeMenuItems();
+      if (!items.length) return null;
+
+      let exact = null;
+      let fallback = null;
       for (const item of items) {
-        const text = normalizeDomText(item.innerText || item.textContent || '');
-        if (matchesThinkingEffortLabel(text, targetEffort)) {
+        const text = getElementMatchText(item);
+        const normalized = ` ${text} `;
+        if (normalized.includes(' thinking ')) {
+          if (isMenuItemChecked(item)) {
+            return item;
+          }
+          exact = exact || item;
+        } else if (!fallback && text.includes('thinking')) {
+          fallback = item;
+        }
+      }
+      return exact || fallback;
+    }
+
+    async function openModelModeMenu(maxWaitMs = 3200) {
+      const startedAt = Date.now();
+      while (Date.now() - startedAt < maxWaitMs) {
+        const existingItems = getVisibleModelModeMenuItems();
+        if (existingItems.length > 0) {
+          return true;
+        }
+
+        const switcher = findModelSwitcherButton();
+        if (switcher) {
+          await activateElement(switcher);
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 180));
+        if (getVisibleModelModeMenuItems().length > 0) {
+          return true;
+        }
+      }
+      return false;
+    }
+
+    async function ensureThinkingModeReadyForEffort(targetEffort = '', maxWaitMs = 9000) {
+      const effort = normalizeThinkingEffortLocal(targetEffort);
+      const startedAt = Date.now();
+      let attempts = 0;
+
+      while (Date.now() - startedAt < maxWaitMs) {
+        attempts += 1;
+        if (findThinkingEffortPillButton(effort)) {
+          return { success: true, attempts };
+        }
+
+        const modelMenuOpened = await openModelModeMenu(3200);
+        if (!modelMenuOpened) {
+          await new Promise((resolve) => setTimeout(resolve, 260));
+          continue;
+        }
+
+        const thinkingModeItem = findThinkingModeMenuItem();
+        if (thinkingModeItem && !isMenuItemChecked(thinkingModeItem)) {
+          await activateElement(thinkingModeItem);
+          await new Promise((resolve) => setTimeout(resolve, 260));
+        }
+
+        closeThinkingEffortMenuBestEffort();
+        await new Promise((resolve) => setTimeout(resolve, 260));
+
+        if (findThinkingEffortPillButton(effort)) {
+          return { success: true, attempts };
+        }
+      }
+
+      return { success: false, attempts };
+    }
+
+    function getVisibleThinkingEffortMenuItems() {
+      const all = Array.from(document.querySelectorAll('[role="menuitemradio"]'));
+      return all.filter((item) => {
+        if (!(item instanceof HTMLElement)) return false;
+        if (!isElementVisibleForInteraction(item)) return false;
+        const text = getElementMatchText(item);
+        return isThinkingEffortMenuLabel(text);
+      });
+    }
+
+    function findThinkingEffortMenuItem(targetEffort) {
+      const effort = normalizeThinkingEffortLocal(targetEffort);
+      if (!effort) return null;
+
+      const visibleItems = getVisibleThinkingEffortMenuItems();
+      for (const item of visibleItems) {
+        const text = getElementMatchText(item);
+        if (matchesThinkingEffortLabel(text, effort)) {
           return item;
+        }
+      }
+
+      const labelCandidates = Array.from(
+        document.querySelectorAll('[role="menu"] .truncate, [role="menu"] [data-state], [role="menu"] div')
+      ).filter((node) => node instanceof HTMLElement && isElementVisibleForInteraction(node));
+      for (const labelNode of labelCandidates) {
+        const text = getElementMatchText(labelNode);
+        if (!matchesThinkingEffortLabel(text, effort)) continue;
+        const container = labelNode.closest('[role="menuitemradio"]');
+        if (container && isElementVisibleForInteraction(container)) {
+          return container;
         }
       }
       return null;
     }
 
     function isThinkingEffortSelected(targetEffort) {
-      if (!targetEffort) return false;
+      const effort = normalizeThinkingEffortLocal(targetEffort);
+      if (!effort) return false;
 
-      const checkedItems = getThinkingEffortMenuItems().filter(
-        (item) => String(item.getAttribute('aria-checked') || '').toLowerCase() === 'true'
-      );
-      for (const item of checkedItems) {
-        const text = normalizeDomText(item.innerText || item.textContent || '');
-        if (matchesThinkingEffortLabel(text, targetEffort)) {
+      const visibleItems = getVisibleThinkingEffortMenuItems();
+      for (const item of visibleItems) {
+        const checked = String(item.getAttribute('aria-checked') || '').toLowerCase() === 'true';
+        if (!checked) continue;
+        const text = getElementMatchText(item);
+        if (matchesThinkingEffortLabel(text, effort)) {
           return true;
         }
       }
 
-      const pillButton = findThinkingEffortPillButton(targetEffort);
+      const pillButton = findThinkingEffortPillButton(effort);
       if (!pillButton) return false;
-      const buttonText = normalizeDomText(pillButton.innerText || pillButton.textContent || '');
-      return matchesThinkingEffortLabel(buttonText, targetEffort);
+      const buttonText = getElementMatchText(pillButton);
+      return matchesThinkingEffortLabel(buttonText, effort) && hasThinkingContextToken(buttonText);
     }
 
     function closeThinkingEffortMenuBestEffort() {
@@ -11014,27 +11414,32 @@ async function injectToChat(
       }
     }
 
-    async function openThinkingEffortMenu(targetEffort, maxWaitMs = 2800) {
+    async function openThinkingEffortMenu(targetEffort, maxWaitMs = 3200) {
+      const effort = normalizeThinkingEffortLocal(targetEffort);
       const startedAt = Date.now();
+
       while (Date.now() - startedAt < maxWaitMs) {
-        if (getThinkingEffortMenuItems().length > 0) {
+        const existingItems = getVisibleThinkingEffortMenuItems();
+        if (existingItems.length > 0) {
           return true;
         }
 
-        const button = findThinkingEffortPillButton(targetEffort);
+        let button = findThinkingEffortPillButton(effort);
+        if (!button) {
+          await ensureThinkingModeReadyForEffort(effort, 3500);
+          button = findThinkingEffortPillButton(effort);
+        }
         if (button) {
-          try {
-            button.click();
-          } catch (_) {
-            // Ignore click errors and keep retrying.
-          }
+          await activateElement(button);
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 160));
-        if (getThinkingEffortMenuItems().length > 0) {
+        await new Promise((resolve) => setTimeout(resolve, 170));
+        const postClickItems = getVisibleThinkingEffortMenuItems();
+        if (postClickItems.length > 0) {
           return true;
         }
       }
+
       return false;
     }
 
@@ -11045,19 +11450,30 @@ async function injectToChat(
       }
 
       const maxAttempts = Number.isInteger(options?.maxAttempts) && options.maxAttempts > 0
-        ? Math.min(options.maxAttempts, 6)
-        : 4;
+        ? Math.min(options.maxAttempts, 7)
+        : 5;
       const retryDelayMs = Number.isInteger(options?.retryDelayMs) && options.retryDelayMs >= 0
         ? Math.min(options.retryDelayMs, 3000)
-        : 280;
+        : 320;
+
+      const thinkingModeReady = await ensureThinkingModeReadyForEffort(effort, 9000);
+      if (!thinkingModeReady?.success) {
+        console.warn('[thinking-effort] thinking mode not ready for effort switch', {
+          effort,
+          attempts: thinkingModeReady?.attempts || 0
+        });
+      }
 
       for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        console.log('[thinking-effort] ensure attempt', { effort, attempt, maxAttempts });
         if (isThinkingEffortSelected(effort)) {
+          console.log('[thinking-effort] already selected', { effort, attempt });
           return { success: true, effort, attempt, alreadySelected: true };
         }
 
-        const menuOpened = await openThinkingEffortMenu(effort, 3200);
+        const menuOpened = await openThinkingEffortMenu(effort, 3600);
         if (!menuOpened) {
+          console.warn('[thinking-effort] menu open failed', { effort, attempt, maxAttempts });
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           continue;
         }
@@ -11069,22 +11485,27 @@ async function injectToChat(
 
         const targetItem = findThinkingEffortMenuItem(effort);
         if (!targetItem) {
+          console.warn('[thinking-effort] target menu item not found', {
+            effort,
+            attempt,
+            visibleItems: getVisibleThinkingEffortMenuItems().map((item) => getElementMatchText(item)).slice(0, 8)
+          });
           closeThinkingEffortMenuBestEffort();
           await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
           continue;
         }
 
-        try {
-          targetItem.click();
-        } catch (_) {
-          // Keep retrying in next attempt.
-        }
-        await new Promise((resolve) => setTimeout(resolve, 240));
+        await activateElement(targetItem);
+        await new Promise((resolve) => setTimeout(resolve, 260));
 
         const selected = isThinkingEffortSelected(effort);
         closeThinkingEffortMenuBestEffort();
         if (selected) {
-          return { success: true, effort, attempt, changed: true };
+          await new Promise((resolve) => setTimeout(resolve, 120));
+          if (isThinkingEffortSelected(effort)) {
+            console.log('[thinking-effort] selected successfully', { effort, attempt });
+            return { success: true, effort, attempt, changed: true };
+          }
         }
 
         await new Promise((resolve) => setTimeout(resolve, retryDelayMs));
@@ -11121,8 +11542,8 @@ async function injectToChat(
       });
 
       const result = await ensureComposerThinkingEffort(requestedComposerThinkingEffort, {
-        maxAttempts: 4,
-        retryDelayMs: 320
+        maxAttempts: 5,
+        retryDelayMs: 360
       });
 
       if (result?.success) {
@@ -11149,10 +11570,6 @@ async function injectToChat(
       };
     }
 
-
-
-    
-  // Funkcja generująca losowe opóźnienie dla anti-automation
   function getRandomDelay() {
     const minDelay = 3000;  // 3 sekundy
     const maxDelay = 15000; // 15 sekund
@@ -13542,6 +13959,7 @@ function waitForTabComplete(tabId) {
     });
   });
 }
+
 
 
 
