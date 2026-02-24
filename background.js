@@ -78,6 +78,13 @@ const AUTO_RESTORE_WINDOWS = {
   maxIssueItems: 12
 };
 const RESUME_COMPOSER_THINKING_EFFORT_STORAGE_KEY = 'resume_composer_thinking_effort';
+const RELOAD_RESUME_MONITOR_STORAGE_KEY = 'reload_resume_monitor_state';
+const RELOAD_RESUME_MONITOR_MAX_EVENTS = 250;
+const RELOAD_RESUME_MONITOR_MAX_ROWS = 350;
+const PROBLEM_LOG_STORAGE_KEY = 'problem_log_entries';
+const PROBLEM_LOG_MAX_ITEMS = 400;
+const PROBLEM_LOG_BURST_DEDUPE_MS = 7000;
+const PROBLEM_LOG_MAX_TEXT_LENGTH = 600;
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
@@ -102,6 +109,11 @@ let watchlistDispatchFlushPending = false;
 let watchlistDispatchFlushPendingReason = '';
 let watchlistDispatchCredentialsCache = null;
 let autoRestoreWindowsInProgress = false;
+let reloadResumeMonitorState = null;
+let reloadResumeMonitorReady = null;
+let problemLogEntries = [];
+let problemLogReady = null;
+const problemLogLastSignatureByRunId = new Map();
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -354,6 +366,12 @@ function normalizeProcessRecord(record) {
       normalized.stageIndex = normalized.totalPrompts - 1;
     }
   }
+  if (Number.isInteger(normalized.stageIndex) && normalized.stageIndex >= 0) {
+    const promptFromStage = normalized.stageIndex + 1;
+    if (!Number.isInteger(normalized.currentPrompt) || normalized.currentPrompt < promptFromStage) {
+      normalized.currentPrompt = promptFromStage;
+    }
+  }
   if (normalized.totalPrompts > 0 && normalized.currentPrompt === 0 && Number.isInteger(normalized.stageIndex)) {
     normalized.currentPrompt = Math.min(normalized.stageIndex + 1, normalized.totalPrompts);
   }
@@ -362,6 +380,15 @@ function normalizeProcessRecord(record) {
   }
   if (normalized.currentPrompt < 0) {
     normalized.currentPrompt = 0;
+  }
+  if (Number.isInteger(normalized.currentPrompt) && normalized.currentPrompt > 0) {
+    const derivedStageIndex = normalized.currentPrompt - 1;
+    if (!Number.isInteger(normalized.stageIndex) || normalized.stageIndex < derivedStageIndex) {
+      normalized.stageIndex = derivedStageIndex;
+    }
+    if (normalized.totalPrompts > 0 && normalized.stageIndex >= normalized.totalPrompts) {
+      normalized.stageIndex = normalized.totalPrompts - 1;
+    }
   }
   if (normalized.startedAt > normalized.timestamp) {
     normalized.startedAt = normalized.timestamp;
@@ -466,6 +493,660 @@ async function broadcastProcessUpdate() {
   return processes;
 }
 
+function createReloadResumeMonitorSessionId(prefix = 'reload-resume') {
+  const normalizedPrefix = typeof prefix === 'string' && prefix.trim()
+    ? prefix.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-')
+    : 'reload-resume';
+  const safePrefix = normalizedPrefix || 'reload-resume';
+  return `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function toNonNegativeInt(value, fallback = 0) {
+  if (!Number.isFinite(value)) return fallback;
+  const normalized = Math.trunc(value);
+  if (normalized < 0) return fallback;
+  return normalized;
+}
+
+function normalizeReloadResumeSummary(rawSummary) {
+  const source = rawSummary && typeof rawSummary === 'object' ? rawSummary : {};
+  return {
+    started: toNonNegativeInt(source.started, 0),
+    detect_failed: toNonNegativeInt(source.detect_failed, 0),
+    reload_failed: toNonNegativeInt(source.reload_failed, 0),
+    skipped_non_company: toNonNegativeInt(source.skipped_non_company, 0),
+    skipped_outside_invest: toNonNegativeInt(source.skipped_outside_invest, 0),
+    final_stage_completed: toNonNegativeInt(source.final_stage_completed, 0),
+    start_failed: toNonNegativeInt(source.start_failed, 0),
+    reload_ok: toNonNegativeInt(source.reload_ok, 0),
+    reload_total: toNonNegativeInt(source.reload_total, 0),
+    prompt_blocks: toNonNegativeInt(source.prompt_blocks, 0),
+    response_blocks: toNonNegativeInt(source.response_blocks, 0),
+    detected_prompts: toNonNegativeInt(source.detected_prompts, 0)
+  };
+}
+
+function sanitizeReloadResumeMonitorRow(rawRow) {
+  if (!rawRow || typeof rawRow !== 'object') return null;
+  return {
+    key: typeof rawRow.key === 'string' ? rawRow.key : '',
+    runId: typeof rawRow.runId === 'string' ? rawRow.runId : '',
+    title: typeof rawRow.title === 'string' ? rawRow.title : '',
+    analysisType: typeof rawRow.analysisType === 'string' ? rawRow.analysisType : '',
+    tabId: Number.isInteger(rawRow.tabId) ? rawRow.tabId : null,
+    windowId: Number.isInteger(rawRow.windowId) ? rawRow.windowId : null,
+    progressPromptNumber: Number.isInteger(rawRow.progressPromptNumber) ? rawRow.progressPromptNumber : null,
+    totalPrompts: Number.isInteger(rawRow.totalPrompts) ? rawRow.totalPrompts : null,
+    progressStageName: typeof rawRow.progressStageName === 'string' ? rawRow.progressStageName : '',
+    chatPromptNumber: Number.isInteger(rawRow.chatPromptNumber) ? rawRow.chatPromptNumber : null,
+    chatPromptSource: typeof rawRow.chatPromptSource === 'string' ? rawRow.chatPromptSource : '',
+    chatPromptMismatch: rawRow.chatPromptMismatch === true,
+    resolvedPromptNumber: Number.isInteger(rawRow.resolvedPromptNumber) ? rawRow.resolvedPromptNumber : null,
+    resolvedPromptSource: typeof rawRow.resolvedPromptSource === 'string' ? rawRow.resolvedPromptSource : '',
+    resolvedPromptMismatch: rawRow.resolvedPromptMismatch === true,
+    detectedPromptNumber: Number.isInteger(rawRow.detectedPromptNumber) ? rawRow.detectedPromptNumber : null,
+    detectedStageName: typeof rawRow.detectedStageName === 'string' ? rawRow.detectedStageName : '',
+    detectedMethod: typeof rawRow.detectedMethod === 'string' ? rawRow.detectedMethod : '',
+    nextStartIndex: Number.isInteger(rawRow.nextStartIndex) ? rawRow.nextStartIndex : null,
+    action: typeof rawRow.action === 'string' ? rawRow.action : '',
+    reason: typeof rawRow.reason === 'string' ? rawRow.reason : '',
+    attempts: toNonNegativeInt(rawRow.attempts, 0),
+    reloadMethod: typeof rawRow.reloadMethod === 'string' ? rawRow.reloadMethod : '',
+    stageConsistency: typeof rawRow.stageConsistency === 'string' ? rawRow.stageConsistency : '',
+    stageDelta: Number.isInteger(rawRow.stageDelta) ? rawRow.stageDelta : null,
+    userMessageCount: Number.isInteger(rawRow.userMessageCount) ? rawRow.userMessageCount : null,
+    assistantMessageCount: Number.isInteger(rawRow.assistantMessageCount) ? rawRow.assistantMessageCount : null,
+    responseBlockCount: Number.isInteger(rawRow.responseBlockCount) ? rawRow.responseBlockCount : null,
+    eligibleForReload: rawRow.eligibleForReload === true
+  };
+}
+
+function sanitizeReloadResumeMonitorStage(rawStage) {
+  if (!rawStage || typeof rawStage !== 'object') return null;
+  return {
+    runId: typeof rawStage.runId === 'string' ? rawStage.runId : '',
+    title: typeof rawStage.title === 'string' ? rawStage.title : '',
+    status: typeof rawStage.status === 'string' ? rawStage.status : '',
+    currentPrompt: Number.isInteger(rawStage.currentPrompt) ? rawStage.currentPrompt : null,
+    totalPrompts: Number.isInteger(rawStage.totalPrompts) ? rawStage.totalPrompts : null,
+    stageIndex: Number.isInteger(rawStage.stageIndex) ? rawStage.stageIndex : null,
+    stageName: typeof rawStage.stageName === 'string' ? rawStage.stageName : '',
+    tabId: Number.isInteger(rawStage.tabId) ? rawStage.tabId : null,
+    windowId: Number.isInteger(rawStage.windowId) ? rawStage.windowId : null
+  };
+}
+
+function sanitizeReloadResumeMonitorEvent(rawEvent) {
+  const source = rawEvent && typeof rawEvent === 'object' ? rawEvent : {};
+  const ts = Number.isInteger(source.ts) && source.ts > 0 ? source.ts : Date.now();
+  const level = source.level === 'warn' || source.level === 'error' ? source.level : 'info';
+  const message = typeof source.message === 'string' ? source.message.trim() : '';
+  let details = '';
+  if (typeof source.details === 'string') {
+    details = source.details.trim();
+  } else if (source.details && typeof source.details === 'object') {
+    try {
+      details = JSON.stringify(source.details);
+    } catch (error) {
+      details = '';
+    }
+  }
+  if (details.length > 420) details = `${details.slice(0, 417)}...`;
+  return {
+    id: typeof source.id === 'string' && source.id.trim() ? source.id.trim() : `evt-${ts}-${Math.random().toString(36).slice(2, 7)}`,
+    ts,
+    level,
+    code: typeof source.code === 'string' ? source.code.trim() : '',
+    message: message || (typeof source.code === 'string' ? source.code.trim() : 'event'),
+    details
+  };
+}
+
+function normalizeReloadResumeMonitorCounts(rawCounts) {
+  const source = rawCounts && typeof rawCounts === 'object' ? rawCounts : {};
+  const normalized = {};
+  Object.entries(source).forEach(([key, value]) => {
+    if (!key) return;
+    if (Number.isFinite(value)) {
+      normalized[key] = toNonNegativeInt(value, 0);
+    }
+  });
+  return normalized;
+}
+
+function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
+  const sourceRows = Array.isArray(rows) ? rows : [];
+  const actionCounts = sourceRows.reduce((acc, row) => {
+    const action = typeof row?.action === 'string' && row.action ? row.action : 'unknown';
+    acc[action] = (acc[action] || 0) + 1;
+    return acc;
+  }, {});
+  const promptBlocks = sourceRows.reduce((sum, row) => (
+    sum + (Number.isInteger(row?.userMessageCount) ? row.userMessageCount : 0)
+  ), 0);
+  const responseBlocks = sourceRows.reduce((sum, row) => (
+    sum + (
+      Number.isInteger(row?.responseBlockCount)
+        ? row.responseBlockCount
+        : (Number.isInteger(row?.assistantMessageCount) ? row.assistantMessageCount : 0)
+    )
+  ), 0);
+  const detectedPrompts = sourceRows.reduce((sum, row) => (
+    sum + (Number.isInteger(row?.detectedPromptNumber) ? 1 : 0)
+  ), 0);
+  const reloadOk = sourceRows.filter((row) => typeof row?.reloadMethod === 'string' && row.reloadMethod.trim()).length;
+  const reloadTotal = Number.isInteger(reloadTotalHint)
+    ? reloadTotalHint
+    : sourceRows.filter((row) => row?.eligibleForReload === true).length;
+
+  return normalizeReloadResumeSummary({
+    started: actionCounts.started || 0,
+    detect_failed: actionCounts.detect_failed || 0,
+    reload_failed: actionCounts.reload_failed || 0,
+    skipped_non_company: actionCounts.skipped_non_company || 0,
+    skipped_outside_invest: actionCounts.skipped_outside_invest || 0,
+    final_stage_completed: actionCounts.final_stage_already_sent || 0,
+    start_failed: actionCounts.start_failed || 0,
+    reload_ok: reloadOk,
+    reload_total: reloadTotal,
+    prompt_blocks: promptBlocks,
+    response_blocks: responseBlocks,
+    detected_prompts: detectedPrompts
+  });
+}
+
+function verifyReloadResumeSummary(summary, rows, reloadTotalHint = null) {
+  const expected = normalizeReloadResumeSummary(summary);
+  const calculated = calculateReloadResumeSummaryFromRows(rows, reloadTotalHint);
+  const mismatchKeys = Object.keys(expected).filter((key) => expected[key] !== calculated[key]);
+  return {
+    ok: mismatchKeys.length === 0,
+    mismatches: mismatchKeys.map((key) => ({
+      key,
+      expected: expected[key],
+      calculated: calculated[key]
+    })),
+    expected,
+    calculated
+  };
+}
+
+function sanitizeReloadResumeMonitorState(rawState) {
+  const source = rawState && typeof rawState === 'object' ? rawState : {};
+  const status = typeof source.status === 'string' ? source.status.trim().toLowerCase() : '';
+  const normalizedStatus = (
+    status === 'running'
+    || status === 'completed'
+    || status === 'failed'
+    || status === 'idle'
+  ) ? status : 'idle';
+  const rows = (Array.isArray(source.rows) ? source.rows : [])
+    .map(sanitizeReloadResumeMonitorRow)
+    .filter(Boolean)
+    .slice(0, RELOAD_RESUME_MONITOR_MAX_ROWS);
+  const stageSnapshot = (Array.isArray(source.stageSnapshot) ? source.stageSnapshot : [])
+    .map(sanitizeReloadResumeMonitorStage)
+    .filter(Boolean)
+    .slice(0, RELOAD_RESUME_MONITOR_MAX_ROWS);
+  const events = (Array.isArray(source.events) ? source.events : [])
+    .map(sanitizeReloadResumeMonitorEvent)
+    .slice(-RELOAD_RESUME_MONITOR_MAX_EVENTS);
+  const summaryCheck = source.summaryCheck && typeof source.summaryCheck === 'object'
+    ? {
+      ok: source.summaryCheck.ok !== false,
+      mismatches: Array.isArray(source.summaryCheck.mismatches)
+        ? source.summaryCheck.mismatches
+            .map((item) => ({
+              key: typeof item?.key === 'string' ? item.key : '',
+              expected: Number.isFinite(item?.expected) ? Math.trunc(item.expected) : 0,
+              calculated: Number.isFinite(item?.calculated) ? Math.trunc(item.calculated) : 0
+            }))
+            .filter((item) => item.key)
+        : [],
+      expected: normalizeReloadResumeSummary(source.summaryCheck.expected),
+      calculated: normalizeReloadResumeSummary(source.summaryCheck.calculated)
+    }
+    : null;
+
+  return {
+    sessionId: typeof source.sessionId === 'string' ? source.sessionId : '',
+    status: normalizedStatus,
+    phase: typeof source.phase === 'string' ? source.phase : '',
+    origin: typeof source.origin === 'string' ? source.origin : '',
+    scope: typeof source.scope === 'string' ? source.scope : '',
+    composerThinkingEffort: normalizeComposerThinkingEffort(source.composerThinkingEffort),
+    forceRepeatLastPrompt: source.forceRepeatLastPrompt === true,
+    startedAt: Number.isInteger(source.startedAt) ? source.startedAt : null,
+    updatedAt: Number.isInteger(source.updatedAt) ? source.updatedAt : Date.now(),
+    finishedAt: Number.isInteger(source.finishedAt) ? source.finishedAt : null,
+    passCount: toNonNegativeInt(source.passCount, 0),
+    pendingCount: toNonNegativeInt(source.pendingCount, 0),
+    counts: normalizeReloadResumeMonitorCounts(source.counts),
+    summary: normalizeReloadResumeSummary(source.summary),
+    summaryCheck,
+    stageSnapshot,
+    rows,
+    events,
+    error: typeof source.error === 'string' ? source.error : ''
+  };
+}
+
+function cloneReloadResumeMonitorState(state) {
+  if (!state || typeof state !== 'object') return null;
+  try {
+    return structuredClone(state);
+  } catch (error) {
+    return JSON.parse(JSON.stringify(state));
+  }
+}
+
+async function ensureReloadResumeMonitorReady() {
+  if (!reloadResumeMonitorReady) {
+    reloadResumeMonitorReady = (async () => {
+      try {
+        const stored = await chrome.storage.local.get([RELOAD_RESUME_MONITOR_STORAGE_KEY]);
+        const existing = stored?.[RELOAD_RESUME_MONITOR_STORAGE_KEY];
+        if (existing && typeof existing === 'object') {
+          reloadResumeMonitorState = sanitizeReloadResumeMonitorState(existing);
+          return;
+        }
+      } catch (error) {
+        console.warn('[reload-monitor] Failed to load state:', error?.message || error);
+      }
+      reloadResumeMonitorState = sanitizeReloadResumeMonitorState({
+        sessionId: '',
+        status: 'idle',
+        phase: 'idle',
+        startedAt: null,
+        updatedAt: Date.now(),
+        finishedAt: null,
+        counts: {},
+        summary: normalizeReloadResumeSummary({}),
+        summaryCheck: null,
+        stageSnapshot: [],
+        rows: [],
+        events: [],
+        error: ''
+      });
+    })();
+  }
+  await reloadResumeMonitorReady;
+  return reloadResumeMonitorState;
+}
+
+async function setReloadResumeMonitorState(nextState) {
+  await ensureReloadResumeMonitorReady();
+  const normalized = sanitizeReloadResumeMonitorState(nextState);
+  normalized.updatedAt = Date.now();
+  reloadResumeMonitorState = normalized;
+  await chrome.storage.local.set({
+    [RELOAD_RESUME_MONITOR_STORAGE_KEY]: normalized
+  });
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'RELOAD_RESUME_MONITOR_UPDATE',
+      state: normalized
+    });
+  } catch (error) {
+    // Ignore: no live listeners.
+  }
+  return normalized;
+}
+
+async function getReloadResumeMonitorState(sessionId = '') {
+  await ensureReloadResumeMonitorReady();
+  if (!sessionId) {
+    return cloneReloadResumeMonitorState(reloadResumeMonitorState);
+  }
+  if (reloadResumeMonitorState?.sessionId && reloadResumeMonitorState.sessionId !== sessionId) {
+    return null;
+  }
+  return cloneReloadResumeMonitorState(reloadResumeMonitorState);
+}
+
+async function startReloadResumeMonitorSession(payload = {}) {
+  const sessionId = typeof payload.sessionId === 'string' && payload.sessionId.trim()
+    ? payload.sessionId.trim()
+    : createReloadResumeMonitorSessionId('reload-resume');
+  const initialEvent = sanitizeReloadResumeMonitorEvent({
+    level: 'info',
+    code: 'session_started',
+    message: 'Reload + resume session started'
+  });
+  return setReloadResumeMonitorState({
+    sessionId,
+    status: 'running',
+    phase: 'init',
+    origin: typeof payload.origin === 'string' ? payload.origin : '',
+    scope: typeof payload.scope === 'string' ? payload.scope : '',
+    composerThinkingEffort: normalizeComposerThinkingEffort(payload.composerThinkingEffort),
+    forceRepeatLastPrompt: payload.forceRepeatLastPrompt === true,
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    finishedAt: null,
+    passCount: 0,
+    pendingCount: 0,
+    counts: normalizeReloadResumeMonitorCounts(payload.counts),
+    summary: normalizeReloadResumeSummary({}),
+    summaryCheck: null,
+    stageSnapshot: [],
+    rows: [],
+    events: [initialEvent],
+    error: ''
+  });
+}
+
+async function appendReloadResumeMonitorEvent(sessionId, rawEvent = {}) {
+  if (!sessionId) return null;
+  const current = await getReloadResumeMonitorState(sessionId);
+  if (!current) return null;
+  const nextEvents = current.events.concat([sanitizeReloadResumeMonitorEvent(rawEvent)]);
+  return setReloadResumeMonitorState({
+    ...current,
+    events: nextEvents.slice(-RELOAD_RESUME_MONITOR_MAX_EVENTS)
+  });
+}
+
+async function updateReloadResumeMonitorSession(sessionId, patch = {}) {
+  if (!sessionId) return null;
+  const current = await getReloadResumeMonitorState(sessionId);
+  if (!current) return null;
+  const next = {
+    ...current,
+    ...(patch && typeof patch === 'object' ? patch : {}),
+    sessionId,
+    counts: normalizeReloadResumeMonitorCounts({
+      ...(current?.counts && typeof current.counts === 'object' ? current.counts : {}),
+      ...(patch?.counts && typeof patch.counts === 'object' ? patch.counts : {})
+    })
+  };
+  if (patch?.summary) {
+    next.summary = normalizeReloadResumeSummary(patch.summary);
+  }
+  if (patch?.summaryCheck && typeof patch.summaryCheck === 'object') {
+    next.summaryCheck = patch.summaryCheck;
+  }
+  return setReloadResumeMonitorState(next);
+}
+
+function trimProblemLogText(value, maxLength = PROBLEM_LOG_MAX_TEXT_LENGTH) {
+  const safeValue = typeof value === 'string' ? value.trim() : '';
+  if (!safeValue) return '';
+  if (!Number.isInteger(maxLength) || maxLength <= 0) return safeValue;
+  if (safeValue.length <= maxLength) return safeValue;
+  return `${safeValue.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function normalizeProblemLogLevel(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'error') return 'error';
+  if (normalized === 'warn' || normalized === 'warning') return 'warn';
+  return 'info';
+}
+
+function buildProblemLogMessage(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  const parts = [];
+  const status = typeof entry.status === 'string' ? entry.status.trim() : '';
+  const reason = typeof entry.reason === 'string' ? entry.reason.trim() : '';
+  const error = typeof entry.error === 'string' ? entry.error.trim() : '';
+  const statusText = typeof entry.statusText === 'string' ? entry.statusText.trim() : '';
+  const stageName = typeof entry.stageName === 'string' ? entry.stageName.trim() : '';
+
+  if (status) parts.push(`status=${status}`);
+  if (reason) parts.push(`reason=${reason}`);
+  if (error) parts.push(`error=${error}`);
+  if (statusText) parts.push(`statusText=${statusText}`);
+
+  const currentPrompt = Number.isInteger(entry.currentPrompt) ? entry.currentPrompt : null;
+  const totalPrompts = Number.isInteger(entry.totalPrompts) ? entry.totalPrompts : null;
+  if (currentPrompt !== null || totalPrompts !== null) {
+    parts.push(`prompt=${currentPrompt ?? '?'}${totalPrompts !== null ? `/${totalPrompts}` : ''}`);
+  }
+  if (stageName) {
+    parts.push(`stage=${stageName}`);
+  }
+
+  const content = parts.join(' | ');
+  return trimProblemLogText(content || 'problem_detected');
+}
+
+function sanitizeProblemLogEntry(rawEntry) {
+  if (!rawEntry || typeof rawEntry !== 'object') return null;
+  const timestamp = Number.isInteger(rawEntry.timestamp) && rawEntry.timestamp > 0
+    ? rawEntry.timestamp
+    : Date.now();
+  const runId = typeof rawEntry.runId === 'string' ? rawEntry.runId.trim() : '';
+  const source = trimProblemLogText(rawEntry.source || 'process', 80) || 'process';
+  const status = trimProblemLogText(rawEntry.status || '', 40);
+  const reason = trimProblemLogText(rawEntry.reason || '', 140);
+  const error = trimProblemLogText(rawEntry.error || '', 200);
+  const statusText = trimProblemLogText(rawEntry.statusText || '', 240);
+  const title = trimProblemLogText(rawEntry.title || '', 160);
+  const analysisType = trimProblemLogText(rawEntry.analysisType || '', 40);
+  const stageName = trimProblemLogText(rawEntry.stageName || '', 120);
+  const message = trimProblemLogText(rawEntry.message || buildProblemLogMessage(rawEntry));
+  const signature = trimProblemLogText(rawEntry.signature || '', 380);
+  const entryId = typeof rawEntry.id === 'string' && rawEntry.id.trim()
+    ? rawEntry.id.trim()
+    : `plog-${timestamp}-${Math.random().toString(36).slice(2, 8)}`;
+
+  return {
+    id: entryId,
+    timestamp,
+    level: normalizeProblemLogLevel(rawEntry.level),
+    source,
+    runId,
+    title,
+    analysisType,
+    status,
+    reason,
+    error,
+    statusText,
+    message: message || 'problem_detected',
+    signature,
+    currentPrompt: Number.isInteger(rawEntry.currentPrompt) ? rawEntry.currentPrompt : null,
+    totalPrompts: Number.isInteger(rawEntry.totalPrompts) ? rawEntry.totalPrompts : null,
+    stageIndex: Number.isInteger(rawEntry.stageIndex) ? rawEntry.stageIndex : null,
+    stageName,
+    tabId: Number.isInteger(rawEntry.tabId) ? rawEntry.tabId : null,
+    windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null
+  };
+}
+
+function normalizeProblemLogEntries(rawEntries) {
+  const normalized = (Array.isArray(rawEntries) ? rawEntries : [])
+    .map(sanitizeProblemLogEntry)
+    .filter(Boolean);
+  if (normalized.length <= PROBLEM_LOG_MAX_ITEMS) return normalized;
+  return normalized.slice(normalized.length - PROBLEM_LOG_MAX_ITEMS);
+}
+
+async function ensureProblemLogReady() {
+  if (!problemLogReady) {
+    problemLogReady = (async () => {
+      try {
+        const stored = await chrome.storage.local.get([PROBLEM_LOG_STORAGE_KEY]);
+        problemLogEntries = normalizeProblemLogEntries(stored?.[PROBLEM_LOG_STORAGE_KEY]);
+      } catch (error) {
+        console.warn('[problem-log] load failed:', error?.message || error);
+        problemLogEntries = [];
+      }
+    })();
+  }
+  await problemLogReady;
+  return problemLogEntries;
+}
+
+async function persistProblemLogEntries() {
+  await chrome.storage.local.set({
+    [PROBLEM_LOG_STORAGE_KEY]: problemLogEntries
+  });
+}
+
+function cloneProblemLogEntries(entries) {
+  try {
+    return structuredClone(Array.isArray(entries) ? entries : []);
+  } catch (error) {
+    return JSON.parse(JSON.stringify(Array.isArray(entries) ? entries : []));
+  }
+}
+
+async function getProblemLogSnapshot(limit = 120) {
+  await ensureProblemLogReady();
+  const safeLimit = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, PROBLEM_LOG_MAX_ITEMS)
+    : 120;
+  const normalized = Array.isArray(problemLogEntries) ? problemLogEntries : [];
+  const sliced = normalized.slice(Math.max(0, normalized.length - safeLimit));
+  return cloneProblemLogEntries(sliced).reverse();
+}
+
+async function clearProblemLogs() {
+  await ensureProblemLogReady();
+  problemLogEntries = [];
+  problemLogLastSignatureByRunId.clear();
+  await persistProblemLogEntries();
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'PROBLEM_LOGS_UPDATED',
+      changed: 'clear'
+    });
+  } catch (error) {
+    // Ignore when no listeners are attached.
+  }
+  return true;
+}
+
+async function appendProblemLog(rawEntry) {
+  const normalized = sanitizeProblemLogEntry(rawEntry);
+  if (!normalized) return null;
+  await ensureProblemLogReady();
+
+  const latest = problemLogEntries.length > 0 ? problemLogEntries[problemLogEntries.length - 1] : null;
+  if (
+    latest
+    && latest.signature
+    && normalized.signature
+    && latest.signature === normalized.signature
+    && Math.abs((normalized.timestamp || 0) - (latest.timestamp || 0)) <= PROBLEM_LOG_BURST_DEDUPE_MS
+  ) {
+    return latest;
+  }
+
+  problemLogEntries.push(normalized);
+  if (problemLogEntries.length > PROBLEM_LOG_MAX_ITEMS) {
+    problemLogEntries = problemLogEntries.slice(problemLogEntries.length - PROBLEM_LOG_MAX_ITEMS);
+  }
+  await persistProblemLogEntries();
+
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'PROBLEM_LOGS_UPDATED',
+      changed: 'append',
+      entry: normalized
+    });
+  } catch (error) {
+    // Ignore when no listeners are attached.
+  }
+
+  return normalized;
+}
+
+function shouldRecordProblemForProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process.status);
+  if (isFailedProcessStatus(status)) return true;
+  if (process.needsAction === true) return true;
+  const reason = typeof process.reason === 'string' ? process.reason.toLowerCase() : '';
+  const error = typeof process.error === 'string' ? process.error.toLowerCase() : '';
+  const statusText = typeof process.statusText === 'string' ? process.statusText.toLowerCase() : '';
+  const markers = ['error', 'fail', 'timeout', 'invalid', 'not_ready', 'needs_action', 'critical'];
+  return markers.some((marker) => reason.includes(marker) || error.includes(marker) || statusText.includes(marker));
+}
+
+function resolveProcessStageSnapshot(process) {
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null;
+  let currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null;
+  let stageIndex = Number.isInteger(process?.stageIndex) ? process.stageIndex : null;
+
+  if (currentPrompt === null && stageIndex !== null && stageIndex >= 0) {
+    currentPrompt = stageIndex + 1;
+  }
+  if (stageIndex === null && currentPrompt !== null && currentPrompt > 0) {
+    stageIndex = currentPrompt - 1;
+  }
+  if (currentPrompt !== null && stageIndex !== null) {
+    const promptFromStage = stageIndex + 1;
+    if (currentPrompt < promptFromStage) currentPrompt = promptFromStage;
+    const stageFromPrompt = currentPrompt - 1;
+    if (stageIndex < stageFromPrompt) stageIndex = stageFromPrompt;
+  }
+  if (totalPrompts !== null && currentPrompt !== null && currentPrompt > totalPrompts) {
+    currentPrompt = totalPrompts;
+  }
+  if (totalPrompts !== null && stageIndex !== null && stageIndex >= totalPrompts) {
+    stageIndex = totalPrompts - 1;
+  }
+
+  const stageName = typeof process?.stageName === 'string' && process.stageName.trim()
+    ? process.stageName.trim()
+    : (currentPrompt !== null ? `Prompt ${currentPrompt}` : '');
+
+  return {
+    currentPrompt,
+    totalPrompts,
+    stageIndex,
+    stageName
+  };
+}
+
+function buildProcessProblemLogEntry(runId, process) {
+  if (!runId || !process || typeof process !== 'object') return null;
+  if (!shouldRecordProblemForProcess(process)) return null;
+
+  const status = normalizeProcessStatus(process.status);
+  const reason = typeof process.reason === 'string' ? process.reason.trim() : '';
+  const error = typeof process.error === 'string' ? process.error.trim() : '';
+  const statusText = typeof process.statusText === 'string' ? process.statusText.trim() : '';
+  const stage = resolveProcessStageSnapshot(process);
+  const signature = [
+    runId,
+    status,
+    process.needsAction ? 'needs_action' : 'no_action',
+    reason,
+    error,
+    Number.isInteger(stage.currentPrompt) ? stage.currentPrompt : '',
+    Number.isInteger(stage.totalPrompts) ? stage.totalPrompts : '',
+    Number.isInteger(stage.stageIndex) ? stage.stageIndex : '',
+    stage.stageName || ''
+  ].join('|');
+
+  const level = isFailedProcessStatus(status)
+    ? 'error'
+    : (process.needsAction ? 'warn' : 'warn');
+
+  return {
+    timestamp: Number.isInteger(process.timestamp) ? process.timestamp : Date.now(),
+    level,
+    source: 'process-monitor',
+    runId,
+    title: process.title || '',
+    analysisType: process.analysisType || '',
+    status,
+    reason,
+    error,
+    statusText,
+    currentPrompt: Number.isInteger(stage.currentPrompt) ? stage.currentPrompt : null,
+    totalPrompts: Number.isInteger(stage.totalPrompts) ? stage.totalPrompts : null,
+    stageIndex: Number.isInteger(stage.stageIndex) ? stage.stageIndex : null,
+    stageName: stage.stageName || '',
+    tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+    windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+    signature
+  };
+}
+
 async function upsertProcess(runId, patch = {}) {
   if (!runId) return null;
   await ensureProcessRegistryReady();
@@ -513,6 +1194,14 @@ async function upsertProcess(runId, patch = {}) {
   });
 
   if (!next) return null;
+  const problemEntry = buildProcessProblemLogEntry(runId, next);
+  const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
+  if (problemEntry?.signature && problemEntry.signature !== knownSignature) {
+    await appendProblemLog(problemEntry);
+    problemLogLastSignatureByRunId.set(runId, problemEntry.signature);
+  } else if (!problemEntry) {
+    problemLogLastSignatureByRunId.delete(runId);
+  }
   processRegistry.set(runId, next);
   logProcessTransition(runId, next, patchData);
   await persistProcessRegistry();
@@ -1500,8 +2189,21 @@ function applyMonotonicProcessPatch(existing, patch, message = null) {
     }
   }
 
+  if (!Number.isInteger(next.currentPrompt) && Number.isInteger(next.stageIndex) && next.stageIndex >= 0) {
+    next.currentPrompt = next.stageIndex + 1;
+  }
   if (!Number.isInteger(next.stageIndex) && Number.isInteger(next.currentPrompt) && next.currentPrompt > 0) {
     next.stageIndex = next.currentPrompt - 1;
+  }
+  if (Number.isInteger(next.currentPrompt) && Number.isInteger(next.stageIndex)) {
+    const promptFromStage = next.stageIndex + 1;
+    if (next.currentPrompt < promptFromStage) {
+      next.currentPrompt = promptFromStage;
+    }
+    const stageFromPrompt = next.currentPrompt - 1;
+    if (next.stageIndex < stageFromPrompt) {
+      next.stageIndex = stageFromPrompt;
+    }
   }
   if (Number.isInteger(next.currentPrompt) && next.currentPrompt > 0) {
     const normalizedPromptStageName = `Prompt ${next.currentPrompt}`;
@@ -2290,6 +2992,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
 async function collectCompanyInvestContextSnapshot(options = {}) {
   const includeClosedProcesses = options?.includeClosedProcesses === true;
   const includeInvestTabs = options?.includeInvestTabs !== false;
+  const includeProcessContextFallback = options?.includeProcessContextFallback !== false;
 
   const processSnapshot = await getProcessSnapshot();
   const processCandidates = processSnapshot
@@ -2346,29 +3049,31 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     });
   });
 
-  processCandidates.forEach((process) => {
-    const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
-    const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
-    if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
-    const contextKey = Number.isInteger(processTabId)
-      ? `tab:${processTabId}`
-      : `window:${processWindowId}`;
-    if (handledContextKeys.has(contextKey)) {
-      skipped += 1;
-      return;
-    }
-    handledContextKeys.add(contextKey);
-    targets.push({
-      source: 'process_context',
-      tabId: processTabId,
-      windowId: processWindowId,
-      url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
-        ? process.chatUrl.trim()
-        : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
-      title: typeof process?.title === 'string' ? process.title : '',
-      process
+  if (includeProcessContextFallback) {
+    processCandidates.forEach((process) => {
+      const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+      const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+      if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
+      const contextKey = Number.isInteger(processTabId)
+        ? `tab:${processTabId}`
+        : `window:${processWindowId}`;
+      if (handledContextKeys.has(contextKey)) {
+        skipped += 1;
+        return;
+      }
+      handledContextKeys.add(contextKey);
+      targets.push({
+        source: 'process_context',
+        tabId: processTabId,
+        windowId: processWindowId,
+        url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+          ? process.chatUrl.trim()
+          : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
+        title: typeof process?.title === 'string' ? process.title : '',
+        process
+      });
     });
-  });
+  }
 
   return {
     processSnapshot,
@@ -2377,11 +3082,15 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     processByTabId,
     processByWindowId,
     targets,
-    skipped
+    skipped,
+    includeProcessContextFallback
   };
 }
 
 async function runResetScanStartAllTabs(options = {}) {
+  const monitorSessionId = typeof options?.monitorSessionId === 'string' && options.monitorSessionId.trim()
+    ? options.monitorSessionId.trim()
+    : createReloadResumeMonitorSessionId('reload-resume');
   try {
     const origin = typeof options?.origin === 'string' && options.origin.trim()
       ? options.origin.trim()
@@ -2400,6 +3109,17 @@ async function runResetScanStartAllTabs(options = {}) {
     const scope = requestedScope === RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
       ? requestedScope
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+    await startReloadResumeMonitorSession({
+      sessionId: monitorSessionId,
+      origin,
+      scope,
+      forceRepeatLastPrompt,
+      composerThinkingEffort,
+      counts: {
+        requestedProcesses: 0,
+        eligibleProcesses: 0
+      }
+    });
 
     const emptySummary = {
       started: 0,
@@ -2427,8 +3147,9 @@ async function runResetScanStartAllTabs(options = {}) {
       await loadPrompts();
     }
     if (PROMPTS_COMPANY.length === 0) {
-      return {
+      const response = {
         success: false,
+        monitorSessionId,
         scannedTabs: 0,
         matchedTabs: 0,
         startedTabs: 0,
@@ -2441,13 +3162,29 @@ async function runResetScanStartAllTabs(options = {}) {
         resetSummary,
         error: 'prompts_not_loaded'
       };
+      await updateReloadResumeMonitorSession(monitorSessionId, {
+        status: 'failed',
+        phase: 'failed',
+        finishedAt: Date.now(),
+        summary: response.summary,
+        rows: [],
+        error: 'prompts_not_loaded'
+      });
+      await appendReloadResumeMonitorEvent(monitorSessionId, {
+        level: 'error',
+        code: 'prompts_not_loaded',
+        message: 'Cannot run reload + resume: prompts not loaded'
+      });
+      return response;
     }
 
     const catalog = buildPromptSignatureCatalog(PROMPTS_COMPANY);
     const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
     const contextSnapshot = await collectCompanyInvestContextSnapshot({
       includeClosedProcesses: options?.includeClosedProcesses === true,
-      includeInvestTabs: true
+      includeInvestTabs: true,
+      // Reload+resume should operate on currently open INVEST tabs only.
+      includeProcessContextFallback: false
     });
     const activeProcesses = contextSnapshot.processCandidates;
     const processContexts = contextSnapshot.targets;
@@ -2521,6 +3258,9 @@ async function runResetScanStartAllTabs(options = {}) {
       const progressPrompt = Number.isInteger(row?.progressPromptNumber)
         ? row.progressPromptNumber
         : null;
+      const chatPromptFromCount = Number.isInteger(row?.userMessageCount)
+        ? row.userMessageCount
+        : null;
       const hasCounters = Number.isInteger(row?.assistantMessageCount) && Number.isInteger(row?.userMessageCount);
       const shouldAdvancePrompt = forceRepeatLastPrompt
         ? false
@@ -2529,10 +3269,17 @@ async function runResetScanStartAllTabs(options = {}) {
             ? row.assistantMessageCount >= row.userMessageCount
             : true
         );
+      const fallbackStageSelection = selectConservativePromptNumber([
+        { source: 'process_progress', value: progressPrompt, priority: 1 },
+        { source: 'chat_user_count', value: chatPromptFromCount, priority: 2 }
+      ], promptCount);
+      const conservativePrompt = Number.isInteger(fallbackStageSelection.promptNumber)
+        ? fallbackStageSelection.promptNumber
+        : null;
 
-      if (Number.isInteger(progressPrompt) && progressPrompt > 0) {
-        const progressIndex = Math.min(Math.max(progressPrompt - 1, 0), promptCount - 1);
-        const computed = computeNextResumeIndex(progressIndex, promptCount, shouldAdvancePrompt);
+      if (Number.isInteger(conservativePrompt) && conservativePrompt > 0) {
+        const conservativeIndex = Math.min(Math.max(conservativePrompt - 1, 0), promptCount - 1);
+        const computed = computeNextResumeIndex(conservativeIndex, promptCount, shouldAdvancePrompt);
         if (Number.isInteger(computed)) {
           return Math.min(Math.max(computed, 1), promptCount - 1);
         }
@@ -2583,7 +3330,14 @@ async function runResetScanStartAllTabs(options = {}) {
         detectedSignature: '',
         detectedHasAssistantReply: null,
         progressPromptNumber: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null,
+        totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null,
         progressStageName: typeof process?.stageName === 'string' ? process.stageName : '',
+        chatPromptNumber: null,
+        chatPromptSource: '',
+        chatPromptMismatch: false,
+        resolvedPromptNumber: null,
+        resolvedPromptSource: '',
+        resolvedPromptMismatch: false,
         stageConsistency: '',
         stageDelta: null,
         nextStartIndex: null,
@@ -2595,7 +3349,8 @@ async function runResetScanStartAllTabs(options = {}) {
         stopSignalSent: false,
         stopSignalAck: false,
         stopSignalReason: '',
-        reloadMethod: ''
+        reloadMethod: '',
+        eligibleForReload: false
       };
 
       if (analysisType !== 'company') {
@@ -2644,6 +3399,7 @@ async function runResetScanStartAllTabs(options = {}) {
 
       row.action = 'queued_for_detection';
       row.reason = 'queued_for_detection';
+      row.eligibleForReload = true;
       orderedResultKeys.push(key);
       resultsByKey.set(key, row);
       scanTargets.push({
@@ -2657,6 +3413,53 @@ async function runResetScanStartAllTabs(options = {}) {
     }
 
     const pendingKeys = new Set(scanTargets.map((target) => target.key));
+    const buildMonitorRows = () => orderedResultKeys
+      .map((key) => sanitizeReloadResumeMonitorRow(resultsByKey.get(key)))
+      .filter(Boolean);
+    const updateMonitorSnapshot = async (phase, extra = {}) => {
+      await updateReloadResumeMonitorSession(monitorSessionId, {
+        phase,
+        passCount,
+        pendingCount: pendingKeys.size,
+        rows: buildMonitorRows(),
+        ...(extra && typeof extra === 'object' ? extra : {})
+      });
+    };
+    const stageSnapshot = processContexts
+      .map((context) => {
+        const process = context?.process;
+        if (!process || typeof process !== 'object') return null;
+        return sanitizeReloadResumeMonitorStage({
+          runId: typeof process.id === 'string' ? process.id : '',
+          title: typeof process.title === 'string' ? process.title : '',
+          status: typeof process.status === 'string' ? process.status : '',
+          currentPrompt: Number.isInteger(process.currentPrompt) ? process.currentPrompt : null,
+          totalPrompts: Number.isInteger(process.totalPrompts) ? process.totalPrompts : null,
+          stageIndex: Number.isInteger(process.stageIndex) ? process.stageIndex : null,
+          stageName: typeof process.stageName === 'string' ? process.stageName : '',
+          tabId: Number.isInteger(context?.tabId) ? context.tabId : (Number.isInteger(process.tabId) ? process.tabId : null),
+          windowId: Number.isInteger(context?.windowId) ? context.windowId : (Number.isInteger(process.windowId) ? process.windowId : null)
+        });
+      })
+      .filter(Boolean);
+
+    await updateReloadResumeMonitorSession(monitorSessionId, {
+      phase: 'stage_snapshot',
+      passCount,
+      pendingCount: pendingKeys.size,
+      stageSnapshot,
+      rows: buildMonitorRows(),
+      counts: {
+        requestedProcesses: processContexts.length,
+        activeProcessRecords: activeProcesses.length,
+        eligibleProcesses: scanTargets.length
+      }
+    });
+    await appendReloadResumeMonitorEvent(monitorSessionId, {
+      level: 'info',
+      code: 'stage_snapshot_ready',
+      message: `Stage snapshot ready: ${stageSnapshot.length} records`
+    });
 
     console.log('[reset-scan-start] Init', {
       origin,
@@ -2685,6 +3488,11 @@ async function runResetScanStartAllTabs(options = {}) {
         pass: passCount,
         pending: pendingKeys.size,
         scanned: scanTargets.length
+      });
+      await appendReloadResumeMonitorEvent(monitorSessionId, {
+        level: 'info',
+        code: 'scan_pass_start',
+        message: `Scan pass ${passCount} started (pending: ${pendingKeys.size})`
       });
 
       for (const target of scanTargets) {
@@ -2965,11 +3773,61 @@ async function runResetScanStartAllTabs(options = {}) {
         row.detectedHasAssistantReply = typeof detection.hasAssistantReplyAfter === 'boolean'
           ? detection.hasAssistantReplyAfter
           : null;
+        const recentPromptNumber = Number.isInteger(recentMatch?.promptNumber)
+          ? recentMatch.promptNumber
+          : null;
+        const chatStageSelection = selectConservativePromptNumber([
+          { source: 'chat_signature', value: row.detectedPromptNumber, priority: 1 },
+          { source: 'chat_recent', value: recentPromptNumber, priority: 2 },
+          { source: 'chat_user_count', value: row.userMessageCount, priority: 3 }
+        ], PROMPTS_COMPANY.length);
+        row.chatPromptNumber = chatStageSelection.promptNumber;
+        row.chatPromptSource = chatStageSelection.source || '';
+        row.chatPromptMismatch = chatStageSelection.mismatch;
+
+        const resolvedStageSelection = selectConservativePromptNumber([
+          { source: `chat:${row.chatPromptSource || 'unknown'}`, value: row.chatPromptNumber, priority: 1 },
+          { source: 'process_progress', value: row.progressPromptNumber, priority: 2 }
+        ], PROMPTS_COMPANY.length);
+        let resolvedPromptNumber = Number.isInteger(resolvedStageSelection.promptNumber)
+          ? resolvedStageSelection.promptNumber
+          : null;
+        if (!Number.isInteger(resolvedPromptNumber) && Number.isInteger(row.detectedPromptNumber)) {
+          resolvedPromptNumber = toBoundedPromptNumber(row.detectedPromptNumber, PROMPTS_COMPANY.length);
+        }
+        if (!Number.isInteger(resolvedPromptNumber)) {
+          row.action = 'detect_failed';
+          row.reason = 'stage_resolution_failed';
+          resultsByKey.set(target.key, row);
+          console.warn('[reset-scan-start] Stage resolution failed', {
+            runId: row.runId || '',
+            tabId: row.tabId,
+            detectedPromptNumber: row.detectedPromptNumber,
+            progressPromptNumber: row.progressPromptNumber,
+            userMessageCount: row.userMessageCount
+          });
+          await sleep(250);
+          continue;
+        }
+        row.resolvedPromptNumber = resolvedPromptNumber;
+        row.resolvedPromptSource = resolvedStageSelection.source
+          || (Number.isInteger(row.detectedPromptNumber) ? 'chat_signature' : '');
+        row.resolvedPromptMismatch = chatStageSelection.mismatch || resolvedStageSelection.mismatch;
+
+        const hasAssistantReplyByCounters = (
+          Number.isInteger(row.userMessageCount) && Number.isInteger(row.assistantMessageCount)
+        )
+          ? row.assistantMessageCount >= row.userMessageCount
+          : null;
+        const noAssistantReplyEvidence = (
+          row.detectedHasAssistantReply === false
+          || hasAssistantReplyByCounters === false
+        );
         const shouldAdvancePrompt = forceRepeatLastPrompt
           ? false
-          : (row.detectedHasAssistantReply !== false);
+          : !noAssistantReplyEvidence;
         row.nextStartIndex = computeNextResumeIndex(
-          detection.index,
+          resolvedPromptNumber - 1,
           PROMPTS_COMPANY.length,
           shouldAdvancePrompt
         );
@@ -2995,19 +3853,31 @@ async function runResetScanStartAllTabs(options = {}) {
         ) {
           row.nextStartIndex = 1;
         }
-        if (Number.isInteger(row.progressPromptNumber) && Number.isInteger(row.detectedPromptNumber)) {
-          const delta = row.detectedPromptNumber - row.progressPromptNumber;
+        if (Number.isInteger(row.progressPromptNumber) && Number.isInteger(row.resolvedPromptNumber)) {
+          const delta = row.resolvedPromptNumber - row.progressPromptNumber;
           row.stageDelta = delta;
           row.stageConsistency = Math.abs(delta) <= 1 ? 'ok' : 'drift';
+        } else {
+          row.stageConsistency = 'chat_only';
+        }
+        if (row.resolvedPromptMismatch) {
+          row.stageConsistency = row.stageConsistency && row.stageConsistency !== 'ok'
+            ? `${row.stageConsistency}|conservative_min`
+            : 'conservative_min';
         }
         console.log('[reset-scan-start] Detection resolved', {
           runId: row.runId || '',
           tabId: row.tabId,
           detectedPromptIndex: row.detectedPromptIndex,
           detectedPromptNumber: row.detectedPromptNumber,
+          chatPromptNumber: row.chatPromptNumber,
+          chatPromptSource: row.chatPromptSource,
+          resolvedPromptNumber: row.resolvedPromptNumber,
+          resolvedPromptSource: row.resolvedPromptSource,
           detectedStageName: row.detectedStageName,
           detectedMethod: row.detectedMethod,
           detectedHasAssistantReply: row.detectedHasAssistantReply,
+          hasAssistantReplyByCounters,
           nextStartIndex: row.nextStartIndex,
           progressPromptNumber: row.progressPromptNumber,
           stageDelta: row.stageDelta,
@@ -3034,7 +3904,7 @@ async function runResetScanStartAllTabs(options = {}) {
         row.reason = forceRepeatLastPrompt
           ? (clampedFromPrompt1 ? 'force_repeat_last_prompt_clamped_to_prompt_2' : 'force_repeat_last_prompt')
           : (
-            row.detectedHasAssistantReply === false
+            noAssistantReplyEvidence
               ? (clampedFromPrompt1 ? 'retry_prompt_1_clamped_to_prompt_2' : 'retry_same_prompt_no_assistant_reply')
               : 'ready_to_start'
           );
@@ -3049,6 +3919,8 @@ async function runResetScanStartAllTabs(options = {}) {
         });
         await sleep(250);
       }
+
+      await updateMonitorSnapshot('scan_pass');
 
       if (
         pendingKeys.size > 0 &&
@@ -3117,6 +3989,12 @@ async function runResetScanStartAllTabs(options = {}) {
         progressPromptNumber: row.progressPromptNumber
       });
     }
+    await updateMonitorSnapshot('fallback');
+    await appendReloadResumeMonitorEvent(monitorSessionId, {
+      level: 'info',
+      code: 'fallback_completed',
+      message: 'Fallback stage computed for unresolved tabs'
+    });
 
     // Start phase: execute queued starts sequentially after full scan pass.
     // This avoids interleaving scan/start on the same pass and makes behavior deterministic.
@@ -3138,6 +4016,16 @@ async function runResetScanStartAllTabs(options = {}) {
         detectedPromptNumber: row.detectedPromptNumber,
         detectedMethod: row.detectedMethod
       }))
+    });
+    await updateMonitorSnapshot('start_queue', {
+      counts: {
+        startQueueSize: startQueue.length
+      }
+    });
+    await appendReloadResumeMonitorEvent(monitorSessionId, {
+      level: 'info',
+      code: 'start_queue_ready',
+      message: `Start queue ready: ${startQueue.length}`
     });
 
     for (const row of startQueue) {
@@ -3186,6 +4074,19 @@ async function runResetScanStartAllTabs(options = {}) {
         });
       }
       resultsByKey.set(row.key, row);
+      await updateMonitorSnapshot('start_dispatch', {
+        counts: {
+          startQueueSize: startQueue.length,
+          started: startedKeys.size
+        }
+      });
+      await appendReloadResumeMonitorEvent(monitorSessionId, {
+        level: startResult?.success ? 'info' : 'warn',
+        code: startResult?.success ? 'start_dispatched' : 'start_failed',
+        message: startResult?.success
+          ? `Tab ${row.tabId}: resume dispatched`
+          : `Tab ${row.tabId}: start failed (${row.reason || 'unknown'})`
+      });
       await sleep(250);
     }
 
@@ -3246,6 +4147,7 @@ async function runResetScanStartAllTabs(options = {}) {
       response_blocks: responseBlocks,
       detected_prompts: detectedPrompts
     };
+    const summaryCheck = verifyReloadResumeSummary(summary, results, scanTargets.length);
     console.log('[reset-scan-start] Summary', {
       scope,
       maxPasses,
@@ -3263,9 +4165,36 @@ async function runResetScanStartAllTabs(options = {}) {
     results.forEach((item) => {
       console.log('[reset-scan-start] Process result', item);
     });
+    await updateReloadResumeMonitorSession(monitorSessionId, {
+      status: 'completed',
+      phase: 'completed',
+      finishedAt: Date.now(),
+      passCount,
+      pendingCount: pendingKeys.size,
+      rows: results,
+      summary,
+      summaryCheck,
+      counts: {
+        requestedProcesses: processContexts.length,
+        activeProcessRecords: activeProcesses.length,
+        eligibleProcesses: scanTargets.length,
+        scannedTabs: scanTargets.length,
+        matchedTabs: matchedKeys.size,
+        startedTabs: startedCount
+      },
+      error: ''
+    });
+    await appendReloadResumeMonitorEvent(monitorSessionId, {
+      level: summaryCheck.ok ? 'info' : 'warn',
+      code: summaryCheck.ok ? 'summary_validated' : 'summary_mismatch',
+      message: summaryCheck.ok
+        ? 'Summary validation passed'
+        : `Summary mismatch detected (${summaryCheck.mismatches.length})`
+    });
 
     return {
       success: true,
+      monitorSessionId,
       scope,
       scannedTabs: scanTargets.length,
       matchedTabs: matchedKeys.size,
@@ -3280,6 +4209,7 @@ async function runResetScanStartAllTabs(options = {}) {
       maxRuntimeMs,
       pendingAfterLoop: pendingKeys.size,
       summary,
+      summaryCheck,
       resetSummary,
       results
     };
@@ -3298,8 +4228,29 @@ async function runResetScanStartAllTabs(options = {}) {
       response_blocks: 0,
       detected_prompts: 0
     };
+    const failureSummaryCheck = verifyReloadResumeSummary(summary, [], 0);
+    try {
+      await updateReloadResumeMonitorSession(monitorSessionId, {
+        status: 'failed',
+        phase: 'failed',
+        finishedAt: Date.now(),
+        summary,
+        summaryCheck: failureSummaryCheck,
+        rows: [],
+        error: error?.message || String(error)
+      });
+      await appendReloadResumeMonitorEvent(monitorSessionId, {
+        level: 'error',
+        code: 'run_failed',
+        message: error?.message || String(error)
+      });
+    } catch (monitorError) {
+      console.warn('[reload-monitor] Failed to write failed state:', monitorError?.message || monitorError);
+    }
+
     return {
       success: false,
+      monitorSessionId,
       scannedTabs: 0,
       matchedTabs: 0,
       startedTabs: 0,
@@ -3307,6 +4258,7 @@ async function runResetScanStartAllTabs(options = {}) {
       requestedProcesses: 0,
       eligibleProcesses: 0,
       summary,
+      summaryCheck: failureSummaryCheck,
       scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
       results: [],
       error: error?.message || String(error)
@@ -4051,21 +5003,39 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
 
   const promptCount = PROMPTS_COMPANY.length;
   let hasAssistantReplyAfter = null;
+  let hasAssistantReplyByCounters = null;
+  let recentMatch = null;
   const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
   if (promptRecords.length > 0) {
     const recent = await extractRecentUserPromptsFromTab(tabId, 3500);
     const recentEntries = Array.isArray(recent?.messageMeta) && recent.messageMeta.length > 0
       ? recent.messageMeta
       : (Array.isArray(recent?.messages) ? recent.messages : []);
-    const recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
+    recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
     if (recentMatch && Number.isInteger(recentMatch.index) && recentMatch.index === detection.index) {
       hasAssistantReplyAfter = recentMatch.hasAssistantReplyAfter;
     }
   }
-
-  const shouldAdvancePrompt = hasAssistantReplyAfter !== false;
+  if (Number.isInteger(extraction.count) && Number.isInteger(extraction.assistantCount)) {
+    hasAssistantReplyByCounters = extraction.assistantCount >= extraction.count;
+  }
+  const conservativeStageSelection = selectConservativePromptNumber([
+    { source: 'chat_signature', value: detection.promptNumber, priority: 1 },
+    { source: 'chat_recent', value: Number.isInteger(recentMatch?.promptNumber) ? recentMatch.promptNumber : null, priority: 2 },
+    { source: 'chat_user_count', value: extraction.count, priority: 3 }
+  ], promptCount);
+  const conservativePromptNumber = Number.isInteger(conservativeStageSelection.promptNumber)
+    ? conservativeStageSelection.promptNumber
+    : toBoundedPromptNumber(detection.promptNumber, promptCount);
+  const conservativePromptIndex = Number.isInteger(conservativePromptNumber)
+    ? (conservativePromptNumber - 1)
+    : detection.index;
+  const shouldAdvancePrompt = (
+    hasAssistantReplyAfter !== false
+    && hasAssistantReplyByCounters !== false
+  );
   const nextStartIndex = computeNextResumeIndex(
-    detection.index,
+    conservativePromptIndex,
     PROMPTS_COMPANY.length,
     shouldAdvancePrompt
   );
@@ -4084,7 +5054,13 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
     remainingPrompts,
     detection: {
       ...detection,
-      hasAssistantReplyAfter
+      hasAssistantReplyAfter,
+      hasAssistantReplyByCounters,
+      conservativePromptNumber,
+      conservativePromptIndex,
+      conservativePromptSource: conservativeStageSelection.source || 'chat_signature',
+      conservativePromptMismatch: conservativeStageSelection.mismatch,
+      chatPromptCountFromBlocks: Number.isInteger(extraction.count) ? extraction.count : null
     }
   };
 }
@@ -4332,6 +5308,50 @@ function detectLastPromptMatch(userMessages, promptRecords) {
   return null;
 }
 
+function toBoundedPromptNumber(promptNumber, promptCount) {
+  if (!Number.isInteger(promptNumber) || promptNumber <= 0) return null;
+  if (!Number.isInteger(promptCount) || promptCount <= 0) return promptNumber;
+  return Math.min(promptNumber, promptCount);
+}
+
+function selectConservativePromptNumber(candidates, promptCount) {
+  const sourceCandidates = Array.isArray(candidates) ? candidates : [];
+  const normalized = sourceCandidates
+    .map((candidate) => {
+      const value = toBoundedPromptNumber(candidate?.value, promptCount);
+      if (!Number.isInteger(value) || value <= 0) return null;
+      const source = typeof candidate?.source === 'string' && candidate.source.trim()
+        ? candidate.source.trim()
+        : 'unknown';
+      const priority = Number.isInteger(candidate?.priority) ? candidate.priority : 100;
+      return { source, value, priority };
+    })
+    .filter(Boolean);
+
+  if (normalized.length === 0) {
+    return {
+      promptNumber: null,
+      source: '',
+      mismatch: false,
+      candidates: []
+    };
+  }
+
+  normalized.sort((left, right) => {
+    if (left.value !== right.value) return left.value - right.value;
+    if (left.priority !== right.priority) return left.priority - right.priority;
+    return left.source.localeCompare(right.source);
+  });
+
+  const selected = normalized[0];
+  return {
+    promptNumber: selected.value,
+    source: selected.source,
+    mismatch: normalized.some((entry) => entry.value !== selected.value),
+    candidates: normalized
+  };
+}
+
 function computeNextResumeIndex(lastPromptIndex, totalPrompts, shouldAdvancePrompt = true) {
   if (!Number.isInteger(lastPromptIndex)) return null;
   const promptCount = Number.isInteger(totalPrompts) ? totalPrompts : 0;
@@ -4398,14 +5418,31 @@ async function handleProcessResumeNextStageMessage(message) {
 
     const promptCount = Number.isInteger(recoveryPoint?.promptCount) ? recoveryPoint.promptCount : PROMPTS_COMPANY.length;
     let nextStartIndex = recoveryPoint.promptOffset;
-    const detectedPromptIndex = Number.isInteger(recoveryPoint?.detection?.index)
-      ? recoveryPoint.detection.index
-      : null;
-    const detectedMethod = typeof recoveryPoint?.detection?.method === 'string'
-      ? recoveryPoint.detection.method
-      : 'last_user_signature';
-    let retrySamePrompt = recoveryPoint?.detection?.hasAssistantReplyAfter === false;
-    let retryReason = retrySamePrompt ? 'missing_assistant_reply' : '';
+    const detectedPromptIndex = Number.isInteger(recoveryPoint?.detection?.conservativePromptIndex)
+      ? recoveryPoint.detection.conservativePromptIndex
+      : (Number.isInteger(recoveryPoint?.detection?.index)
+        ? recoveryPoint.detection.index
+        : null);
+    const conservativeSource = typeof recoveryPoint?.detection?.conservativePromptSource === 'string'
+      ? recoveryPoint.detection.conservativePromptSource.trim()
+      : '';
+    const detectedMethod = conservativeSource
+      ? `conservative_${conservativeSource}`
+      : (
+        typeof recoveryPoint?.detection?.method === 'string'
+          ? recoveryPoint.detection.method
+          : 'last_user_signature'
+      );
+    let retrySamePrompt = (
+      recoveryPoint?.detection?.hasAssistantReplyAfter === false
+      || recoveryPoint?.detection?.hasAssistantReplyByCounters === false
+    );
+    let retryReason = '';
+    if (retrySamePrompt) {
+      retryReason = recoveryPoint?.detection?.hasAssistantReplyAfter === false
+        ? 'missing_assistant_reply'
+        : 'missing_assistant_reply_by_count';
+    }
 
     if (!retrySamePrompt) {
       const metrics = await collectTabConversationMetricsForAutoRestore(chatTab.id);
@@ -4521,14 +5558,46 @@ async function handleProcessResumeNextStageMessage(message) {
     ? extracted.messageMeta
     : (Array.isArray(extracted?.messages) ? extracted.messages : []);
   const matched = detectLastPromptMatch(extractedEntries, promptRecords);
-
-  const detectedPromptIndex = matched
-    ? matched.index
+  const latestExtraction = await extractLastUserMessageFromTab(chatTab.id);
+  const chatPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.count)
+    ? latestExtraction.count
+    : null;
+  const assistantPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.assistantCount)
+    ? latestExtraction.assistantCount
+    : null;
+  const progressPromptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
+    ? process.currentPrompt
+    : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : null);
+  const conservativeStageSelection = selectConservativePromptNumber([
+    { source: 'chat_recent', value: Number.isInteger(matched?.promptNumber) ? matched.promptNumber : null, priority: 1 },
+    { source: 'chat_user_count', value: chatPromptCountFromBlocks, priority: 2 },
+    { source: 'process_progress', value: progressPromptNumber, priority: 3 }
+  ], PROMPTS_COMPANY.length);
+  const conservativePromptNumber = Number.isInteger(conservativeStageSelection.promptNumber)
+    ? conservativeStageSelection.promptNumber
+    : null;
+  const detectedPromptIndex = Number.isInteger(conservativePromptNumber)
+    ? (conservativePromptNumber - 1)
     : getProgressPromptIndex(process);
-  const detectedMethod = matched ? matched.method : 'progress_fallback';
-  let shouldAdvancePrompt = matched?.hasAssistantReplyAfter !== false;
-  let retrySamePrompt = matched?.hasAssistantReplyAfter === false;
-  let retryReason = retrySamePrompt ? 'missing_assistant_reply' : '';
+  const detectedMethod = conservativeStageSelection.source
+    ? `conservative_${conservativeStageSelection.source}`
+    : (matched ? matched.method : 'progress_fallback');
+  const hasAssistantReplyByCounters = (
+    Number.isInteger(chatPromptCountFromBlocks) && Number.isInteger(assistantPromptCountFromBlocks)
+  )
+    ? assistantPromptCountFromBlocks >= chatPromptCountFromBlocks
+    : null;
+  let shouldAdvancePrompt = (
+    matched?.hasAssistantReplyAfter !== false
+    && hasAssistantReplyByCounters !== false
+  );
+  let retrySamePrompt = !shouldAdvancePrompt;
+  let retryReason = '';
+  if (retrySamePrompt) {
+    retryReason = matched?.hasAssistantReplyAfter === false
+      ? 'missing_assistant_reply'
+      : 'missing_assistant_reply_by_count';
+  }
 
   if (shouldAdvancePrompt) {
     const metrics = await collectTabConversationMetricsForAutoRestore(chatTab.id);
@@ -7230,6 +8299,53 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ processes: [] });
     });
     return true;
+  } else if (message.type === 'GET_PROBLEM_LOGS') {
+    (async () => {
+      const limit = Number.isInteger(message?.limit) ? message.limit : 120;
+      const entries = await getProblemLogSnapshot(limit);
+      sendResponse({
+        success: true,
+        entries,
+        total: Array.isArray(problemLogEntries) ? problemLogEntries.length : entries.length
+      });
+    })().catch((error) => {
+      console.warn('[problem-log] GET_PROBLEM_LOGS failed:', error);
+      sendResponse({
+        success: false,
+        entries: [],
+        total: 0,
+        error: error?.message || String(error)
+      });
+    });
+    return true;
+  } else if (message.type === 'CLEAR_PROBLEM_LOGS') {
+    clearProblemLogs()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => {
+        console.warn('[problem-log] CLEAR_PROBLEM_LOGS failed:', error);
+        sendResponse({
+          success: false,
+          error: error?.message || String(error)
+        });
+      });
+    return true;
+  } else if (message.type === 'GET_RELOAD_RESUME_MONITOR_STATE') {
+    (async () => {
+      const sessionId = typeof message?.sessionId === 'string' ? message.sessionId.trim() : '';
+      const state = await getReloadResumeMonitorState(sessionId);
+      sendResponse({
+        success: true,
+        state: state || null
+      });
+    })().catch((error) => {
+      console.warn('[reload-monitor] GET_RELOAD_RESUME_MONITOR_STATE failed:', error);
+      sendResponse({
+        success: false,
+        state: null,
+        error: error?.message || String(error)
+      });
+    });
+    return true;
   } else if (message.type === 'GET_WATCHLIST_DISPATCH_STATUS') {
     getWatchlistDispatchStatus(Boolean(message?.forceReload))
       .then((status) => sendResponse({ success: true, ...status }))
@@ -7360,6 +8476,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const forceRepeatLastPrompt = message?.forceRepeatLastPrompt === true;
     const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
     const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
+    const monitorSessionId = typeof message?.monitorSessionId === 'string' && message.monitorSessionId.trim()
+      ? message.monitorSessionId.trim()
+      : createReloadResumeMonitorSessionId('reload-resume');
     (async () => {
       let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
       if (resolvedComposerThinkingEffort) {
@@ -7372,14 +8491,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         scope: resumeScope,
         forceRepeatLastPrompt,
         useStoredComposerThinkingEffort,
-        composerThinkingEffort: resolvedComposerThinkingEffort
+        composerThinkingEffort: resolvedComposerThinkingEffort,
+        monitorSessionId
       });
     })()
       .then((result) => sendResponse(result))
       .catch((error) => {
         console.warn('[monitor] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', error);
+        void updateReloadResumeMonitorSession(monitorSessionId, {
+          status: 'failed',
+          phase: 'failed',
+          finishedAt: Date.now(),
+          summary: normalizeReloadResumeSummary({}),
+          rows: [],
+          error: error?.message || String(error)
+        }).catch(() => {});
         sendResponse({
           success: false,
+          monitorSessionId,
           scannedTabs: 0,
           matchedTabs: 0,
           startedTabs: 0,
@@ -10250,11 +11379,10 @@ async function injectToChat(
     const MANUAL_PDF_ATTACH_MAX_ATTEMPTS = 2;
     const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
     const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
-    // Limit "wait for ready" to a short window so resume/start cannot freeze for hours.
-    const INTERFACE_READY_MAX_WAIT_MS = 3 * 60 * 1000;
+    // Keep interface-ready wait aligned with response wait; long "thinking" must not fail early.
     const interfaceReadyWaitMs = Number.isFinite(responseWaitMs) && responseWaitMs > 0
-      ? Math.max(15000, Math.min(responseWaitMs, INTERFACE_READY_MAX_WAIT_MS))
-      : INTERFACE_READY_MAX_WAIT_MS;
+      ? Math.max(15000, responseWaitMs)
+      : WAIT_FOR_RESPONSE_MS;
     const manualPdfAttachment = (() => {
       const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
         ? manualPdfAttachmentContext
@@ -12229,6 +13357,7 @@ async function injectToChat(
 
   async function waitForResponse(maxWaitMs) {
     if (shouldStopNow()) return false;
+    const safeMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
     const initialSnapshot = getAssistantSnapshot();
     const initialAssistantCount = initialSnapshot.count;
     const initialAssistantText = initialSnapshot.lastText || '';
@@ -12239,10 +13368,10 @@ async function injectToChat(
 
     // Faza 1: wykryj start odpowiedzi.
     const phase1StartTime = Date.now();
-    const startTimeout = Math.min(maxWaitMs, 7200000);
+    let phase1IdleSince = Date.now();
     let responseStarted = false;
 
-    while (Date.now() - phase1StartTime < startTimeout) {
+    while (true) {
       if (shouldStopNow()) return false;
       if (hasHardGenerationErrorMessage()) {
         console.error('[FAZA 1] Wykryto hard error na ostatnim turnie.');
@@ -12267,6 +13396,16 @@ async function injectToChat(
         break;
       }
 
+      if (lastTextChanged) {
+        phase1IdleSince = Date.now();
+      }
+
+      if (safeMaxWaitMs > 0 && (Date.now() - phase1IdleSince) >= safeMaxWaitMs) {
+        const phase1Duration = Math.round((Date.now() - phase1StartTime) / 1000);
+        console.error(`[FAZA 1] Timeout startu odpowiedzi po ${phase1Duration}s (brak aktywnosci).`);
+        return false;
+      }
+
       if ((Date.now() - phase1StartTime) % 30000 < 500) {
         const elapsed = Math.round((Date.now() - phase1StartTime) / 1000);
         console.log(`[FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`);
@@ -12276,19 +13415,19 @@ async function injectToChat(
     }
 
     if (!responseStarted) {
-      console.error(`[FAZA 1] Timeout startu odpowiedzi po ${Math.round(startTimeout / 1000)}s.`);
+      console.error('[FAZA 1] Nie wykryto startu odpowiedzi.');
       return false;
     }
 
     // Faza 2: wykryj stabilne zakonczenie odpowiedzi.
     const phase2StartTime = Date.now();
-    const phase2Timeout = Math.min(maxWaitMs, 7200000);
+    let phase2IdleSince = Date.now();
     let consecutiveReady = 0;
     let logInterval = 0;
     let lastAssistantText = initialAssistantText;
     let lastAssistantChangeAt = Date.now();
 
-    while (Date.now() - phase2StartTime < phase2Timeout) {
+    while (true) {
       if (shouldStopNow()) return false;
       if (hasHardGenerationErrorMessage()) {
         console.error('[FAZA 2] Wykryto hard error na ostatnim turnie.');
@@ -12308,6 +13447,7 @@ async function injectToChat(
 
       if (logInterval % 10 === 0) {
         const phase2Elapsed = Math.round((Date.now() - phase2StartTime) / 1000);
+        const stalledFor = Math.round((Date.now() - phase2IdleSince) / 1000);
         console.log('[FAZA 2] Stan interfejsu:', {
           editor_exists: !!editor,
           editor_enabled: editor?.getAttribute('contenteditable') === 'true',
@@ -12316,7 +13456,8 @@ async function injectToChat(
           sendButton_exists: !!sendButton,
           sendButton_disabled: sendButton?.disabled,
           consecutiveReady,
-          elapsed: `${phase2Elapsed}s`
+          elapsed: `${phase2Elapsed}s`,
+          stalledFor: `${stalledFor}s`
         });
       }
       logInterval += 1;
@@ -12327,7 +13468,8 @@ async function injectToChat(
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const lastAssistantMsg = assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
       const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
-      if (currentLastText && currentLastText !== lastAssistantText) {
+      const textChangedNow = currentLastText && currentLastText !== lastAssistantText;
+      if (textChangedNow) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
       }
@@ -12352,9 +13494,12 @@ async function injectToChat(
         progressText.includes('collecting sources') ||
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
-      const minResponseLengthReached = currentLastText.length >= 50;
 
-      const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && minResponseLengthReached && !hasProgressText;
+      if (genStatus.generating || textChangedNow || hasNewAssistantMessage || hasProgressText) {
+        phase2IdleSince = Date.now();
+      }
+
+      const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && !hasProgressText;
 
       if (isReady) {
         consecutiveReady += 1;
@@ -12374,12 +13519,15 @@ async function injectToChat(
         consecutiveReady = 0;
       }
 
+      if (safeMaxWaitMs > 0 && !genStatus.generating && (Date.now() - phase2IdleSince) >= safeMaxWaitMs) {
+        const phase2Duration = Math.round((Date.now() - phase2StartTime) / 1000);
+        const stalledFor = Math.round((Date.now() - phase2IdleSince) / 1000);
+        console.error(`[FAZA 2] Timeout zakonczenia odpowiedzi po ${phase2Duration}s (zastoj ${stalledFor}s).`);
+        return false;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
-
-    const phase2Duration = Math.round((Date.now() - phase2StartTime) / 1000);
-    console.error(`[FAZA 2] Timeout zakonczenia odpowiedzi po ${phase2Duration}s.`);
-    return false;
   }
 
   // Funkcja sprawdzajaca czy ChatGPT dziala (brak bledow polaczenia)
@@ -12753,6 +13901,7 @@ async function injectToChat(
   async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     if (shouldStopNow()) return false;
     const startTime = Date.now();
+    let effectiveMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
     let consecutiveReady = 0;
     
     console.log("⏳ Czekam aż interface będzie gotowy...");
@@ -12772,7 +13921,7 @@ async function injectToChat(
         return true;
       } else {
         console.log("⏳ Editor nie istnieje - czekam max 5s...");
-        maxWaitMs = 5000; // Krótki timeout tylko na pojawienie się editora
+        effectiveMaxWaitMs = 5000; // Krótki timeout tylko na pojawienie się editora
       }
     } else {
       console.log(`📊 Kontynuacja konwersacji (${userMessages.length} user, ${assistantMessages.length} assistant) - pełny timeout`);
@@ -12793,6 +13942,7 @@ async function injectToChat(
     // Mapowanie powodów na przyjazne opisy po polsku
     let lastAssistantText = '';
     let lastAssistantChangeAt = Date.now();
+    let readyIdleSince = Date.now();
     const initialAssistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (initialAssistantMessages.length > 0) {
       const lastMsg = initialAssistantMessages[initialAssistantMessages.length - 1];
@@ -12808,7 +13958,7 @@ async function injectToChat(
       'none': 'gotowy'
     };
     
-    while (Date.now() - startTime < maxWaitMs) {
+    while (true) {
       if (shouldStopNow()) return false;
       // Sprawdź wszystkie elementy interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
@@ -12825,7 +13975,8 @@ async function injectToChat(
       const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
       const currentLastText = lastAssistantMsg ? compactText(lastAssistantMsg.innerText || lastAssistantMsg.textContent || '') : '';
-      if (currentLastText && currentLastText !== lastAssistantText) {
+      const textChangedNow = currentLastText && currentLastText !== lastAssistantText;
+      if (textChangedNow) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
       }
@@ -12839,9 +13990,11 @@ async function injectToChat(
         progressText.includes('collecting sources') ||
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
+      if (genStatus.generating || textChangedNow || hasProgressText) {
+        readyIdleSince = Date.now();
+      }
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const minResponseLengthReached = currentLastText.length >= 50;
-      const isReady = noGeneration && editorReady && textStable && minResponseLengthReached && !hasProgressText;
+      const isReady = noGeneration && editorReady && textStable && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -12877,17 +14030,20 @@ async function injectToChat(
           reasonDesc: reason,
           editorReady: editorReady,
           textStable: textStable,
-          minResponseLengthReached: minResponseLengthReached,
           hasProgressText: hasProgressText,
-          consecutiveReady: consecutiveReady
+          consecutiveReady: consecutiveReady,
+          stalledFor: `${Math.round((Date.now() - readyIdleSince) / 1000)}s`
         });
+      }
+
+      if (effectiveMaxWaitMs > 0 && !genStatus.generating && (Date.now() - readyIdleSince) >= effectiveMaxWaitMs) {
+        const stalledFor = Math.round((Date.now() - readyIdleSince) / 1000);
+        console.error(`❌ Timeout czekania na gotowość interfejsu (${effectiveMaxWaitMs}ms, zastoj ${stalledFor}s)`);
+        return false;
       }
       
       await new Promise(resolve => setTimeout(resolve, 500));
     }
-    
-    console.error(`❌ Timeout czekania na gotowość interfejsu (${maxWaitMs}ms)`);
-    return false;
   }
   
   // Funkcja pokazująca przyciski "Kontynuuj" i czekająca na kliknięcie

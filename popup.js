@@ -25,6 +25,34 @@ function sendRuntimeMessage(payload) {
   });
 }
 
+function createReloadResumeMonitorSessionId(origin = 'popup') {
+  const normalizedOrigin = typeof origin === 'string' && origin.trim()
+    ? origin.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-')
+    : 'popup';
+  return `${normalizedOrigin || 'popup'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function openReloadResumeMonitorWindow(sessionId, options = {}) {
+  if (typeof sessionId !== 'string' || !sessionId.trim()) return;
+  const params = new URLSearchParams();
+  params.set('sessionId', sessionId.trim());
+  params.set('openedAt', String(Date.now()));
+  if (typeof options?.origin === 'string' && options.origin.trim()) {
+    params.set('origin', options.origin.trim());
+  }
+  if (typeof options?.composerThinkingEffort === 'string' && options.composerThinkingEffort.trim()) {
+    params.set('composerThinkingEffort', options.composerThinkingEffort.trim());
+  }
+  const targetUrl = chrome.runtime.getURL(`reload-resume-monitor.html?${params.toString()}`);
+  chrome.windows.create({
+    url: targetUrl,
+    type: 'popup',
+    width: 1280,
+    height: 900,
+    focused: true
+  });
+}
+
 const runStatus = document.getElementById('runStatus');
 const copyYouTubeTranscriptBtn = document.getElementById('copyYouTubeTranscriptBtn');
 const youtubeTranscriptStatus = document.getElementById('youtubeTranscriptStatus');
@@ -431,6 +459,7 @@ function getResumeAllSummary(response) {
 async function executeResumeAllFromPopup(button, options = {}) {
   if (!button) return;
 
+  const origin = typeof options?.origin === 'string' ? options.origin : 'popup-resume-all';
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
@@ -441,6 +470,7 @@ async function executeResumeAllFromPopup(button, options = {}) {
     || composerThinkingEffort === 'heavy'
   );
   const effortSuffix = composerThinkingEffort ? ` (${composerThinkingEffort})` : '';
+  const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
   button.textContent = `Reload + wznawiam${effortSuffix}...`;
@@ -449,12 +479,17 @@ async function executeResumeAllFromPopup(button, options = {}) {
       ? `Reload + wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
       : 'Reload + wznowienie aktywnych procesow company (INVEST)...'
   );
+  openReloadResumeMonitorWindow(monitorSessionId, {
+    origin,
+    composerThinkingEffort
+  });
 
   try {
     const message = {
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
-      origin: typeof options?.origin === 'string' ? options.origin : 'popup-resume-all',
+      origin,
       scope: 'active_company_invest_processes',
+      monitorSessionId
     };
     if (hasExplicitThinkingEffort) {
       message.composerThinkingEffort = composerThinkingEffort;
@@ -869,6 +904,14 @@ const decisionPanelBtn = document.getElementById('decisionPanelBtn');
 if (decisionPanelBtn) {
   decisionPanelBtn.addEventListener('click', () => {
     chrome.tabs.create({ url: chrome.runtime.getURL('process-monitor.html') });
+    window.close();
+  });
+}
+
+const problemLogsBtn = document.getElementById('problemLogsBtn');
+if (problemLogsBtn) {
+  problemLogsBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('problem-log.html') });
     window.close();
   });
 }
