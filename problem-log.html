@@ -1,0 +1,172 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Problem Logs</title>
+  <style>
+    :root {
+      --bg: #f5f7fb;
+      --panel: #ffffff;
+      --border: #dbe3ec;
+      --text: #0f172a;
+      --muted: #475569;
+      --warn: #b45309;
+      --error: #b91c1c;
+      --info: #1d4ed8;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 18px;
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      background: linear-gradient(165deg, #eef3f8 0%, #f8fafc 100%);
+      color: var(--text);
+      min-height: 100vh;
+    }
+    .header {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 12px;
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0.01em;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      background: #fff;
+      color: var(--text);
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:hover {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.12);
+    }
+    .btn-danger {
+      color: #fff;
+      background: var(--error);
+      border-color: var(--error);
+    }
+    .meta {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 10px 12px;
+      margin-bottom: 12px;
+      white-space: pre-wrap;
+      line-height: 1.4;
+      font-size: 12px;
+    }
+    .status {
+      margin-bottom: 12px;
+      background: #eff6ff;
+      border: 1px solid #bfdbfe;
+      color: #1e3a8a;
+      border-radius: 10px;
+      padding: 8px 10px;
+      font-size: 12px;
+      white-space: pre-wrap;
+    }
+    .status.error {
+      background: #fef2f2;
+      border-color: #fecaca;
+      color: #991b1b;
+    }
+    .table-wrap {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      overflow: auto;
+    }
+    table {
+      width: 100%;
+      min-width: 1080px;
+      border-collapse: collapse;
+      background: #fff;
+    }
+    th, td {
+      font-size: 12px;
+      border-bottom: 1px solid #edf2f7;
+      text-align: left;
+      padding: 8px 9px;
+      vertical-align: top;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      z-index: 1;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      font-size: 11px;
+      color: var(--muted);
+      background: #f8fafc;
+    }
+    .level-error {
+      color: var(--error);
+      font-weight: 700;
+    }
+    .level-warn {
+      color: var(--warn);
+      font-weight: 700;
+    }
+    .level-info {
+      color: var(--info);
+      font-weight: 700;
+    }
+    .placeholder {
+      color: var(--muted);
+      font-style: italic;
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Problem Logs</h1>
+    <div class="actions">
+      <button class="btn" id="refresh-btn">Odswiez</button>
+      <button class="btn" id="copy-btn">Kopiuj</button>
+      <button class="btn btn-danger" id="clear-btn">Wyczysc</button>
+    </div>
+  </div>
+  <div class="meta" id="meta">Laduje...</div>
+  <div class="status" id="status" hidden></div>
+  <div class="table-wrap">
+    <table>
+      <thead>
+        <tr>
+          <th>Czas</th>
+          <th>Level</th>
+          <th>Run</th>
+          <th>Tytul</th>
+          <th>Etap</th>
+          <th>Status</th>
+          <th>Powod</th>
+          <th>Blad</th>
+          <th>Wiadomosc</th>
+          <th>Prompt</th>
+          <th>Tab/Window</th>
+        </tr>
+      </thead>
+      <tbody id="rows-body"></tbody>
+    </table>
+  </div>
+  <script src="problem-log.js"></script>
+</body>
+</html>
