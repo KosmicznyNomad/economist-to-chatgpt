@@ -536,8 +536,11 @@ function sanitizeReloadResumeMonitorRow(rawRow) {
     tabId: Number.isInteger(rawRow.tabId) ? rawRow.tabId : null,
     windowId: Number.isInteger(rawRow.windowId) ? rawRow.windowId : null,
     progressPromptNumber: Number.isInteger(rawRow.progressPromptNumber) ? rawRow.progressPromptNumber : null,
+    progressStageIndex: Number.isInteger(rawRow.progressStageIndex) ? rawRow.progressStageIndex : null,
     totalPrompts: Number.isInteger(rawRow.totalPrompts) ? rawRow.totalPrompts : null,
     progressStageName: typeof rawRow.progressStageName === 'string' ? rawRow.progressStageName : '',
+    progressStatus: typeof rawRow.progressStatus === 'string' ? rawRow.progressStatus : '',
+    progressNeedsAction: rawRow.progressNeedsAction === true,
     chatPromptNumber: Number.isInteger(rawRow.chatPromptNumber) ? rawRow.chatPromptNumber : null,
     chatPromptSource: typeof rawRow.chatPromptSource === 'string' ? rawRow.chatPromptSource : '',
     chatPromptMismatch: rawRow.chatPromptMismatch === true,
@@ -550,6 +553,7 @@ function sanitizeReloadResumeMonitorRow(rawRow) {
     nextStartIndex: Number.isInteger(rawRow.nextStartIndex) ? rawRow.nextStartIndex : null,
     action: typeof rawRow.action === 'string' ? rawRow.action : '',
     reason: typeof rawRow.reason === 'string' ? rawRow.reason : '',
+    resumeDecisionSource: typeof rawRow.resumeDecisionSource === 'string' ? rawRow.resumeDecisionSource : '',
     attempts: toNonNegativeInt(rawRow.attempts, 0),
     reloadMethod: typeof rawRow.reloadMethod === 'string' ? rawRow.reloadMethod : '',
     stageConsistency: typeof rawRow.stageConsistency === 'string' ? rawRow.stageConsistency : '',
@@ -2536,43 +2540,337 @@ function detectPromptIndexFromMessage(lastUserMessageText, catalog) {
   };
 }
 
+async function readFullConversationFromTab(tabId, options = {}) {
+  if (!Number.isInteger(tabId)) {
+    return { success: false, error: 'invalid_tab_id' };
+  }
+
+  const maxWaitMs = Number.isInteger(options?.maxWaitMs) && options.maxWaitMs > 0
+    ? Math.min(options.maxWaitMs, 60000)
+    : 12000;
+  const stepDelayMs = Number.isInteger(options?.stepDelayMs) && options.stepDelayMs >= 80
+    ? Math.min(options.stepDelayMs, 1500)
+    : 220;
+  const maxCharsPerMessage = Number.isInteger(options?.maxCharsPerMessage) && options.maxCharsPerMessage > 200
+    ? Math.min(options.maxCharsPerMessage, 32000)
+    : 24000;
+  const transferUserMetaLimit = Number.isInteger(options?.transferUserMetaLimit) && options.transferUserMetaLimit > 0
+    ? Math.min(options.transferUserMetaLimit, 1200)
+    : 320;
+  const hardForce = options?.hardForce !== false;
+  const restoreScroll = options?.restoreScroll !== false;
+
+  try {
+    const result = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: async (cfg) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        const isElement = (node) => (
+          !!node
+          && typeof node === 'object'
+          && typeof node.nodeType === 'number'
+          && node.nodeType === 1
+        );
+
+        function readConversationEntries() {
+          const nodes = Array.from(
+            document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+          );
+          const entries = [];
+          for (const node of nodes) {
+            const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
+            if (role !== 'user' && role !== 'assistant') continue;
+            const textRaw = compact(node?.innerText || node?.textContent || '');
+            if (!textRaw) continue;
+            entries.push({
+              role,
+              text: textRaw.length > cfg.maxCharsPerMessage
+                ? textRaw.slice(0, cfg.maxCharsPerMessage)
+                : textRaw
+            });
+          }
+          return entries;
+        }
+
+        function isScrollableElement(node) {
+          if (!isElement(node)) return false;
+          let style = null;
+          try {
+            style = window.getComputedStyle(node);
+          } catch (error) {
+            return false;
+          }
+          const overflowY = String(style?.overflowY || '').toLowerCase();
+          const canScroll = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+          if (!canScroll) return false;
+          return (node.scrollHeight - node.clientHeight) > 12;
+        }
+
+        function getScrollRef() {
+          const firstMessage = document.querySelector('[data-message-author-role="assistant"], [data-message-author-role="user"]');
+          let cursor = firstMessage ? firstMessage.parentElement : null;
+          while (cursor) {
+            if (isScrollableElement(cursor)) {
+              return { type: 'element', node: cursor };
+            }
+            cursor = cursor.parentElement;
+          }
+          const scrollingElement = document.scrollingElement || document.documentElement || document.body;
+          return { type: 'document', node: scrollingElement };
+        }
+
+        function getScrollTop(ref) {
+          if (!ref || !ref.node) return 0;
+          if (ref.type === 'document') {
+            return window.scrollY
+              || ref.node.scrollTop
+              || document.documentElement.scrollTop
+              || 0;
+          }
+          return ref.node.scrollTop || 0;
+        }
+
+        function setScrollTop(ref, value) {
+          if (!ref || !ref.node) return;
+          const target = Number.isFinite(value) ? value : 0;
+          if (ref.type === 'document') {
+            try {
+              window.scrollTo(0, target);
+            } catch (error) {
+              // Ignore.
+            }
+            try {
+              ref.node.scrollTop = target;
+            } catch (error) {
+              // Ignore.
+            }
+            return;
+          }
+          try {
+            ref.node.scrollTop = target;
+          } catch (error) {
+            // Ignore.
+          }
+        }
+
+        function getMaxScrollTop(ref) {
+          if (!ref || !ref.node) return 0;
+          if (ref.type === 'document') {
+            const doc = ref.node;
+            const maxByNode = (doc.scrollHeight || 0) - (doc.clientHeight || 0);
+            const root = document.documentElement || null;
+            const body = document.body || null;
+            const rootMax = root
+              ? ((root.scrollHeight || 0) - (root.clientHeight || 0))
+              : 0;
+            const bodyMax = body
+              ? ((body.scrollHeight || 0) - (body.clientHeight || 0))
+              : 0;
+            return Math.max(0, maxByNode, rootMax, bodyMax);
+          }
+          return Math.max(0, (ref.node.scrollHeight || 0) - (ref.node.clientHeight || 0));
+        }
+
+        function buildUserMessageMeta(conversation) {
+          const users = [];
+          for (let i = 0; i < conversation.length; i += 1) {
+            const entry = conversation[i];
+            if (entry.role !== 'user') continue;
+
+            let hasAssistantReplyAfter = false;
+            let assistantReplyLength = 0;
+            for (let j = i + 1; j < conversation.length; j += 1) {
+              const nextEntry = conversation[j];
+              if (nextEntry.role === 'assistant') {
+                hasAssistantReplyAfter = nextEntry.text.length > 0;
+                assistantReplyLength = nextEntry.text.length;
+                break;
+              }
+              if (nextEntry.role === 'user') {
+                break;
+              }
+            }
+
+            users.push({
+              text: entry.text,
+              hasAssistantReplyAfter,
+              assistantReplyLength
+            });
+          }
+          return users;
+        }
+
+        const startedAt = Date.now();
+        const scrollRef = getScrollRef();
+        const initialScrollTop = getScrollTop(scrollRef);
+        let latestConversation = readConversationEntries();
+        if (cfg.hardForce) {
+          const maxScrollTop = getMaxScrollTop(scrollRef);
+          if (maxScrollTop > 2) {
+            setScrollTop(scrollRef, maxScrollTop);
+            await sleep(cfg.stepDelayMs);
+            const bottomConversation = readConversationEntries();
+            if (bottomConversation.length > 0) {
+              latestConversation = bottomConversation;
+            }
+          }
+        }
+
+        let bestConversation = latestConversation.length > 0
+          ? latestConversation
+          : readConversationEntries();
+        let bestCount = bestConversation.length;
+        let bestUserCount = bestConversation.filter((entry) => entry.role === 'user').length;
+
+        if (cfg.hardForce) {
+          let stableIterations = 0;
+          let prevCount = bestConversation.length;
+          let prevTop = getScrollTop(scrollRef);
+
+          while ((Date.now() - startedAt) < cfg.maxWaitMs) {
+            setScrollTop(scrollRef, 0);
+            await sleep(cfg.stepDelayMs);
+
+            const currentConversation = readConversationEntries();
+            const currentTop = getScrollTop(scrollRef);
+            const currentCount = currentConversation.length;
+            const currentUserCount = currentConversation.filter((entry) => entry.role === 'user').length;
+
+            const isBetter = (
+              currentCount > bestCount
+              || (currentCount === bestCount && currentUserCount > bestUserCount)
+            );
+            if (isBetter) {
+              bestConversation = currentConversation;
+              bestCount = currentCount;
+              bestUserCount = currentUserCount;
+            }
+
+            const atTop = currentTop <= 2;
+            const noChange = currentCount === prevCount && Math.abs(currentTop - prevTop) <= 1;
+            if (atTop && noChange) {
+              stableIterations += 1;
+            } else {
+              stableIterations = 0;
+            }
+
+            prevCount = currentCount;
+            prevTop = currentTop;
+            if (stableIterations >= 4) break;
+          }
+
+          if (cfg.restoreScroll) {
+            setScrollTop(scrollRef, initialScrollTop);
+          }
+        }
+
+        const finalConversation = bestConversation.length > 0 ? bestConversation : readConversationEntries();
+        const latestConversationFinal = latestConversation.length > 0
+          ? latestConversation
+          : finalConversation;
+        const allUserMeta = buildUserMessageMeta(finalConversation);
+        const latestUserMeta = buildUserMessageMeta(latestConversationFinal);
+        const allMessages = allUserMeta.map((entry) => entry.text);
+        const userCountTotal = allUserMeta.length;
+        const assistantCountTotal = finalConversation.reduce((sum, entry) => (
+          sum + (entry.role === 'assistant' ? 1 : 0)
+        ), 0);
+        const totalMessages = finalConversation.length;
+        const lastUserMessageText = latestUserMeta.length > 0
+          ? latestUserMeta[latestUserMeta.length - 1].text
+          : (userCountTotal > 0 ? allUserMeta[userCountTotal - 1].text : '');
+
+        const transferLimit = Number.isInteger(cfg.transferUserMetaLimit) && cfg.transferUserMetaLimit > 0
+          ? cfg.transferUserMetaLimit
+          : 320;
+        const userMeta = allUserMeta.length > transferLimit
+          ? allUserMeta.slice(-transferLimit)
+          : allUserMeta;
+        const messages = allMessages.length > transferLimit
+          ? allMessages.slice(-transferLimit)
+          : allMessages;
+        const latestUserCount = latestUserMeta.length;
+        const latestAssistantCount = latestConversationFinal.reduce((sum, entry) => (
+          sum + (entry.role === 'assistant' ? 1 : 0)
+        ), 0);
+        const latestTotalMessages = latestConversationFinal.length;
+
+        return {
+          success: true,
+          url: location.href || '',
+          title: document.title || '',
+          text: lastUserMessageText,
+          count: userCountTotal,
+          assistantCount: assistantCountTotal,
+          totalMessages,
+          latestUserCount,
+          latestAssistantCount,
+          latestTotalMessages,
+          hardForceApplied: !!cfg.hardForce,
+          scanDurationMs: Date.now() - startedAt,
+          userMetaTotal: allUserMeta.length,
+          userMetaTruncated: allUserMeta.length > transferLimit,
+          messages,
+          messageMeta: userMeta
+        };
+      },
+      args: [{
+        maxWaitMs,
+        stepDelayMs,
+        maxCharsPerMessage,
+        transferUserMetaLimit,
+        hardForce,
+        restoreScroll
+      }]
+    });
+
+    const payload = result?.[0]?.result || {};
+    if (payload?.success) {
+      return payload;
+    }
+    return {
+      success: false,
+      error: typeof payload?.error === 'string' && payload.error.trim()
+        ? payload.error.trim()
+        : 'conversation_scan_failed'
+    };
+  } catch (error) {
+    return { success: false, error: error?.message || String(error) };
+  }
+}
+
 async function extractLastUserMessageFromTab(tabId) {
   if (!Number.isInteger(tabId)) {
     return { success: false, error: 'invalid_tab_id' };
   }
 
-  try {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId },
-      function: () => {
-        const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
-        const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-        const count = userMessages.length;
-        const assistantCount = assistantMessages.length;
-        const last = count > 0 ? userMessages[count - 1] : null;
-        const text = last ? (last.innerText || last.textContent || '') : '';
-        return {
-          text: typeof text === 'string' ? text : '',
-          count,
-          assistantCount,
-          title: document.title || '',
-          url: location.href || ''
-        };
-      }
-    });
-
-    const payload = result?.[0]?.result || {};
+  const scanned = await readFullConversationFromTab(tabId, {
+    maxWaitMs: 14000,
+    transferUserMetaLimit: 2,
+    hardForce: true,
+    restoreScroll: true
+  });
+  if (!scanned?.success) {
     return {
-      success: true,
-      text: typeof payload.text === 'string' ? payload.text : '',
-      count: Number.isInteger(payload.count) ? payload.count : 0,
-      assistantCount: Number.isInteger(payload.assistantCount) ? payload.assistantCount : 0,
-      title: typeof payload.title === 'string' ? payload.title : '',
-      url: typeof payload.url === 'string' ? payload.url : ''
+      success: false,
+      error: scanned?.error || 'conversation_scan_failed'
     };
-  } catch (error) {
-    return { success: false, error: error?.message || String(error) };
   }
+  return {
+    success: true,
+    text: typeof scanned.text === 'string' ? scanned.text : '',
+    count: Number.isInteger(scanned.count) ? scanned.count : 0,
+    assistantCount: Number.isInteger(scanned.assistantCount) ? scanned.assistantCount : 0,
+    title: typeof scanned.title === 'string' ? scanned.title : '',
+    url: typeof scanned.url === 'string' ? scanned.url : '',
+    totalMessages: Number.isInteger(scanned.totalMessages) ? scanned.totalMessages : 0,
+    latestUserCount: Number.isInteger(scanned.latestUserCount) ? scanned.latestUserCount : null,
+    latestAssistantCount: Number.isInteger(scanned.latestAssistantCount) ? scanned.latestAssistantCount : null,
+    latestTotalMessages: Number.isInteger(scanned.latestTotalMessages) ? scanned.latestTotalMessages : null,
+    hardForceApplied: scanned.hardForceApplied === true,
+    scanDurationMs: Number.isInteger(scanned.scanDurationMs) ? scanned.scanDurationMs : null
+  };
 }
 
 async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
@@ -3251,16 +3549,81 @@ async function runResetScanStartAllTabs(options = {}) {
         return false;
       }
     };
-    const computeFallbackResumeStartIndex = (row) => {
+    const computeResumePlanFromSavedStage = (row) => {
       const promptCount = PROMPTS_COMPANY.length;
       if (!Number.isInteger(promptCount) || promptCount <= 1) return null;
 
       const progressPrompt = Number.isInteger(row?.progressPromptNumber)
         ? row.progressPromptNumber
         : null;
+      const progressPromptFromStageIndex = Number.isInteger(row?.progressStageIndex) && row.progressStageIndex >= 0
+        ? (row.progressStageIndex + 1)
+        : null;
+      const savedStageSelection = selectConservativePromptNumber([
+        { source: 'monitor_current_prompt', value: progressPrompt, priority: 1 },
+        { source: 'monitor_stage_index', value: progressPromptFromStageIndex, priority: 2 }
+      ], promptCount);
+      const savedPromptNumber = Number.isInteger(savedStageSelection.promptNumber)
+        ? savedStageSelection.promptNumber
+        : null;
+      if (!Number.isInteger(savedPromptNumber) || savedPromptNumber <= 0) {
+        return {
+          usable: false,
+          reason: 'saved_stage_unavailable'
+        };
+      }
+
+      const savedStatus = normalizeProcessStatus(row?.progressStatus || '');
+      const savedNeedsAction = row?.progressNeedsAction === true;
+      let shouldAdvancePrompt = forceRepeatLastPrompt
+        ? false
+        : !(savedNeedsAction || isFailedProcessStatus(savedStatus));
+      if (!forceRepeatLastPrompt && savedPromptNumber >= promptCount && !isClosedProcessStatus(savedStatus)) {
+        // For active runs at final prompt, retry the same stage instead of auto-marking completion.
+        shouldAdvancePrompt = false;
+      }
+      let nextStartIndex = computeNextResumeIndex(
+        savedPromptNumber - 1,
+        promptCount,
+        shouldAdvancePrompt
+      );
+      let clampedFromPrompt1 = false;
+      if (Number.isInteger(nextStartIndex) && nextStartIndex < 1 && promptCount > 1) {
+        nextStartIndex = 1;
+        clampedFromPrompt1 = true;
+      }
+
+      const reason = forceRepeatLastPrompt
+        ? (clampedFromPrompt1 ? 'force_repeat_saved_stage_clamped_to_prompt_2' : 'force_repeat_saved_stage')
+        : (
+          savedNeedsAction || isFailedProcessStatus(savedStatus)
+            ? (clampedFromPrompt1 ? 'saved_stage_retry_clamped_to_prompt_2' : 'saved_stage_retry_same_prompt')
+            : 'saved_stage_snapshot'
+        );
+
+      return {
+        usable: true,
+        promptNumber: savedPromptNumber,
+        promptSource: savedStageSelection.source || 'monitor_current_prompt',
+        promptMismatch: savedStageSelection.mismatch,
+        shouldAdvancePrompt,
+        nextStartIndex,
+        finalStageReached: !Number.isInteger(nextStartIndex),
+        clampedFromPrompt1,
+        reason
+      };
+    };
+
+    const computeFallbackResumeStartIndex = (row) => {
+      const promptCount = PROMPTS_COMPANY.length;
+      if (!Number.isInteger(promptCount) || promptCount <= 1) return null;
+
       const chatPromptFromCount = Number.isInteger(row?.userMessageCount)
         ? row.userMessageCount
         : null;
+      if (!Number.isInteger(chatPromptFromCount) || chatPromptFromCount <= 0) {
+        return null;
+      }
       const hasCounters = Number.isInteger(row?.assistantMessageCount) && Number.isInteger(row?.userMessageCount);
       const shouldAdvancePrompt = forceRepeatLastPrompt
         ? false
@@ -3269,13 +3632,32 @@ async function runResetScanStartAllTabs(options = {}) {
             ? row.assistantMessageCount >= row.userMessageCount
             : true
         );
-      const fallbackStageSelection = selectConservativePromptNumber([
-        { source: 'process_progress', value: progressPrompt, priority: 1 },
-        { source: 'chat_user_count', value: chatPromptFromCount, priority: 2 }
-      ], promptCount);
-      const conservativePrompt = Number.isInteger(fallbackStageSelection.promptNumber)
-        ? fallbackStageSelection.promptNumber
+      const conservativePrompt = toBoundedPromptNumber(chatPromptFromCount, promptCount);
+      if (Number.isInteger(conservativePrompt) && conservativePrompt > 0) {
+        const conservativeIndex = Math.min(Math.max(conservativePrompt - 1, 0), promptCount - 1);
+        const computed = computeNextResumeIndex(conservativeIndex, promptCount, shouldAdvancePrompt);
+        if (Number.isInteger(computed)) {
+          return Math.min(Math.max(computed, 1), promptCount - 1);
+        }
+        return null;
+      }
+
+      return null;
+    };
+
+    const computeFinalFallbackResumeStartIndex = (row) => {
+      const promptCount = PROMPTS_COMPANY.length;
+      if (!Number.isInteger(promptCount) || promptCount <= 1) return null;
+
+      const progressPrompt = Number.isInteger(row?.progressPromptNumber)
+        ? row.progressPromptNumber
         : null;
+      if (!Number.isInteger(progressPrompt) || progressPrompt <= 0) {
+        return 1;
+      }
+
+      const shouldAdvancePrompt = forceRepeatLastPrompt ? false : true;
+      const conservativePrompt = toBoundedPromptNumber(progressPrompt, promptCount);
 
       if (Number.isInteger(conservativePrompt) && conservativePrompt > 0) {
         const conservativeIndex = Math.min(Math.max(conservativePrompt - 1, 0), promptCount - 1);
@@ -3330,8 +3712,11 @@ async function runResetScanStartAllTabs(options = {}) {
         detectedSignature: '',
         detectedHasAssistantReply: null,
         progressPromptNumber: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null,
+        progressStageIndex: Number.isInteger(process?.stageIndex) ? process.stageIndex : null,
         totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null,
         progressStageName: typeof process?.stageName === 'string' ? process.stageName : '',
+        progressStatus: process ? normalizeProcessStatus(process?.status || '') : '',
+        progressNeedsAction: process?.needsAction === true,
         chatPromptNumber: null,
         chatPromptSource: '',
         chatPromptMismatch: false,
@@ -3341,6 +3726,7 @@ async function runResetScanStartAllTabs(options = {}) {
         stageConsistency: '',
         stageDelta: null,
         nextStartIndex: null,
+        resumeDecisionSource: '',
         action: 'queued',
         reason: '',
         attempts: 0,
@@ -3604,6 +3990,66 @@ async function runResetScanStartAllTabs(options = {}) {
           tabId: row.tabId,
           windowId: row.windowId
         });
+
+        const savedStagePlan = computeResumePlanFromSavedStage(row);
+        if (savedStagePlan?.usable) {
+          matchedKeys.add(target.key);
+          row.detectedPromptNumber = savedStagePlan.promptNumber;
+          row.detectedPromptIndex = Math.max(0, savedStagePlan.promptNumber - 1);
+          row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${savedStagePlan.promptNumber}`;
+          row.detectedMethod = 'monitor_stage_snapshot';
+          row.resolvedPromptNumber = savedStagePlan.promptNumber;
+          row.resolvedPromptSource = `monitor:${savedStagePlan.promptSource || 'monitor_current_prompt'}`;
+          row.resolvedPromptMismatch = savedStagePlan.promptMismatch === true;
+          row.nextStartIndex = savedStagePlan.nextStartIndex;
+          row.resumeDecisionSource = 'saved_stage_snapshot';
+          row.stageDelta = Number.isInteger(row.progressPromptNumber)
+            ? (savedStagePlan.promptNumber - row.progressPromptNumber)
+            : null;
+          row.stageConsistency = row.resolvedPromptMismatch
+            ? 'monitor_snapshot|conservative_min'
+            : 'monitor_snapshot';
+
+          console.log('[reset-scan-start] Saved monitor stage resolved', {
+            runId: row.runId || '',
+            tabId: row.tabId,
+            promptNumber: row.detectedPromptNumber,
+            promptSource: savedStagePlan.promptSource,
+            promptMismatch: savedStagePlan.promptMismatch,
+            shouldAdvancePrompt: savedStagePlan.shouldAdvancePrompt,
+            nextStartIndex: row.nextStartIndex,
+            progressPromptNumber: row.progressPromptNumber,
+            progressStageIndex: row.progressStageIndex,
+            progressStatus: row.progressStatus,
+            progressNeedsAction: row.progressNeedsAction
+          });
+
+          if (!Number.isInteger(row.nextStartIndex)) {
+            row.action = 'final_stage_already_sent';
+            row.reason = 'saved_stage_final_stage_completed';
+            await markProcessCompletedAfterFinalStage(row, 'saved_stage_final_stage_completed');
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            await sleep(120);
+            continue;
+          }
+
+          row.action = 'ready_to_start';
+          row.reason = savedStagePlan.reason || 'saved_stage_snapshot';
+          resultsByKey.set(target.key, row);
+          pendingKeys.delete(target.key);
+          await sleep(120);
+          continue;
+        }
+
+        console.log('[reset-scan-start] Saved stage unavailable, switching to chat counter fallback', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          reason: savedStagePlan?.reason || 'saved_stage_unavailable',
+          progressPromptNumber: row.progressPromptNumber,
+          progressStageIndex: row.progressStageIndex
+        });
+        row.resumeDecisionSource = 'chat_fallback_pending';
 
         let extraction = await extractLastUserMessageFromTab(row.tabId);
         if (!extraction.success) {
@@ -3883,6 +4329,7 @@ async function runResetScanStartAllTabs(options = {}) {
           stageDelta: row.stageDelta,
           stageConsistency: row.stageConsistency || ''
         });
+        row.resumeDecisionSource = 'chat_fallback_detection';
 
         if (!Number.isInteger(row.nextStartIndex)) {
           row.action = 'final_stage_already_sent';
@@ -3961,11 +4408,12 @@ async function runResetScanStartAllTabs(options = {}) {
       if (Number.isInteger(fallbackStartIndex)) {
         row.nextStartIndex = fallbackStartIndex;
         row.action = 'ready_to_start';
-        row.reason = forceRepeatLastPrompt ? 'force_repeat_last_prompt_fallback' : 'fallback_progress_resume';
-        if (!row.detectedMethod) row.detectedMethod = 'progress_counter_fallback';
-        if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.progressPromptNumber)) {
-          row.detectedPromptNumber = row.progressPromptNumber;
-          row.detectedPromptIndex = Math.max(0, row.progressPromptNumber - 1);
+        row.reason = forceRepeatLastPrompt ? 'force_repeat_counter_fallback' : 'counter_fallback_resume';
+        row.resumeDecisionSource = 'chat_counter_fallback';
+        if (!row.detectedMethod) row.detectedMethod = 'chat_counter_fallback';
+        if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.userMessageCount)) {
+          row.detectedPromptNumber = row.userMessageCount;
+          row.detectedPromptIndex = Math.max(0, row.userMessageCount - 1);
           row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${row.detectedPromptNumber}`;
         }
         resultsByKey.set(target.key, row);
@@ -3974,6 +4422,31 @@ async function runResetScanStartAllTabs(options = {}) {
           tabId: row.tabId,
           fallbackStartIndex,
           startPromptNumber: fallbackStartIndex + 1,
+          userMessageCount: row.userMessageCount
+        });
+        continue;
+      }
+
+      const finalFallbackStartIndex = computeFinalFallbackResumeStartIndex(row);
+      if (Number.isInteger(finalFallbackStartIndex)) {
+        row.nextStartIndex = finalFallbackStartIndex;
+        row.action = 'ready_to_start';
+        row.reason = forceRepeatLastPrompt
+          ? 'force_repeat_progress_last_resort'
+          : 'progress_last_resort_resume';
+        row.resumeDecisionSource = 'progress_last_resort_fallback';
+        if (!row.detectedMethod) row.detectedMethod = 'progress_last_resort_fallback';
+        if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.progressPromptNumber)) {
+          row.detectedPromptNumber = row.progressPromptNumber;
+          row.detectedPromptIndex = Math.max(0, row.progressPromptNumber - 1);
+          row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${row.detectedPromptNumber}`;
+        }
+        resultsByKey.set(target.key, row);
+        console.log('[reset-scan-start] Last-resort progress fallback queued', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          finalFallbackStartIndex,
+          startPromptNumber: finalFallbackStartIndex + 1,
           progressPromptNumber: row.progressPromptNumber
         });
         continue;
@@ -3981,6 +4454,7 @@ async function runResetScanStartAllTabs(options = {}) {
 
       row.action = 'final_stage_already_sent';
       row.reason = 'fallback_final_stage_completed';
+      row.resumeDecisionSource = 'fallback_final_stage_completed';
       await markProcessCompletedAfterFinalStage(row, 'fallback_final_stage_completed');
       resultsByKey.set(target.key, row);
       console.log('[reset-scan-start] Fallback detected completed process', {
@@ -5198,86 +5672,58 @@ async function resolveChatTabForProcess(process, message = {}) {
 
 async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
   if (!Number.isInteger(tabId)) {
-    return { messages: [], messageMeta: [], url: '' };
+    return {
+      messages: [],
+      messageMeta: [],
+      url: '',
+      title: '',
+      count: 0,
+      assistantCount: 0,
+      totalMessages: 0,
+      userMetaTruncated: false,
+      hardForceApplied: false
+    };
   }
 
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      function: async (waitMs) => {
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
-
-        function readConversationEntries() {
-          const nodes = Array.from(
-            document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
-          );
-          return nodes
-            .map((node) => {
-              const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
-              const text = compact(node?.innerText || node?.textContent || '');
-              return {
-                role,
-                text: text.length > 24000 ? text.slice(0, 24000) : text
-              };
-            })
-            .filter((entry) => (entry.role === 'user' || entry.role === 'assistant') && entry.text.length > 0)
-            .slice(-40);
-        }
-
-        function buildUserMessageMeta() {
-          const conversation = readConversationEntries();
-          const users = [];
-          for (let i = 0; i < conversation.length; i += 1) {
-            const entry = conversation[i];
-            if (entry.role !== 'user') continue;
-
-            let hasAssistantReplyAfter = false;
-            let assistantReplyLength = 0;
-            for (let j = i + 1; j < conversation.length; j += 1) {
-              const nextEntry = conversation[j];
-              if (nextEntry.role === 'assistant') {
-                hasAssistantReplyAfter = nextEntry.text.length > 0;
-                assistantReplyLength = nextEntry.text.length;
-                break;
-              }
-              if (nextEntry.role === 'user') {
-                break;
-              }
-            }
-
-            users.push({
-              text: entry.text,
-              hasAssistantReplyAfter,
-              assistantReplyLength
-            });
-          }
-          return users.slice(-14);
-        }
-
-        const startedAt = Date.now();
-        let messageMeta = buildUserMessageMeta();
-        let messages = messageMeta.map((entry) => entry.text);
-        while (messages.length === 0 && (Date.now() - startedAt) < waitMs) {
-          await sleep(300);
-          messageMeta = buildUserMessageMeta();
-          messages = messageMeta.map((entry) => entry.text);
-        }
-
-        return {
-          url: location.href,
-          messages,
-          messageMeta
-        };
-      },
-      args: [maxWaitMs]
+  const scanned = await readFullConversationFromTab(tabId, {
+    maxWaitMs,
+    transferUserMetaLimit: 420,
+    hardForce: true,
+    restoreScroll: true
+  });
+  if (!scanned?.success) {
+    console.warn('[resume] Nie udalo sie odczytac promptow usera z tab:', {
+      tabId,
+      reason: typeof scanned?.error === 'string' && scanned.error.trim()
+        ? scanned.error.trim()
+        : 'conversation_scan_failed'
     });
-
-    return results?.[0]?.result || { messages: [], messageMeta: [], url: '' };
-  } catch (error) {
-    console.warn('[resume] Nie udalo sie odczytac promptow usera z tab:', tabId, error?.message || error);
-    return { messages: [], messageMeta: [], url: '' };
+    return {
+      messages: [],
+      messageMeta: [],
+      url: '',
+      title: '',
+      count: 0,
+      assistantCount: 0,
+      totalMessages: 0,
+      userMetaTruncated: false,
+      hardForceApplied: false
+    };
   }
+
+  return {
+    url: typeof scanned.url === 'string' ? scanned.url : '',
+    title: typeof scanned.title === 'string' ? scanned.title : '',
+    messages: Array.isArray(scanned.messages) ? scanned.messages : [],
+    messageMeta: Array.isArray(scanned.messageMeta) ? scanned.messageMeta : [],
+    count: Number.isInteger(scanned.count) ? scanned.count : 0,
+    assistantCount: Number.isInteger(scanned.assistantCount) ? scanned.assistantCount : 0,
+    totalMessages: Number.isInteger(scanned.totalMessages) ? scanned.totalMessages : 0,
+    userMetaTruncated: scanned.userMetaTruncated === true,
+    userMetaTotal: Number.isInteger(scanned.userMetaTotal) ? scanned.userMetaTotal : null,
+    hardForceApplied: scanned.hardForceApplied === true,
+    scanDurationMs: Number.isInteger(scanned.scanDurationMs) ? scanned.scanDurationMs : null
+  };
 }
 
 function detectLastPromptMatch(userMessages, promptRecords) {
@@ -5552,51 +5998,72 @@ async function handleProcessResumeNextStageMessage(message) {
     return { success: false, error: 'chat_tab_not_found' };
   }
 
-  const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
-  const extracted = await extractRecentUserPromptsFromTab(chatTab.id);
-  const extractedEntries = Array.isArray(extracted?.messageMeta) && extracted.messageMeta.length > 0
-    ? extracted.messageMeta
-    : (Array.isArray(extracted?.messages) ? extracted.messages : []);
-  const matched = detectLastPromptMatch(extractedEntries, promptRecords);
-  const latestExtraction = await extractLastUserMessageFromTab(chatTab.id);
-  const chatPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.count)
-    ? latestExtraction.count
-    : null;
-  const assistantPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.assistantCount)
-    ? latestExtraction.assistantCount
-    : null;
   const progressPromptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
     ? process.currentPrompt
     : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : null);
-  const conservativeStageSelection = selectConservativePromptNumber([
-    { source: 'chat_recent', value: Number.isInteger(matched?.promptNumber) ? matched.promptNumber : null, priority: 1 },
-    { source: 'chat_user_count', value: chatPromptCountFromBlocks, priority: 2 },
-    { source: 'process_progress', value: progressPromptNumber, priority: 3 }
-  ], PROMPTS_COMPANY.length);
-  const conservativePromptNumber = Number.isInteger(conservativeStageSelection.promptNumber)
-    ? conservativeStageSelection.promptNumber
-    : null;
-  const detectedPromptIndex = Number.isInteger(conservativePromptNumber)
-    ? (conservativePromptNumber - 1)
-    : getProgressPromptIndex(process);
-  const detectedMethod = conservativeStageSelection.source
-    ? `conservative_${conservativeStageSelection.source}`
-    : (matched ? matched.method : 'progress_fallback');
-  const hasAssistantReplyByCounters = (
-    Number.isInteger(chatPromptCountFromBlocks) && Number.isInteger(assistantPromptCountFromBlocks)
-  )
-    ? assistantPromptCountFromBlocks >= chatPromptCountFromBlocks
-    : null;
-  let shouldAdvancePrompt = (
-    matched?.hasAssistantReplyAfter !== false
-    && hasAssistantReplyByCounters !== false
-  );
-  let retrySamePrompt = !shouldAdvancePrompt;
+  const processStatus = normalizeProcessStatus(process?.status || '');
+  const processNeedsAction = process?.needsAction === true;
+  let matched = null;
+  let detectedPromptIndex = null;
+  let detectedMethod = '';
+  let hasAssistantReplyByCounters = null;
+  let shouldAdvancePrompt = true;
+  let retrySamePrompt = false;
   let retryReason = '';
-  if (retrySamePrompt) {
-    retryReason = matched?.hasAssistantReplyAfter === false
-      ? 'missing_assistant_reply'
-      : 'missing_assistant_reply_by_count';
+
+  const boundedProgressPromptNumber = toBoundedPromptNumber(progressPromptNumber, PROMPTS_COMPANY.length);
+  if (Number.isInteger(boundedProgressPromptNumber) && boundedProgressPromptNumber > 0) {
+    detectedPromptIndex = boundedProgressPromptNumber - 1;
+    detectedMethod = 'saved_process_progress';
+    shouldAdvancePrompt = !(processNeedsAction || isFailedProcessStatus(processStatus));
+    retrySamePrompt = !shouldAdvancePrompt;
+    if (retrySamePrompt) {
+      retryReason = processNeedsAction
+        ? 'saved_stage_needs_action'
+        : 'saved_stage_failed_status';
+    }
+  } else {
+    const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
+    const extracted = await extractRecentUserPromptsFromTab(chatTab.id);
+    const extractedEntries = Array.isArray(extracted?.messageMeta) && extracted.messageMeta.length > 0
+      ? extracted.messageMeta
+      : (Array.isArray(extracted?.messages) ? extracted.messages : []);
+    matched = detectLastPromptMatch(extractedEntries, promptRecords);
+    const latestExtraction = await extractLastUserMessageFromTab(chatTab.id);
+    const chatPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.count)
+      ? latestExtraction.count
+      : null;
+    const assistantPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.assistantCount)
+      ? latestExtraction.assistantCount
+      : null;
+    const conservativeStageSelection = selectConservativePromptNumber([
+      { source: 'chat_recent', value: Number.isInteger(matched?.promptNumber) ? matched.promptNumber : null, priority: 1 },
+      { source: 'chat_user_count', value: chatPromptCountFromBlocks, priority: 2 }
+    ], PROMPTS_COMPANY.length);
+    const conservativePromptNumber = Number.isInteger(conservativeStageSelection.promptNumber)
+      ? conservativeStageSelection.promptNumber
+      : null;
+    detectedPromptIndex = Number.isInteger(conservativePromptNumber)
+      ? (conservativePromptNumber - 1)
+      : getProgressPromptIndex(process);
+    detectedMethod = conservativeStageSelection.source
+      ? `conservative_${conservativeStageSelection.source}`
+      : (matched ? matched.method : 'progress_fallback');
+    hasAssistantReplyByCounters = (
+      Number.isInteger(chatPromptCountFromBlocks) && Number.isInteger(assistantPromptCountFromBlocks)
+    )
+      ? assistantPromptCountFromBlocks >= chatPromptCountFromBlocks
+      : null;
+    shouldAdvancePrompt = (
+      matched?.hasAssistantReplyAfter !== false
+      && hasAssistantReplyByCounters !== false
+    );
+    retrySamePrompt = !shouldAdvancePrompt;
+    if (retrySamePrompt) {
+      retryReason = matched?.hasAssistantReplyAfter === false
+        ? 'missing_assistant_reply'
+        : 'missing_assistant_reply_by_count';
+    }
   }
 
   if (shouldAdvancePrompt) {

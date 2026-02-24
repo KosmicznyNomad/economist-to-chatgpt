@@ -526,17 +526,24 @@ async function executeResumeAllFromPopup(button, options = {}) {
 async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   if (!button) return;
 
+  const origin = typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all';
+  const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = 'Powtarzam...';
   setRunStatus('Powtarzam ostatni prompt we wszystkich aktywnych procesach company...');
+  openReloadResumeMonitorWindow(monitorSessionId, {
+    origin,
+    forceRepeatLastPrompt: true
+  });
 
   try {
     const response = await sendRuntimeMessage({
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
-      origin: typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all',
+      origin,
       scope: 'active_company_invest_processes',
       forceRepeatLastPrompt: true,
+      monitorSessionId
     });
 
     if (!response || Object.keys(response).length === 0) {
