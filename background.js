@@ -28,7 +28,7 @@ const RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST = 'active_company_invest_processes'
 const AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const AUTO_RECOVERY_DELAY_MS = 2000;
 const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
-const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout', 'invalid_response'];
+const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout'];
 const YT_TRANSCRIPT_PREFERRED_LANGUAGES = ['pl', 'en'];
 const YT_TRANSCRIPT_REQUEST_TIMEOUT_MS = 9000;
 const YT_TRANSCRIPT_MAX_RETRIES = 3;
@@ -85,6 +85,8 @@ const PROBLEM_LOG_STORAGE_KEY = 'problem_log_entries';
 const PROBLEM_LOG_MAX_ITEMS = 400;
 const PROBLEM_LOG_BURST_DEDUPE_MS = 7000;
 const PROBLEM_LOG_MAX_TEXT_LENGTH = 600;
+const WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY = 'watchlist_dispatch_process_log';
+const WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS = 800;
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
@@ -108,6 +110,8 @@ let watchlistDispatchFlushInProgress = false;
 let watchlistDispatchFlushPending = false;
 let watchlistDispatchFlushPendingReason = '';
 let watchlistDispatchCredentialsCache = null;
+let watchlistDispatchProcessLogEntries = [];
+let watchlistDispatchProcessLogReady = null;
 let autoRestoreWindowsInProgress = false;
 let reloadResumeMonitorState = null;
 let reloadResumeMonitorReady = null;
@@ -522,8 +526,21 @@ function normalizeReloadResumeSummary(rawSummary) {
     reload_total: toNonNegativeInt(source.reload_total, 0),
     prompt_blocks: toNonNegativeInt(source.prompt_blocks, 0),
     response_blocks: toNonNegativeInt(source.response_blocks, 0),
-    detected_prompts: toNonNegativeInt(source.detected_prompts, 0)
+    detected_prompts: toNonNegativeInt(source.detected_prompts, 0),
+    recognized_saved_stage: toNonNegativeInt(source.recognized_saved_stage, 0),
+    recognized_chat_detection: toNonNegativeInt(source.recognized_chat_detection, 0),
+    recognized_chat_counter_fallback: toNonNegativeInt(source.recognized_chat_counter_fallback, 0),
+    recognized_progress_last_resort: toNonNegativeInt(source.recognized_progress_last_resort, 0),
+    recognized_unresolved: toNonNegativeInt(source.recognized_unresolved, 0)
   };
+}
+
+function sanitizeReloadResumeRecognitionSteps(rawSteps) {
+  if (!Array.isArray(rawSteps)) return [];
+  return rawSteps
+    .filter((item) => typeof item === 'string' && item.trim())
+    .map((item) => item.trim().slice(0, 220))
+    .slice(-24);
 }
 
 function sanitizeReloadResumeMonitorRow(rawRow) {
@@ -554,10 +571,25 @@ function sanitizeReloadResumeMonitorRow(rawRow) {
     action: typeof rawRow.action === 'string' ? rawRow.action : '',
     reason: typeof rawRow.reason === 'string' ? rawRow.reason : '',
     resumeDecisionSource: typeof rawRow.resumeDecisionSource === 'string' ? rawRow.resumeDecisionSource : '',
+    recognitionStage: typeof rawRow.recognitionStage === 'string' ? rawRow.recognitionStage : '',
+    recognitionStatus: typeof rawRow.recognitionStatus === 'string' ? rawRow.recognitionStatus : '',
+    recognitionSource: typeof rawRow.recognitionSource === 'string' ? rawRow.recognitionSource : '',
+    recognitionSummary: typeof rawRow.recognitionSummary === 'string' ? rawRow.recognitionSummary : '',
+    recognitionSteps: sanitizeReloadResumeRecognitionSteps(rawRow.recognitionSteps),
     attempts: toNonNegativeInt(rawRow.attempts, 0),
     reloadMethod: typeof rawRow.reloadMethod === 'string' ? rawRow.reloadMethod : '',
     stageConsistency: typeof rawRow.stageConsistency === 'string' ? rawRow.stageConsistency : '',
     stageDelta: Number.isInteger(rawRow.stageDelta) ? rawRow.stageDelta : null,
+    restartPlannedStartIndex: Number.isInteger(rawRow.restartPlannedStartIndex) ? rawRow.restartPlannedStartIndex : null,
+    restartPlannedStartPromptNumber: Number.isInteger(rawRow.restartPlannedStartPromptNumber) ? rawRow.restartPlannedStartPromptNumber : null,
+    restartDispatchedStartIndex: Number.isInteger(rawRow.restartDispatchedStartIndex) ? rawRow.restartDispatchedStartIndex : null,
+    restartDispatchedStartPromptNumber: Number.isInteger(rawRow.restartDispatchedStartPromptNumber) ? rawRow.restartDispatchedStartPromptNumber : null,
+    restartDecisionReason: typeof rawRow.restartDecisionReason === 'string' ? rawRow.restartDecisionReason : '',
+    restartDecisionSource: typeof rawRow.restartDecisionSource === 'string' ? rawRow.restartDecisionSource : '',
+    restartDispatchStatus: typeof rawRow.restartDispatchStatus === 'string' ? rawRow.restartDispatchStatus : '',
+    restartMissingAssistantReply: rawRow.restartMissingAssistantReply === true
+      ? true
+      : (rawRow.restartMissingAssistantReply === false ? false : null),
     userMessageCount: Number.isInteger(rawRow.userMessageCount) ? rawRow.userMessageCount : null,
     assistantMessageCount: Number.isInteger(rawRow.assistantMessageCount) ? rawRow.assistantMessageCount : null,
     responseBlockCount: Number.isInteger(rawRow.responseBlockCount) ? rawRow.responseBlockCount : null,
@@ -642,6 +674,46 @@ function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
   const reloadTotal = Number.isInteger(reloadTotalHint)
     ? reloadTotalHint
     : sourceRows.filter((row) => row?.eligibleForReload === true).length;
+  const recognitionCounts = {
+    savedStage: 0,
+    chatDetection: 0,
+    chatCounterFallback: 0,
+    progressLastResort: 0,
+    unresolved: 0
+  };
+  const isRecognitionResolved = (source) => (
+    source === 'saved_stage_snapshot'
+    || source === 'chat_fallback_detection'
+    || source === 'chat_counter_fallback'
+    || source === 'progress_last_resort_fallback'
+    || source === 'conversation_audit_match'
+    || source === 'conversation_audit_counter_fallback'
+  );
+
+  sourceRows.forEach((row) => {
+    const recognitionSource = (
+      typeof row?.recognitionSource === 'string' && row.recognitionSource.trim()
+    )
+      ? row.recognitionSource.trim()
+      : (typeof row?.resumeDecisionSource === 'string' ? row.resumeDecisionSource.trim() : '');
+    if (recognitionSource === 'saved_stage_snapshot') recognitionCounts.savedStage += 1;
+    if (recognitionSource === 'chat_fallback_detection' || recognitionSource === 'conversation_audit_match') {
+      recognitionCounts.chatDetection += 1;
+    }
+    if (recognitionSource === 'chat_counter_fallback' || recognitionSource === 'conversation_audit_counter_fallback') {
+      recognitionCounts.chatCounterFallback += 1;
+    }
+    if (recognitionSource === 'progress_last_resort_fallback') recognitionCounts.progressLastResort += 1;
+    const unresolvedBySource = recognitionSource === 'chat_fallback_unresolved' || recognitionSource === 'detect_unresolved';
+    const unresolvedByAction = (
+      row?.eligibleForReload === true
+      && row?.action === 'detect_failed'
+      && !isRecognitionResolved(recognitionSource)
+    );
+    if (unresolvedBySource || unresolvedByAction) {
+      recognitionCounts.unresolved += 1;
+    }
+  });
 
   return normalizeReloadResumeSummary({
     started: actionCounts.started || 0,
@@ -655,7 +727,12 @@ function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
     reload_total: reloadTotal,
     prompt_blocks: promptBlocks,
     response_blocks: responseBlocks,
-    detected_prompts: detectedPrompts
+    detected_prompts: detectedPrompts,
+    recognized_saved_stage: recognitionCounts.savedStage,
+    recognized_chat_detection: recognitionCounts.chatDetection,
+    recognized_chat_counter_fallback: recognitionCounts.chatCounterFallback,
+    recognized_progress_last_resort: recognitionCounts.progressLastResort,
+    recognized_unresolved: recognitionCounts.unresolved
   });
 }
 
@@ -1751,6 +1828,7 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
       ? saveResult.dispatch
       : null,
+    dispatchProcessLog: Array.isArray(saveResult.dispatchProcessLog) ? saveResult.dispatchProcessLog.slice(-16) : [],
     dispatchSummary
   };
 }
@@ -2566,6 +2644,24 @@ async function readFullConversationFromTab(tabId, options = {}) {
       function: async (cfg) => {
         const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
         const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
+        const countWords = (text) => {
+          const normalized = compact(text).toLowerCase();
+          if (!normalized) return 0;
+          return normalized
+            .split(/[\s,.;:!?()[\]{}"'<>\-_/\\|]+/)
+            .map((token) => token.trim())
+            .filter((token) => token.length > 0)
+            .length;
+        };
+        const countSentences = (text) => {
+          const normalized = compact(text);
+          if (!normalized) return 0;
+          const parts = normalized.match(/[^.!?\n]+(?:[.!?]+|$)/g) || [];
+          return parts
+            .map((part) => compact(part))
+            .filter((part) => part.length > 0 && countWords(part) > 0)
+            .length;
+        };
         const isElement = (node) => (
           !!node
           && typeof node === 'object'
@@ -2680,11 +2776,17 @@ async function readFullConversationFromTab(tabId, options = {}) {
 
             let hasAssistantReplyAfter = false;
             let assistantReplyLength = 0;
+            let assistantReplyWordCount = 0;
+            let assistantReplySentenceCount = 0;
             for (let j = i + 1; j < conversation.length; j += 1) {
               const nextEntry = conversation[j];
               if (nextEntry.role === 'assistant') {
                 hasAssistantReplyAfter = nextEntry.text.length > 0;
                 assistantReplyLength = nextEntry.text.length;
+                if (hasAssistantReplyAfter) {
+                  assistantReplyWordCount = countWords(nextEntry.text);
+                  assistantReplySentenceCount = countSentences(nextEntry.text);
+                }
                 break;
               }
               if (nextEntry.role === 'user') {
@@ -2695,7 +2797,9 @@ async function readFullConversationFromTab(tabId, options = {}) {
             users.push({
               text: entry.text,
               hasAssistantReplyAfter,
-              assistantReplyLength
+              assistantReplyLength,
+              assistantReplyWordCount,
+              assistantReplySentenceCount
             });
           }
           return users;
@@ -2874,8 +2978,8 @@ async function extractLastUserMessageFromTab(tabId) {
 }
 
 async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
-  const normalizedStartIndex = Number.isInteger(startIndex) ? startIndex : -1;
-  if (!Number.isInteger(tabId) || normalizedStartIndex < 0) {
+  const requestedStartIndex = Number.isInteger(startIndex) ? startIndex : -1;
+  if (!Number.isInteger(tabId) || requestedStartIndex < 0) {
     return { success: false, error: 'invalid_resume_arguments' };
   }
 
@@ -2897,7 +3001,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   if (PROMPTS_COMPANY.length === 0) {
     return { success: false, error: 'prompts_empty' };
   }
-  if (normalizedStartIndex >= PROMPTS_COMPANY.length) {
+  if (requestedStartIndex >= PROMPTS_COMPANY.length) {
     return { success: false, error: 'start_index_out_of_range' };
   }
 
@@ -2928,7 +3032,73 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     }
   }
 
-  const promptsToSend = PROMPTS_COMPANY.slice(normalizedStartIndex);
+  const minStartIndex = Number.isInteger(options?.minStartIndex)
+    ? Math.max(0, Math.min(options.minStartIndex, Math.max(PROMPTS_COMPANY.length - 1, 0)))
+    : (PROMPTS_COMPANY.length > 1 ? 1 : 0);
+  const stagePreflightEnabled = options?.skipStagePreflight !== true;
+  const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
+  const precomputedStagePlan = options?.precomputedStagePlan && typeof options.precomputedStagePlan === 'object'
+    ? options.precomputedStagePlan
+    : null;
+  let stagePlan = null;
+  let effectiveStartIndex = requestedStartIndex;
+
+  if (stagePreflightEnabled) {
+    if (precomputedStagePlan?.resolved === true) {
+      stagePlan = precomputedStagePlan;
+    } else {
+      const planResult = await resolveCompanyResumeStagePlanForTab(tabId, {
+        maxWaitMs: Number.isInteger(options?.stagePlanMaxWaitMs) ? options.stagePlanMaxWaitMs : 18000,
+        forceRepeatLastPrompt,
+        minStartIndex,
+        origin: 'resume-from-stage-on-tab'
+      });
+      if (planResult?.success && planResult.plan?.resolved) {
+        stagePlan = planResult.plan;
+      } else {
+        console.warn('[resume-stage-plan] preflight failed; using requested start index', {
+          tabId,
+          requestedStartIndex,
+          error: planResult?.error || 'stage_plan_failed'
+        });
+      }
+    }
+
+    if (stagePlan?.resolved) {
+      if (stagePlan.finalStageReached || !Number.isInteger(stagePlan.nextStartIndex)) {
+        return {
+          success: false,
+          error: 'already_at_last_prompt',
+          requestedStartIndex,
+          resolvedStartIndex: null,
+          stagePlan
+        };
+      }
+      effectiveStartIndex = Math.max(0, Math.min(stagePlan.nextStartIndex, PROMPTS_COMPANY.length - 1));
+      if (effectiveStartIndex !== requestedStartIndex) {
+        console.log('[resume-stage-plan] adjusted start index from audit', {
+          tabId,
+          requestedStartIndex,
+          resolvedStartIndex: effectiveStartIndex,
+          detectedPromptNumber: stagePlan.detectedPromptNumber,
+          reason: stagePlan.reason,
+          source: stagePlan.source
+        });
+      }
+    }
+  }
+
+  if (effectiveStartIndex >= PROMPTS_COMPANY.length) {
+    return {
+      success: false,
+      error: 'already_at_last_prompt',
+      requestedStartIndex,
+      resolvedStartIndex: null,
+      stagePlan
+    };
+  }
+
+  const promptsToSend = PROMPTS_COMPANY.slice(effectiveStartIndex);
   const cleanedPrompts = [...promptsToSend];
   if (cleanedPrompts[0]) {
     cleanedPrompts[0] = cleanedPrompts[0].replace('{{articlecontent}}', '').trim();
@@ -2938,8 +3108,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   const restOfPrompts = cleanedPrompts;
   const processTitle = typeof options.processTitle === 'string' && options.processTitle.trim()
     ? options.processTitle.trim()
-    : `Auto Resume from Stage ${normalizedStartIndex + 1}`;
-  const processId = `resume-auto-company-${Date.now()}-${tabId}-${normalizedStartIndex}-${Math.random().toString(36).slice(2, 8)}`;
+    : `Auto Resume from Stage ${effectiveStartIndex + 1}`;
+  const processId = `resume-auto-company-${Date.now()}-${tabId}-${effectiveStartIndex}-${Math.random().toString(36).slice(2, 8)}`;
 
   await upsertProcess(processId, {
     title: processTitle,
@@ -2948,10 +3118,10 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     statusText: composerThinkingEffort
       ? `Auto-resume przygotowanie (${composerThinkingEffort})`
       : 'Auto-resume przygotowanie',
-    currentPrompt: normalizedStartIndex,
+    currentPrompt: effectiveStartIndex,
     totalPrompts: PROMPTS_COMPANY.length,
-    stageIndex: normalizedStartIndex > 0 ? (normalizedStartIndex - 1) : null,
-    stageName: normalizedStartIndex > 0 ? `Prompt ${normalizedStartIndex}` : 'Start',
+    stageIndex: effectiveStartIndex > 0 ? (effectiveStartIndex - 1) : null,
+    stageName: effectiveStartIndex > 0 ? `Prompt ${effectiveStartIndex}` : 'Start',
     needsAction: false,
     startedAt: Date.now(),
     timestamp: Date.now(),
@@ -2976,7 +3146,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     let result;
     let executionPayload = payload;
     let executionPromptChain = restOfPrompts;
-    let executionPromptOffset = normalizedStartIndex;
+    let executionPromptOffset = effectiveStartIndex;
     let autoRecoveryAttempt = 0;
 
     while (true) {
@@ -3200,6 +3370,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
           copyTrace: persistenceSummary.copyTrace,
           saveError: persistenceSummary.saveError,
           dispatch: persistenceSummary.dispatch || null,
+          dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
           updatedAt: Date.now()
         },
         ...(hasResultLastResponse
@@ -3211,6 +3382,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
             completedResponseSaved: persistenceSummary.saveOk,
             completedResponseDispatch: persistenceSummary.dispatch || null,
             completedResponseDispatchSummary: persistenceSummary.dispatchSummary,
+            completedResponseDispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
             completedResponseSaveTrace: persistenceSummary.copyTrace || ''
           }
           : {}),
@@ -3243,8 +3415,9 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       processId,
       tabId,
       windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
-      startIndex: normalizedStartIndex,
-      startPromptNumber: normalizedStartIndex + 1
+      requestedStartIndex,
+      startIndex: effectiveStartIndex,
+      startPromptNumber: effectiveStartIndex + 1
     });
 
     void executeResumeFlow()
@@ -3281,10 +3454,25 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         });
       });
 
-    return { success: true, processId, detached: true };
+    return {
+      success: true,
+      processId,
+      detached: true,
+      requestedStartIndex,
+      resolvedStartIndex: effectiveStartIndex,
+      resolvedStartPromptNumber: effectiveStartIndex + 1,
+      stagePlan
+    };
   }
 
-  return executeResumeFlow();
+  const executeResult = await executeResumeFlow();
+  return {
+    ...(executeResult && typeof executeResult === 'object' ? executeResult : { success: false, error: 'resume_failed' }),
+    requestedStartIndex,
+    resolvedStartIndex: Number.isInteger(effectiveStartIndex) ? effectiveStartIndex : null,
+    resolvedStartPromptNumber: Number.isInteger(effectiveStartIndex) ? (effectiveStartIndex + 1) : null,
+    stagePlan
+  };
 }
 
 async function collectCompanyInvestContextSnapshot(options = {}) {
@@ -3431,7 +3619,12 @@ async function runResetScanStartAllTabs(options = {}) {
       reload_total: 0,
       prompt_blocks: 0,
       response_blocks: 0,
-      detected_prompts: 0
+      detected_prompts: 0,
+      recognized_saved_stage: 0,
+      recognized_chat_detection: 0,
+      recognized_chat_counter_fallback: 0,
+      recognized_progress_last_resort: 0,
+      recognized_unresolved: 0
     };
     const resetSummary = {
       mode: 'scoped_context_targets',
@@ -3513,6 +3706,71 @@ async function runResetScanStartAllTabs(options = {}) {
       const compact = text.replace(/\s+/g, ' ').trim();
       if (compact.length <= maxLen) return compact;
       return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
+    };
+    const appendRecognitionStep = (row, stage, status, detail = '') => {
+      if (!row || typeof row !== 'object') return;
+      const normalizedStage = typeof stage === 'string' ? stage.trim() : '';
+      const normalizedStatus = typeof status === 'string' ? status.trim() : '';
+      const normalizedDetail = truncateForLog(typeof detail === 'string' ? detail : String(detail ?? ''), 180);
+      const entry = [normalizedStage || 'stage', normalizedStatus || 'info', normalizedDetail]
+        .filter(Boolean)
+        .join('|');
+      const nextSteps = Array.isArray(row.recognitionSteps) ? row.recognitionSteps.slice() : [];
+      if (entry && nextSteps[nextSteps.length - 1] !== entry) {
+        nextSteps.push(entry);
+      }
+      row.recognitionSteps = nextSteps.slice(-24);
+      if (normalizedStage) row.recognitionStage = normalizedStage;
+      if (normalizedStatus) row.recognitionStatus = normalizedStatus;
+      row.recognitionSummary = row.recognitionSteps
+        .slice(-4)
+        .map((item) => item.replace(/\|/g, ':'))
+        .join(' -> ');
+      console.log('[resume-recognition] step', {
+        runId: row.runId || '',
+        tabId: row.tabId,
+        stage: row.recognitionStage || '',
+        status: row.recognitionStatus || '',
+        source: row.recognitionSource || '',
+        detail: normalizedDetail || ''
+      });
+    };
+    const isMissingAssistantReplyReason = (value) => {
+      if (typeof value !== 'string') return false;
+      const text = value.trim();
+      if (!text) return false;
+      return text.includes('missing_assistant_reply');
+    };
+    const markRestartLaunchPlan = (row, startIndex, options = {}) => {
+      if (!row || typeof row !== 'object') return;
+      const normalizedStartIndex = Number.isInteger(startIndex) ? startIndex : null;
+      row.restartPlannedStartIndex = normalizedStartIndex;
+      row.restartPlannedStartPromptNumber = Number.isInteger(normalizedStartIndex)
+        ? (normalizedStartIndex + 1)
+        : null;
+      const decisionReason = typeof options?.decisionReason === 'string' && options.decisionReason.trim()
+        ? options.decisionReason.trim()
+        : (typeof row?.reason === 'string' && row.reason.trim() ? row.reason.trim() : '');
+      if (decisionReason) row.restartDecisionReason = decisionReason;
+      const decisionSource = typeof options?.decisionSource === 'string' && options.decisionSource.trim()
+        ? options.decisionSource.trim()
+        : (
+          typeof row?.resumeDecisionSource === 'string' && row.resumeDecisionSource.trim()
+            ? row.resumeDecisionSource.trim()
+            : (typeof row?.recognitionSource === 'string' ? row.recognitionSource.trim() : '')
+        );
+      if (decisionSource) row.restartDecisionSource = decisionSource;
+      if (typeof options?.missingAssistantReply === 'boolean') {
+        row.restartMissingAssistantReply = options.missingAssistantReply;
+      } else if (decisionReason) {
+        row.restartMissingAssistantReply = isMissingAssistantReplyReason(decisionReason);
+      } else if (row.restartMissingAssistantReply !== true && row.restartMissingAssistantReply !== false) {
+        row.restartMissingAssistantReply = null;
+      }
+    };
+    const setRecognitionSource = (row, source) => {
+      if (!row || typeof row !== 'object') return;
+      row.recognitionSource = typeof source === 'string' ? source : '';
     };
     const getResultKey = (context, index) => {
       const processId = context?.process?.id ? String(context.process.id).trim() : '';
@@ -3726,7 +3984,20 @@ async function runResetScanStartAllTabs(options = {}) {
         stageConsistency: '',
         stageDelta: null,
         nextStartIndex: null,
+        restartPlannedStartIndex: null,
+        restartPlannedStartPromptNumber: null,
+        restartDispatchedStartIndex: null,
+        restartDispatchedStartPromptNumber: null,
+        restartDecisionReason: '',
+        restartDecisionSource: '',
+        restartDispatchStatus: '',
+        restartMissingAssistantReply: null,
         resumeDecisionSource: '',
+        recognitionStage: '',
+        recognitionStatus: '',
+        recognitionSource: '',
+        recognitionSummary: '',
+        recognitionSteps: [],
         action: 'queued',
         reason: '',
         attempts: 0,
@@ -3738,10 +4009,12 @@ async function runResetScanStartAllTabs(options = {}) {
         reloadMethod: '',
         eligibleForReload: false
       };
+      appendRecognitionStep(row, 'init', 'queued', 'process_enqueued_for_reload_resume');
 
       if (analysisType !== 'company') {
         row.action = 'skipped_non_company';
         row.reason = `analysis_type:${analysisType || 'unknown'}`;
+        appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
         orderedResultKeys.push(key);
         resultsByKey.set(key, row);
         continue;
@@ -3770,6 +4043,7 @@ async function runResetScanStartAllTabs(options = {}) {
       if (!isInvestGptUrl(row.url)) {
         row.action = 'skipped_outside_invest';
         row.reason = `outside_invest:${row.url || 'empty'}`;
+        appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
         orderedResultKeys.push(key);
         resultsByKey.set(key, row);
         continue;
@@ -3778,6 +4052,8 @@ async function runResetScanStartAllTabs(options = {}) {
       if (!Number.isInteger(row.tabId)) {
         row.action = 'detect_failed';
         row.reason = 'tab_not_found_for_process';
+        setRecognitionSource(row, 'detect_unresolved');
+        appendRecognitionStep(row, 'precheck', 'failed', row.reason);
         orderedResultKeys.push(key);
         resultsByKey.set(key, row);
         continue;
@@ -3786,6 +4062,7 @@ async function runResetScanStartAllTabs(options = {}) {
       row.action = 'queued_for_detection';
       row.reason = 'queued_for_detection';
       row.eligibleForReload = true;
+      appendRecognitionStep(row, 'precheck', 'ready', 'queued_for_detection');
       orderedResultKeys.push(key);
       resultsByKey.set(key, row);
       scanTargets.push({
@@ -3863,6 +4140,11 @@ async function runResetScanStartAllTabs(options = {}) {
       passDelayMs,
       resetSummary
     });
+    await appendReloadResumeMonitorEvent(monitorSessionId, {
+      level: 'info',
+      code: 'recognition_pipeline',
+      message: 'Pipeline: saved_stage -> chat_extract -> chat_direct_signature -> chat_recent_history -> chat_resolution -> decision -> fallback_counter/progress -> start_dispatch'
+    });
 
     while (
       pendingKeys.size > 0 &&
@@ -3905,6 +4187,8 @@ async function runResetScanStartAllTabs(options = {}) {
         if (!Number.isInteger(row.tabId)) {
           row.action = 'detect_failed';
           row.reason = 'invalid_tab_id';
+          setRecognitionSource(row, 'detect_unresolved');
+          appendRecognitionStep(row, 'precheck', 'failed', row.reason);
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
           continue;
@@ -3928,6 +4212,7 @@ async function runResetScanStartAllTabs(options = {}) {
             row.action = 'reload_failed';
             row.reason = prepareResult?.reason || 'reload_failed';
             row.reloadDetails = prepareResult?.error || '';
+            appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
             resultsByKey.set(target.key, row);
             pendingKeys.delete(target.key);
             console.warn('[reset-scan-start] Reload failed for process context', {
@@ -3942,6 +4227,7 @@ async function runResetScanStartAllTabs(options = {}) {
           row.reloadMethod = typeof prepareResult?.reloadResult?.method === 'string'
             ? prepareResult.reloadResult.method
             : '';
+          appendRecognitionStep(row, 'reload_prepare', 'ok', row.reloadMethod || 'prepared');
           preparedKeys.add(target.key);
 
           if (row.runId) {
@@ -3963,6 +4249,8 @@ async function runResetScanStartAllTabs(options = {}) {
         if (!currentTab) {
           row.action = 'detect_failed';
           row.reason = 'tab_not_found';
+          setRecognitionSource(row, 'detect_unresolved');
+          appendRecognitionStep(row, 'precheck', 'failed', row.reason);
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
           continue;
@@ -3975,6 +4263,7 @@ async function runResetScanStartAllTabs(options = {}) {
         if (!isInvestGptUrl(row.url)) {
           row.action = 'skipped_outside_invest';
           row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
+          appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
           console.warn('[reset-scan-start] Skip process (url outside inwestycje GPT)', {
@@ -3991,6 +4280,7 @@ async function runResetScanStartAllTabs(options = {}) {
           windowId: row.windowId
         });
 
+        appendRecognitionStep(row, 'saved_stage', 'checking', 'using_monitor_snapshot');
         const savedStagePlan = computeResumePlanFromSavedStage(row);
         if (savedStagePlan?.usable) {
           matchedKeys.add(target.key);
@@ -4003,12 +4293,19 @@ async function runResetScanStartAllTabs(options = {}) {
           row.resolvedPromptMismatch = savedStagePlan.promptMismatch === true;
           row.nextStartIndex = savedStagePlan.nextStartIndex;
           row.resumeDecisionSource = 'saved_stage_snapshot';
+          setRecognitionSource(row, 'saved_stage_snapshot');
           row.stageDelta = Number.isInteger(row.progressPromptNumber)
             ? (savedStagePlan.promptNumber - row.progressPromptNumber)
             : null;
           row.stageConsistency = row.resolvedPromptMismatch
             ? 'monitor_snapshot|conservative_min'
             : 'monitor_snapshot';
+          appendRecognitionStep(
+            row,
+            'saved_stage',
+            'resolved',
+            `prompt=P${savedStagePlan.promptNumber}, source=${savedStagePlan.promptSource || 'monitor_current_prompt'}`
+          );
 
           console.log('[reset-scan-start] Saved monitor stage resolved', {
             runId: row.runId || '',
@@ -4027,6 +4324,7 @@ async function runResetScanStartAllTabs(options = {}) {
           if (!Number.isInteger(row.nextStartIndex)) {
             row.action = 'final_stage_already_sent';
             row.reason = 'saved_stage_final_stage_completed';
+            appendRecognitionStep(row, 'decision', 'final_completed', row.reason);
             await markProcessCompletedAfterFinalStage(row, 'saved_stage_final_stage_completed');
             resultsByKey.set(target.key, row);
             pendingKeys.delete(target.key);
@@ -4036,6 +4334,17 @@ async function runResetScanStartAllTabs(options = {}) {
 
           row.action = 'ready_to_start';
           row.reason = savedStagePlan.reason || 'saved_stage_snapshot';
+          markRestartLaunchPlan(row, row.nextStartIndex, {
+            decisionReason: row.reason,
+            decisionSource: row.resumeDecisionSource || 'saved_stage_snapshot',
+            missingAssistantReply: isMissingAssistantReplyReason(row.reason)
+          });
+          appendRecognitionStep(
+            row,
+            'decision',
+            'ready',
+            `next_prompt=P${Number.isInteger(row.nextStartIndex) ? row.nextStartIndex + 1 : '?'}`
+          );
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
           await sleep(120);
@@ -4050,7 +4359,15 @@ async function runResetScanStartAllTabs(options = {}) {
           progressStageIndex: row.progressStageIndex
         });
         row.resumeDecisionSource = 'chat_fallback_pending';
+        setRecognitionSource(row, 'chat_fallback_pending');
+        appendRecognitionStep(
+          row,
+          'saved_stage',
+          'missing',
+          savedStagePlan?.reason || 'saved_stage_unavailable'
+        );
 
+        appendRecognitionStep(row, 'chat_extract', 'running', 'extract_last_user_message');
         let extraction = await extractLastUserMessageFromTab(row.tabId);
         if (!extraction.success) {
           console.warn('[reset-scan-start] Extraction failed, retrying', {
@@ -4058,12 +4375,16 @@ async function runResetScanStartAllTabs(options = {}) {
             tabId: row.tabId,
             error: extraction.error || 'unknown_error'
           });
+          appendRecognitionStep(row, 'chat_extract', 'retry', extraction.error || 'extract_failed_retrying');
           await sleep(350);
           extraction = await extractLastUserMessageFromTab(row.tabId);
         }
         if (!extraction.success) {
           row.action = 'detect_failed';
           row.reason = extraction.error || 'extract_last_user_message_failed';
+          row.resumeDecisionSource = 'chat_fallback_unresolved';
+          setRecognitionSource(row, 'chat_fallback_unresolved');
+          appendRecognitionStep(row, 'chat_extract', 'failed', row.reason);
           resultsByKey.set(target.key, row);
           console.warn('[reset-scan-start] Extraction failed after retry', {
             runId: row.runId || '',
@@ -4078,6 +4399,12 @@ async function runResetScanStartAllTabs(options = {}) {
         row.assistantMessageCount = Number.isInteger(extraction.assistantCount) ? extraction.assistantCount : 0;
         row.responseBlockCount = row.assistantMessageCount;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
+        appendRecognitionStep(
+          row,
+          'chat_extract',
+          'ok',
+          `user=${row.userMessageCount}, assistant=${row.assistantMessageCount}, len=${row.lastUserMessageLength}`
+        );
         console.log('[reset-scan-start] Extraction success', {
           runId: row.runId || '',
           tabId: row.tabId,
@@ -4095,6 +4422,12 @@ async function runResetScanStartAllTabs(options = {}) {
           const directDetection = detectPromptIndexFromMessage(lastUserText, catalog);
           if (directDetection.matched && Number.isInteger(directDetection.index)) {
             detection = directDetection;
+            appendRecognitionStep(
+              row,
+              'chat_direct_signature',
+              'matched',
+              `method=${directDetection.method || 'unknown'}, prompt=P${directDetection.promptNumber}`
+            );
             console.log('[reset-scan-start] Direct detection matched', {
               runId: row.runId || '',
               tabId: row.tabId,
@@ -4109,6 +4442,7 @@ async function runResetScanStartAllTabs(options = {}) {
             });
           } else {
             directDetectionReason = directDetection.reason || 'signature_not_found';
+            appendRecognitionStep(row, 'chat_direct_signature', 'no_match', directDetectionReason);
             console.log('[reset-scan-start] Direct detection failed', {
               runId: row.runId || '',
               tabId: row.tabId,
@@ -4120,6 +4454,7 @@ async function runResetScanStartAllTabs(options = {}) {
             });
           }
         } else {
+          appendRecognitionStep(row, 'chat_direct_signature', 'skipped', 'empty_last_user_text');
           console.log('[reset-scan-start] Direct detection skipped (empty last user text)', {
             runId: row.runId || '',
             tabId: row.tabId
@@ -4133,6 +4468,12 @@ async function runResetScanStartAllTabs(options = {}) {
             ? recent.messageMeta
             : (Array.isArray(recent?.messages) ? recent.messages : []);
           recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
+          appendRecognitionStep(
+            row,
+            'chat_recent_history',
+            recentMatch ? 'matched' : 'no_match',
+            `messages=${recentEntries.length}${recentMatch?.promptNumber ? `, prompt=P${recentMatch.promptNumber}` : ''}`
+          );
           console.log('[reset-scan-start] Recent history fallback evaluated', {
             runId: row.runId || '',
             tabId: row.tabId,
@@ -4194,6 +4535,9 @@ async function runResetScanStartAllTabs(options = {}) {
             row.action = 'detect_failed';
             row.reason = directDetectionReason || 'signature_not_found';
           }
+          row.resumeDecisionSource = 'chat_fallback_unresolved';
+          setRecognitionSource(row, 'chat_fallback_unresolved');
+          appendRecognitionStep(row, 'chat_resolution', 'failed', row.reason);
           resultsByKey.set(target.key, row);
           // Signature matching may fail during early page hydration; retry in next pass.
           console.log('[reset-scan-start] Detection unresolved for process (will retry)', {
@@ -4244,6 +4588,9 @@ async function runResetScanStartAllTabs(options = {}) {
         if (!Number.isInteger(resolvedPromptNumber)) {
           row.action = 'detect_failed';
           row.reason = 'stage_resolution_failed';
+          row.resumeDecisionSource = 'chat_fallback_unresolved';
+          setRecognitionSource(row, 'chat_fallback_unresolved');
+          appendRecognitionStep(row, 'chat_resolution', 'failed', row.reason);
           resultsByKey.set(target.key, row);
           console.warn('[reset-scan-start] Stage resolution failed', {
             runId: row.runId || '',
@@ -4259,6 +4606,12 @@ async function runResetScanStartAllTabs(options = {}) {
         row.resolvedPromptSource = resolvedStageSelection.source
           || (Number.isInteger(row.detectedPromptNumber) ? 'chat_signature' : '');
         row.resolvedPromptMismatch = chatStageSelection.mismatch || resolvedStageSelection.mismatch;
+        appendRecognitionStep(
+          row,
+          'chat_resolution',
+          'resolved',
+          `detected=P${row.detectedPromptNumber}, resolved=P${row.resolvedPromptNumber}, source=${row.resolvedPromptSource || 'chat_signature'}`
+        );
 
         const hasAssistantReplyByCounters = (
           Number.isInteger(row.userMessageCount) && Number.isInteger(row.assistantMessageCount)
@@ -4330,10 +4683,13 @@ async function runResetScanStartAllTabs(options = {}) {
           stageConsistency: row.stageConsistency || ''
         });
         row.resumeDecisionSource = 'chat_fallback_detection';
+        setRecognitionSource(row, 'chat_fallback_detection');
+        appendRecognitionStep(row, 'chat_detection', 'resolved', `next_prompt=${Number.isInteger(row.nextStartIndex) ? `P${row.nextStartIndex + 1}` : 'final'}`);
 
         if (!Number.isInteger(row.nextStartIndex)) {
           row.action = 'final_stage_already_sent';
           row.reason = 'already_at_last_stage';
+          appendRecognitionStep(row, 'decision', 'final_completed', row.reason);
           await markProcessCompletedAfterFinalStage(row, 'already_at_last_stage');
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
@@ -4355,6 +4711,17 @@ async function runResetScanStartAllTabs(options = {}) {
               ? (clampedFromPrompt1 ? 'retry_prompt_1_clamped_to_prompt_2' : 'retry_same_prompt_no_assistant_reply')
               : 'ready_to_start'
           );
+        markRestartLaunchPlan(row, row.nextStartIndex, {
+          decisionReason: row.reason,
+          decisionSource: row.resumeDecisionSource || 'chat_fallback_detection',
+          missingAssistantReply: noAssistantReplyEvidence
+        });
+        appendRecognitionStep(
+          row,
+          'decision',
+          'ready',
+          `next_prompt=P${Number.isInteger(row.nextStartIndex) ? row.nextStartIndex + 1 : '?'}`
+        );
         resultsByKey.set(target.key, row);
         pendingKeys.delete(target.key);
         console.log('[reset-scan-start] Process queued for sequential start', {
@@ -4395,6 +4762,10 @@ async function runResetScanStartAllTabs(options = {}) {
         row.reason = row.reason ? `${row.reason}|${suffix}` : suffix;
         row.retryExhausted = true;
         row.action = 'detect_failed';
+        if (!row.recognitionSource || row.recognitionSource === 'chat_fallback_pending') {
+          setRecognitionSource(row, 'chat_fallback_unresolved');
+        }
+        appendRecognitionStep(row, 'retry_budget', 'failed', suffix);
         resultsByKey.set(key, row);
       }
     }
@@ -4410,12 +4781,30 @@ async function runResetScanStartAllTabs(options = {}) {
         row.action = 'ready_to_start';
         row.reason = forceRepeatLastPrompt ? 'force_repeat_counter_fallback' : 'counter_fallback_resume';
         row.resumeDecisionSource = 'chat_counter_fallback';
+        setRecognitionSource(row, 'chat_counter_fallback');
+        const fallbackMissingReply = (
+          Number.isInteger(row?.assistantMessageCount)
+          && Number.isInteger(row?.userMessageCount)
+        )
+          ? row.assistantMessageCount < row.userMessageCount
+          : null;
+        markRestartLaunchPlan(row, row.nextStartIndex, {
+          decisionReason: row.reason,
+          decisionSource: row.resumeDecisionSource,
+          ...(typeof fallbackMissingReply === 'boolean' ? { missingAssistantReply: fallbackMissingReply } : {})
+        });
         if (!row.detectedMethod) row.detectedMethod = 'chat_counter_fallback';
         if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.userMessageCount)) {
           row.detectedPromptNumber = row.userMessageCount;
           row.detectedPromptIndex = Math.max(0, row.userMessageCount - 1);
           row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${row.detectedPromptNumber}`;
         }
+        appendRecognitionStep(
+          row,
+          'fallback_counter',
+          'selected',
+          `next_prompt=P${fallbackStartIndex + 1}, user_count=${row.userMessageCount ?? 'n/a'}`
+        );
         resultsByKey.set(target.key, row);
         console.log('[reset-scan-start] Fallback resume queued', {
           runId: row.runId || '',
@@ -4435,12 +4824,23 @@ async function runResetScanStartAllTabs(options = {}) {
           ? 'force_repeat_progress_last_resort'
           : 'progress_last_resort_resume';
         row.resumeDecisionSource = 'progress_last_resort_fallback';
+        setRecognitionSource(row, 'progress_last_resort_fallback');
+        markRestartLaunchPlan(row, row.nextStartIndex, {
+          decisionReason: row.reason,
+          decisionSource: row.resumeDecisionSource
+        });
         if (!row.detectedMethod) row.detectedMethod = 'progress_last_resort_fallback';
         if (!Number.isInteger(row.detectedPromptNumber) && Number.isInteger(row.progressPromptNumber)) {
           row.detectedPromptNumber = row.progressPromptNumber;
           row.detectedPromptIndex = Math.max(0, row.progressPromptNumber - 1);
           row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${row.detectedPromptNumber}`;
         }
+        appendRecognitionStep(
+          row,
+          'fallback_progress',
+          'selected',
+          `next_prompt=P${finalFallbackStartIndex + 1}, progress_prompt=${row.progressPromptNumber ?? 'n/a'}`
+        );
         resultsByKey.set(target.key, row);
         console.log('[reset-scan-start] Last-resort progress fallback queued', {
           runId: row.runId || '',
@@ -4455,6 +4855,8 @@ async function runResetScanStartAllTabs(options = {}) {
       row.action = 'final_stage_already_sent';
       row.reason = 'fallback_final_stage_completed';
       row.resumeDecisionSource = 'fallback_final_stage_completed';
+      setRecognitionSource(row, 'fallback_final_stage_completed');
+      appendRecognitionStep(row, 'fallback_final', 'completed', row.reason);
       await markProcessCompletedAfterFinalStage(row, 'fallback_final_stage_completed');
       resultsByKey.set(target.key, row);
       console.log('[reset-scan-start] Fallback detected completed process', {
@@ -4487,6 +4889,11 @@ async function runResetScanStartAllTabs(options = {}) {
         windowId: row.windowId,
         nextStartIndex: row.nextStartIndex,
         startPromptNumber: Number.isInteger(row.nextStartIndex) ? (row.nextStartIndex + 1) : null,
+        plannedStartPromptNumber: Number.isInteger(row?.restartPlannedStartPromptNumber)
+          ? row.restartPlannedStartPromptNumber
+          : null,
+        missingAssistantReply: row?.restartMissingAssistantReply === true,
+        decisionReason: typeof row?.restartDecisionReason === 'string' ? row.restartDecisionReason : '',
         detectedPromptNumber: row.detectedPromptNumber,
         detectedMethod: row.detectedMethod
       }))
@@ -4504,12 +4911,89 @@ async function runResetScanStartAllTabs(options = {}) {
 
     for (const row of startQueue) {
       if (!Number.isInteger(row.tabId) || !Number.isInteger(row.nextStartIndex)) continue;
+      let precomputedStagePlan = null;
+      const stagePlanResult = await resolveCompanyResumeStagePlanForTab(row.tabId, {
+        maxWaitMs: 18000,
+        forceRepeatLastPrompt,
+        minStartIndex: PROMPTS_COMPANY.length > 1 ? 1 : 0,
+        progressPromptNumber: Number.isInteger(row?.resolvedPromptNumber)
+          ? row.resolvedPromptNumber
+          : (
+            Number.isInteger(row?.detectedPromptNumber)
+              ? row.detectedPromptNumber
+              : row.progressPromptNumber
+          ),
+        origin: 'bulk-start-dispatch'
+      });
+      if (stagePlanResult?.success && stagePlanResult.plan?.resolved) {
+        precomputedStagePlan = stagePlanResult.plan;
+        row.detectedPromptNumber = Number.isInteger(precomputedStagePlan?.detectedPromptNumber)
+          ? precomputedStagePlan.detectedPromptNumber
+          : row.detectedPromptNumber;
+        row.detectedPromptIndex = Number.isInteger(precomputedStagePlan?.detectedPromptIndex)
+          ? precomputedStagePlan.detectedPromptIndex
+          : row.detectedPromptIndex;
+        if (Number.isInteger(row.detectedPromptIndex)) {
+          row.detectedStageName = STAGE_NAMES_COMPANY[row.detectedPromptIndex] || `Prompt ${row.detectedPromptIndex + 1}`;
+        }
+        row.detectedMethod = typeof precomputedStagePlan?.method === 'string' && precomputedStagePlan.method.trim()
+          ? precomputedStagePlan.method.trim()
+          : row.detectedMethod;
+        row.resumeDecisionSource = typeof precomputedStagePlan?.source === 'string' && precomputedStagePlan.source.trim()
+          ? precomputedStagePlan.source.trim()
+          : row.resumeDecisionSource;
+        row.reason = typeof precomputedStagePlan?.reason === 'string' && precomputedStagePlan.reason.trim()
+          ? precomputedStagePlan.reason.trim()
+          : row.reason;
+        row.nextStartIndex = Number.isInteger(precomputedStagePlan?.nextStartIndex)
+          ? precomputedStagePlan.nextStartIndex
+          : null;
+        markRestartLaunchPlan(row, row.nextStartIndex, {
+          decisionReason: typeof precomputedStagePlan?.retryReason === 'string' && precomputedStagePlan.retryReason.trim()
+            ? precomputedStagePlan.retryReason.trim()
+            : row.reason,
+          decisionSource: typeof precomputedStagePlan?.source === 'string' && precomputedStagePlan.source.trim()
+            ? precomputedStagePlan.source.trim()
+            : row.resumeDecisionSource,
+          missingAssistantReply: (
+            precomputedStagePlan?.hasAssistantReplyAfter === false
+            || precomputedStagePlan?.hasAssistantReplyByCounters === false
+          )
+        });
+        appendRecognitionStep(
+          row,
+          'stage_plan',
+          'resolved',
+          `detected=P${row.detectedPromptNumber || '?'}, next=${Number.isInteger(row.nextStartIndex) ? `P${row.nextStartIndex + 1}` : 'final'}, missing_reply=${row.restartMissingAssistantReply === true ? 'yes' : 'no'}`
+        );
+      } else {
+        markRestartLaunchPlan(row, row.nextStartIndex, {
+          decisionReason: row.reason,
+          decisionSource: row.resumeDecisionSource
+        });
+        appendRecognitionStep(
+          row,
+          'stage_plan',
+          'fallback',
+          stagePlanResult?.error || 'stage_plan_failed'
+        );
+      }
+
+      if (!Number.isInteger(row.nextStartIndex)) {
+        row.action = 'final_stage_already_sent';
+        row.reason = row.reason || 'already_at_last_stage';
+        appendRecognitionStep(row, 'decision', 'final_completed', row.reason);
+        await markProcessCompletedAfterFinalStage(row, row.reason || 'already_at_last_stage');
+        resultsByKey.set(row.key, row);
+        continue;
+      }
 
       const autoStartPrefix = forceRepeatLastPrompt ? 'Auto Repeat' : 'Auto Start';
       const autoStartEffort = composerThinkingEffort
         ? ` [${composerThinkingEffort.toUpperCase()}]`
         : '';
       const autoStartTitle = `${autoStartPrefix}${autoStartEffort}: Prompt ${row.nextStartIndex + 1}`;
+      appendRecognitionStep(row, 'start_dispatch', 'dispatching', `prompt=P${row.nextStartIndex + 1}`);
       console.log('[reset-scan-start] Starting process from queue', {
         runId: row.runId || '',
         tabId: row.tabId,
@@ -4523,13 +5007,36 @@ async function runResetScanStartAllTabs(options = {}) {
         detach: true,
         // Tab is already hard-reloaded in the detection phase.
         reloadBeforeResume: false,
-        composerThinkingEffort
+        composerThinkingEffort,
+        forceRepeatLastPrompt,
+        minStartIndex: PROMPTS_COMPANY.length > 1 ? 1 : 0,
+        precomputedStagePlan
       });
 
       if (startResult.success) {
         startedKeys.add(row.key);
         row.action = 'started';
-        row.reason = startResult.detached ? 'start_dispatched' : 'start_started';
+        row.restartDispatchStatus = startResult.detached ? 'start_dispatched' : 'start_started';
+        if (!row.restartDecisionReason && row.reason) {
+          row.restartDecisionReason = row.reason;
+        }
+        if (Number.isInteger(startResult?.resolvedStartIndex)) {
+          row.nextStartIndex = startResult.resolvedStartIndex;
+        }
+        const dispatchedStartIndex = Number.isInteger(startResult?.resolvedStartIndex)
+          ? startResult.resolvedStartIndex
+          : row.nextStartIndex;
+        const dispatchedStartPromptNumber = Number.isInteger(startResult?.resolvedStartPromptNumber)
+          ? startResult.resolvedStartPromptNumber
+          : (Number.isInteger(dispatchedStartIndex) ? (dispatchedStartIndex + 1) : null);
+        row.restartDispatchedStartIndex = dispatchedStartIndex;
+        row.restartDispatchedStartPromptNumber = dispatchedStartPromptNumber;
+        appendRecognitionStep(
+          row,
+          'start_dispatch',
+          'started',
+          `status=${row.restartDispatchStatus}, prompt=${Number.isInteger(dispatchedStartPromptNumber) ? `P${dispatchedStartPromptNumber}` : '?'}, missing_reply=${row.restartMissingAssistantReply === true ? 'yes' : 'no'}`
+        );
         console.log('[reset-scan-start] Start success', {
           runId: row.runId || '',
           tabId: row.tabId,
@@ -4538,8 +5045,20 @@ async function runResetScanStartAllTabs(options = {}) {
           action: row.action
         });
       } else {
-        row.action = startResult?.error === 'reload_failed' ? 'reload_failed' : 'start_failed';
-        row.reason = startResult.error || 'start_failed';
+        if (startResult?.error === 'already_at_last_prompt') {
+          row.action = 'final_stage_already_sent';
+          row.reason = 'already_at_last_stage';
+          await markProcessCompletedAfterFinalStage(row, 'already_at_last_stage');
+        } else {
+          row.action = startResult?.error === 'reload_failed' ? 'reload_failed' : 'start_failed';
+          row.reason = startResult.error || 'start_failed';
+        }
+        appendRecognitionStep(
+          row,
+          'start_dispatch',
+          row.action === 'final_stage_already_sent' ? 'final_completed' : 'failed',
+          row.reason
+        );
         console.warn('[reset-scan-start] Start failed', {
           runId: row.runId || '',
           tabId: row.tabId,
@@ -4558,7 +5077,7 @@ async function runResetScanStartAllTabs(options = {}) {
         level: startResult?.success ? 'info' : 'warn',
         code: startResult?.success ? 'start_dispatched' : 'start_failed',
         message: startResult?.success
-          ? `Tab ${row.tabId}: resume dispatched`
+          ? `Tab ${row.tabId}: resume dispatched${Number.isInteger(row?.restartDispatchedStartPromptNumber) ? ` od P${row.restartDispatchedStartPromptNumber}` : ''}${row.restartMissingAssistantReply === true ? ' (brak odpowiedzi)' : ''}`
           : `Tab ${row.tabId}: start failed (${row.reason || 'unknown'})`
       });
       await sleep(250);
@@ -4580,6 +5099,11 @@ async function runResetScanStartAllTabs(options = {}) {
         detectedPromptIndex: null,
         detectedPromptNumber: null,
         detectedStageName: null,
+        recognitionStage: 'finalize',
+        recognitionStatus: 'failed',
+        recognitionSource: 'detect_unresolved',
+        recognitionSummary: 'finalize:failed:not_processed',
+        recognitionSteps: ['finalize|failed|not_processed'],
         nextStartIndex: null,
         action: 'detect_failed',
         reason: runtimeLimitHit ? 'runtime_limit_reached_before_processing' : 'not_processed'
@@ -4594,33 +5118,7 @@ async function runResetScanStartAllTabs(options = {}) {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
-    const promptBlocks = results.reduce((sum, row) => (
-      sum + (Number.isInteger(row?.userMessageCount) ? row.userMessageCount : 0)
-    ), 0);
-    const responseBlocks = results.reduce((sum, row) => (
-      sum + (
-        Number.isInteger(row?.responseBlockCount)
-          ? row.responseBlockCount
-          : (Number.isInteger(row?.assistantMessageCount) ? row.assistantMessageCount : 0)
-      )
-    ), 0);
-    const detectedPrompts = results.reduce((sum, row) => (
-      sum + (Number.isInteger(row?.detectedPromptNumber) ? 1 : 0)
-    ), 0);
-    const summary = {
-      started: actionCounts.started || 0,
-      detect_failed: actionCounts.detect_failed || 0,
-      reload_failed: actionCounts.reload_failed || 0,
-      skipped_non_company: actionCounts.skipped_non_company || 0,
-      skipped_outside_invest: actionCounts.skipped_outside_invest || 0,
-      final_stage_completed: actionCounts.final_stage_already_sent || 0,
-      start_failed: actionCounts.start_failed || 0,
-      reload_ok: preparedKeys.size,
-      reload_total: scanTargets.length,
-      prompt_blocks: promptBlocks,
-      response_blocks: responseBlocks,
-      detected_prompts: detectedPrompts
-    };
+    const summary = calculateReloadResumeSummaryFromRows(results, scanTargets.length);
     const summaryCheck = verifyReloadResumeSummary(summary, results, scanTargets.length);
     console.log('[reset-scan-start] Summary', {
       scope,
@@ -4700,7 +5198,12 @@ async function runResetScanStartAllTabs(options = {}) {
       reload_total: 0,
       prompt_blocks: 0,
       response_blocks: 0,
-      detected_prompts: 0
+      detected_prompts: 0,
+      recognized_saved_stage: 0,
+      recognized_chat_detection: 0,
+      recognized_chat_counter_fallback: 0,
+      recognized_progress_last_resort: 0,
+      recognized_unresolved: 0
     };
     const failureSummaryCheck = verifyReloadResumeSummary(summary, [], 0);
     try {
@@ -5436,105 +5939,57 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
     };
   }
 
-  const promptCatalog = Array.isArray(catalog) && catalog.length > 0
-    ? catalog
-    : buildPromptSignatureCatalog(PROMPTS_COMPANY);
-
-  let extraction = await extractLastUserMessageFromTab(tabId);
-  if (!extraction.success) {
-    await sleep(350);
-    extraction = await extractLastUserMessageFromTab(tabId);
-  }
-
-  if (!extraction.success) {
+  const progressPromptNumber = Number.isInteger(safeFallbackOffset) ? (safeFallbackOffset + 1) : null;
+  const planResult = await resolveCompanyResumeStagePlanForTab(tabId, {
+    maxWaitMs: 16000,
+    forceRepeatLastPrompt: false,
+    minStartIndex: PROMPTS_COMPANY.length > 1 ? 1 : 0,
+    progressPromptNumber,
+    origin: 'detect-company-recovery-point'
+  });
+  if (!planResult?.success || !planResult?.plan?.resolved) {
     return {
       matched: false,
-      reason: extraction.error || 'extract_last_user_message_failed',
+      reason: planResult?.error || 'stage_not_detected',
       promptOffset: safeFallbackOffset,
       remainingPrompts: []
     };
   }
 
-  const lastUserText = typeof extraction.text === 'string' ? extraction.text.trim() : '';
-  if (!lastUserText) {
-    return {
-      matched: false,
-      reason: 'empty_user_message',
-      promptOffset: safeFallbackOffset,
-      remainingPrompts: []
-    };
-  }
-
-  const detection = detectPromptIndexFromMessage(lastUserText, promptCatalog);
-  if (!detection.matched || !Number.isInteger(detection.index)) {
-    return {
-      matched: false,
-      reason: detection.reason || 'signature_not_found',
-      promptOffset: safeFallbackOffset,
-      remainingPrompts: []
-    };
-  }
-
-  const promptCount = PROMPTS_COMPANY.length;
-  let hasAssistantReplyAfter = null;
-  let hasAssistantReplyByCounters = null;
-  let recentMatch = null;
-  const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
-  if (promptRecords.length > 0) {
-    const recent = await extractRecentUserPromptsFromTab(tabId, 3500);
-    const recentEntries = Array.isArray(recent?.messageMeta) && recent.messageMeta.length > 0
-      ? recent.messageMeta
-      : (Array.isArray(recent?.messages) ? recent.messages : []);
-    recentMatch = detectLastPromptMatch(recentEntries, promptRecords);
-    if (recentMatch && Number.isInteger(recentMatch.index) && recentMatch.index === detection.index) {
-      hasAssistantReplyAfter = recentMatch.hasAssistantReplyAfter;
-    }
-  }
-  if (Number.isInteger(extraction.count) && Number.isInteger(extraction.assistantCount)) {
-    hasAssistantReplyByCounters = extraction.assistantCount >= extraction.count;
-  }
-  const conservativeStageSelection = selectConservativePromptNumber([
-    { source: 'chat_signature', value: detection.promptNumber, priority: 1 },
-    { source: 'chat_recent', value: Number.isInteger(recentMatch?.promptNumber) ? recentMatch.promptNumber : null, priority: 2 },
-    { source: 'chat_user_count', value: extraction.count, priority: 3 }
-  ], promptCount);
-  const conservativePromptNumber = Number.isInteger(conservativeStageSelection.promptNumber)
-    ? conservativeStageSelection.promptNumber
-    : toBoundedPromptNumber(detection.promptNumber, promptCount);
-  const conservativePromptIndex = Number.isInteger(conservativePromptNumber)
-    ? (conservativePromptNumber - 1)
-    : detection.index;
-  const shouldAdvancePrompt = (
-    hasAssistantReplyAfter !== false
-    && hasAssistantReplyByCounters !== false
-  );
-  const nextStartIndex = computeNextResumeIndex(
-    conservativePromptIndex,
-    PROMPTS_COMPANY.length,
-    shouldAdvancePrompt
-  );
-  const finalStageReached = !Number.isInteger(nextStartIndex);
-  const promptOffset = finalStageReached
-    ? PROMPTS_COMPANY.length
-    : Math.max(0, Math.min(nextStartIndex, PROMPTS_COMPANY.length));
+  const plan = planResult.plan;
+  const promptCount = Number.isInteger(plan?.promptCount) ? plan.promptCount : PROMPTS_COMPANY.length;
+  const promptOffset = plan?.finalStageReached
+    ? promptCount
+    : (Number.isInteger(plan?.nextStartIndex)
+      ? Math.max(0, Math.min(plan.nextStartIndex, promptCount))
+      : safeFallbackOffset);
   const remainingPrompts = buildCompanyPromptChainForResume(promptOffset);
 
   return {
     matched: true,
-    reason: 'matched',
+    reason: 'conversation_audit',
     promptOffset,
     promptCount,
-    finalStageReached,
+    finalStageReached: plan?.finalStageReached === true,
     remainingPrompts,
     detection: {
-      ...detection,
-      hasAssistantReplyAfter,
-      hasAssistantReplyByCounters,
-      conservativePromptNumber,
-      conservativePromptIndex,
-      conservativePromptSource: conservativeStageSelection.source || 'chat_signature',
-      conservativePromptMismatch: conservativeStageSelection.mismatch,
-      chatPromptCountFromBlocks: Number.isInteger(extraction.count) ? extraction.count : null
+      matched: true,
+      reason: 'conversation_audit',
+      method: typeof plan?.method === 'string' ? plan.method : 'audit:prompt_match',
+      promptNumber: Number.isInteger(plan?.detectedPromptNumber) ? plan.detectedPromptNumber : null,
+      index: Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null,
+      hasAssistantReplyAfter: plan?.hasAssistantReplyAfter === true,
+      hasAssistantReplyByCounters: plan?.hasAssistantReplyByCounters === true,
+      assistantReplyPassThreshold: plan?.assistantReplyPassThreshold === true,
+      conservativePromptNumber: Number.isInteger(plan?.detectedPromptNumber) ? plan.detectedPromptNumber : null,
+      conservativePromptIndex: Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null,
+      conservativePromptSource: typeof plan?.source === 'string' ? plan.source : 'conversation_audit',
+      conservativePromptMismatch: false,
+      chatPromptCountFromBlocks: Number.isInteger(plan?.auditSummary?.totalUserMessages)
+        ? plan.auditSummary.totalUserMessages
+        : null,
+      duplicatePromptNumbers: Array.isArray(plan?.duplicatePromptNumbers) ? plan.duplicatePromptNumbers : [],
+      missingPromptNumbers: Array.isArray(plan?.missingPromptNumbers) ? plan.missingPromptNumbers : []
     }
   };
 }
@@ -5726,6 +6181,768 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
   };
 }
 
+const COMPANY_PROMPT_MATCH_MIN_SCORE = 180;
+const COMPANY_PROMPT_MATCH_MAX_TOKENS = 1800;
+
+function extractSentenceWindowSignature(text, startIndex = 0, count = 2) {
+  const safeStart = Number.isInteger(startIndex) ? Math.max(startIndex, 0) : 0;
+  const safeCount = Number.isInteger(count) ? Math.max(count, 1) : 2;
+  const sentenceLimit = safeStart + safeCount;
+  const sentences = extractLeadingSentences(text, sentenceLimit);
+  const selected = sentences.slice(safeStart, safeStart + safeCount);
+  if (selected.length === 0) return '';
+  return normalizeSentenceSignature(selected.join(' '));
+}
+
+function tokenizeForCompanyPromptMatch(text) {
+  const normalized = normalizeSentenceSignature(text);
+  if (!normalized) return [];
+  const tokens = normalized
+    .split(/\s+/)
+    .map((token) => token.trim())
+    .filter(Boolean);
+  if (tokens.length <= COMPANY_PROMPT_MATCH_MAX_TOKENS) return tokens;
+  return tokens.slice(0, COMPANY_PROMPT_MATCH_MAX_TOKENS);
+}
+
+function normalizeCompanyPromptTemplate(promptText) {
+  const raw = typeof promptText === 'string' ? promptText : '';
+  return compactWhitespace(raw.replace(/\{\{\s*articlecontent\s*\}\}/gi, ' '));
+}
+
+function buildCompanyPromptMatchRecords(prompts) {
+  const source = Array.isArray(prompts) ? prompts : [];
+  const records = source.map((promptText, index) => {
+    const normalizedPrompt = normalizeCompanyPromptTemplate(promptText);
+    const normalized = normalizeSentenceSignature(normalizedPrompt);
+    const headSignature = extractSentenceWindowSignature(normalizedPrompt, 0, 2);
+    const bodySignature = extractSentenceWindowSignature(normalizedPrompt, 2, 4);
+    const tailSignature = normalizeSentenceSignature(extractLastTwoSentences(normalizedPrompt));
+    const prefix = normalized.slice(0, 520);
+    const suffix = normalized.slice(Math.max(0, normalized.length - 520));
+    const tokenSet = Array.from(new Set(
+      tokenizeForCompanyPromptMatch(normalizedPrompt)
+        .filter((token) => token.length >= 6)
+    ));
+    return {
+      index,
+      promptNumber: index + 1,
+      stageName: STAGE_NAMES_COMPANY[index] || `Prompt ${index + 1}`,
+      normalized,
+      prefix,
+      suffix,
+      headSignature,
+      bodySignature,
+      tailSignature,
+      tokenSet,
+      distinctiveTokens: []
+    };
+  });
+
+  const tokenFrequency = new Map();
+  records.forEach((record) => {
+    record.tokenSet.forEach((token) => {
+      tokenFrequency.set(token, (tokenFrequency.get(token) || 0) + 1);
+    });
+  });
+
+  records.forEach((record) => {
+    const sorted = [...record.tokenSet].sort((left, right) => {
+      const leftFreq = tokenFrequency.get(left) || 0;
+      const rightFreq = tokenFrequency.get(right) || 0;
+      if (leftFreq !== rightFreq) return leftFreq - rightFreq;
+      if (right.length !== left.length) return right.length - left.length;
+      return left.localeCompare(right);
+    });
+    record.distinctiveTokens = sorted.slice(0, 24);
+  });
+
+  return records;
+}
+
+function buildConversationMessageMatchFeatures(text) {
+  const rawText = typeof text === 'string' ? text : '';
+  const normalized = normalizeSentenceSignature(rawText);
+  return {
+    normalized,
+    prefix: normalized.slice(0, 520),
+    suffix: normalized.slice(Math.max(0, normalized.length - 520)),
+    headSignature: extractSentenceWindowSignature(rawText, 0, 2),
+    bodySignature: extractSentenceWindowSignature(rawText, 2, 4),
+    tailSignature: normalizeSentenceSignature(extractLastTwoSentences(rawText)),
+    tokenSet: new Set(
+      tokenizeForCompanyPromptMatch(rawText)
+        .filter((token) => token.length >= 6)
+    )
+  };
+}
+
+function signaturesOverlap(left, right) {
+  if (!left || !right) return false;
+  return left === right || left.includes(right) || right.includes(left);
+}
+
+function computeCompanyPromptMatchScore(messageFeatures, promptRecord) {
+  const features = messageFeatures && typeof messageFeatures === 'object' ? messageFeatures : {};
+  const record = promptRecord && typeof promptRecord === 'object' ? promptRecord : {};
+  const signals = [];
+  let score = 0;
+
+  if (features.headSignature && record.headSignature) {
+    if (features.headSignature === record.headSignature) {
+      score += 220;
+      signals.push('head_exact');
+    } else if (signaturesOverlap(features.headSignature, record.headSignature)) {
+      score += 130;
+      signals.push('head_overlap');
+    }
+  }
+
+  if (features.bodySignature && record.bodySignature) {
+    if (features.bodySignature === record.bodySignature) {
+      score += 340;
+      signals.push('body_exact');
+    } else if (signaturesOverlap(features.bodySignature, record.bodySignature)) {
+      score += 220;
+      signals.push('body_overlap');
+    }
+  }
+
+  if (features.tailSignature && record.tailSignature) {
+    if (features.tailSignature === record.tailSignature) {
+      score += 260;
+      signals.push('tail_exact');
+    } else if (signaturesOverlap(features.tailSignature, record.tailSignature)) {
+      score += 150;
+      signals.push('tail_overlap');
+    }
+  }
+
+  const prefixLen = sharedPrefixLength(features.prefix || '', record.prefix || '', 420);
+  if (prefixLen >= 70) {
+    score += Math.min(prefixLen, 260);
+    signals.push(`prefix_${prefixLen}`);
+  }
+
+  const suffixLen = sharedPrefixLength(features.suffix || '', record.suffix || '', 420);
+  if (suffixLen >= 50) {
+    score += Math.min(suffixLen, 220);
+    signals.push(`suffix_${suffixLen}`);
+  }
+
+  const prefixAnchor = typeof record.prefix === 'string' && record.prefix.length >= 140
+    ? record.prefix.slice(0, 140)
+    : '';
+  if (prefixAnchor && typeof features.normalized === 'string' && features.normalized.includes(prefixAnchor)) {
+    score += 90;
+    signals.push('prefix_anchor');
+  }
+
+  const suffixAnchor = typeof record.suffix === 'string' && record.suffix.length >= 140
+    ? record.suffix.slice(Math.max(0, record.suffix.length - 140))
+    : '';
+  if (suffixAnchor && typeof features.normalized === 'string' && features.normalized.includes(suffixAnchor)) {
+    score += 120;
+    signals.push('suffix_anchor');
+  }
+
+  let tokenHits = 0;
+  const messageTokens = features.tokenSet instanceof Set ? features.tokenSet : new Set();
+  const distinctive = Array.isArray(record.distinctiveTokens) ? record.distinctiveTokens : [];
+  for (const token of distinctive) {
+    if (messageTokens.has(token)) tokenHits += 1;
+  }
+  if (tokenHits > 0) {
+    score += tokenHits * 26;
+    signals.push(`tokens_${tokenHits}`);
+  }
+
+  const primarySignal = signals.length > 0 ? signals[0] : 'score_only';
+  return {
+    score,
+    signals,
+    primarySignal,
+    tokenHits,
+    prefixLen,
+    suffixLen
+  };
+}
+
+function hasStrongCompanyPromptSignal(scoreInfo) {
+  const info = scoreInfo && typeof scoreInfo === 'object' ? scoreInfo : {};
+  const signals = Array.isArray(info.signals) ? info.signals : [];
+  if (
+    signals.includes('body_exact')
+    || signals.includes('tail_exact')
+    || signals.includes('body_overlap')
+    || signals.includes('tail_overlap')
+  ) {
+    return true;
+  }
+  const tokenHits = Number.isInteger(info.tokenHits) ? info.tokenHits : 0;
+  const prefixLen = Number.isInteger(info.prefixLen) ? info.prefixLen : 0;
+  const suffixLen = Number.isInteger(info.suffixLen) ? info.suffixLen : 0;
+  if (tokenHits >= 4 && (prefixLen >= 140 || suffixLen >= 120)) {
+    return true;
+  }
+  if (tokenHits >= 6 && (signals.includes('prefix_anchor') || signals.includes('suffix_anchor'))) {
+    return true;
+  }
+  return false;
+}
+
+function resolveCompanyPromptAssignments(userMessages, promptRecords) {
+  const messages = Array.isArray(userMessages) ? userMessages : [];
+  const prompts = Array.isArray(promptRecords) ? promptRecords : [];
+  const messageFeatures = messages.map((text) => buildConversationMessageMatchFeatures(text));
+  const scoreMatrix = messageFeatures.map((features) => (
+    prompts.map((record) => computeCompanyPromptMatchScore(features, record))
+  ));
+
+  if (prompts.length === 0) {
+    return {
+      assignments: messages.map(() => ({
+        matched: false,
+        reason: 'prompt_catalog_empty'
+      })),
+      scoreMatrix
+    };
+  }
+
+  const stateCount = prompts.length + 1;
+  const trace = Array.from({ length: messages.length }, () => Array(stateCount).fill(null));
+  let prevScores = Array(stateCount).fill(Number.NEGATIVE_INFINITY);
+  prevScores[0] = 0;
+
+  for (let i = 0; i < messages.length; i += 1) {
+    const nextScores = Array(stateCount).fill(Number.NEGATIVE_INFINITY);
+    for (let state = 0; state < stateCount; state += 1) {
+      const baseScore = prevScores[state];
+      if (!Number.isFinite(baseScore)) continue;
+
+      const unmatchedPenalty = messageFeatures[i]?.normalized ? 75 : 40;
+      const unmatchedScore = baseScore - unmatchedPenalty;
+      if (unmatchedScore > nextScores[state]) {
+        nextScores[state] = unmatchedScore;
+        trace[i][state] = {
+          prevState: state,
+          promptNumber: null,
+          runReset: false
+        };
+      }
+
+      for (let promptNumber = 1; promptNumber <= prompts.length; promptNumber += 1) {
+        const scoreInfo = scoreMatrix[i][promptNumber - 1];
+        const rawScore = Number.isFinite(scoreInfo?.score) ? scoreInfo.score : 0;
+        if (rawScore < COMPANY_PROMPT_MATCH_MIN_SCORE) continue;
+
+        let transitionBonus = 0;
+        let runReset = false;
+        if (state === 0) {
+          transitionBonus = promptNumber === 1
+            ? 120
+            : Math.max(-120, 80 - ((promptNumber - 1) * 70));
+        } else {
+          const delta = promptNumber - state;
+          if (delta < 0) {
+            const allowReset = (
+              promptNumber <= 3
+              && hasStrongCompanyPromptSignal(scoreInfo)
+            );
+            if (!allowReset) continue;
+            transitionBonus = -170 - ((state - promptNumber) * 35);
+            runReset = true;
+          } else if (delta === 0) {
+            transitionBonus = 40;
+          } else if (delta === 1) {
+            transitionBonus = 100;
+          } else {
+            transitionBonus = Math.max(-160, 30 - ((delta - 1) * 90));
+          }
+        }
+
+        const totalScore = baseScore + rawScore + transitionBonus;
+        if (totalScore > nextScores[promptNumber]) {
+          nextScores[promptNumber] = totalScore;
+          trace[i][promptNumber] = {
+            prevState: state,
+            promptNumber,
+            runReset
+          };
+        }
+      }
+    }
+    prevScores = nextScores;
+  }
+
+  let finalState = 0;
+  for (let state = 1; state < stateCount; state += 1) {
+    if (prevScores[state] > prevScores[finalState]) {
+      finalState = state;
+    }
+  }
+
+  const assignments = Array(messages.length).fill(null);
+  let state = finalState;
+  for (let i = messages.length - 1; i >= 0; i -= 1) {
+    const step = trace[i][state];
+    if (!step) {
+      assignments[i] = {
+        matched: false,
+        reason: 'assignment_trace_missing'
+      };
+      state = 0;
+      continue;
+    }
+
+    if (Number.isInteger(step.promptNumber) && step.promptNumber > 0) {
+      const promptNumber = step.promptNumber;
+      const promptRecord = prompts[promptNumber - 1];
+      const scoreInfo = scoreMatrix[i][promptNumber - 1] || {};
+      assignments[i] = {
+        matched: true,
+        promptNumber,
+        stageName: promptRecord?.stageName || `Prompt ${promptNumber}`,
+        method: scoreInfo?.primarySignal || 'score_match',
+        score: Number.isFinite(scoreInfo?.score) ? scoreInfo.score : 0,
+        signals: Array.isArray(scoreInfo?.signals) ? scoreInfo.signals : [],
+        runReset: step?.runReset === true
+      };
+    } else {
+      const candidates = [];
+      for (let promptIndex = 0; promptIndex < prompts.length; promptIndex += 1) {
+        const scoreInfo = scoreMatrix[i][promptIndex] || {};
+        const candidateScore = Number.isFinite(scoreInfo?.score) ? scoreInfo.score : 0;
+        candidates.push({
+          promptNumber: promptIndex + 1,
+          score: candidateScore
+        });
+      }
+      candidates.sort((left, right) => right.score - left.score);
+      const bestCandidate = candidates[0] || null;
+      const secondCandidate = candidates[1] || null;
+      const bestPromptText = bestCandidate
+        ? `best=P${bestCandidate.promptNumber},score=${Math.round(bestCandidate.score)}`
+        : 'best=n/a';
+      const secondPromptText = secondCandidate
+        ? `second=P${secondCandidate.promptNumber},score=${Math.round(secondCandidate.score)}`
+        : 'second=n/a';
+      let reason = `low_confidence(${bestPromptText})`;
+      if (bestCandidate && bestCandidate.score >= COMPANY_PROMPT_MATCH_MIN_SCORE) {
+        const scoreGap = secondCandidate ? (bestCandidate.score - secondCandidate.score) : bestCandidate.score;
+        reason = scoreGap < 140
+          ? `ambiguous_candidates(${bestPromptText};${secondPromptText})`
+          : `sequence_conflict(${bestPromptText})`;
+      }
+      assignments[i] = {
+        matched: false,
+        reason
+      };
+    }
+
+    state = Number.isInteger(step.prevState) ? step.prevState : 0;
+  }
+
+  let runId = 1;
+  let previousMatchedPrompt = null;
+  for (let i = 0; i < assignments.length; i += 1) {
+    const assignment = assignments[i];
+    if (!assignment || assignment.matched !== true) {
+      if (assignment && typeof assignment === 'object') assignment.runId = null;
+      continue;
+    }
+    const isPromptDecrease = Number.isInteger(previousMatchedPrompt)
+      && Number.isInteger(assignment.promptNumber)
+      && assignment.promptNumber < previousMatchedPrompt;
+    const isRunReset = assignment.runReset === true;
+    if ((isPromptDecrease || isRunReset) && Number.isInteger(previousMatchedPrompt)) {
+      runId += 1;
+    }
+    assignment.runId = runId;
+    previousMatchedPrompt = assignment.promptNumber;
+  }
+
+  return {
+    assignments,
+    scoreMatrix
+  };
+}
+
+async function countCompanyConversationMessages(tabId, options = {}) {
+  if (!Number.isInteger(tabId)) {
+    return { success: false, error: 'invalid_tab_id' };
+  }
+
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady) {
+    return { success: false, error: 'prompts_not_loaded' };
+  }
+
+  const targetTab = await getTabByIdSafe(tabId);
+  if (!targetTab) {
+    return { success: false, error: 'tab_not_found' };
+  }
+
+  const targetUrl = getTabEffectiveUrl(targetTab);
+  if (!isChatGptUrl(targetUrl)) {
+    return {
+      success: false,
+      error: 'tab_not_chatgpt',
+      tabId,
+      url: typeof targetUrl === 'string' ? targetUrl : ''
+    };
+  }
+
+  const maxWaitMs = Number.isInteger(options?.maxWaitMs) && options.maxWaitMs >= 6000
+    ? Math.min(options.maxWaitMs, 45000)
+    : 18000;
+  const scanned = await readFullConversationFromTab(tabId, {
+    maxWaitMs,
+    transferUserMetaLimit: 1200,
+    hardForce: true,
+    restoreScroll: true
+  });
+  if (!scanned?.success) {
+    return {
+      success: false,
+      error: typeof scanned?.error === 'string' && scanned.error.trim()
+        ? scanned.error.trim()
+        : 'conversation_scan_failed',
+      tabId,
+      url: typeof targetUrl === 'string' ? targetUrl : ''
+    };
+  }
+
+  const promptRecords = buildCompanyPromptMatchRecords(PROMPTS_COMPANY);
+  const promptStats = new Map();
+  promptRecords.forEach((entry) => {
+    if (!Number.isInteger(entry?.promptNumber) || entry.promptNumber <= 0) return;
+    promptStats.set(entry.promptNumber, {
+      promptNumber: entry.promptNumber,
+      stageName: typeof entry?.stageName === 'string' ? entry.stageName : `Prompt ${entry.promptNumber}`,
+      occurrences: 0,
+      repliesPresent: 0,
+      repliesPassingThreshold: 0,
+      firstUserMessageIndex: null,
+      lastUserMessageIndex: null,
+      detectionMethods: new Set()
+    });
+  });
+
+  const userMessages = Array.isArray(scanned?.messages) ? scanned.messages : [];
+  const userMeta = Array.isArray(scanned?.messageMeta) ? scanned.messageMeta : [];
+  const assignmentResult = resolveCompanyPromptAssignments(userMessages, promptRecords);
+  const assignments = Array.isArray(assignmentResult?.assignments)
+    ? assignmentResult.assignments
+    : [];
+  const minAssistantWords = AUTO_RESTORE_WINDOWS.minAssistantWords;
+  const minAssistantSentences = AUTO_RESTORE_WINDOWS.minAssistantSentences;
+
+  const rows = [];
+  for (let i = 0; i < userMessages.length; i += 1) {
+    const text = typeof userMessages[i] === 'string' ? userMessages[i] : '';
+    const meta = userMeta[i] && typeof userMeta[i] === 'object' ? userMeta[i] : {};
+    const assignment = assignments[i] && typeof assignments[i] === 'object'
+      ? assignments[i]
+      : { matched: false, reason: 'assignment_missing' };
+    const promptMatched = assignment?.matched === true && Number.isInteger(assignment?.promptNumber);
+
+    const hasAssistantReplyAfter = meta?.hasAssistantReplyAfter === true;
+    const assistantReplyLength = Number.isInteger(meta?.assistantReplyLength) ? meta.assistantReplyLength : 0;
+    const assistantReplyWordCount = Number.isInteger(meta?.assistantReplyWordCount)
+      ? meta.assistantReplyWordCount
+      : 0;
+    const assistantReplySentenceCount = Number.isInteger(meta?.assistantReplySentenceCount)
+      ? meta.assistantReplySentenceCount
+      : 0;
+    const assistantReplyPassThreshold = hasAssistantReplyAfter
+      && assistantReplyWordCount >= minAssistantWords
+      && assistantReplySentenceCount >= minAssistantSentences;
+
+    const normalizedText = compactWhitespace(text);
+    const preview = normalizedText.length > 180
+      ? `${normalizedText.slice(0, 177)}...`
+      : normalizedText;
+
+    const row = {
+      userMessageIndex: i + 1,
+      runId: Number.isInteger(assignment?.runId) ? assignment.runId : null,
+      promptMatched,
+      promptNumber: promptMatched ? assignment.promptNumber : null,
+      stageName: promptMatched
+        ? (typeof assignment?.stageName === 'string' ? assignment.stageName : `Prompt ${assignment.promptNumber}`)
+        : '',
+      detectionMethod: promptMatched
+        ? (typeof assignment?.method === 'string' ? assignment.method : 'unknown')
+        : '',
+      detectionReason: !promptMatched && typeof assignment?.reason === 'string'
+        ? assignment.reason
+        : '',
+      detectionScore: Number.isFinite(assignment?.score) ? assignment.score : null,
+      detectionSignals: Array.isArray(assignment?.signals) ? assignment.signals : [],
+      hasAssistantReplyAfter,
+      assistantReplyLength,
+      assistantReplyWordCount,
+      assistantReplySentenceCount,
+      assistantReplyPassThreshold,
+      messagePreview: preview
+    };
+    rows.push(row);
+
+    if (!promptMatched) continue;
+    const stats = promptStats.get(row.promptNumber) || {
+      promptNumber: row.promptNumber,
+      stageName: row.stageName || `Prompt ${row.promptNumber}`,
+      occurrences: 0,
+      repliesPresent: 0,
+      repliesPassingThreshold: 0,
+      firstUserMessageIndex: null,
+      lastUserMessageIndex: null,
+      detectionMethods: new Set()
+    };
+
+    stats.occurrences += 1;
+    if (hasAssistantReplyAfter) stats.repliesPresent += 1;
+    if (assistantReplyPassThreshold) stats.repliesPassingThreshold += 1;
+    if (!Number.isInteger(stats.firstUserMessageIndex)) stats.firstUserMessageIndex = row.userMessageIndex;
+    stats.lastUserMessageIndex = row.userMessageIndex;
+    if (row.detectionMethod) stats.detectionMethods.add(row.detectionMethod);
+    promptStats.set(row.promptNumber, stats);
+  }
+
+  const matchedRows = rows.filter((row) => row.promptMatched);
+  const unmatchedRows = rows.filter((row) => !row.promptMatched);
+
+  const recognizedPromptNumbers = Array.from(
+    new Set(
+      matchedRows
+        .map((row) => (Number.isInteger(row.promptNumber) ? row.promptNumber : null))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    )
+  ).sort((left, right) => left - right);
+  const recognizedPromptSet = new Set(recognizedPromptNumbers);
+
+  const missingPromptNumbers = promptRecords
+    .map((entry) => entry.promptNumber)
+    .filter((promptNumber) => !recognizedPromptSet.has(promptNumber));
+  const duplicatePromptNumbers = Array.from(promptStats.values())
+    .filter((entry) => entry.occurrences > 1)
+    .map((entry) => entry.promptNumber)
+    .sort((left, right) => left - right);
+
+  const promptRepliesPresent = matchedRows.filter((row) => row.hasAssistantReplyAfter).length;
+  const promptRepliesMissing = matchedRows.length - promptRepliesPresent;
+  const promptRepliesPassingThreshold = matchedRows.filter((row) => row.assistantReplyPassThreshold).length;
+  const promptRepliesBelowThreshold = matchedRows.filter((row) => (
+    row.hasAssistantReplyAfter && !row.assistantReplyPassThreshold
+  )).length;
+
+  const sequenceIssues = [];
+  const previousPromptByRun = new Map();
+  for (const row of matchedRows) {
+    const runId = Number.isInteger(row?.runId) ? row.runId : 1;
+    const previousPromptNumber = previousPromptByRun.get(runId);
+    if (
+      Number.isInteger(previousPromptNumber)
+      && Number.isInteger(row.promptNumber)
+      && row.promptNumber < previousPromptNumber
+    ) {
+      sequenceIssues.push({
+        runId,
+        userMessageIndex: row.userMessageIndex,
+        previousPromptNumber,
+        currentPromptNumber: row.promptNumber
+      });
+    }
+    if (Number.isInteger(row.promptNumber)) {
+      previousPromptByRun.set(runId, row.promptNumber);
+    }
+  }
+  const runResets = [];
+  let previousMatchedRow = null;
+  for (const row of matchedRows) {
+    if (
+      previousMatchedRow
+      && Number.isInteger(previousMatchedRow?.runId)
+      && Number.isInteger(row?.runId)
+      && row.runId > previousMatchedRow.runId
+    ) {
+      runResets.push({
+        fromRunId: previousMatchedRow.runId,
+        toRunId: row.runId,
+        fromUserMessageIndex: previousMatchedRow.userMessageIndex,
+        toUserMessageIndex: row.userMessageIndex,
+        fromPromptNumber: previousMatchedRow.promptNumber,
+        toPromptNumber: row.promptNumber
+      });
+    }
+    previousMatchedRow = row;
+  }
+  const detectedRuns = Array.from(
+    new Set(
+      matchedRows
+        .map((row) => (Number.isInteger(row?.runId) ? row.runId : null))
+        .filter((value) => Number.isInteger(value) && value > 0)
+    )
+  ).sort((left, right) => left - right);
+
+  const promptCoverage = Array.from(promptStats.values())
+    .sort((left, right) => left.promptNumber - right.promptNumber)
+    .map((entry) => ({
+      promptNumber: entry.promptNumber,
+      stageName: entry.stageName,
+      occurrences: entry.occurrences,
+      repliesPresent: entry.repliesPresent,
+      repliesPassingThreshold: entry.repliesPassingThreshold,
+      firstUserMessageIndex: entry.firstUserMessageIndex,
+      lastUserMessageIndex: entry.lastUserMessageIndex,
+      detectionMethods: Array.from(entry.detectionMethods).sort()
+    }));
+
+  const unmatchedUserSamples = unmatchedRows.slice(0, 8).map((row) => ({
+    userMessageIndex: row.userMessageIndex,
+    reason: row.detectionReason || 'not_matched',
+    preview: row.messagePreview
+  }));
+
+  const totalUserMessages = Number.isInteger(scanned?.count) ? scanned.count : userMessages.length;
+  const totalAssistantMessages = Number.isInteger(scanned?.assistantCount) ? scanned.assistantCount : 0;
+  const totalMessages = Number.isInteger(scanned?.totalMessages)
+    ? scanned.totalMessages
+    : (totalUserMessages + totalAssistantMessages);
+  const stageMapping = promptRecords.map((entry) => {
+    const rawPrompt = PROMPTS_COMPANY[entry.index];
+    const normalizedPrompt = normalizeCompanyPromptTemplate(rawPrompt);
+    const promptPreview = normalizedPrompt.length > 160
+      ? `${normalizedPrompt.slice(0, 157)}...`
+      : normalizedPrompt;
+    return {
+      promptNumber: entry.promptNumber,
+      stageName: entry.stageName,
+      promptPreview
+    };
+  });
+  const stageMappingCheck = {
+    promptCount: PROMPTS_COMPANY.length,
+    stageNameCount: STAGE_NAMES_COMPANY.length,
+    alignedByCount: PROMPTS_COMPANY.length === STAGE_NAMES_COMPANY.length,
+    missingStageNames: promptRecords
+      .filter((entry) => !(typeof STAGE_NAMES_COMPANY[entry.index] === 'string' && STAGE_NAMES_COMPANY[entry.index].trim()))
+      .map((entry) => entry.promptNumber)
+  };
+  const assignmentLog = rows.map((row) => ({
+    userMessageIndex: row.userMessageIndex,
+    runId: Number.isInteger(row.runId) ? row.runId : null,
+    assignedPrompt: row.promptMatched ? `P${row.promptNumber}` : '-',
+    stageName: row.stageName || '-',
+    method: row.detectionMethod || row.detectionReason || '-',
+    score: Number.isFinite(row.detectionScore) ? Math.round(row.detectionScore) : null,
+    signals: Array.isArray(row.detectionSignals) ? row.detectionSignals.join('|') : '',
+    assistantReply: row.hasAssistantReplyAfter ? 'yes' : 'no',
+    qualityPass: row.assistantReplyPassThreshold ? 'yes' : 'no',
+    assistantWords: row.assistantReplyWordCount,
+    assistantSentences: row.assistantReplySentenceCount
+  }));
+
+  try {
+    console.group('[company-count] conversation audit');
+    console.log('[company-count] summary', {
+      tabId,
+      url: typeof scanned?.url === 'string' ? scanned.url : '',
+      totalUserMessages,
+      totalAssistantMessages,
+      matchedPromptMessages: matchedRows.length,
+      unmatchedUserMessages: unmatchedRows.length,
+      recognizedUniquePrompts: recognizedPromptNumbers.length,
+      missingPromptNumbers,
+      duplicatePromptNumbers,
+      promptRepliesMissing,
+      promptRepliesBelowThreshold,
+      sequenceIssues: sequenceIssues.length,
+      detectedRuns,
+      runResets
+    });
+    console.log('[company-count] stage mapping check', stageMappingCheck);
+    console.table(stageMapping.map((item) => ({
+      prompt: `P${item.promptNumber}`,
+      stage: item.stageName,
+      preview: item.promptPreview
+    })));
+    console.table(promptCoverage.map((item) => ({
+      prompt: `P${item.promptNumber}`,
+      stage: item.stageName,
+      occurrences: item.occurrences,
+      repliesPresent: item.repliesPresent,
+      repliesPassingThreshold: item.repliesPassingThreshold,
+      firstIndex: item.firstUserMessageIndex,
+      lastIndex: item.lastUserMessageIndex,
+      methods: item.detectionMethods.join('|')
+    })));
+    if (runResets.length > 0) {
+      console.table(runResets.map((item) => ({
+        fromRun: `R${item.fromRunId}`,
+        toRun: `R${item.toRunId}`,
+        fromPrompt: `P${item.fromPromptNumber}`,
+        toPrompt: `P${item.toPromptNumber}`,
+        fromIndex: item.fromUserMessageIndex,
+        toIndex: item.toUserMessageIndex
+      })));
+    }
+    console.table(assignmentLog);
+    console.groupEnd();
+  } catch (error) {
+    console.warn('[company-count] logging failed:', error?.message || String(error));
+  }
+
+  return {
+    success: true,
+    analysisType: 'company',
+    tabId,
+    url: typeof scanned?.url === 'string' && scanned.url
+      ? scanned.url
+      : (typeof targetUrl === 'string' ? targetUrl : ''),
+    title: typeof scanned?.title === 'string' && scanned.title
+      ? scanned.title
+      : (typeof targetTab?.title === 'string' ? targetTab.title : ''),
+    promptCatalogCount: promptRecords.length,
+    stageMappingCheck,
+    stageMapping,
+    thresholds: {
+      minAssistantWords,
+      minAssistantSentences
+    },
+    totals: {
+      totalUserMessages,
+      totalAssistantMessages,
+      totalMessages,
+      matchedPromptMessages: matchedRows.length,
+      unmatchedUserMessages: unmatchedRows.length,
+      recognizedUniquePrompts: recognizedPromptNumbers.length,
+      detectedRuns: detectedRuns.length,
+      promptRepliesPresent,
+      promptRepliesMissing,
+      promptRepliesPassingThreshold,
+      promptRepliesBelowThreshold
+    },
+    verification: {
+      allPromptsDetected: missingPromptNumbers.length === 0,
+      allMatchedPromptsHaveReply: promptRepliesMissing === 0,
+      allMatchedRepliesPassThreshold: promptRepliesBelowThreshold === 0,
+      sequenceNonDecreasing: sequenceIssues.length === 0,
+      userMetaTruncated: scanned?.userMetaTruncated === true
+    },
+    recognizedPromptNumbers,
+    missingPromptNumbers,
+    duplicatePromptNumbers,
+    promptCoverage,
+    runResets,
+    sequenceIssues,
+    unmatchedUserSamples,
+    assignmentLog,
+    rows
+  };
+}
+
 function detectLastPromptMatch(userMessages, promptRecords) {
   const messages = Array.isArray(userMessages) ? userMessages : [];
   for (let i = messages.length - 1; i >= 0; i -= 1) {
@@ -5816,6 +7033,211 @@ function computeNextResumeIndex(lastPromptIndex, totalPrompts, shouldAdvanceProm
   return Math.max(1, nextIndex);
 }
 
+function buildCompanyResumePlanFromAudit(audit, options = {}) {
+  const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
+  const promptCount = Number.isInteger(audit?.promptCatalogCount) && audit.promptCatalogCount > 0
+    ? audit.promptCatalogCount
+    : (Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0);
+  if (!Number.isInteger(promptCount) || promptCount <= 0) {
+    return {
+      resolved: false,
+      error: 'prompt_catalog_empty'
+    };
+  }
+
+  const minStartIndexRaw = Number.isInteger(options?.minStartIndex) ? options.minStartIndex : 0;
+  const minStartIndex = Math.max(0, Math.min(minStartIndexRaw, Math.max(promptCount - 1, 0)));
+  const rows = Array.isArray(audit?.rows) ? audit.rows : [];
+  const totals = audit?.totals && typeof audit.totals === 'object' ? audit.totals : {};
+  const missingPromptNumbers = Array.isArray(audit?.missingPromptNumbers) ? audit.missingPromptNumbers : [];
+  const duplicatePromptNumbers = Array.isArray(audit?.duplicatePromptNumbers) ? audit.duplicatePromptNumbers : [];
+
+  const matchedRows = rows
+    .filter((row) => row?.promptMatched === true && Number.isInteger(row?.promptNumber) && row.promptNumber > 0)
+    .sort((left, right) => {
+      const leftIndex = Number.isInteger(left?.userMessageIndex) ? left.userMessageIndex : 0;
+      const rightIndex = Number.isInteger(right?.userMessageIndex) ? right.userMessageIndex : 0;
+      return leftIndex - rightIndex;
+    });
+
+  let selectedRow = null;
+  if (matchedRows.length > 0) {
+    const latestRunId = matchedRows.reduce((maxRunId, row) => {
+      const runId = Number.isInteger(row?.runId) && row.runId > 0 ? row.runId : 1;
+      return Math.max(maxRunId, runId);
+    }, 1);
+    const latestRunRows = matchedRows.filter((row) => {
+      const runId = Number.isInteger(row?.runId) && row.runId > 0 ? row.runId : 1;
+      return runId === latestRunId;
+    });
+    selectedRow = latestRunRows.length > 0
+      ? latestRunRows[latestRunRows.length - 1]
+      : matchedRows[matchedRows.length - 1];
+  }
+
+  let detectedPromptNumber = null;
+  let hasAssistantReplyAfter = null;
+  let assistantReplyPassThreshold = null;
+  let hasAssistantReplyByCounters = null;
+  let shouldAdvancePrompt = true;
+  let retryReason = '';
+  let source = '';
+  let method = '';
+  let runId = null;
+
+  if (selectedRow) {
+    detectedPromptNumber = selectedRow.promptNumber;
+    hasAssistantReplyAfter = selectedRow.hasAssistantReplyAfter === true;
+    assistantReplyPassThreshold = selectedRow.assistantReplyPassThreshold === true;
+    shouldAdvancePrompt = forceRepeatLastPrompt
+      ? false
+      : hasAssistantReplyAfter;
+    retryReason = forceRepeatLastPrompt
+      ? 'force_repeat_last_prompt'
+      : (
+        !hasAssistantReplyAfter
+          ? 'missing_assistant_reply'
+          : ''
+      );
+    source = 'conversation_audit_match';
+    method = typeof selectedRow?.detectionMethod === 'string' && selectedRow.detectionMethod.trim()
+      ? `audit:${selectedRow.detectionMethod.trim()}`
+      : 'audit:prompt_match';
+    runId = Number.isInteger(selectedRow?.runId) ? selectedRow.runId : null;
+  } else {
+    const userCountCandidate = Number.isInteger(totals?.totalUserMessages) && totals.totalUserMessages > 0
+      ? totals.totalUserMessages
+      : null;
+    const progressPromptCandidate = Number.isInteger(options?.progressPromptNumber) && options.progressPromptNumber > 0
+      ? options.progressPromptNumber
+      : null;
+    const fallbackSelection = selectConservativePromptNumber([
+      { source: 'chat_user_count', value: userCountCandidate, priority: 1 },
+      { source: 'saved_progress', value: progressPromptCandidate, priority: 2 }
+    ], promptCount);
+
+    detectedPromptNumber = Number.isInteger(fallbackSelection.promptNumber)
+      ? fallbackSelection.promptNumber
+      : null;
+    if (!Number.isInteger(detectedPromptNumber)) {
+      return {
+        resolved: false,
+        error: 'stage_not_detected'
+      };
+    }
+
+    hasAssistantReplyByCounters = (
+      Number.isInteger(totals?.totalAssistantMessages)
+      && Number.isInteger(totals?.totalUserMessages)
+    )
+      ? totals.totalAssistantMessages >= totals.totalUserMessages
+      : null;
+    shouldAdvancePrompt = forceRepeatLastPrompt
+      ? false
+      : (hasAssistantReplyByCounters !== false);
+    retryReason = forceRepeatLastPrompt
+      ? 'force_repeat_last_prompt'
+      : (
+        hasAssistantReplyByCounters === false
+          ? 'missing_assistant_reply_by_count'
+          : ''
+      );
+    source = 'conversation_audit_counter_fallback';
+    method = `audit:${fallbackSelection.source || 'counter_fallback'}`;
+  }
+
+  const detectedPromptIndex = Number.isInteger(detectedPromptNumber) ? (detectedPromptNumber - 1) : null;
+  let nextStartIndex = computeNextResumeIndex(
+    detectedPromptIndex,
+    promptCount,
+    shouldAdvancePrompt
+  );
+  const finalStageReached = !Number.isInteger(nextStartIndex);
+  let clampedFromMinStart = false;
+  if (Number.isInteger(nextStartIndex) && nextStartIndex < minStartIndex && promptCount > 1) {
+    nextStartIndex = minStartIndex;
+    clampedFromMinStart = true;
+  }
+
+  const detectedStageName = Number.isInteger(detectedPromptIndex)
+    ? (STAGE_NAMES_COMPANY[detectedPromptIndex] || `Prompt ${detectedPromptNumber}`)
+    : '';
+
+  return {
+    resolved: true,
+    promptCount,
+    source,
+    method,
+    runId,
+    reason: retryReason || 'assistant_reply_ok',
+    retrySamePrompt: shouldAdvancePrompt === false,
+    retryReason,
+    shouldAdvancePrompt,
+    detectedPromptNumber,
+    detectedPromptIndex,
+    detectedStageName,
+    hasAssistantReplyAfter,
+    assistantReplyPassThreshold,
+    hasAssistantReplyByCounters,
+    nextStartIndex: Number.isInteger(nextStartIndex) ? nextStartIndex : null,
+    nextPromptNumber: Number.isInteger(nextStartIndex) ? (nextStartIndex + 1) : null,
+    finalStageReached,
+    minStartIndex,
+    clampedFromMinStart,
+    missingPromptNumbers,
+    duplicatePromptNumbers,
+    auditSummary: {
+      totalUserMessages: Number.isInteger(totals?.totalUserMessages) ? totals.totalUserMessages : 0,
+      totalAssistantMessages: Number.isInteger(totals?.totalAssistantMessages) ? totals.totalAssistantMessages : 0,
+      matchedPromptMessages: Number.isInteger(totals?.matchedPromptMessages) ? totals.matchedPromptMessages : 0,
+      unmatchedUserMessages: Number.isInteger(totals?.unmatchedUserMessages) ? totals.unmatchedUserMessages : 0,
+      recognizedUniquePrompts: Number.isInteger(totals?.recognizedUniquePrompts) ? totals.recognizedUniquePrompts : 0,
+      detectedRuns: Number.isInteger(totals?.detectedRuns) ? totals.detectedRuns : 0
+    }
+  };
+}
+
+async function resolveCompanyResumeStagePlanForTab(tabId, options = {}) {
+  if (!Number.isInteger(tabId)) {
+    return { success: false, error: 'invalid_tab_id' };
+  }
+
+  const maxWaitMs = Number.isInteger(options?.maxWaitMs) && options.maxWaitMs >= 6000
+    ? Math.min(options.maxWaitMs, 45000)
+    : 18000;
+  const audit = await countCompanyConversationMessages(tabId, {
+    maxWaitMs,
+    origin: typeof options?.origin === 'string' ? options.origin : 'stage-plan-preflight'
+  });
+  if (!audit?.success) {
+    return {
+      success: false,
+      error: typeof audit?.error === 'string' && audit.error.trim()
+        ? audit.error.trim()
+        : 'conversation_audit_failed',
+      audit
+    };
+  }
+
+  const plan = buildCompanyResumePlanFromAudit(audit, options);
+  if (!plan?.resolved) {
+    return {
+      success: false,
+      error: typeof plan?.error === 'string' && plan.error.trim()
+        ? plan.error.trim()
+        : 'stage_not_detected',
+      audit,
+      plan
+    };
+  }
+
+  return {
+    success: true,
+    plan,
+    audit
+  };
+}
+
 function openResumeStagePopup(startIndex, title = '', analysisType = 'company', options = {}) {
   const params = new URLSearchParams();
   const targetTabId = Number.isInteger(options?.targetTabId) ? options.targetTabId : null;
@@ -5890,21 +7312,6 @@ async function handleProcessResumeNextStageMessage(message) {
         : 'missing_assistant_reply_by_count';
     }
 
-    if (!retrySamePrompt) {
-      const metrics = await collectTabConversationMetricsForAutoRestore(chatTab.id);
-      const assistantReplyTooShort = metrics.success
-        && metrics.hasAssistantAfterLastUser === true
-        && (
-          metrics.lastAssistantWordCount < AUTO_RESTORE_WINDOWS.minAssistantWords
-          || metrics.lastAssistantSentenceCount < AUTO_RESTORE_WINDOWS.minAssistantSentences
-        );
-      if (assistantReplyTooShort && Number.isInteger(detectedPromptIndex)) {
-        retrySamePrompt = true;
-        retryReason = 'assistant_reply_too_short';
-        nextStartIndex = detectedPromptIndex;
-      }
-    }
-
     if (promptCount > 1) {
       nextStartIndex = Math.min(Math.max(nextStartIndex, 1), promptCount - 1);
     } else {
@@ -5955,8 +7362,12 @@ async function handleProcessResumeNextStageMessage(message) {
       return {
         success: false,
         error: resumeResult?.error || 'resume_failed',
-        startIndex: nextStartIndex,
-        startPromptNumber: nextStartIndex + 1,
+        startIndex: Number.isInteger(resumeResult?.resolvedStartIndex)
+          ? resumeResult.resolvedStartIndex
+          : nextStartIndex,
+        startPromptNumber: Number.isInteger(resumeResult?.resolvedStartIndex)
+          ? (resumeResult.resolvedStartIndex + 1)
+          : (nextStartIndex + 1),
         detectedPromptIndex,
         detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
         detectedMethod,
@@ -5965,11 +7376,15 @@ async function handleProcessResumeNextStageMessage(message) {
       };
     }
 
+    const resolvedStartIndex = Number.isInteger(resumeResult?.startIndex)
+      ? resumeResult.startIndex
+      : nextStartIndex;
+
     return {
       success: true,
       mode: 'direct',
-      startIndex: nextStartIndex,
-      startPromptNumber: nextStartIndex + 1,
+      startIndex: resolvedStartIndex,
+      startPromptNumber: resolvedStartIndex + 1,
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
@@ -6003,89 +7418,50 @@ async function handleProcessResumeNextStageMessage(message) {
     : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : null);
   const processStatus = normalizeProcessStatus(process?.status || '');
   const processNeedsAction = process?.needsAction === true;
-  let matched = null;
+  const minStartIndex = PROMPTS_COMPANY.length > 1 ? 1 : 0;
   let detectedPromptIndex = null;
   let detectedMethod = '';
-  let hasAssistantReplyByCounters = null;
-  let shouldAdvancePrompt = true;
   let retrySamePrompt = false;
   let retryReason = '';
+  let nextStartIndex = null;
 
-  const boundedProgressPromptNumber = toBoundedPromptNumber(progressPromptNumber, PROMPTS_COMPANY.length);
-  if (Number.isInteger(boundedProgressPromptNumber) && boundedProgressPromptNumber > 0) {
-    detectedPromptIndex = boundedProgressPromptNumber - 1;
-    detectedMethod = 'saved_process_progress';
-    shouldAdvancePrompt = !(processNeedsAction || isFailedProcessStatus(processStatus));
-    retrySamePrompt = !shouldAdvancePrompt;
-    if (retrySamePrompt) {
-      retryReason = processNeedsAction
-        ? 'saved_stage_needs_action'
-        : 'saved_stage_failed_status';
-    }
+  const stagePlanResult = await resolveCompanyResumeStagePlanForTab(chatTab.id, {
+    maxWaitMs: 18000,
+    forceRepeatLastPrompt: message?.forceRepeatLastPrompt === true,
+    minStartIndex,
+    progressPromptNumber,
+    origin: 'process-resume-next-stage'
+  });
+  if (stagePlanResult?.success && stagePlanResult.plan?.resolved) {
+    const plan = stagePlanResult.plan;
+    detectedPromptIndex = Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null;
+    detectedMethod = typeof plan?.method === 'string' && plan.method.trim()
+      ? plan.method.trim()
+      : 'conversation_audit';
+    retrySamePrompt = plan?.retrySamePrompt === true;
+    retryReason = typeof plan?.retryReason === 'string' ? plan.retryReason : '';
+    nextStartIndex = Number.isInteger(plan?.nextStartIndex) ? plan.nextStartIndex : null;
   } else {
-    const promptRecords = buildPromptSignatureRecords(PROMPTS_COMPANY);
-    const extracted = await extractRecentUserPromptsFromTab(chatTab.id);
-    const extractedEntries = Array.isArray(extracted?.messageMeta) && extracted.messageMeta.length > 0
-      ? extracted.messageMeta
-      : (Array.isArray(extracted?.messages) ? extracted.messages : []);
-    matched = detectLastPromptMatch(extractedEntries, promptRecords);
-    const latestExtraction = await extractLastUserMessageFromTab(chatTab.id);
-    const chatPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.count)
-      ? latestExtraction.count
-      : null;
-    const assistantPromptCountFromBlocks = latestExtraction?.success && Number.isInteger(latestExtraction?.assistantCount)
-      ? latestExtraction.assistantCount
-      : null;
-    const conservativeStageSelection = selectConservativePromptNumber([
-      { source: 'chat_recent', value: Number.isInteger(matched?.promptNumber) ? matched.promptNumber : null, priority: 1 },
-      { source: 'chat_user_count', value: chatPromptCountFromBlocks, priority: 2 }
-    ], PROMPTS_COMPANY.length);
-    const conservativePromptNumber = Number.isInteger(conservativeStageSelection.promptNumber)
-      ? conservativeStageSelection.promptNumber
-      : null;
-    detectedPromptIndex = Number.isInteger(conservativePromptNumber)
-      ? (conservativePromptNumber - 1)
-      : getProgressPromptIndex(process);
-    detectedMethod = conservativeStageSelection.source
-      ? `conservative_${conservativeStageSelection.source}`
-      : (matched ? matched.method : 'progress_fallback');
-    hasAssistantReplyByCounters = (
-      Number.isInteger(chatPromptCountFromBlocks) && Number.isInteger(assistantPromptCountFromBlocks)
-    )
-      ? assistantPromptCountFromBlocks >= chatPromptCountFromBlocks
-      : null;
-    shouldAdvancePrompt = (
-      matched?.hasAssistantReplyAfter !== false
-      && hasAssistantReplyByCounters !== false
-    );
-    retrySamePrompt = !shouldAdvancePrompt;
-    if (retrySamePrompt) {
-      retryReason = matched?.hasAssistantReplyAfter === false
-        ? 'missing_assistant_reply'
-        : 'missing_assistant_reply_by_count';
-    }
-  }
-
-  if (shouldAdvancePrompt) {
-    const metrics = await collectTabConversationMetricsForAutoRestore(chatTab.id);
-    const assistantReplyTooShort = metrics.success
-      && metrics.hasAssistantAfterLastUser === true
-      && (
-        metrics.lastAssistantWordCount < AUTO_RESTORE_WINDOWS.minAssistantWords
-        || metrics.lastAssistantSentenceCount < AUTO_RESTORE_WINDOWS.minAssistantSentences
+    const boundedProgressPromptNumber = toBoundedPromptNumber(progressPromptNumber, PROMPTS_COMPANY.length);
+    if (Number.isInteger(boundedProgressPromptNumber) && boundedProgressPromptNumber > 0) {
+      detectedPromptIndex = boundedProgressPromptNumber - 1;
+      detectedMethod = 'fallback_saved_process_progress';
+      const shouldAdvancePrompt = !(processNeedsAction || isFailedProcessStatus(processStatus));
+      retrySamePrompt = !shouldAdvancePrompt;
+      retryReason = retrySamePrompt
+        ? (processNeedsAction ? 'saved_stage_needs_action' : 'saved_stage_failed_status')
+        : '';
+      nextStartIndex = computeNextResumeIndex(
+        detectedPromptIndex,
+        PROMPTS_COMPANY.length,
+        shouldAdvancePrompt
       );
-    if (assistantReplyTooShort) {
-      shouldAdvancePrompt = false;
-      retrySamePrompt = true;
-      retryReason = 'assistant_reply_too_short';
+      if (Number.isInteger(nextStartIndex) && nextStartIndex < minStartIndex && PROMPTS_COMPANY.length > 1) {
+        nextStartIndex = minStartIndex;
+      }
     }
   }
 
-  const nextStartIndex = computeNextResumeIndex(
-    detectedPromptIndex,
-    PROMPTS_COMPANY.length,
-    shouldAdvancePrompt
-  );
   if (!Number.isInteger(nextStartIndex)) {
     return {
       success: false,
@@ -6130,8 +7506,12 @@ async function handleProcessResumeNextStageMessage(message) {
     return {
       success: false,
       error: resumeResult?.error || 'resume_failed',
-      startIndex: nextStartIndex,
-      startPromptNumber: nextStartIndex + 1,
+      startIndex: Number.isInteger(resumeResult?.resolvedStartIndex)
+        ? resumeResult.resolvedStartIndex
+        : nextStartIndex,
+      startPromptNumber: Number.isInteger(resumeResult?.resolvedStartIndex)
+        ? (resumeResult.resolvedStartIndex + 1)
+        : (nextStartIndex + 1),
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
@@ -6140,15 +7520,19 @@ async function handleProcessResumeNextStageMessage(message) {
     };
   }
 
+  const resolvedStartIndex = Number.isInteger(resumeResult?.startIndex)
+    ? resumeResult.startIndex
+    : nextStartIndex;
+
   await upsertProcess(runId, {
     status: 'stopped',
     statusText: retrySamePrompt
       ? (
-        retryReason === 'assistant_reply_too_short'
-          ? `Ponowiono Prompt ${nextStartIndex + 1} (odpowiedz byla za krotka)`
-          : `Ponowiono Prompt ${nextStartIndex + 1} (brak odpowiedzi)`
+        retryReason === 'force_repeat_last_prompt'
+          ? `Ponowiono Prompt ${resolvedStartIndex + 1} (wymuszone)`
+          : `Ponowiono Prompt ${resolvedStartIndex + 1} (brak odpowiedzi)`
       )
-      : `Wznowiono od Prompt ${nextStartIndex + 1}`,
+      : `Wznowiono od Prompt ${resolvedStartIndex + 1}`,
     reason: 'resumed_from_decision_panel',
     needsAction: false,
     finishedAt: Date.now(),
@@ -6158,8 +7542,8 @@ async function handleProcessResumeNextStageMessage(message) {
   return {
     success: true,
     mode: 'direct',
-    startIndex: nextStartIndex,
-    startPromptNumber: nextStartIndex + 1,
+    startIndex: resolvedStartIndex,
+    startPromptNumber: resolvedStartIndex + 1,
     detectedPromptIndex,
     detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
     detectedMethod,
@@ -6277,6 +7661,34 @@ function formatDispatchUiSummary(dispatchOutcome) {
   return 'Dispatch: brak wysylki';
 }
 
+function normalizeDispatchProcessLog(rawLog) {
+  if (!Array.isArray(rawLog)) return [];
+  return rawLog
+    .filter((entry) => typeof entry === 'string' && entry.trim())
+    .map((entry) => truncateDispatchLogText(entry.trim(), 220))
+    .slice(-16);
+}
+
+function formatDispatchProcessLogEntry(entry) {
+  const normalized = typeof entry === 'string' ? entry.trim() : '';
+  if (!normalized) return '';
+  const [stage, status, detail] = normalized.split('|');
+  const parts = [];
+  if (stage && stage.trim()) parts.push(stage.trim());
+  if (status && status.trim()) parts.push(status.trim());
+  if (detail && detail.trim()) parts.push(detail.trim());
+  return truncateDispatchLogText(parts.join(': '), 180);
+}
+
+function buildDispatchProcessLogUiLines(rawLog) {
+  const normalized = normalizeDispatchProcessLog(rawLog);
+  if (normalized.length === 0) return [];
+  const slice = normalized.slice(-3);
+  return slice
+    .map((entry, index) => `Dispatch flow ${index + 1}/${slice.length}: ${formatDispatchProcessLogEntry(entry)}`)
+    .filter((line) => line);
+}
+
 function buildPersistenceUiSummary(options = {}) {
   const hasResponse = options?.hasResponse !== false;
   const saveResult = options?.saveResult && typeof options.saveResult === 'object'
@@ -6287,6 +7699,12 @@ function buildPersistenceUiSummary(options = {}) {
   const dispatch = saveResult?.dispatch && typeof saveResult.dispatch === 'object'
     ? saveResult.dispatch
     : null;
+  const dispatchProcessLog = normalizeDispatchProcessLog(
+    saveResult?.dispatchProcessLog
+      || dispatch?.processLog
+      || []
+  );
+  const dispatchFlowUiLines = buildDispatchProcessLogUiLines(dispatchProcessLog);
   const dispatchSummary = formatDispatchUiSummary(dispatch);
 
   if (!hasResponse) {
@@ -6303,6 +7721,7 @@ function buildPersistenceUiSummary(options = {}) {
       logLines,
       dispatchSummary: 'Dispatch: pominieto',
       dispatch: null,
+      dispatchProcessLog: [],
       copyTrace: '',
       saveError: 'empty_response'
     };
@@ -6312,7 +7731,7 @@ function buildPersistenceUiSummary(options = {}) {
   if (!saveOk) {
     const normalizedSaveError = saveError || 'save_failed';
     const storageSummary = `Baza: BLAD zapisu (${truncateDispatchLogText(normalizedSaveError, 140)})`;
-    const logLines = [storageSummary, dispatchSummary];
+    const logLines = [storageSummary, dispatchSummary, ...dispatchFlowUiLines];
     return {
       saveOk: false,
       hasResponse: true,
@@ -6322,6 +7741,7 @@ function buildPersistenceUiSummary(options = {}) {
       logLines,
       dispatchSummary,
       dispatch,
+      dispatchProcessLog,
       copyTrace: '',
       saveError: normalizedSaveError
     };
@@ -6334,7 +7754,7 @@ function buildPersistenceUiSummary(options = {}) {
   const copyTrace = typeof saveResult?.copyTrace === 'string' && saveResult.copyTrace.trim()
     ? saveResult.copyTrace.trim()
     : '';
-  const logLines = [storageSummary, dispatchSummary];
+  const logLines = [storageSummary, dispatchSummary, ...dispatchFlowUiLines];
   if (copyTrace) {
     logLines.push(`Trace: ${copyTrace}`);
   }
@@ -6352,6 +7772,7 @@ function buildPersistenceUiSummary(options = {}) {
     logLines,
     dispatchSummary,
     dispatch,
+    dispatchProcessLog,
     copyTrace,
     saveError: ''
   };
@@ -6762,8 +8183,176 @@ async function appendWatchlistDispatchHistory(entry) {
   }
 }
 
+function normalizeWatchlistDispatchProcessLogLevel(rawLevel) {
+  const value = typeof rawLevel === 'string' ? rawLevel.trim().toLowerCase() : '';
+  if (value === 'error') return 'error';
+  if (value === 'warn' || value === 'warning') return 'warn';
+  return 'info';
+}
+
+function sanitizeWatchlistDispatchProcessLogEntry(rawEntry) {
+  if (!rawEntry || typeof rawEntry !== 'object') return null;
+  const ts = Number.isInteger(rawEntry.ts) && rawEntry.ts > 0 ? rawEntry.ts : Date.now();
+  const level = normalizeWatchlistDispatchProcessLogLevel(rawEntry.level);
+  const code = truncateDispatchLogText(typeof rawEntry.code === 'string' ? rawEntry.code : 'event', 80);
+  const message = truncateDispatchLogText(
+    typeof rawEntry.message === 'string' ? rawEntry.message : 'dispatch_event',
+    260
+  );
+  const trace = truncateDispatchLogText(typeof rawEntry.trace === 'string' ? rawEntry.trace : '', 140);
+  const runId = truncateDispatchLogText(typeof rawEntry.runId === 'string' ? rawEntry.runId : '', 140);
+  const responseId = truncateDispatchLogText(typeof rawEntry.responseId === 'string' ? rawEntry.responseId : '', 180);
+  let details = '';
+  if (typeof rawEntry.details === 'string') {
+    details = rawEntry.details;
+  } else if (rawEntry.details && typeof rawEntry.details === 'object') {
+    try {
+      details = JSON.stringify(rawEntry.details);
+    } catch (error) {
+      details = '';
+    }
+  }
+  details = truncateDispatchLogText(details, 700);
+  const id = typeof rawEntry.id === 'string' && rawEntry.id.trim()
+    ? rawEntry.id.trim()
+    : `wdp-${ts}-${Math.random().toString(36).slice(2, 8)}`;
+  return {
+    id,
+    ts,
+    level,
+    code,
+    message,
+    trace,
+    runId,
+    responseId,
+    details
+  };
+}
+
+function normalizeWatchlistDispatchProcessLogs(rawEntries) {
+  const entries = (Array.isArray(rawEntries) ? rawEntries : [])
+    .map(sanitizeWatchlistDispatchProcessLogEntry)
+    .filter(Boolean);
+  if (entries.length <= WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS) return entries;
+  return entries.slice(entries.length - WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS);
+}
+
+async function ensureWatchlistDispatchProcessLogReady() {
+  if (!watchlistDispatchProcessLogReady) {
+    watchlistDispatchProcessLogReady = (async () => {
+      try {
+        const snapshot = await chrome.storage.local.get([WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY]);
+        watchlistDispatchProcessLogEntries = normalizeWatchlistDispatchProcessLogs(
+          snapshot?.[WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY]
+        );
+      } catch (error) {
+        console.warn('[db-dispatch] [log-load-failed]', error?.message || String(error));
+        watchlistDispatchProcessLogEntries = [];
+      }
+    })();
+  }
+  await watchlistDispatchProcessLogReady;
+  return watchlistDispatchProcessLogEntries;
+}
+
+async function persistWatchlistDispatchProcessLogs() {
+  await chrome.storage.local.set({
+    [WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY]: watchlistDispatchProcessLogEntries
+  });
+}
+
+async function appendWatchlistDispatchProcessLog(rawEntry) {
+  const normalized = sanitizeWatchlistDispatchProcessLogEntry(rawEntry);
+  if (!normalized) return null;
+  await ensureWatchlistDispatchProcessLogReady();
+  watchlistDispatchProcessLogEntries.push(normalized);
+  if (watchlistDispatchProcessLogEntries.length > WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS) {
+    watchlistDispatchProcessLogEntries = watchlistDispatchProcessLogEntries.slice(
+      watchlistDispatchProcessLogEntries.length - WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS
+    );
+  }
+  await persistWatchlistDispatchProcessLogs();
+  return normalized;
+}
+
+async function getWatchlistDispatchProcessLogs(limit = 120) {
+  await ensureWatchlistDispatchProcessLogReady();
+  const safeLimit = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS)
+    : 120;
+  const logs = watchlistDispatchProcessLogEntries.slice(
+    Math.max(0, watchlistDispatchProcessLogEntries.length - safeLimit)
+  );
+  try {
+    return structuredClone(logs).reverse();
+  } catch (error) {
+    return JSON.parse(JSON.stringify(logs)).reverse();
+  }
+}
+
+async function clearWatchlistDispatchProcessLogs() {
+  await ensureWatchlistDispatchProcessLogReady();
+  watchlistDispatchProcessLogEntries = [];
+  await persistWatchlistDispatchProcessLogs();
+  return true;
+}
+
+function emitWatchlistDispatchProcessLog(level, code, message, details = null) {
+  const normalizedLevel = normalizeWatchlistDispatchProcessLogLevel(level);
+  const safeCode = truncateDispatchLogText(typeof code === 'string' ? code : 'event', 80) || 'event';
+  const safeMessage = truncateDispatchLogText(typeof message === 'string' ? message : 'dispatch_event', 260) || 'dispatch_event';
+  const safeDetails = details && typeof details === 'object'
+    ? details
+    : null;
+  const logger = normalizedLevel === 'error'
+    ? console.error
+    : normalizedLevel === 'warn'
+      ? console.warn
+      : console.log;
+  if (safeDetails) {
+    logger(`[db-dispatch] [${safeCode}] ${safeMessage}`, safeDetails);
+  } else {
+    logger(`[db-dispatch] [${safeCode}] ${safeMessage}`);
+  }
+
+  const trace = typeof safeDetails?.trace === 'string' ? safeDetails.trace.trim() : '';
+  const traceParts = (() => {
+    if (!trace || trace === 'no-run/no-response') return { runId: '', responseId: '' };
+    const slashIndex = trace.indexOf('/');
+    if (slashIndex <= 0 || slashIndex >= (trace.length - 1)) return { runId: '', responseId: '' };
+    return {
+      runId: trace.slice(0, slashIndex).trim(),
+      responseId: trace.slice(slashIndex + 1).trim()
+    };
+  })();
+  const runId = typeof safeDetails?.runId === 'string' && safeDetails.runId.trim()
+    ? safeDetails.runId.trim()
+    : traceParts.runId;
+  const responseId = typeof safeDetails?.responseId === 'string' && safeDetails.responseId.trim()
+    ? safeDetails.responseId.trim()
+    : traceParts.responseId;
+  void appendWatchlistDispatchProcessLog({
+    ts: Date.now(),
+    level: normalizedLevel,
+    code: safeCode,
+    message: safeMessage,
+    trace,
+    runId,
+    responseId,
+    details: safeDetails
+  }).catch((error) => {
+    console.warn('[db-dispatch] [log-persist-failed]', {
+      code: safeCode,
+      error: error?.message || String(error)
+    });
+  });
+}
+
 async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-response') {
   if (!WATCHLIST_DISPATCH.enabled) {
+    emitWatchlistDispatchProcessLog('warn', 'queue_skipped_disabled', 'Queue skipped because dispatch is disabled', {
+      trace: copyTrace
+    });
     return { skipped: true, reason: 'dispatch_disabled' };
   }
 
@@ -6779,6 +8368,15 @@ async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-respons
       responseId: typeof response?.responseId === 'string' ? response.responseId : '',
       analysisType: typeof response?.analysisType === 'string' ? response.analysisType : '',
       source: typeof response?.source === 'string' ? response.source : ''
+    });
+    emitWatchlistDispatchProcessLog('warn', 'queue_invalid_payload', 'Queue skipped due to invalid payload', {
+      trace: copyTrace,
+      runId: typeof response?.runId === 'string' ? response.runId : '',
+      responseId: typeof response?.responseId === 'string' ? response.responseId : '',
+      analysisType: typeof response?.analysisType === 'string' ? response.analysisType : '',
+      source: typeof response?.source === 'string' ? response.source : '',
+      textLength: text.length,
+      textFingerprint: textFingerprint(text)
     });
     return { skipped: true, reason: 'invalid_payload' };
   }
@@ -6797,6 +8395,13 @@ async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-respons
   const saved = await writeWatchlistOutbox(next);
   console.log('[copy-flow] [dispatch:queued]', {
     trace: copyTrace,
+    queueSize: saved.length,
+    payload: summarizeWatchlistDispatchPayload(payload)
+  });
+  emitWatchlistDispatchProcessLog('info', 'queue_queued', 'Payload queued for database dispatch', {
+    trace: copyTrace,
+    runId: payload.runId || '',
+    responseId: payload.responseId || '',
     queueSize: saved.length,
     payload: summarizeWatchlistDispatchPayload(payload)
   });
@@ -7059,12 +8664,15 @@ async function resolveWatchlistDispatchConfiguration(forceReload = false) {
 }
 
 async function getWatchlistDispatchStatus(forceReload = false) {
-  const [config, outbox, history] = await Promise.all([
+  const [config, outbox, history, recentProcessLogs] = await Promise.all([
     resolveWatchlistDispatchConfiguration(forceReload),
     readWatchlistOutbox().catch(() => []),
-    readWatchlistDispatchHistory().catch(() => [])
+    readWatchlistDispatchHistory().catch(() => []),
+    getWatchlistDispatchProcessLogs(8).catch(() => [])
   ]);
-  const lastFlush = history.length > 0 ? history[history.length - 1] : null;
+  const lastFlush = Array.isArray(history)
+    ? [...history].reverse().find((entry) => entry?.kind === 'flush') || null
+    : null;
   const outboxItems = Array.isArray(outbox) ? outbox : [];
   const retryCandidates = outboxItems
     .map((item) => (Number.isInteger(item?.nextAttemptAt) ? item.nextAttemptAt : 0))
@@ -7101,6 +8709,7 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     flushInProgress: !!watchlistDispatchFlushInProgress,
     historySize: Array.isArray(history) ? history.length : 0,
     lastFlush,
+    recentProcessLogs: Array.isArray(recentProcessLogs) ? recentProcessLogs : [],
     nextRetryAt,
     latestOutboxError,
     latestOutboxErrorTrace
@@ -7305,16 +8914,29 @@ function buildWatchlistCanonicalString({ method, path, timestamp, nonce, bodyHas
 
 async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') {
   if (!WATCHLIST_DISPATCH.enabled) {
+    emitWatchlistDispatchProcessLog('warn', 'send_skipped_disabled', 'Send skipped because dispatch is disabled', {
+      trace: copyTrace
+    });
     return { skipped: true, reason: 'dispatch_disabled' };
   }
 
   const dispatchConfig = await resolveWatchlistDispatchConfiguration();
   if (!dispatchConfig.ok) {
+    emitWatchlistDispatchProcessLog('warn', 'send_skipped_config', 'Send skipped due to missing dispatch configuration', {
+      trace: copyTrace,
+      reason: dispatchConfig.reason || 'missing_dispatch_credentials',
+      intakeUrlSource: dispatchConfig.intakeUrlSource || 'missing',
+      keyIdSource: dispatchConfig.keyIdSource || 'missing',
+      secretSource: dispatchConfig.secretSource || 'missing'
+    });
     return { skipped: true, reason: dispatchConfig.reason || 'missing_dispatch_credentials' };
   }
 
   const urlCandidates = buildWatchlistDispatchUrlCandidates(dispatchConfig.intakeUrl);
   if (urlCandidates.length === 0) {
+    emitWatchlistDispatchProcessLog('error', 'send_missing_url', 'Send failed because intake URL candidate list is empty', {
+      trace: copyTrace
+    });
     return { success: false, reason: 'missing_intake_url', error: 'missing_intake_url' };
   }
   const body = JSON.stringify(payload);
@@ -7342,6 +8964,15 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
       },
       payload: summarizeWatchlistDispatchPayload(payload)
     });
+    emitWatchlistDispatchProcessLog('info', 'send_start', 'Starting HTTP dispatch to intake endpoint', {
+      trace: copyTrace,
+      intakeUrl: url,
+      usingFallbackUrl,
+      urlCandidateIndex: candidateIndex + 1,
+      urlCandidatesCount: urlCandidates.length,
+      maxAttempts,
+      timeoutMs: WATCHLIST_DISPATCH.timeoutMs
+    });
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const controller = new AbortController();
@@ -7360,6 +8991,13 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
         const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
 
         console.log(`[copy-flow] [dispatch:attempt] trace=${copyTrace} attempt=${attempt}/${maxAttempts} intakeUrl=${url}`);
+        emitWatchlistDispatchProcessLog('info', 'send_attempt_start', 'Dispatch HTTP attempt started', {
+          trace: copyTrace,
+          intakeUrl: url,
+          attempt,
+          maxAttempts,
+          usingFallbackUrl
+        });
         const response = await fetch(url, {
           method: 'POST',
           headers: {
@@ -7409,6 +9047,15 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
             }
             : null
         });
+        emitWatchlistDispatchProcessLog('info', 'send_attempt_ok', 'Dispatch HTTP attempt succeeded', {
+          trace: copyTrace,
+          intakeUrl: url,
+          attempt,
+          maxAttempts,
+          status: response.status,
+          requestId,
+          eventId: responseJson?.event_id || null
+        });
         return { success: true, status: response.status, eventId: responseJson?.event_id || null };
       } catch (error) {
         clearTimeout(timeoutId);
@@ -7437,6 +9084,13 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
               reason: dispatchReason,
               error: truncateDispatchLogText(errorMessage, 500)
             });
+            emitWatchlistDispatchProcessLog('warn', 'send_switch_candidate', 'Switching dispatch to next URL candidate', {
+              trace: copyTrace,
+              fromIntakeUrl: url,
+              toCandidateIndex: candidateIndex + 2,
+              reason: dispatchReason,
+              error: truncateDispatchLogText(errorMessage, 400)
+            });
             break;
           }
           console.warn('[copy-flow] [dispatch:retry]', {
@@ -7448,6 +9102,17 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
             reason: dispatchReason,
             status: dispatchMeta.status || null,
             requestId: dispatchMeta.requestId || ''
+          });
+          emitWatchlistDispatchProcessLog('warn', 'send_attempt_retry', 'Dispatch HTTP attempt failed; retry scheduled', {
+            trace: copyTrace,
+            intakeUrl: url,
+            attempt,
+            maxAttempts,
+            retryDelayMs,
+            reason: dispatchReason,
+            status: dispatchMeta.status || null,
+            requestId: dispatchMeta.requestId || '',
+            error: truncateDispatchLogText(errorMessage, 400)
           });
           await sleep(retryDelayMs);
           continue;
@@ -7474,10 +9139,28 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
           requestId: dispatchMeta.requestId || '',
           responseSnippet: dispatchMeta.responseSnippet || ''
         });
+        emitWatchlistDispatchProcessLog('error', 'send_attempt_failed', 'Dispatch HTTP attempt failed after retries', {
+          trace: copyTrace,
+          intakeUrl: url,
+          usingFallbackUrl,
+          attempts: maxAttempts,
+          hasAnotherUrlCandidate,
+          reason: dispatchReason,
+          status: dispatchMeta.status || null,
+          requestId: dispatchMeta.requestId || '',
+          error: truncateDispatchLogText(errorMessage, 500)
+        });
       }
     }
   }
 
+  emitWatchlistDispatchProcessLog('error', 'send_failed_all_candidates', 'Dispatch failed for all intake URL candidates', {
+    trace: copyTrace,
+    reason: lastFailure?.reason || 'dispatch_error',
+    status: lastFailure?.status ?? null,
+    requestId: lastFailure?.requestId || '',
+    error: truncateDispatchLogText(lastFailure?.error || 'unknown', 500)
+  });
   return lastFailure;
 }
 
@@ -7504,6 +9187,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       deferred: 0,
       remaining: 0
     }).catch(() => {});
+    emitWatchlistDispatchProcessLog('warn', 'flush_skipped_disabled', 'Flush skipped because dispatch is disabled', {
+      reason: normalizedReason
+    });
     return { skipped: true, reason: 'dispatch_disabled' };
   }
   if (watchlistDispatchFlushInProgress) {
@@ -7523,6 +9209,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       deferred: 0,
       remaining: 0
     }).catch(() => {});
+    emitWatchlistDispatchProcessLog('info', 'flush_skipped_in_progress', 'Flush skipped because another flush is in progress', {
+      reason: normalizedReason
+    });
     return {
       skipped: true,
       reason: 'flush_in_progress',
@@ -7534,8 +9223,15 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   try {
     const queued = await readWatchlistOutbox();
     console.log(`[copy-flow] [dispatch:flush-start] reason=${normalizedReason} queued=${queued.length}`);
+    emitWatchlistDispatchProcessLog('info', 'flush_start', 'Started flush of dispatch outbox', {
+      reason: normalizedReason,
+      queued: queued.length
+    });
     if (queued.length === 0) {
       console.log(`[copy-flow] [dispatch:flush-empty] reason=${normalizedReason}`);
+      emitWatchlistDispatchProcessLog('info', 'flush_empty', 'Flush finished: queue is empty', {
+        reason: normalizedReason
+      });
       appendWatchlistDispatchHistory({
         ts,
         kind: 'flush',
@@ -7564,6 +9260,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
           firstFailure = 'invalid_queue_item';
         }
         console.warn('[copy-flow] [dispatch:item-invalid] reason=invalid_queue_item');
+        emitWatchlistDispatchProcessLog('warn', 'flush_item_invalid', 'Skipping invalid dispatch queue item', {
+          reason: normalizedReason
+        });
         continue;
       }
 
@@ -7573,6 +9272,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         const waitMs = Math.max(0, nextAttemptAt - now);
         const trace = buildCopyTrace(item.payload.runId || '', item.payload.responseId || '');
         console.log(`[copy-flow] [dispatch:item-deferred] trace=${trace} waitMs=${waitMs}`);
+        emitWatchlistDispatchProcessLog('info', 'flush_item_deferred', 'Dispatch item deferred until next attempt window', {
+          reason: normalizedReason,
+          trace,
+          waitMs
+        });
         remaining.push(item);
         continue;
       }
@@ -7598,6 +9302,13 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       console.warn(
         `[copy-flow] [dispatch:item-failed] trace=${trace} attemptCount=${attemptCount} retryInMs=${retryDelayMs} error=${truncateDispatchLogText(dispatchError, 400)}`
       );
+      emitWatchlistDispatchProcessLog('warn', 'flush_item_failed', 'Dispatch item failed and was re-queued', {
+        reason: normalizedReason,
+        trace,
+        attemptCount,
+        retryDelayMs,
+        error: truncateDispatchLogText(dispatchError, 400)
+      });
       remaining.push({
         ...item,
         attemptCount,
@@ -7610,6 +9321,15 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     console.log(
       `[copy-flow] [dispatch:flush] reason=${normalizedReason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length}`
     );
+    emitWatchlistDispatchProcessLog('info', 'flush_done', 'Flush finished', {
+      reason: normalizedReason,
+      queued: queued.length,
+      sent,
+      failed,
+      deferred,
+      remaining: persisted.length,
+      firstFailure: firstFailure || ''
+    });
     appendWatchlistDispatchHistory({
       ts,
       kind: 'flush',
@@ -7630,6 +9350,26 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       remaining: persisted.length,
       firstFailure: firstFailure || ''
     };
+  } catch (error) {
+    emitWatchlistDispatchProcessLog('error', 'flush_exception', 'Flush crashed with unexpected error', {
+      reason: normalizedReason,
+      error: error?.message || String(error)
+    });
+    appendWatchlistDispatchHistory({
+      ts,
+      kind: 'flush',
+      reason: normalizedReason,
+      success: false,
+      skipped: false,
+      skipReason: '',
+      error: error?.message || String(error),
+      queued: 0,
+      sent: 0,
+      failed: 0,
+      deferred: 0,
+      remaining: 0
+    }).catch(() => {});
+    throw error;
   } finally {
     watchlistDispatchFlushInProgress = false;
     if (watchlistDispatchFlushPending) {
@@ -7640,10 +9380,17 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       watchlistDispatchFlushPending = false;
       watchlistDispatchFlushPendingReason = '';
       console.log(`[copy-flow] [dispatch:flush-follow-up] reason=${pendingReason}`);
+      emitWatchlistDispatchProcessLog('info', 'flush_follow_up_scheduled', 'Follow-up flush scheduled', {
+        reason: pendingReason
+      });
       Promise.resolve()
         .then(() => flushWatchlistDispatchOutbox(pendingReason))
         .catch((error) => {
           console.warn('[copy-flow] [dispatch:flush-follow-up-failed]', {
+            reason: pendingReason,
+            error: error?.message || String(error)
+          });
+          emitWatchlistDispatchProcessLog('error', 'flush_follow_up_failed', 'Follow-up flush failed', {
             reason: pendingReason,
             error: error?.message || String(error)
           });
@@ -8438,47 +10185,87 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       failed: 0,
       deferred: 0,
       remaining: 0,
-      firstFailure: ''
+      firstFailure: '',
+      processLog: []
+    };
+    const dispatchProcessLog = [];
+    const appendDispatchProcessLog = (stage, status, details = '') => {
+      const normalizedStage = typeof stage === 'string' ? stage.trim() : '';
+      const normalizedStatus = typeof status === 'string' ? status.trim() : '';
+      const normalizedDetails = truncateDispatchLogText(typeof details === 'string' ? details : String(details ?? ''), 180);
+      const entry = [normalizedStage || 'stage', normalizedStatus || 'info', normalizedDetails]
+        .filter(Boolean)
+        .join('|');
+      if (!entry) return;
+      dispatchProcessLog.push(entry);
+      dispatchOutcome.processLog = dispatchProcessLog.slice(-16);
+      console.log(`[copy-flow] [dispatch:flow] trace=${copyTrace} step=${entry}`);
     };
 
-    const dispatchQueueResult = await enqueueWatchlistDispatch(newResponse, copyTrace);
-    if (dispatchQueueResult?.queued) {
-      dispatchOutcome.queued = true;
-      dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
-      console.log(
-        `[copy-flow] [dispatch:queued-ok] trace=${copyTrace} responseId=${dispatchQueueResult.responseId} queueSize=${dispatchQueueResult.queueSize}`
-      );
-      const flushResult = await flushWatchlistDispatchOutbox('save_response');
-      if (flushResult?.skipped) {
-        const flushSkipReason = typeof flushResult?.reason === 'string' ? flushResult.reason : 'unknown';
-        const flushLogMethod = flushSkipReason === 'flush_in_progress' ? 'log' : 'warn';
-        dispatchOutcome.flushSkipped = true;
-        dispatchOutcome.flushSkipReason = flushSkipReason;
-        dispatchOutcome.flushFollowUpScheduled = flushResult?.followUpScheduled === true;
-        console[flushLogMethod](
-          `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${flushSkipReason} followUpScheduled=${dispatchOutcome.flushFollowUpScheduled}`
-        );
-      } else {
-        dispatchOutcome.sent = Number.isInteger(flushResult?.sent) ? flushResult.sent : 0;
-        dispatchOutcome.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
-        dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
-        dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
-        dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
+    try {
+      appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
+      const dispatchQueueResult = await enqueueWatchlistDispatch(newResponse, copyTrace);
+      if (dispatchQueueResult?.queued) {
+        dispatchOutcome.queued = true;
+        dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
+        appendDispatchProcessLog('queue_result', 'queued', `queueSize=${dispatchOutcome.queueSize}`);
         console.log(
-          `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
+          `[copy-flow] [dispatch:queued-ok] trace=${copyTrace} responseId=${dispatchQueueResult.responseId} queueSize=${dispatchQueueResult.queueSize}`
         );
+        appendDispatchProcessLog('flush_attempt', 'start', 'reason=save_response');
+        const flushResult = await flushWatchlistDispatchOutbox('save_response');
+        if (flushResult?.skipped) {
+          const flushSkipReason = typeof flushResult?.reason === 'string' ? flushResult.reason : 'unknown';
+          const flushLogMethod = flushSkipReason === 'flush_in_progress' ? 'log' : 'warn';
+          dispatchOutcome.flushSkipped = true;
+          dispatchOutcome.flushSkipReason = flushSkipReason;
+          dispatchOutcome.flushFollowUpScheduled = flushResult?.followUpScheduled === true;
+          appendDispatchProcessLog(
+            'flush_result',
+            'skipped',
+            `reason=${flushSkipReason}, followUp=${dispatchOutcome.flushFollowUpScheduled}`
+          );
+          console[flushLogMethod](
+            `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${flushSkipReason} followUpScheduled=${dispatchOutcome.flushFollowUpScheduled}`
+          );
+        } else {
+          dispatchOutcome.sent = Number.isInteger(flushResult?.sent) ? flushResult.sent : 0;
+          dispatchOutcome.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
+          dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
+          dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
+          dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
+          appendDispatchProcessLog(
+            'flush_result',
+            dispatchOutcome.failed > 0 ? 'partial' : 'ok',
+            `sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}`
+          );
+          console.log(
+            `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
+          );
+        }
+        await logWatchlistDispatchStatusSnapshot('save_response:post_flush', false, { trace: copyTrace });
+      } else if (dispatchQueueResult?.skipped) {
+        dispatchOutcome.queueSkipped = true;
+        dispatchOutcome.queueSkipReason = typeof dispatchQueueResult?.reason === 'string' ? dispatchQueueResult.reason : 'unknown';
+        appendDispatchProcessLog('queue_result', 'skipped', `reason=${dispatchOutcome.queueSkipReason}`);
+        console.log(
+          `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${dispatchQueueResult.reason || 'unknown'}`
+        );
+        await logWatchlistDispatchStatusSnapshot('save_response:queue_skipped', false, {
+          trace: copyTrace,
+          skipReason: dispatchQueueResult.reason || 'unknown'
+        });
+      } else {
+        appendDispatchProcessLog('queue_result', 'unknown', 'enqueue_returned_unexpected_payload');
       }
-      await logWatchlistDispatchStatusSnapshot('save_response:post_flush', false, { trace: copyTrace });
-    } else if (dispatchQueueResult?.skipped) {
-      dispatchOutcome.queueSkipped = true;
-      dispatchOutcome.queueSkipReason = typeof dispatchQueueResult?.reason === 'string' ? dispatchQueueResult.reason : 'unknown';
-      console.log(
-        `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${dispatchQueueResult.reason || 'unknown'}`
+      appendDispatchProcessLog(
+        'dispatch_final',
+        dispatchOutcome.failed > 0 ? 'warn' : 'ok',
+        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}`
       );
-      await logWatchlistDispatchStatusSnapshot('save_response:queue_skipped', false, {
-        trace: copyTrace,
-        skipReason: dispatchQueueResult.reason || 'unknown'
-      });
+    } catch (dispatchError) {
+      appendDispatchProcessLog('dispatch_exception', 'error', dispatchError?.message || String(dispatchError));
+      throw dispatchError;
     }
 
     console.log(`\n${'*'.repeat(80)}`);
@@ -8492,7 +10279,8 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       response: newResponse,
       copyTrace,
       verifiedCount: verifiedResponses.length,
-      dispatch: dispatchOutcome
+      dispatch: dispatchOutcome,
+      dispatchProcessLog: dispatchProcessLog.slice(-16)
     };
   } catch (error) {
     console.error(`\n${'!'.repeat(80)}`);
@@ -8533,7 +10321,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   : null,
                 dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
                   ? saveResult.dispatch
-                  : null
+                  : null,
+                dispatchProcessLog: Array.isArray(saveResult.dispatchProcessLog)
+                  ? saveResult.dispatchProcessLog
+                      .filter((entry) => typeof entry === 'string' && entry.trim())
+                      .slice(-16)
+                  : []
               }
               : null
           });
@@ -8568,6 +10361,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: true, started: true });
     })().catch((error) => {
       sendResponse({ success: false, error: error?.message || 'run_analysis_start_failed' });
+    });
+    return true;
+  } else if (message.type === 'COUNT_COMPANY_CONVERSATION_MESSAGES') {
+    (async () => {
+      const targetTabId = Number.isInteger(message?.tabId)
+        ? message.tabId
+        : (Number.isInteger(sender?.tab?.id) ? sender.tab.id : null);
+      const result = await countCompanyConversationMessages(targetTabId, {
+        maxWaitMs: Number.isInteger(message?.maxWaitMs) ? message.maxWaitMs : null
+      });
+      sendResponse(result);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'company_conversation_count_failed'
+      });
     });
     return true;
   } else if (message.type === 'YT_FETCH_TRANSCRIPT_FOR_TAB') {
@@ -8821,6 +10630,37 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, error: error?.message || 'status_failed' });
       });
     return true;
+  } else if (message.type === 'GET_WATCHLIST_DISPATCH_PROCESS_LOGS') {
+    const limit = Number.isInteger(message?.limit) ? message.limit : 120;
+    getWatchlistDispatchProcessLogs(limit)
+      .then((entries) => {
+        sendResponse({
+          success: true,
+          entries: Array.isArray(entries) ? entries : [],
+          total: Array.isArray(entries) ? entries.length : 0
+        });
+      })
+      .catch((error) => {
+        console.warn('[db-dispatch] [logs-fetch-failed]', error);
+        sendResponse({
+          success: false,
+          entries: [],
+          total: 0,
+          error: error?.message || String(error)
+        });
+      });
+    return true;
+  } else if (message.type === 'CLEAR_WATCHLIST_DISPATCH_PROCESS_LOGS') {
+    clearWatchlistDispatchProcessLogs()
+      .then(() => sendResponse({ success: true }))
+      .catch((error) => {
+        console.warn('[db-dispatch] [logs-clear-failed]', error);
+        sendResponse({
+          success: false,
+          error: error?.message || String(error)
+        });
+      });
+    return true;
   } else if (message.type === 'GET_AUTO_RESTORE_WINDOWS_STATUS') {
     getAutoRestoreWindowsStatus({ forceSync: Boolean(message?.forceSync) })
       .then((status) => sendResponse(status))
@@ -8993,7 +10833,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             reload_total: 0,
             prompt_blocks: 0,
             response_blocks: 0,
-            detected_prompts: 0
+            detected_prompts: 0,
+            recognized_saved_stage: 0,
+            recognized_chat_detection: 0,
+            recognized_chat_counter_fallback: 0,
+            recognized_progress_last_resort: 0,
+            recognized_unresolved: 0
           },
           resetSummary: null,
           results: [],
@@ -9174,7 +11019,10 @@ async function resumeFromStage(startIndex, options = {}) {
     const resumed = await resumeFromStageOnTab(activeTab.id, targetWindowId, startIndex, {
       processTitle,
       reloadBeforeResume,
-      detach
+      detach,
+      forceRepeatLastPrompt: options?.forceRepeatLastPrompt === true,
+      minStartIndex: Number.isInteger(options?.minStartIndex) ? options.minStartIndex : undefined,
+      stagePlanMaxWaitMs: Number.isInteger(options?.stagePlanMaxWaitMs) ? options.stagePlanMaxWaitMs : undefined
     });
 
     if (!resumed?.success) {
@@ -9192,15 +11040,26 @@ async function resumeFromStage(startIndex, options = {}) {
           notifyAlert('Blad wznowienia procesu.');
         }
       }
-      return { success: false, error: errorCode };
+      return {
+        success: false,
+        error: errorCode,
+        requestedStartIndex: startIndex,
+        resolvedStartIndex: Number.isInteger(resumed?.resolvedStartIndex) ? resumed.resolvedStartIndex : null,
+        stagePlan: resumed?.stagePlan && typeof resumed.stagePlan === 'object' ? resumed.stagePlan : null
+      };
     }
 
+    const resolvedStartIndex = Number.isInteger(resumed?.resolvedStartIndex)
+      ? resumed.resolvedStartIndex
+      : startIndex;
     return {
       success: true,
       processId: resumed.processId,
       detached: resumed.detached === true,
-      startIndex,
-      startPromptNumber: startIndex + 1
+      requestedStartIndex: startIndex,
+      startIndex: resolvedStartIndex,
+      startPromptNumber: resolvedStartIndex + 1,
+      stagePlan: resumed?.stagePlan && typeof resumed.stagePlan === 'object' ? resumed.stagePlan : null
     };
   } catch (error) {
     console.error('Blad w resumeFromStage:', error);
@@ -10290,6 +12149,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             copyTrace: persistenceSummary.copyTrace,
             saveError: persistenceSummary.saveError,
             dispatch: persistenceSummary.dispatch || null,
+            dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
             updatedAt: Date.now()
           }
         };
@@ -10297,6 +12157,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           completedResponsePatch.completedResponseSaved = persistenceSummary.saveOk;
           completedResponsePatch.completedResponseDispatch = persistenceSummary.dispatch || null;
           completedResponsePatch.completedResponseDispatchSummary = persistenceSummary.dispatchSummary;
+          completedResponsePatch.completedResponseDispatchProcessLog = persistenceSummary.dispatchProcessLog || [];
           completedResponsePatch.completedResponseSaveTrace = persistenceSummary.copyTrace || '';
         }
         await mirrorCopyFlowLogToTab(
@@ -10351,6 +12212,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             copyTrace: '',
             saveError: persistenceSummary.saveError,
             dispatch: null,
+            dispatchProcessLog: [],
             updatedAt: Date.now()
           }
         };
@@ -15318,24 +17180,6 @@ async function injectToChat(
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
               console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Odpowiedz za krotka');
-              const trimmedResponse = compactText(responseText);
-              const assistantAdvanced = hasAssistantAdvancedSince(promptSnapshotBeforeSend, 10);
-              const allowAutoRecoveryForInvalid = hasHardGenerationErrorMessage() || (!assistantAdvanced && trimmedResponse.length === 0);
-              
-              if (allowAutoRecoveryForInvalid) {
-                const autoRecoveryHandoff = maybeTriggerAutoRecovery(
-                  'invalid_response',
-                  i,
-                  promptChain,
-                  absoluteCurrentPrompt,
-                  absoluteStageIndex,
-                  counter
-                );
-                if (autoRecoveryHandoff) {
-                  return autoRecoveryHandoff;
-                }
-              }
-
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
               
               if (action === 'skip') {

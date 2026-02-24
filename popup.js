@@ -65,6 +65,7 @@ const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn')
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
+const countCompanyMessagesBtn = document.getElementById('countCompanyMessagesBtn');
 const resumeAllExtendedBtn = document.getElementById('resumeAllExtendedBtn');
 const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
@@ -297,6 +298,20 @@ function formatLastDispatchFlush(lastFlush) {
   return `sent=${lastFlush.sent || 0}, failed=${lastFlush.failed || 0}, remaining=${lastFlush.remaining || 0} @ ${when}`;
 }
 
+function formatLatestDispatchProcessLog(logs) {
+  const latest = Array.isArray(logs) && logs.length > 0 ? logs[0] : null;
+  if (!latest || typeof latest !== 'object') return '';
+  const ts = Number.isInteger(latest.ts) ? latest.ts : null;
+  const when = ts ? new Date(ts).toLocaleString() : 'n/a';
+  const code = typeof latest.code === 'string' && latest.code.trim() ? latest.code.trim() : 'event';
+  const level = typeof latest.level === 'string' && latest.level.trim() ? latest.level.trim() : 'info';
+  const message = typeof latest.message === 'string' && latest.message.trim()
+    ? latest.message.trim()
+    : 'dispatch_event';
+  const compactMessage = message.length > 120 ? `${message.slice(0, 117)}...` : message;
+  return ` Ostatni etap DB: ${code}/${level} - ${compactMessage} @ ${when}.`;
+}
+
 function formatDispatchStatus(status) {
   if (!status || status.success === false) {
     return 'Intake status: blad odczytu.';
@@ -313,7 +328,8 @@ function formatDispatchStatus(status) {
   const errorText = status.latestOutboxError
     ? ` Ostatni blad: ${status.latestOutboxError}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
     : '';
-  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}`;
+  const latestProcessLogText = formatLatestDispatchProcessLog(status.recentProcessLogs);
+  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}${latestProcessLogText}`;
 
   if (status.configured) {
     return `Intake status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}. ${base}`;
@@ -359,6 +375,176 @@ async function refreshDispatchStatus(forceReload = false) {
     setDispatchStatus(formatDispatchStatus(response), response?.success === false);
   } catch (error) {
     setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
+  }
+}
+
+function formatCompanyConversationCountError(response) {
+  const errorCode = typeof response?.error === 'string' ? response.error.trim() : '';
+  if (!errorCode) return 'unknown_error';
+  if (errorCode === 'invalid_tab_id' || errorCode === 'tab_not_found') return 'brak aktywnej karty.';
+  if (errorCode === 'tab_not_chatgpt') return 'aktywna karta nie jest konwersacja ChatGPT.';
+  if (errorCode === 'prompts_not_loaded') return 'prompty company nie sa zaladowane.';
+  if (errorCode === 'conversation_scan_failed') return 'nie udalo sie odczytac calej konwersacji.';
+  return errorCode;
+}
+
+function formatCompanyConversationCountStatus(response) {
+  if (!response || response.success !== true) {
+    return `Liczenie company: ${formatCompanyConversationCountError(response)}`;
+  }
+
+  const totals = response?.totals && typeof response.totals === 'object' ? response.totals : {};
+  const thresholds = response?.thresholds && typeof response.thresholds === 'object' ? response.thresholds : {};
+  const verification = response?.verification && typeof response.verification === 'object' ? response.verification : {};
+  const stageMappingCheck = response?.stageMappingCheck && typeof response.stageMappingCheck === 'object'
+    ? response.stageMappingCheck
+    : {};
+  const stageMapping = Array.isArray(response?.stageMapping) ? response.stageMapping : [];
+  const promptCoverage = Array.isArray(response?.promptCoverage) ? response.promptCoverage : [];
+  const assignmentLog = Array.isArray(response?.assignmentLog) ? response.assignmentLog : [];
+  const missingPromptNumbers = Array.isArray(response?.missingPromptNumbers) ? response.missingPromptNumbers : [];
+  const duplicatePromptNumbers = Array.isArray(response?.duplicatePromptNumbers) ? response.duplicatePromptNumbers : [];
+  const unmatchedUserSamples = Array.isArray(response?.unmatchedUserSamples) ? response.unmatchedUserSamples : [];
+  const sequenceIssues = Array.isArray(response?.sequenceIssues) ? response.sequenceIssues : [];
+  const runResets = Array.isArray(response?.runResets) ? response.runResets : [];
+
+  const lines = [];
+  lines.push('[Company count]');
+  lines.push(`Konwersacja: user=${totals.totalUserMessages || 0}, assistant=${totals.totalAssistantMessages || 0}, wszystkie=${totals.totalMessages || 0}`);
+  lines.push(`Prompty rozpoznane: ${totals.matchedPromptMessages || 0}/${response.promptCatalogCount || 0} (unique=${totals.recognizedUniquePrompts || 0}, nierozpoznane_user=${totals.unmatchedUserMessages || 0}, runy=${totals.detectedRuns || 0})`);
+  lines.push(`Odpowiedzi: present=${totals.promptRepliesPresent || 0}, missing=${totals.promptRepliesMissing || 0}, quality_ok=${totals.promptRepliesPassingThreshold || 0}, quality_low=${totals.promptRepliesBelowThreshold || 0} (prog: ${thresholds.minAssistantWords || 0} slow, ${thresholds.minAssistantSentences || 0} zdan)`);
+
+  const missingText = missingPromptNumbers.length > 0 ? missingPromptNumbers.join(', ') : 'brak';
+  const duplicateText = duplicatePromptNumbers.length > 0 ? duplicatePromptNumbers.join(', ') : 'brak';
+  lines.push(`Brakujace prompty: ${missingText}`);
+  lines.push(`Duplikaty promptow: ${duplicateText}`);
+
+  lines.push(
+    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
+  );
+  lines.push('');
+
+  const stageCount = Number.isInteger(stageMappingCheck?.stageNameCount) ? stageMappingCheck.stageNameCount : 0;
+  const promptCount = Number.isInteger(stageMappingCheck?.promptCount) ? stageMappingCheck.promptCount : 0;
+  const stageAligned = stageMappingCheck?.alignedByCount === true;
+  const missingStageNames = Array.isArray(stageMappingCheck?.missingStageNames) ? stageMappingCheck.missingStageNames : [];
+  lines.push('[Mapowanie prompt -> etap]');
+  lines.push(`Liczba promptow=${promptCount}, liczba stage names=${stageCount}, align=${stageAligned ? 'TAK' : 'NIE'}`);
+  if (missingStageNames.length > 0) {
+    lines.push(`Brak nazw etapu dla: ${missingStageNames.join(', ')}`);
+  }
+  if (stageMapping.length > 0) {
+    stageMapping.forEach((entry) => {
+      const promptNumber = Number.isInteger(entry?.promptNumber) ? entry.promptNumber : '?';
+      const stageName = typeof entry?.stageName === 'string' && entry.stageName.trim()
+        ? entry.stageName.trim()
+        : '-';
+      lines.push(`P${promptNumber}: ${stageName}`);
+    });
+  } else {
+    lines.push('Brak danych mapowania etapow.');
+  }
+  lines.push('');
+
+  if (promptCoverage.length > 0) {
+    lines.push('[Pokrycie etapow]');
+    promptCoverage.forEach((entry) => {
+      const promptNumber = Number.isInteger(entry?.promptNumber) ? entry.promptNumber : '?';
+      const stageName = typeof entry?.stageName === 'string' && entry.stageName.trim()
+        ? entry.stageName.trim()
+        : '-';
+      const occurrences = Number.isInteger(entry?.occurrences) ? entry.occurrences : 0;
+      const repliesPresent = Number.isInteger(entry?.repliesPresent) ? entry.repliesPresent : 0;
+      const repliesPassingThreshold = Number.isInteger(entry?.repliesPassingThreshold) ? entry.repliesPassingThreshold : 0;
+      lines.push(`P${promptNumber} ${stageName}: occ=${occurrences}, present=${repliesPresent}, quality_ok=${repliesPassingThreshold}`);
+    });
+    lines.push('');
+  }
+
+  if (assignmentLog.length > 0) {
+    lines.push('[Sekwencja user -> prompt]');
+    const limit = 16;
+    assignmentLog.slice(0, limit).forEach((entry) => {
+      const index = Number.isInteger(entry?.userMessageIndex) ? entry.userMessageIndex : '?';
+      const runId = Number.isInteger(entry?.runId) ? entry.runId : null;
+      const assignedPrompt = typeof entry?.assignedPrompt === 'string' ? entry.assignedPrompt : '-';
+      const stageName = typeof entry?.stageName === 'string' ? entry.stageName : '-';
+      const method = typeof entry?.method === 'string' ? entry.method : '-';
+      const score = Number.isFinite(entry?.score) ? entry.score : null;
+      const signals = typeof entry?.signals === 'string' && entry.signals.trim()
+        ? entry.signals.trim()
+        : '';
+      const assistantReply = typeof entry?.assistantReply === 'string' ? entry.assistantReply : 'no';
+      const qualityPass = typeof entry?.qualityPass === 'string' ? entry.qualityPass : 'no';
+      lines.push(
+        `#${index}${runId ? ` [R${runId}]` : ''}: ${assignedPrompt} | ${stageName} | method=${method}${score !== null ? `, score=${score}` : ''}${signals ? `, signals=${signals}` : ''} | reply=${assistantReply}, quality=${qualityPass}`
+      );
+    });
+    if (assignmentLog.length > limit) {
+      lines.push(`... +${assignmentLog.length - limit} kolejnych wpisow`);
+    }
+    lines.push('');
+  }
+
+  if (runResets.length > 0) {
+    lines.push('[Restarty runow]');
+    runResets.slice(0, 6).forEach((item) => {
+      lines.push(
+        `R${item.fromRunId} -> R${item.toRunId}: #${item.fromUserMessageIndex} P${item.fromPromptNumber} -> #${item.toUserMessageIndex} P${item.toPromptNumber}`
+      );
+    });
+    if (runResets.length > 6) {
+      lines.push(`... +${runResets.length - 6} kolejnych restartow`);
+    }
+    lines.push('');
+  }
+
+  if (sequenceIssues.length > 0) {
+    const compactSequenceIssues = sequenceIssues
+      .slice(0, 4)
+      .map((item) => `R${item.runId || '?'}:#${item.userMessageIndex}:P${item.previousPromptNumber}->P${item.currentPromptNumber}`)
+      .join(', ');
+    lines.push(`[Problemy kolejnosci] ${compactSequenceIssues}${sequenceIssues.length > 4 ? ', ...' : ''}`);
+    lines.push('');
+  }
+
+  if (unmatchedUserSamples.length > 0) {
+    const compactUnmatched = unmatchedUserSamples
+      .slice(0, 3)
+      .map((item) => `#${item.userMessageIndex}[${item.reason}]: ${safePreview(item.preview || '', '-')}`)
+      .join(' | ');
+    lines.push(`[Nierozpoznane user] ${compactUnmatched}${unmatchedUserSamples.length > 3 ? ' | ...' : ''}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function executeCountCompanyMessagesFromPopup(button) {
+  if (!button) return;
+
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Licze...';
+  setRunStatus('Licze wszystkie wiadomosci company na aktywnej konwersacji...');
+
+  try {
+    const activeTab = await getActiveTabInCurrentWindow();
+    const response = await sendRuntimeMessage({
+      type: 'COUNT_COMPANY_CONVERSATION_MESSAGES',
+      tabId: Number.isInteger(activeTab?.id) ? activeTab.id : null,
+      origin: 'popup-company-conversation-count'
+    });
+    if (!response || response.success !== true) {
+      setRunStatus(`Liczenie company: ${formatCompanyConversationCountError(response)}`, true);
+      return;
+    }
+
+    setRunStatus(formatCompanyConversationCountStatus(response), false);
+  } catch (error) {
+    setRunStatus(`Liczenie company: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText || 'Policz wszystkie wiadomosci (company)';
   }
 }
 
@@ -452,8 +638,23 @@ function getResumeAllSummary(response) {
   const detectedPrompts = Number.isInteger(summary?.detected_prompts)
     ? summary.detected_prompts
     : rows.filter((row) => Number.isInteger(row?.detectedPromptNumber)).length;
+  const recognizedSavedStage = Number.isInteger(summary?.recognized_saved_stage)
+    ? summary.recognized_saved_stage
+    : rows.filter((row) => row?.recognitionSource === 'saved_stage_snapshot' || row?.resumeDecisionSource === 'saved_stage_snapshot').length;
+  const recognizedChatDetection = Number.isInteger(summary?.recognized_chat_detection)
+    ? summary.recognized_chat_detection
+    : rows.filter((row) => row?.recognitionSource === 'chat_fallback_detection' || row?.resumeDecisionSource === 'chat_fallback_detection').length;
+  const recognizedCounterFallback = Number.isInteger(summary?.recognized_chat_counter_fallback)
+    ? summary.recognized_chat_counter_fallback
+    : rows.filter((row) => row?.recognitionSource === 'chat_counter_fallback' || row?.resumeDecisionSource === 'chat_counter_fallback').length;
+  const recognizedProgressFallback = Number.isInteger(summary?.recognized_progress_last_resort)
+    ? summary.recognized_progress_last_resort
+    : rows.filter((row) => row?.recognitionSource === 'progress_last_resort_fallback' || row?.resumeDecisionSource === 'progress_last_resort_fallback').length;
+  const recognizedUnresolved = Number.isInteger(summary?.recognized_unresolved)
+    ? summary.recognized_unresolved
+    : rows.filter((row) => row?.action === 'detect_failed').length;
 
-  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_non_company: ${skippedNonCompany}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, detected_prompts: ${detectedPrompts}`;
+  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_non_company: ${skippedNonCompany}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
 }
 
 async function executeResumeAllFromPopup(button, options = {}) {
@@ -850,6 +1051,12 @@ if (repeatLastPromptAllBtn) {
     void executeRepeatLastPromptAllFromPopup(repeatLastPromptAllBtn, {
       origin: 'popup-repeat-last-prompt-all',
     });
+  });
+}
+
+if (countCompanyMessagesBtn) {
+  countCompanyMessagesBtn.addEventListener('click', () => {
+    void executeCountCompanyMessagesFromPopup(countCompanyMessagesBtn);
   });
 }
 

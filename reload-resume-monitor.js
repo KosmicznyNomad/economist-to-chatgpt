@@ -105,6 +105,55 @@ function formatPromptInfo(promptNumber, totalPrompts, stageName) {
   return `P${promptNumber}${total}${stage}`;
 }
 
+function toCompactRecognitionText(value, maxLength = 120) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  const compact = text.replace(/\s+/g, ' ');
+  if (compact.length <= maxLength) return compact;
+  return `${compact.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function formatRecognitionStep(step) {
+  const text = typeof step === 'string' ? step.trim() : '';
+  if (!text) return '';
+  const [stage, status, detail] = text.split('|');
+  const parts = [];
+  if (stage && stage.trim()) parts.push(stage.trim());
+  if (status && status.trim()) parts.push(status.trim());
+  if (detail && detail.trim()) parts.push(detail.trim());
+  return toCompactRecognitionText(parts.join(': '), 150);
+}
+
+function formatRecognitionPipeline(row) {
+  const rawSteps = Array.isArray(row?.recognitionSteps) ? row.recognitionSteps : [];
+  const steps = rawSteps
+    .map((step) => formatRecognitionStep(step))
+    .filter((step) => step);
+  if (steps.length > 0) {
+    return steps.slice(-3).join(' -> ');
+  }
+  const summary = toCompactRecognitionText(
+    typeof row?.recognitionSummary === 'string' ? row.recognitionSummary : '',
+    180
+  );
+  return summary || '-';
+}
+
+function formatRecognitionSource(row) {
+  const source = typeof row?.recognitionSource === 'string' && row.recognitionSource.trim()
+    ? row.recognitionSource.trim()
+    : (typeof row?.resumeDecisionSource === 'string' && row.resumeDecisionSource.trim()
+      ? row.resumeDecisionSource.trim()
+      : '');
+  const stage = typeof row?.recognitionStage === 'string' ? row.recognitionStage.trim() : '';
+  const status = typeof row?.recognitionStatus === 'string' ? row.recognitionStatus.trim() : '';
+  const parts = [];
+  if (source) parts.push(source);
+  if (stage) parts.push(`stage=${stage}`);
+  if (status) parts.push(`status=${status}`);
+  return parts.length > 0 ? parts.join(' | ') : '-';
+}
+
 function renderSessionMeta(state) {
   sessionMeta.innerHTML = '';
   if (!state || typeof state !== 'object') {
@@ -166,7 +215,9 @@ function renderSummaryMeta(state) {
     `Strony: requested=${requested}, eligible=${eligible}`,
     `Wznowione: ${resumed}, pending: ${pending}, bledy: ${failed}`,
     `Summary: started=${summary.started || 0}, detect_failed=${summary.detect_failed || 0}, reload_failed=${summary.reload_failed || 0}, final=${summary.final_stage_completed || 0}, start_failed=${summary.start_failed || 0}`,
-    `Liczniki: reload_ok=${summary.reload_ok || 0}/${summary.reload_total || 0}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, detected_prompts=${summary.detected_prompts || 0}`
+    `Liczniki: reload_ok=${summary.reload_ok || 0}/${summary.reload_total || 0}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, detected_prompts=${summary.detected_prompts || 0}`,
+    `Rozpoznanie: saved=${summary.recognized_saved_stage || 0}, chat=${summary.recognized_chat_detection || 0}, counter_fb=${summary.recognized_chat_counter_fallback || 0}, progress_fb=${summary.recognized_progress_last_resort || 0}, unresolved=${summary.recognized_unresolved || 0}`,
+    'Pipeline: saved_stage -> chat_extract -> chat_direct_signature -> chat_recent_history -> chat_resolution -> decision -> fallback_* -> start_dispatch'
   ].join('\n');
 }
 
@@ -231,7 +282,7 @@ function renderRows(state) {
   rowsBody.innerHTML = '';
   const rows = Array.isArray(state?.rows) ? state.rows : [];
   if (rows.length === 0) {
-    rowsBody.appendChild(createPlaceholderRow(9, 'Czekam na dane sesji...'));
+    rowsBody.appendChild(createPlaceholderRow(12, 'Czekam na dane sesji...'));
     return;
   }
 
@@ -253,17 +304,50 @@ function renderRows(state) {
     if (item?.resolvedPromptMismatch) {
       detectedStage = `${detectedStage} [MIN]`;
     }
-    const nextPrompt = Number.isInteger(item?.nextStartIndex)
-      ? `P${item.nextStartIndex + 1}`
+    const startFromPromptNumber = Number.isInteger(item?.restartDispatchedStartPromptNumber)
+      ? item.restartDispatchedStartPromptNumber
+      : (
+        Number.isInteger(item?.restartPlannedStartPromptNumber)
+          ? item.restartPlannedStartPromptNumber
+          : (
+            Number.isInteger(item?.nextStartIndex)
+              ? (item.nextStartIndex + 1)
+              : null
+          )
+      );
+    const startFromMode = Number.isInteger(item?.restartDispatchedStartPromptNumber)
+      ? 'dispatch'
+      : (
+        Number.isInteger(item?.restartPlannedStartPromptNumber)
+          ? 'plan'
+          : ''
+      );
+    const startFrom = Number.isInteger(startFromPromptNumber)
+      ? `P${startFromPromptNumber}${startFromMode ? ` (${startFromMode})` : ''}`
       : '-';
+    const missingReply = item?.restartMissingAssistantReply === true
+      ? 'TAK'
+      : (item?.restartMissingAssistantReply === false ? 'NIE' : '-');
+    const recognitionSource = formatRecognitionSource(item);
+    const recognitionPipeline = formatRecognitionPipeline(item);
     const reloadMethod = typeof item?.reloadMethod === 'string' && item.reloadMethod.trim()
       ? item.reloadMethod.trim()
       : '-';
     const action = actionLabel(item?.action);
     const actionClass = actionStatusClass(item?.action);
     const resumeState = resolveResumeState(item);
-    const reason = typeof item?.reason === 'string' && item.reason.trim()
-      ? item.reason.trim()
+    const reasonBase = typeof item?.restartDecisionReason === 'string' && item.restartDecisionReason.trim()
+      ? item.restartDecisionReason.trim()
+      : (
+        typeof item?.reason === 'string' && item.reason.trim()
+          ? item.reason.trim()
+          : ''
+      );
+    const dispatchStatus = typeof item?.restartDispatchStatus === 'string' && item.restartDispatchStatus.trim()
+      ? item.restartDispatchStatus.trim()
+      : '';
+    const reason = reasonBase
+      ? `${reasonBase}${dispatchStatus ? ` | ${dispatchStatus}` : ''}`
       : '-';
 
     const values = [
@@ -271,7 +355,10 @@ function renderRows(state) {
       title,
       beforeStage,
       detectedStage,
-      nextPrompt,
+      recognitionSource,
+      recognitionPipeline,
+      startFrom,
+      missingReply,
       reloadMethod,
       action,
       resumeState.label,
@@ -281,8 +368,12 @@ function renderRows(state) {
     values.forEach((value, cellIndex) => {
       const cell = document.createElement('td');
       cell.textContent = value;
-      if (cellIndex === 6 && actionClass) cell.className = actionClass;
-      if (cellIndex === 7 && resumeState.className) cell.className = resumeState.className;
+      if (cellIndex === 7) {
+        if (item?.restartMissingAssistantReply === true) cell.className = 'status-warn';
+        if (item?.restartMissingAssistantReply === false) cell.className = 'status-ok';
+      }
+      if (cellIndex === 9 && actionClass) cell.className = actionClass;
+      if (cellIndex === 10 && resumeState.className) cell.className = resumeState.className;
       row.appendChild(cell);
     });
 
