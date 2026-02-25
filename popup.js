@@ -57,6 +57,8 @@ const runStatus = document.getElementById('runStatus');
 const copyYouTubeTranscriptBtn = document.getElementById('copyYouTubeTranscriptBtn');
 const youtubeTranscriptStatus = document.getElementById('youtubeTranscriptStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
+const watchlistCredentialsHint = document.getElementById('watchlistCredentialsHint');
+const watchlistCredentialsForm = document.getElementById('watchlistCredentialsForm');
 const watchlistIntakeUrlInput = document.getElementById('watchlistIntakeUrlInput');
 const watchlistKeyIdInput = document.getElementById('watchlistKeyIdInput');
 const watchlistSecretInput = document.getElementById('watchlistSecretInput');
@@ -71,6 +73,8 @@ const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
+let watchlistDispatchStatusSnapshot = null;
+let dispatchButtonsBusy = false;
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -127,6 +131,10 @@ function setYouTubeTranscriptStatus(text, isError = false) {
 
 function setDispatchStatus(text, isError = false) {
   setStatusElement(watchlistDispatchStatus, text, isError);
+}
+
+function setWatchlistCredentialsHint(text, isError = false) {
+  setStatusElement(watchlistCredentialsHint, text, isError);
 }
 
 function setRestoreProcessWindowsStatus(text, isError = false) {
@@ -288,12 +296,97 @@ function safePreview(value, fallback = 'n/a') {
   return text.length > 48 ? `${text.slice(0, 45)}...` : text;
 }
 
+const DISPATCH_REASON_LABELS = {
+  dispatch_disabled: 'dispatch wylaczony',
+  invalid_payload: 'niepoprawny payload',
+  missing_intake_url: 'brak Intake URL',
+  missing_key_id: 'brak Key ID',
+  missing_dispatch_credentials: 'brak sekretu HMAC',
+  empty_token: 'pusty sekret',
+  storage_unavailable: 'storage niedostepny',
+  runtime_unavailable: 'most runtime niedostepny',
+  runtime_timeout: 'timeout mostu runtime',
+  flush_in_progress: 'flush juz trwa',
+  save_response: 'flush po zapisie odpowiedzi',
+  timeout: 'timeout HTTP',
+  dispatch_error: 'blad transportu dispatch',
+  dispatch_failed: 'dispatch nieudany',
+  queue_skipped: 'kolejka pominieta',
+  flush_skipped: 'flush pominiety'
+};
+
+const DISPATCH_PROCESS_CODE_LABELS = {
+  queue_skipped_disabled: 'kolejka pominieta (dispatch off)',
+  queue_invalid_payload: 'kolejka pominieta (payload)',
+  queue_queued: 'payload dodany do kolejki',
+  send_skipped_disabled: 'wysylka pominieta (dispatch off)',
+  send_skipped_config: 'wysylka pominieta (konfiguracja)',
+  send_missing_url: 'brak URL intake',
+  send_start: 'start wysylki HTTP',
+  send_attempt_start: 'proba wysylki',
+  send_attempt_ok: 'proba OK',
+  send_switch_candidate: 'przelaczenie URL',
+  send_attempt_retry: 'retry wysylki',
+  send_attempt_failed: 'proba nieudana',
+  send_failed_all_candidates: 'wszystkie URL nieudane',
+  flush_skipped_disabled: 'flush pominiety (dispatch off)',
+  flush_skipped_in_progress: 'flush pominiety (w toku)',
+  flush_start: 'start flush',
+  flush_empty: 'flush pustej kolejki',
+  flush_item_invalid: 'pozycja kolejki niepoprawna',
+  flush_item_deferred: 'pozycja odlozona',
+  flush_item_failed: 'pozycja nieudana (requeue)',
+  flush_done: 'flush zakonczony',
+  flush_exception: 'wyjatek flush',
+  flush_follow_up_scheduled: 'zaplanowano follow-up flush',
+  flush_follow_up_failed: 'blad follow-up flush',
+  pipeline_result: 'wynik pipeline zapisu'
+};
+
+function normalizeDispatchToken(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function humanizeDispatchToken(value) {
+  const normalized = normalizeDispatchToken(value);
+  if (!normalized) return '';
+  return normalized.replace(/[_-]+/g, ' ');
+}
+
+function getDispatchReasonLabel(reasonCode) {
+  const normalized = normalizeDispatchToken(reasonCode);
+  if (!normalized) return '';
+  if (DISPATCH_REASON_LABELS[normalized]) return DISPATCH_REASON_LABELS[normalized];
+  if (normalized.startsWith('http_')) {
+    const suffix = normalized.slice('http_'.length);
+    return `blad HTTP (${suffix || 'unknown'})`;
+  }
+  return humanizeDispatchToken(normalized);
+}
+
+function getDispatchProcessCodeLabel(code) {
+  const normalized = normalizeDispatchToken(code);
+  if (!normalized) return 'zdarzenie';
+  if (DISPATCH_PROCESS_CODE_LABELS[normalized]) return DISPATCH_PROCESS_CODE_LABELS[normalized];
+  return humanizeDispatchToken(normalized);
+}
+
+function formatDispatchErrorText(rawError) {
+  const text = typeof rawError === 'string' ? rawError.trim() : '';
+  if (!text) return '';
+  if (/^[a-z0-9_.-]+$/i.test(text)) {
+    return getDispatchReasonLabel(text);
+  }
+  return text;
+}
+
 function formatLastDispatchFlush(lastFlush) {
   if (!lastFlush || typeof lastFlush !== 'object') return 'brak';
   const ts = Number.isInteger(lastFlush.ts) ? lastFlush.ts : null;
   const when = ts ? new Date(ts).toLocaleString() : 'n/a';
   if (lastFlush.skipped) {
-    return `skip=${lastFlush.skipReason || 'n/a'} @ ${when}`;
+    const skipReason = getDispatchReasonLabel(lastFlush.skipReason || 'unknown');
+    return `skip=${skipReason || 'n/a'} @ ${when}`;
   }
   return `sent=${lastFlush.sent || 0}, failed=${lastFlush.failed || 0}, remaining=${lastFlush.remaining || 0} @ ${when}`;
 }
@@ -304,17 +397,21 @@ function formatLatestDispatchProcessLog(logs) {
   const ts = Number.isInteger(latest.ts) ? latest.ts : null;
   const when = ts ? new Date(ts).toLocaleString() : 'n/a';
   const code = typeof latest.code === 'string' && latest.code.trim() ? latest.code.trim() : 'event';
+  const codeLabel = getDispatchProcessCodeLabel(code);
   const level = typeof latest.level === 'string' && latest.level.trim() ? latest.level.trim() : 'info';
   const message = typeof latest.message === 'string' && latest.message.trim()
     ? latest.message.trim()
     : 'dispatch_event';
   const compactMessage = message.length > 120 ? `${message.slice(0, 117)}...` : message;
-  return ` Ostatni etap DB: ${code}/${level} - ${compactMessage} @ ${when}.`;
+  return ` Ostatni etap DB: ${codeLabel} [${level}] - ${compactMessage} @ ${when}.`;
 }
 
 function formatDispatchStatus(status) {
   if (!status || status.success === false) {
-    return 'Intake status: blad odczytu.';
+    const reason = getDispatchReasonLabel(status?.reason || '');
+    return reason
+      ? `Intake status: blad odczytu (${reason}).`
+      : 'Intake status: blad odczytu.';
   }
   if (!status.enabled) {
     return 'Intake status: wylaczony.';
@@ -326,22 +423,20 @@ function formatDispatchStatus(status) {
     ? ` Nastepna proba: ${new Date(status.nextRetryAt).toLocaleString()}.`
     : '';
   const errorText = status.latestOutboxError
-    ? ` Ostatni blad: ${status.latestOutboxError}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
+    ? ` Ostatni blad: ${formatDispatchErrorText(status.latestOutboxError)}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
     : '';
   const latestProcessLogText = formatLatestDispatchProcessLog(status.recentProcessLogs);
   const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}${latestProcessLogText}`;
 
   if (status.configured) {
+    if (status.tokenSource === 'inline_config') {
+      return `Intake status: skonfigurowany centralnie (inline config, bez lokalnego klucza). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}. ${base}`;
+    }
     return `Intake status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}. ${base}`;
   }
-  if (status.reason === 'missing_intake_url') {
-    return `Intake status: brak Intake URL. ${base}`;
-  }
-  if (status.reason === 'missing_key_id') {
-    return `Intake status: brak Key ID. ${base}`;
-  }
-  if (status.reason === 'missing_dispatch_credentials') {
-    return `Intake status: brak sekretu HMAC. ${base}`;
+  const reasonLabel = getDispatchReasonLabel(status.reason || '');
+  if (reasonLabel) {
+    return `Intake status: ${reasonLabel}. ${base}`;
   }
   return `Intake status: ${status.reason || 'nieznany'}. ${base}`;
 }
@@ -349,12 +444,52 @@ function formatDispatchStatus(status) {
 function formatDispatchFlushResult(flushResult) {
   if (!flushResult || typeof flushResult !== 'object') return 'brak danych';
   if (flushResult.skipped) {
-    return `skip (${flushResult.reason || 'unknown'})`;
+    return `skip (${getDispatchReasonLabel(flushResult.reason || 'unknown') || 'unknown'})`;
   }
   if (flushResult.success === false) {
-    return `blad (${flushResult.error || 'unknown'})`;
+    return `blad (${formatDispatchErrorText(flushResult.error || 'unknown') || 'unknown'})`;
   }
   return `sent=${flushResult.sent || 0}, failed=${flushResult.failed || 0}, deferred=${flushResult.deferred || 0}, remaining=${flushResult.remaining || 0}`;
+}
+
+function isDispatchInlineManaged(status) {
+  return !!(status && status.configured === true && status.tokenSource === 'inline_config');
+}
+
+function applyDispatchButtonsState() {
+  const inlineManaged = isDispatchInlineManaged(watchlistDispatchStatusSnapshot);
+  if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
+  if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
+  if (flushWatchlistDispatchBtn) flushWatchlistDispatchBtn.disabled = dispatchButtonsBusy;
+}
+
+function applyWatchlistCredentialsUi(status) {
+  const inlineManaged = isDispatchInlineManaged(status);
+  if (watchlistCredentialsForm) {
+    watchlistCredentialsForm.hidden = inlineManaged;
+  }
+  if (inlineManaged) {
+    setWatchlistCredentialsHint(
+      'Konfiguracja centralna aktywna: lokalny Intake URL / Key ID / Secret nie sa wymagane.',
+      false
+    );
+    return;
+  }
+  setWatchlistCredentialsHint('', false);
+}
+
+function applyDispatchStatusSnapshot(status) {
+  watchlistDispatchStatusSnapshot = status && typeof status === 'object' ? status : null;
+  if (watchlistDispatchStatusSnapshot) {
+    if (watchlistIntakeUrlInput && typeof watchlistDispatchStatusSnapshot.intakeUrl === 'string' && watchlistDispatchStatusSnapshot.intakeUrl.trim()) {
+      watchlistIntakeUrlInput.value = watchlistDispatchStatusSnapshot.intakeUrl.trim();
+    }
+    if (watchlistKeyIdInput && typeof watchlistDispatchStatusSnapshot.keyId === 'string' && watchlistDispatchStatusSnapshot.keyId.trim()) {
+      watchlistKeyIdInput.value = watchlistDispatchStatusSnapshot.keyId.trim();
+    }
+  }
+  applyWatchlistCredentialsUi(watchlistDispatchStatusSnapshot);
+  applyDispatchButtonsState();
 }
 
 async function refreshDispatchStatus(forceReload = false) {
@@ -364,16 +499,10 @@ async function refreshDispatchStatus(forceReload = false) {
       type: 'GET_WATCHLIST_DISPATCH_STATUS',
       forceReload,
     });
-    if (response && typeof response === 'object') {
-      if (watchlistIntakeUrlInput && typeof response.intakeUrl === 'string' && response.intakeUrl.trim()) {
-        watchlistIntakeUrlInput.value = response.intakeUrl.trim();
-      }
-      if (watchlistKeyIdInput && typeof response.keyId === 'string' && response.keyId.trim()) {
-        watchlistKeyIdInput.value = response.keyId.trim();
-      }
-    }
+    applyDispatchStatusSnapshot(response);
     setDispatchStatus(formatDispatchStatus(response), response?.success === false);
   } catch (error) {
+    applyDispatchStatusSnapshot(null);
     setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
   }
 }
@@ -1411,13 +1540,16 @@ document.addEventListener('keydown', (event) => {
 });
 
 function setDispatchButtonsDisabled(disabled) {
-  if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = disabled;
-  if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = disabled;
-  if (flushWatchlistDispatchBtn) flushWatchlistDispatchBtn.disabled = disabled;
+  dispatchButtonsBusy = !!disabled;
+  applyDispatchButtonsState();
 }
 
 if (saveWatchlistTokenBtn) {
   saveWatchlistTokenBtn.addEventListener('click', async () => {
+    if (isDispatchInlineManaged(watchlistDispatchStatusSnapshot)) {
+      setDispatchStatus('Intake status: konfiguracja centralna aktywna - lokalny klucz nie jest wymagany.', false);
+      return;
+    }
     const intakeUrl = typeof watchlistIntakeUrlInput?.value === 'string' ? watchlistIntakeUrlInput.value.trim() : '';
     const keyId = typeof watchlistKeyIdInput?.value === 'string' ? watchlistKeyIdInput.value.trim() : '';
     const secret = typeof watchlistSecretInput?.value === 'string' ? watchlistSecretInput.value.trim() : '';
@@ -1451,6 +1583,7 @@ if (saveWatchlistTokenBtn) {
       const statusPayload = response?.status && typeof response.status === 'object'
         ? { success: true, ...response.status }
         : response;
+      applyDispatchStatusSnapshot(statusPayload);
       setDispatchStatus(formatDispatchStatus(statusPayload), false);
     } catch (error) {
       setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
@@ -1463,6 +1596,10 @@ if (saveWatchlistTokenBtn) {
 
 if (clearWatchlistTokenBtn) {
   clearWatchlistTokenBtn.addEventListener('click', async () => {
+    if (isDispatchInlineManaged(watchlistDispatchStatusSnapshot)) {
+      setDispatchStatus('Intake status: konfiguracja centralna aktywna - brak lokalnego klucza do czyszczenia.', false);
+      return;
+    }
     setDispatchButtonsDisabled(true);
     const originalText = clearWatchlistTokenBtn.textContent;
     clearWatchlistTokenBtn.textContent = 'Czyszcze...';
@@ -1481,6 +1618,7 @@ if (clearWatchlistTokenBtn) {
       const statusPayload = response?.status && typeof response.status === 'object'
         ? { success: true, ...response.status }
         : response;
+      applyDispatchStatusSnapshot(statusPayload);
       setDispatchStatus(formatDispatchStatus(statusPayload), false);
     } catch (error) {
       setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
@@ -1511,6 +1649,7 @@ if (flushWatchlistDispatchBtn) {
       const statusPayload = response?.status && typeof response.status === 'object'
         ? { success: true, ...response.status }
         : response;
+      applyDispatchStatusSnapshot(statusPayload);
       const flushSummary = formatDispatchFlushResult(response?.flushResult);
       const baseStatus = formatDispatchStatus(statusPayload);
       setDispatchStatus(`${baseStatus} Flush: ${flushSummary}.`, false);

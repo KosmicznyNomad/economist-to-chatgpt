@@ -261,30 +261,33 @@
   <details class="details">
     <summary>Watchlist</summary>
     <div class="details-content">
-      <input
-        class="dispatch-input"
-        id="watchlistIntakeUrlInput"
-        type="url"
-        placeholder="Intake URL (https://...)"
-        autocomplete="off"
-      />
-      <input
-        class="dispatch-input"
-        id="watchlistKeyIdInput"
-        type="text"
-        placeholder="Key ID"
-        autocomplete="off"
-      />
-      <input
-        class="dispatch-input"
-        id="watchlistSecretInput"
-        type="password"
-        placeholder="Secret (HMAC)"
-        autocomplete="off"
-      />
-      <div class="dispatch-actions">
-        <button class="btn btn-center" id="saveWatchlistTokenBtn">Zapisz dane</button>
-        <button class="btn btn-center" id="clearWatchlistTokenBtn">Wyczysc</button>
+      <p class="status" id="watchlistCredentialsHint" aria-live="polite" hidden></p>
+      <div id="watchlistCredentialsForm">
+        <input
+          class="dispatch-input"
+          id="watchlistIntakeUrlInput"
+          type="url"
+          placeholder="Intake URL (https://...)"
+          autocomplete="off"
+        />
+        <input
+          class="dispatch-input"
+          id="watchlistKeyIdInput"
+          type="text"
+          placeholder="Key ID"
+          autocomplete="off"
+        />
+        <input
+          class="dispatch-input"
+          id="watchlistSecretInput"
+          type="password"
+          placeholder="Secret (HMAC)"
+          autocomplete="off"
+        />
+        <div class="dispatch-actions">
+          <button class="btn btn-center" id="saveWatchlistTokenBtn">Zapisz dane</button>
+          <button class="btn btn-center" id="clearWatchlistTokenBtn">Wyczysc</button>
+        </div>
       </div>
       <div class="row"><button class="btn btn-center" id="flushWatchlistDispatchBtn">Wymus flush kolejki</button></div>
       <p class="status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status intake...</p>

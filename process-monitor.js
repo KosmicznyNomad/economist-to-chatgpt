@@ -19,7 +19,7 @@ const processSeenAt = new Map();
 let stageNamesCompany = [];
 let stageNamesLoaded = false;
 
-console.log('🔍 Monitor procesów uruchomiony');
+console.log('[panel] Monitor procesow uruchomiony');
 
 async function loadStageNames() {
   return new Promise((resolve) => {
@@ -47,14 +47,14 @@ async function initializeMonitor() {
 // Pobierz procesy przy starcie
 void initializeMonitor();
 
-// Nasłuchuj na aktualizacje
+// Nasluchuj na aktualizacje
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'PROCESSES_UPDATE') {
     applyProcessesUpdate(message.processes);
   }
 });
 
-// Odświeżaj co 6s jako backup
+// Odswiezaj co 6s jako backup
 setInterval(refreshProcesses, 3000);
 
 if (historyToggle && historyList) {
@@ -74,16 +74,101 @@ const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
   invalid_response: 'Za krotka odpowiedz',
-  save_failed: 'Blad zapisu do bazy',
+  missing_assistant_reply: 'Brak odpowiedzi asystenta',
+  textarea_not_found: 'Nie znaleziono pola wpisywania',
+  execute_script_failed: 'Blad executeScript',
+  auto_resume_execute_script_failed: 'Auto-resume: blad executeScript',
+  auto_resume_failed: 'Auto-resume nieudany',
+  auto_resume_unhandled_exception: 'Auto-resume: nieobsluzony wyjatek',
+  bulk_resume_reload: 'Zatrzymano przed zbiorczym wznowieniem',
+  missing_execute_result: 'Brak wyniku executeScript',
+  inject_failed: 'Inject zakonczyl sie bledem',
+  inject_critical_error: 'Krytyczny blad injectToChat',
+  force_stopped: 'Proces zatrzymany sygnalem STOP',
+  pdf_attach_failed: 'Nie udalo sie dolaczyc PDF',
+  save_failed: 'Blad zapisu odpowiedzi',
+  save_response_failed: 'Nieudany zapis odpowiedzi',
   empty_response: 'Pusta odpowiedz (bez zapisu)',
   auto_recovery_send_failed: 'Auto-resend po bledzie wysylania',
   auto_recovery_timeout: 'Auto-resend po timeout',
   auto_recovery_invalid_response: 'Auto-resend po niepoprawnej odpowiedzi',
-  missing_assistant_reply: 'Brak odpowiedzi asystenta',
+  auto_recovery_textarea_not_found: 'Auto-resend: brak pola wpisywania',
+  auto_recovery_provider_invalid_response: 'Auto-resend: niepoprawna odpowiedz providera',
   data_gap_unresolved: 'DATA_GAPS nierozwiazany',
   data_gap_rewind_applied: 'DATA_GAPS rewind zastosowany'
 };
+const persistenceErrorLabels = {
+  runtime_unavailable: 'most runtime niedostepny',
+  runtime_timeout: 'timeout mostu runtime',
+  save_message_failed: 'blad save-message',
+  save_response_failed: 'blad save-response',
+  save_failed: 'blad zapisu',
+  dispatch_failed: 'blad dispatch',
+  missing_intake_url: 'brak Intake URL',
+  missing_dispatch_credentials: 'brak danych dispatch',
+  storage_unavailable: 'storage niedostepny',
+  empty_response: 'pusta odpowiedz'
+};
 const RESPONSE_STORAGE_KEY = 'responses';
+
+function normalizeCodeToken(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function humanizeToken(value) {
+  const normalized = normalizeCodeToken(value);
+  if (!normalized) return '';
+  return normalized.replace(/[_-]+/g, ' ');
+}
+
+function getReasonLabel(reasonCode) {
+  const normalized = normalizeCodeToken(reasonCode);
+  if (!normalized) return '';
+  if (reasonLabels[normalized]) return reasonLabels[normalized];
+  if (normalized.startsWith('auto_recovery_')) {
+    const suffix = normalized.slice('auto_recovery_'.length);
+    if (suffix && reasonLabels[suffix]) {
+      return `Auto-recovery: ${reasonLabels[suffix].toLowerCase()}`;
+    }
+    return `Auto-recovery: ${humanizeToken(suffix) || 'nieznany powod'}`;
+  }
+  return humanizeToken(normalized);
+}
+
+function getPersistenceErrorLabel(errorCode) {
+  const normalized = normalizeCodeToken(errorCode);
+  if (!normalized) return '';
+  if (persistenceErrorLabels[normalized]) return persistenceErrorLabels[normalized];
+  return humanizeToken(normalized);
+}
+
+function buildProcessReasonLine(process) {
+  if (!process || typeof process !== 'object') return '';
+  const reasonCode = normalizeCodeToken(process?.reason);
+  const reasonLabel = getReasonLabel(reasonCode);
+  const errorText = shortenText(process?.error || '', 180);
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const saveErrorCode = normalizeCodeToken(persistenceStatus?.saveError || '');
+  const bridgeErrorCode = normalizeCodeToken(persistenceStatus?.bridgeError || '');
+
+  const details = [];
+  if (saveErrorCode && saveErrorCode !== 'empty_response') {
+    details.push(`save=${getPersistenceErrorLabel(saveErrorCode)}`);
+  }
+  if (bridgeErrorCode) {
+    details.push(`bridge=${getPersistenceErrorLabel(bridgeErrorCode)}`);
+  }
+  if (errorText) {
+    details.push(`err=${errorText}`);
+  }
+
+  if (reasonLabel && details.length === 0) return reasonLabel;
+  if (!reasonLabel && details.length > 0) return details.join(' | ');
+  if (!reasonLabel) return '';
+  return `${reasonLabel} | ${details.join(' | ')}`;
+}
 
 function shortenText(value, maxLength = 180) {
   const text = typeof value === 'string' ? value.trim() : '';
@@ -95,6 +180,9 @@ function shortenText(value, maxLength = 180) {
 function getPersistenceLogLines(process, maxLines = 4) {
   const normalizedMaxLines = Number.isInteger(maxLines) && maxLines > 0 ? maxLines : 4;
   const lines = [];
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
 
   const directLog = Array.isArray(process?.persistenceLog)
     ? process.persistenceLog
@@ -106,9 +194,23 @@ function getPersistenceLogLines(process, maxLines = 4) {
   });
 
   if (lines.length === 0) {
-    const summary = shortenText(process?.persistenceStatus?.dispatchSummary || '', 220);
+    const summary = shortenText(persistenceStatus?.dispatchSummary || '', 220);
     if (summary) {
       lines.push(summary);
+    }
+  }
+
+  if (lines.length === 0) {
+    const saveError = getPersistenceErrorLabel(persistenceStatus?.saveError || '');
+    if (saveError && persistenceStatus?.saveOk === false) {
+      lines.push(`Baza: BLAD zapisu (${saveError})`);
+    }
+  }
+
+  if (lines.length === 0) {
+    const bridgeError = getPersistenceErrorLabel(persistenceStatus?.bridgeError || '');
+    if (bridgeError && persistenceStatus?.saveOk === true) {
+      lines.push(`Most runtime: fallback (${bridgeError})`);
     }
   }
 
@@ -755,12 +857,7 @@ function updateProcessCard(entry, process, isSelected) {
   refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni update: ${formatClock(updatedAt)} (${formatRelativeTime(updatedAt)})`;
   refs.locationMeta.textContent = `Tab: ${tabLabel} | Okno: ${windowLabel} | ID: ${process.id || '-'}`;
 
-  let reasonText = null;
-  if (process.reason) {
-    reasonText = reasonLabels[process.reason] || process.reason;
-  } else if (isFailedStatus(status) && process.error) {
-    reasonText = process.error;
-  }
+  const reasonText = buildProcessReasonLine(process);
 
   if (reasonText) {
     refs.reason.textContent = `Powod: ${reasonText}`;
@@ -1606,6 +1703,14 @@ function renderDetails() {
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
 
+  const reasonSummary = buildProcessReasonLine(selected);
+  if (reasonSummary) {
+    const reasonMeta = document.createElement('div');
+    reasonMeta.className = 'details-subtitle';
+    reasonMeta.textContent = `Powod: ${reasonSummary}`;
+    titleWrap.appendChild(reasonMeta);
+  }
+
   const metaWrap = document.createElement('div');
   metaWrap.className = 'details-subtitle';
   const detailsProgress = getProgressPercent(selected.currentPrompt, selected.totalPrompts);
@@ -1642,10 +1747,11 @@ function renderDetails() {
     const autoReason = typeof autoRecovery.reason === 'string' && autoRecovery.reason.trim()
       ? autoRecovery.reason
       : 'unknown';
+    const autoReasonLabel = getReasonLabel(`auto_recovery_${autoReason}`) || humanizeToken(autoReason);
     const autoCurrentPrompt = Number.isInteger(autoRecovery.currentPrompt) ? autoRecovery.currentPrompt : null;
     const autoLine = document.createElement('div');
     autoLine.className = 'details-subtitle';
-    autoLine.textContent = `Auto-recovery: ${autoAttempt}/${autoMaxAttempts}, reason=${autoReason}, delay=${autoDelaySec}s${autoCurrentPrompt !== null ? `, prompt=${autoCurrentPrompt}` : ''}`;
+    autoLine.textContent = `Auto-recovery: ${autoAttempt}/${autoMaxAttempts}, reason=${autoReasonLabel || autoReason}, delay=${autoDelaySec}s${autoCurrentPrompt !== null ? `, prompt=${autoCurrentPrompt}` : ''}`;
     header.appendChild(autoLine);
   }
 
@@ -1743,7 +1849,7 @@ function renderDetails() {
         ? message.stageName
         : (Number.isInteger(message.stageIndex) ? `Prompt ${message.stageIndex + 1}` : 'Wiadomosc');
       const truncatedLabel = message.truncated ? ' - skrocone' : '';
-      summaryLabel.textContent = `${roleLabel} · ${stageLabel}${truncatedLabel}`;
+      summaryLabel.textContent = `${roleLabel} - ${stageLabel}${truncatedLabel}`;
 
       const preview = document.createElement('span');
       preview.className = 'message-preview';
@@ -1769,5 +1875,6 @@ function renderDetails() {
 
   detailsContainer.appendChild(messageList);
 }
+
 
 

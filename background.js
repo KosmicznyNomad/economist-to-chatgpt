@@ -3578,6 +3578,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: hasResultLastResponse,
         saveResult,
+        bridgeError: persistedSaveErrorFromInject,
         saveError: hasResultLastResponse && !saveResult?.success
           ? (persistedSaveErrorFromInject
             ? persistedSaveErrorFromInject
@@ -3621,6 +3622,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
           dispatchSummary: persistenceSummary.dispatchSummary,
           copyTrace: persistenceSummary.copyTrace,
           saveError: persistenceSummary.saveError,
+          bridgeError: persistenceSummary.bridgeError || '',
           dispatch: persistenceSummary.dispatch || null,
           dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
           updatedAt: Date.now()
@@ -8130,6 +8132,31 @@ function formatDispatchUiSummary(dispatchOutcome) {
   return 'Dispatch: brak wysylki';
 }
 
+function normalizePersistenceBridgeError(rawError = '') {
+  const normalized = typeof rawError === 'string'
+    ? rawError.trim()
+    : String(rawError ?? '').trim();
+  if (!normalized) return '';
+  const lowered = normalized.toLowerCase();
+  if (lowered === 'runtime_unavailable') return 'runtime_unavailable';
+  if (lowered === 'runtime_timeout') return 'runtime_timeout';
+  if (lowered === 'save_message_failed') return 'save_message_failed';
+  if (lowered.includes('extension context invalidated')) return 'runtime_unavailable';
+  if (lowered.includes('receiving end does not exist')) return 'runtime_unavailable';
+  if (lowered.includes('message port closed')) return 'runtime_unavailable';
+  if (lowered.includes('could not establish connection')) return 'runtime_unavailable';
+  return normalized;
+}
+
+function formatPersistenceBridgeErrorLabel(code = '') {
+  const normalized = typeof code === 'string' ? code.trim() : '';
+  if (!normalized) return '';
+  if (normalized === 'runtime_unavailable') return 'most runtime niedostepny';
+  if (normalized === 'runtime_timeout') return 'timeout mostu runtime';
+  if (normalized === 'save_message_failed') return 'blad save-message';
+  return truncateDispatchLogText(normalized, 120);
+}
+
 function normalizeDispatchProcessLog(rawLog) {
   if (!Array.isArray(rawLog)) return [];
   return rawLog
@@ -8165,6 +8192,11 @@ function buildPersistenceUiSummary(options = {}) {
     : null;
   const saveErrorRaw = typeof options?.saveError === 'string' ? options.saveError : '';
   const saveError = saveErrorRaw.trim();
+  const bridgeErrorRaw = typeof options?.bridgeError === 'string' ? options.bridgeError : '';
+  const bridgeError = normalizePersistenceBridgeError(bridgeErrorRaw);
+  const bridgeSummary = bridgeError
+    ? `Most runtime: fallback (${formatPersistenceBridgeErrorLabel(bridgeError)})`
+    : '';
   const dispatch = saveResult?.dispatch && typeof saveResult.dispatch === 'object'
     ? saveResult.dispatch
     : null;
@@ -8192,7 +8224,8 @@ function buildPersistenceUiSummary(options = {}) {
       dispatch: null,
       dispatchProcessLog: [],
       copyTrace: '',
-      saveError: 'empty_response'
+      saveError: 'empty_response',
+      bridgeError: ''
     };
   }
 
@@ -8200,11 +8233,17 @@ function buildPersistenceUiSummary(options = {}) {
   if (!saveOk) {
     const normalizedSaveError = saveError || 'save_failed';
     const storageSummary = `Baza: BLAD zapisu (${truncateDispatchLogText(normalizedSaveError, 140)})`;
-    const logLines = [storageSummary, dispatchSummary, ...dispatchFlowUiLines];
+    const logLines = [
+      storageSummary,
+      ...(bridgeSummary ? [bridgeSummary] : []),
+      dispatchSummary,
+      ...dispatchFlowUiLines
+    ];
+    const bridgeStatusChunk = bridgeSummary ? ` | ${bridgeSummary}` : '';
     return {
       saveOk: false,
       hasResponse: true,
-      statusText: `Zakonczono | ${storageSummary} | ${dispatchSummary}`,
+      statusText: `Zakonczono | ${storageSummary}${bridgeStatusChunk} | ${dispatchSummary}`,
       reason: 'save_failed',
       tone: 'error',
       logLines,
@@ -8212,7 +8251,8 @@ function buildPersistenceUiSummary(options = {}) {
       dispatch,
       dispatchProcessLog,
       copyTrace: '',
-      saveError: normalizedSaveError
+      saveError: normalizedSaveError,
+      bridgeError
     };
   }
 
@@ -8223,7 +8263,12 @@ function buildPersistenceUiSummary(options = {}) {
   const copyTrace = typeof saveResult?.copyTrace === 'string' && saveResult.copyTrace.trim()
     ? saveResult.copyTrace.trim()
     : '';
-  const logLines = [storageSummary, dispatchSummary, ...dispatchFlowUiLines];
+  const logLines = [
+    storageSummary,
+    ...(bridgeSummary ? [bridgeSummary] : []),
+    dispatchSummary,
+    ...dispatchFlowUiLines
+  ];
   if (copyTrace) {
     logLines.push(`Trace: ${copyTrace}`);
   }
@@ -8231,11 +8276,15 @@ function buildPersistenceUiSummary(options = {}) {
     logLines.push(`Dispatch error: ${truncateDispatchLogText(dispatch.firstFailure, 180)}`);
   }
 
-  const tone = Number.isInteger(dispatch?.failed) && dispatch.failed > 0 ? 'warn' : 'success';
+  const tone = (
+    (Number.isInteger(dispatch?.failed) && dispatch.failed > 0)
+    || !!bridgeSummary
+  ) ? 'warn' : 'success';
+  const bridgeStatusChunk = bridgeSummary ? ` | ${bridgeSummary}` : '';
   return {
     saveOk: true,
     hasResponse: true,
-    statusText: `Zakonczono | ${storageSummary} | ${dispatchSummary}`,
+    statusText: `Zakonczono | ${storageSummary}${bridgeStatusChunk} | ${dispatchSummary}`,
     reason: '',
     tone,
     logLines,
@@ -8243,7 +8292,8 @@ function buildPersistenceUiSummary(options = {}) {
     dispatch,
     dispatchProcessLog,
     copyTrace,
-    saveError: ''
+    saveError: '',
+    bridgeError
   };
 }
 
@@ -12732,6 +12782,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
           saveResult,
+          bridgeError: persistedSaveErrorFromInject,
           saveError: saveResult?.success
             ? ''
             : (persistedSaveErrorFromInject
@@ -12748,6 +12799,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             dispatchSummary: persistenceSummary.dispatchSummary,
             copyTrace: persistenceSummary.copyTrace,
             saveError: persistenceSummary.saveError,
+            bridgeError: persistenceSummary.bridgeError || '',
             dispatch: persistenceSummary.dispatch || null,
             dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
             updatedAt: Date.now()
@@ -12811,6 +12863,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             dispatchSummary: persistenceSummary.dispatchSummary,
             copyTrace: '',
             saveError: persistenceSummary.saveError,
+            bridgeError: '',
             dispatch: null,
             dispatchProcessLog: [],
             updatedAt: Date.now()
