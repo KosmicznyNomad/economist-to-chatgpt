@@ -18098,6 +18098,74 @@ async function injectToChat(
     }
     console.log("✅ Połączenie z ChatGPT OK - wysyłam prompt");
     
+    function isVisibleEditorCandidate(element) {
+      if (!element || !(element instanceof Element)) return false;
+      const style = window.getComputedStyle(element);
+      if (!style) return false;
+      if (style.display === 'none' || style.visibility === 'hidden') return false;
+      const rect = element.getBoundingClientRect();
+      return rect.width > 0 && rect.height > 0;
+    }
+
+    function isUsableEditorCandidate(element) {
+      if (!isVisibleEditorCandidate(element)) return false;
+      const tag = String(element.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input') {
+        return element.disabled !== true && element.readOnly !== true;
+      }
+      const contenteditable = element.getAttribute('contenteditable');
+      return contenteditable === 'true' || element.isContentEditable;
+    }
+
+    function collectEditorCandidates() {
+      const selectors = [
+        'textarea#prompt-textarea',
+        '[role="textbox"][contenteditable="true"]',
+        'div[contenteditable="true"]',
+        '[data-testid="composer-input"]',
+        '[contenteditable]'
+      ];
+      const seen = new Set();
+      const collected = [];
+      selectors.forEach((selector) => {
+        const nodes = document.querySelectorAll(selector);
+        nodes.forEach((node) => {
+          if (seen.has(node)) return;
+          seen.add(node);
+          collected.push(node);
+        });
+      });
+      return collected;
+    }
+
+    function clearContentEditableEditor(editorNode) {
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editorNode);
+        selection.removeAllRanges();
+        selection.addRange(range);
+        editorNode.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', code: 'Delete', bubbles: true }));
+        document.execCommand('delete', false, null);
+      } catch (e) {
+        console.warn("⚠️ Fallback czyszczenia:", e);
+      }
+
+      editorNode.innerHTML = '';
+      editorNode.textContent = '';
+      editorNode.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+    }
+
+    function getEditorCurrentText(editorNode, textInputMode) {
+      if (!editorNode) return '';
+      if (textInputMode) {
+        const rawValue = typeof editorNode.value === 'string' ? editorNode.value : '';
+        return rawValue.replace(/\r\n?/g, '\n');
+      }
+      const domText = String(editorNode.innerText || editorNode.textContent || '');
+      return domText.replace(/\r\n?/g, '\n');
+    }
+
     // KROK 2: Szukaj edytora
     console.log("🔍 Szukam edytora contenteditable...");
     
@@ -18108,11 +18176,11 @@ async function injectToChat(
     
     while (Date.now() - startTime < maxWait) {
       if (shouldStopNow()) return false;
-      editor = document.querySelector('textarea#prompt-textarea') ||
-               document.querySelector('[role="textbox"][contenteditable="true"]') ||
-               document.querySelector('div[contenteditable="true"]') ||
-               document.querySelector('[data-testid="composer-input"]') ||
-               document.querySelector('[contenteditable]');
+      const candidates = collectEditorCandidates();
+      editor = candidates.find((node) => isUsableEditorCandidate(node))
+        || candidates.find((node) => isVisibleEditorCandidate(node))
+        || candidates[0]
+        || null;
       if (editor) {
         break;
       }
@@ -18163,40 +18231,59 @@ async function injectToChat(
         console.warn("⚠️ Nie udało się ustawić kursora:", e);
       }
 
-      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
       editor.dispatchEvent(new Event('change', { bubbles: true }));
     } else {
-      // Wyczyść zawartość - najpierw spróbuj nowoczesnym API
-      try {
-        // Metoda 1: Selection API (najbardziej niezawodna)
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        selection.removeAllRanges();
-        selection.addRange(range);
+      const newlineExpected = normalizedPromptText.includes('\n');
+      clearContentEditableEditor(editor);
+      await new Promise(resolve => setTimeout(resolve, 120));
 
-        // Usuń przez KeyboardEvent (symuluje naturalne usuwanie)
-        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', code: 'Delete', bubbles: true }));
-        document.execCommand('delete', false, null);
-      } catch (e) {
-        console.warn("⚠️ Fallback czyszczenia:", e);
+      let insertedByCommand = false;
+      if (typeof document.execCommand === 'function') {
+        try {
+          insertedByCommand = document.execCommand('insertText', false, normalizedPromptText);
+        } catch (e) {
+          console.warn("⚠️ insertText failed:", e);
+        }
       }
 
-      editor.innerHTML = '';
-      editor.textContent = '';
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
-      await new Promise(resolve => setTimeout(resolve, 200));
+      let insertedText = getEditorCurrentText(editor, false);
+      let newlinePreserved = !newlineExpected || insertedText.includes('\n');
 
-      // Wstaw tekst jako node'y aby zachować nowe linie bez wstrzykiwania HTML.
-      const fragment = document.createDocumentFragment();
-      const lines = normalizedPromptText.split('\n');
-      lines.forEach((line, index) => {
-        if (index > 0) {
-          fragment.appendChild(document.createElement('br'));
-        }
-        fragment.appendChild(document.createTextNode(line));
-      });
-      editor.appendChild(fragment);
+      if (!insertedByCommand || !newlinePreserved) {
+        clearContentEditableEditor(editor);
+        await new Promise(resolve => setTimeout(resolve, 80));
+        const lines = normalizedPromptText.split('\n');
+        lines.forEach((line, index) => {
+          if (typeof document.execCommand === 'function' && line.length > 0) {
+            document.execCommand('insertText', false, line);
+          } else if (line.length > 0) {
+            editor.appendChild(document.createTextNode(line));
+          }
+          if (index < lines.length - 1) {
+            const lineBreakInserted = typeof document.execCommand === 'function'
+              ? document.execCommand('insertLineBreak', false, null)
+              : false;
+            if (!lineBreakInserted) {
+              editor.appendChild(document.createElement('br'));
+            }
+          }
+        });
+
+        insertedText = getEditorCurrentText(editor, false);
+        newlinePreserved = !newlineExpected || insertedText.includes('\n');
+      }
+
+      if (!newlinePreserved) {
+        clearContentEditableEditor(editor);
+        const fragment = document.createDocumentFragment();
+        const lines = normalizedPromptText.split('\n');
+        lines.forEach((line, index) => {
+          if (index > 0) fragment.appendChild(document.createElement('br'));
+          fragment.appendChild(document.createTextNode(line));
+        });
+        editor.appendChild(fragment);
+      }
 
       // Przesuń kursor na koniec
       try {
@@ -18217,7 +18304,9 @@ async function injectToChat(
       editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
     }
 
-    console.log(`✓ Tekst wstawiony (${normalizedPromptText.length} znaków): "${normalizedPromptText.substring(0, 50)}..."`);
+    const postInsertText = getEditorCurrentText(editor, isTextInputEditor);
+    const postInsertLines = postInsertText.split('\n').length;
+    console.log(`✓ Tekst wstawiony (${normalizedPromptText.length} znaków, linie=${postInsertLines}): "${normalizedPromptText.substring(0, 50)}..."`);
     
     // Czekaj aż przycisk Send będzie enabled - zwiększony timeout
     let submitButton = null;
