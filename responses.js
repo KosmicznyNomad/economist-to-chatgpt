@@ -1,21 +1,16 @@
 ﻿// responses.js - zarzÄ…dzanie listÄ… odpowiedzi z podziaĹ‚em na analiza spĂłĹ‚ki i portfela
 
 const companyResponsesList = document.getElementById('companyResponsesList');
-const portfolioResponsesList = document.getElementById('portfolioResponsesList');
 const companyEmptyState = document.getElementById('companyEmptyState');
-const portfolioEmptyState = document.getElementById('portfolioEmptyState');
 const responseCount = document.getElementById('responseCount');
 const companyCount = document.getElementById('companyCount');
-const portfolioCount = document.getElementById('portfolioCount');
 const marketCount = document.getElementById('marketCount');
 const marketStatus = document.getElementById('marketStatus');
 const marketTable = document.getElementById('marketTable');
 const marketTableBody = marketTable ? marketTable.querySelector('tbody') : null;
 const clearBtn = document.getElementById('clearBtn');
 const copyAllCompanyBtn = document.getElementById('copyAllCompanyBtn');
-const copyAllPortfolioBtn = document.getElementById('copyAllPortfolioBtn');
 const copyAllCompanyWithLinkBtn = document.getElementById('copyAllCompanyWithLinkBtn');
-const copyAllPortfolioWithLinkBtn = document.getElementById('copyAllPortfolioWithLinkBtn');
 
 const RESPONSE_STORAGE_KEY = 'responses';
 let responseStorageReady = null;
@@ -213,17 +208,6 @@ if (copyAllCompanyWithLinkBtn) {
   });
 }
 
-// ObsĹ‚uga przycisku "Kopiuj wszystkie" dla analizy portfela
-copyAllPortfolioBtn.addEventListener('click', async () => {
-  await copyAllByType('portfolio', copyAllPortfolioBtn);
-});
-
-if (copyAllPortfolioWithLinkBtn) {
-  copyAllPortfolioWithLinkBtn.addEventListener('click', async () => {
-    await copyAllByTypeWithLink('portfolio', copyAllPortfolioWithLinkBtn);
-  });
-}
-
 function normalizeConversationUrl(value) {
   const raw = typeof value === 'string' ? value.trim() : '';
   if (!raw) return '';
@@ -390,12 +374,10 @@ async function loadResponses() {
 function renderResponses(responses) {
   console.log(`đźŽ¨ [renderResponses] RenderujÄ™ ${responses.length} odpowiedzi`);
   
-  // Rozdziel odpowiedzi na dwa typy
   // Starsze odpowiedzi bez analysisType domyĹ›lnie 'company'
   const companyResponses = responses.filter(r => (r.analysisType || 'company') === 'company');
-  const portfolioResponses = responses.filter(r => r.analysisType === 'portfolio');
   
-  console.log(`   Company: ${companyResponses.length}, Portfolio: ${portfolioResponses.length}`);
+  console.log(`   Company: ${companyResponses.length}`);
   
   // Aktualizuj liczniki
   const totalCount = responses.length;
@@ -406,19 +388,13 @@ function renderResponses(responses) {
       : `${totalCount} odpowiedzi`;
   
   updateSectionCount(companyCount, companyResponses.length);
-  updateSectionCount(portfolioCount, portfolioResponses.length);
   
   clearBtn.disabled = totalCount === 0;
   copyAllCompanyBtn.disabled = companyResponses.length === 0;
-  copyAllPortfolioBtn.disabled = portfolioResponses.length === 0;
   if (copyAllCompanyWithLinkBtn) {
     copyAllCompanyWithLinkBtn.disabled = companyResponses.length === 0;
   }
-  if (copyAllPortfolioWithLinkBtn) {
-    copyAllPortfolioWithLinkBtn.disabled = portfolioResponses.length === 0;
-  }
   
-  // Renderuj sekcjÄ™ analizy spĂłĹ‚ki
   if (companyResponses.length === 0) {
     showEmptyState(companyEmptyState);
     hideResponsesList(companyResponsesList);
@@ -426,16 +402,6 @@ function renderResponses(responses) {
     hideEmptyState(companyEmptyState);
     showResponsesList(companyResponsesList);
     renderResponsesInSection(companyResponsesList, companyResponses);
-  }
-  
-  // Renderuj sekcjÄ™ analizy portfela
-  if (portfolioResponses.length === 0) {
-    showEmptyState(portfolioEmptyState);
-    hideResponsesList(portfolioResponsesList);
-  } else {
-    hideEmptyState(portfolioEmptyState);
-    showResponsesList(portfolioResponsesList);
-    renderResponsesInSection(portfolioResponsesList, portfolioResponses);
   }
 }
 
@@ -631,9 +597,7 @@ function hideResponsesList(element) {
 
 function showEmptyStates() {
   showEmptyState(companyEmptyState);
-  showEmptyState(portfolioEmptyState);
   hideResponsesList(companyResponsesList);
-  hideResponsesList(portfolioResponsesList);
 }
 
 // NasĹ‚uchuj zmian w storage (gdy nowe odpowiedzi sÄ… dodawane)

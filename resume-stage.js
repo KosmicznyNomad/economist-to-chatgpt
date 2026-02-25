@@ -12,7 +12,6 @@ const presetTargetWindowIdRaw = Number.parseInt(urlParams.get('targetWindowId'),
 const presetTargetTabId = Number.isInteger(presetTargetTabIdRaw) ? presetTargetTabIdRaw : null;
 const presetTargetWindowId = Number.isInteger(presetTargetWindowIdRaw) ? presetTargetWindowIdRaw : null;
 const resumeTitle = urlParams.get('title') || '';
-const resumeAnalysisType = urlParams.get('analysisType') || '';
 
 // Funkcja skracania tekstu do preview
 function truncateText(text, maxLength = 60) {
@@ -98,7 +97,6 @@ function updateInfo() {
   const selectedIndex = parseInt(promptSelect.value);
   const prefixParts = [];
   if (resumeTitle) prefixParts.push(`Zrodlo: ${resumeTitle}`);
-  if (resumeAnalysisType) prefixParts.push(`Typ: ${resumeAnalysisType}`);
   const prefix = prefixParts.length > 0 ? `${prefixParts.join(' - ')}\n` : '';
   
   if (isNaN(selectedIndex)) {
@@ -128,7 +126,6 @@ startBtn.addEventListener('click', () => {
       targetTabId: presetTargetTabId,
       targetWindowId: presetTargetWindowId,
       title: resumeTitle,
-      analysisType: resumeAnalysisType,
       reloadBeforeResume: true,
       detach: true
     }, () => {

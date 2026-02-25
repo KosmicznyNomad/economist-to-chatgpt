@@ -21,7 +21,6 @@ const ACTION_LABELS = {
   detect_failed: 'Detect failed',
   reload_failed: 'Reload failed',
   start_failed: 'Start failed',
-  skipped_non_company: 'Skipped non-company',
   skipped_outside_invest: 'Skipped outside INVEST',
   final_stage_already_sent: 'Final stage already done'
 };
@@ -68,7 +67,7 @@ function actionStatusClass(action) {
   if (!normalized) return '';
   if (normalized === 'started' || normalized === 'final_stage_already_sent') return 'status-ok';
   if (normalized === 'detect_failed' || normalized === 'reload_failed' || normalized === 'start_failed') return 'status-err';
-  if (normalized === 'skipped_non_company' || normalized === 'skipped_outside_invest') return 'status-warn';
+  if (normalized === 'skipped_outside_invest') return 'status-warn';
   return 'status-running';
 }
 
@@ -80,7 +79,7 @@ function resolveResumeState(row) {
   if (action === 'final_stage_already_sent') {
     return { label: 'NIE (final)', className: 'status-ok' };
   }
-  if (action === 'skipped_non_company' || action === 'skipped_outside_invest') {
+  if (action === 'skipped_outside_invest') {
     return { label: 'NIE (skip)', className: 'status-warn' };
   }
   if (action === 'detect_failed' || action === 'reload_failed' || action === 'start_failed') {

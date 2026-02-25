@@ -351,13 +351,12 @@ function findCompletedResponseForProcess(process, responses) {
   }
 
   // Fallback for older responses saved without runId.
-  const analysisType = process.analysisType || 'company';
   const source = process.title || '';
   const startedAt = Number.isInteger(process.startedAt) ? process.startedAt : null;
   const finishedAt = Number.isInteger(process.finishedAt) ? process.finishedAt : null;
 
   const byMetadata = sorted.filter((response) => {
-    if ((response.analysisType || 'company') !== analysisType) return false;
+    if ((response.analysisType || 'company') !== 'company') return false;
     if (source && (response.source || '') !== source) return false;
     const ts = Number.isInteger(response.timestamp) ? response.timestamp : 0;
     if (startedAt && ts < startedAt - 10 * 60 * 1000) return false;
@@ -472,7 +471,6 @@ function resolveStageLabel(process) {
   const normalizedPrompt = Math.max(currentPrompt || 0, promptFromStageIndex || 0);
 
   const rawStageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
-  const analysisType = (process?.analysisType || '').toLowerCase();
   const companyStageName = normalizedPrompt > 0
     ? stageNamesCompany[normalizedPrompt - 1]
     : '';
@@ -482,12 +480,12 @@ function resolveStageLabel(process) {
     if (promptMatch && normalizedPrompt > 0) {
       const stagePrompt = Number.parseInt(promptMatch[1], 10);
       if (Number.isInteger(stagePrompt) && stagePrompt !== normalizedPrompt) {
-        if (analysisType === 'company' && companyStageName) {
+        if (companyStageName) {
           return `${companyStageName} (Prompt ${normalizedPrompt})`;
         }
         return `Prompt ${normalizedPrompt}`;
       }
-      if (analysisType === 'company' && companyStageName) {
+      if (companyStageName) {
         return `${companyStageName} (Prompt ${normalizedPrompt})`;
       }
     }
@@ -495,7 +493,7 @@ function resolveStageLabel(process) {
   }
 
   if (normalizedPrompt > 0) {
-    if (analysisType === 'company' && companyStageName) {
+    if (companyStageName) {
       return `${companyStageName} (Prompt ${normalizedPrompt})`;
     }
     return `Prompt ${normalizedPrompt}`;
@@ -678,7 +676,7 @@ function updateProcessCard(entry, process, isSelected) {
   card.classList.toggle('selected', !!isSelected);
 
   refs.title.textContent = process.title || 'Bez tytulu';
-  refs.type.textContent = process.analysisType || 'company';
+  refs.type.textContent = 'company';
 
   const currentPrompt = Number.isInteger(process.currentPrompt) ? process.currentPrompt : 0;
   const totalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : 0;
@@ -1130,7 +1128,6 @@ function sendProcessResumeNextStage(process, options = {}) {
       windowId: Number.isInteger(process.windowId) ? process.windowId : null,
       chatUrl: resolveChatUrl(process),
       title: process?.title || '',
-      analysisType: process?.analysisType || '',
       openDialogOnly: !!options.openDialogOnly
     }, (response) => {
       if (chrome.runtime.lastError) {
@@ -1275,7 +1272,6 @@ function updateUI(processes, options = {}) {
       const statusText = process.statusText || '';
       const reason = process.reason || '';
       const title = process.title || '';
-      const analysisType = process.analysisType || '';
       const tabId = Number.isInteger(process.tabId) ? process.tabId : '';
       const windowId = Number.isInteger(process.windowId) ? process.windowId : '';
       const chatUrl = process.chatUrl || '';
@@ -1298,7 +1294,7 @@ function updateUI(processes, options = {}) {
         : '';
       const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${analysisType}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${persistenceLog}`;
+      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${persistenceLog}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -1377,9 +1373,8 @@ function updateHistory(processes) {
     const card = document.createElement('div');
     card.className = 'history-card';
     card.addEventListener('click', () => {
-      const analysisType = process.analysisType || 'company';
       const closed = isProcessClosed(process);
-      if (analysisType === 'company' && closed) {
+      if (closed) {
         void openResumeStageWithAutoDetect(process);
         return;
       }
@@ -1433,16 +1428,14 @@ function updateHistory(processes) {
     });
     actions.appendChild(copyBtn);
 
-    if ((process.analysisType || 'company') === 'company') {
-      const resumeBtn = document.createElement('button');
-      resumeBtn.className = 'history-open history-resume-next';
-      resumeBtn.textContent = 'Wznow od kolejnego etapu';
-      resumeBtn.addEventListener('click', (event) => {
-        event.stopPropagation();
-        void openResumeStageWithAutoDetect(process, resumeBtn);
-      });
-      actions.appendChild(resumeBtn);
-    }
+    const resumeBtn = document.createElement('button');
+    resumeBtn.className = 'history-open history-resume-next';
+    resumeBtn.textContent = 'Wznow od kolejnego etapu';
+    resumeBtn.addEventListener('click', (event) => {
+      event.stopPropagation();
+      void openResumeStageWithAutoDetect(process, resumeBtn);
+    });
+    actions.appendChild(resumeBtn);
 
     card.appendChild(title);
     card.appendChild(meta);
@@ -1516,14 +1509,13 @@ function openResumeStage(process) {
   chrome.runtime.sendMessage({
     type: 'RESUME_STAGE_OPEN',
     startIndex,
-    title: process?.title || '',
-    analysisType: process?.analysisType || ''
+    title: process?.title || ''
   });
   return true;
 }
 
 async function openResumeStageWithAutoDetect(process, button = null) {
-  if (!process || (process.analysisType || 'company') !== 'company') {
+  if (!process) {
     return false;
   }
 
@@ -1582,7 +1574,7 @@ function renderDetails() {
       : selected.needsAction
         ? 'Wymaga akcji'
         : 'W trakcie';
-  subtitle.textContent = `${selected.analysisType || 'company'} · ${statusLabel}`;
+  subtitle.textContent = statusLabel;
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
 
@@ -1672,8 +1664,7 @@ function renderDetails() {
     actions.appendChild(focusBtn);
   }
 
-  const canResumeNextFromDetails = (selected.analysisType || 'company') === 'company'
-    && (selected.needsAction || isProcessClosed(selected));
+  const canResumeNextFromDetails = selected.needsAction || isProcessClosed(selected);
   if (canResumeNextFromDetails) {
     const resumeNextBtn = document.createElement('button');
     resumeNextBtn.className = 'details-open details-resume-next';
