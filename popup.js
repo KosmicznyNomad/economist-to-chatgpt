@@ -762,6 +762,20 @@ function getResumeAllSummary(response) {
       if (Number.isInteger(row?.assistantMessageCount)) return sum + row.assistantMessageCount;
       return sum;
     }, 0);
+  const missingRepliesDetected = Number.isInteger(summary?.missing_replies_detected)
+    ? summary.missing_replies_detected
+    : rows.filter((row) => row?.restartMissingAssistantReply === true).length;
+  const dataGapsDetected = Number.isInteger(summary?.data_gaps_detected)
+    ? summary.data_gaps_detected
+    : rows.filter((row) => {
+      if (row?.dataGapDetected === true) return true;
+      const marker = [
+        typeof row?.reason === 'string' ? row.reason : '',
+        typeof row?.restartDecisionReason === 'string' ? row.restartDecisionReason : '',
+        typeof row?.recognitionSummary === 'string' ? row.recognitionSummary : ''
+      ].join(' ');
+      return /\bdata[_\s-]?gaps?\b/i.test(marker);
+    }).length;
   const detectedPrompts = Number.isInteger(summary?.detected_prompts)
     ? summary.detected_prompts
     : rows.filter((row) => Number.isInteger(row?.detectedPromptNumber)).length;
@@ -781,7 +795,7 @@ function getResumeAllSummary(response) {
     ? summary.recognized_unresolved
     : rows.filter((row) => row?.action === 'detect_failed').length;
 
-  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
+  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, missing_reply_detected: ${missingRepliesDetected}, data_gaps: ${dataGapsDetected}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
 }
 
 async function executeResumeAllFromPopup(button, options = {}) {

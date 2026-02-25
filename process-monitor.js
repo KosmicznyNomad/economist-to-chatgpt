@@ -78,7 +78,10 @@ const reasonLabels = {
   empty_response: 'Pusta odpowiedz (bez zapisu)',
   auto_recovery_send_failed: 'Auto-resend po bledzie wysylania',
   auto_recovery_timeout: 'Auto-resend po timeout',
-  auto_recovery_invalid_response: 'Auto-resend po niepoprawnej odpowiedzi'
+  auto_recovery_invalid_response: 'Auto-resend po niepoprawnej odpowiedzi',
+  missing_assistant_reply: 'Brak odpowiedzi asystenta',
+  data_gap_unresolved: 'DATA_GAPS nierozwiazany',
+  data_gap_rewind_applied: 'DATA_GAPS rewind zastosowany'
 };
 const RESPONSE_STORAGE_KEY = 'responses';
 
@@ -125,6 +128,29 @@ function getPersistenceLogLines(process, maxLines = 4) {
 function getNormalizedStatus(process) {
   if (!process || typeof process.status !== 'string') return '';
   return process.status.trim().toLowerCase();
+}
+
+function isDataGapProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const marker = [
+    typeof process?.reason === 'string' ? process.reason : '',
+    typeof process?.statusText === 'string' ? process.statusText : '',
+    typeof process?.error === 'string' ? process.error : ''
+  ].join(' ');
+  return /\bdata[_\s-]?gaps?\b/i.test(marker);
+}
+
+function isMissingReplyProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const marker = [
+    typeof process?.reason === 'string' ? process.reason : '',
+    typeof process?.statusText === 'string' ? process.statusText : '',
+    typeof process?.error === 'string' ? process.error : ''
+  ].join(' ');
+  return (
+    /\bmissing_assistant_reply\b/i.test(marker)
+    || /brak odpowiedzi/i.test(marker)
+  );
 }
 
 function isFailedStatus(status) {
@@ -238,6 +264,8 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const needsActionCount = activeItems.filter((process) => !!process?.needsAction).length;
   const completedCount = allItems.filter((process) => isCompletedStatus(getNormalizedStatus(process))).length;
   const failedCount = allItems.filter((process) => isFailedStatus(getNormalizedStatus(process))).length;
+  const dataGapCount = allItems.filter((process) => isDataGapProcess(process)).length;
+  const missingReplyCount = allItems.filter((process) => isMissingReplyProcess(process)).length;
   const totalCount = allItems.length;
   const consistencyIssues = ensureCountConsistency(allItems, activeItems, historyItems);
   const activeProgress = activeItems
@@ -257,7 +285,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const stageInfo = stageNamesLoaded ? `Etapy: ${stageNamesCompany.length}` : 'Etapy: ladowanie...';
 
   if (processSummary) {
-    let summary = `Aktywne: ${activeCount} | Wymaga akcji: ${needsActionCount} | Zakonczone: ${completedCount} | Blad: ${failedCount} | Wszystkie: ${totalCount}`;
+    let summary = `Aktywne: ${activeCount} | Wymaga akcji: ${needsActionCount} | Zakonczone: ${completedCount} | Blad: ${failedCount} | DATA_GAPS: ${dataGapCount} | Braki odp.: ${missingReplyCount} | Wszystkie: ${totalCount}`;
     summary += ` | Sredni postep aktywnych: ${avgProgress}%`;
     summary += ` | Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`;
     summary += ` | ${stageInfo}`;

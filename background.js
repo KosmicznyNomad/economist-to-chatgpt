@@ -511,6 +511,65 @@ function toNonNegativeInt(value, fallback = 0) {
   return normalized;
 }
 
+const DATA_GAPS_STOP_COMMAND = 'DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN';
+const DATA_GAPS_STOP_COMMAND_REGEX = /SYSTEM_COMMAND:\s*DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN/i;
+const DATA_GAPS_CATEGORY_REGEX = /CATEGORY:\s*DATA_GAPS\b/i;
+const DATA_GAPS_MISSING_INPUTS_REGEX = /MISSING_INPUTS:\s*([^\n\r]+)/i;
+const DATA_GAPS_GENERIC_REGEX = /\bDATA[_\s-]?GAPS?\b/i;
+
+function parseDataGapsStopFromText(text) {
+  const normalized = typeof text === 'string' ? text.trim() : '';
+  if (!normalized) {
+    return {
+      detected: false,
+      hasCommand: false,
+      hasCategory: false,
+      missingInputsText: '',
+      missingInputs: []
+    };
+  }
+  const hasCommand = DATA_GAPS_STOP_COMMAND_REGEX.test(normalized);
+  const hasCategory = DATA_GAPS_CATEGORY_REGEX.test(normalized);
+  const hasDataGapToken = DATA_GAPS_GENERIC_REGEX.test(normalized);
+  const missingInputsMatch = normalized.match(DATA_GAPS_MISSING_INPUTS_REGEX);
+  const missingInputsText = missingInputsMatch?.[1]
+    ? compactWhitespace(missingInputsMatch[1]).slice(0, 320)
+    : '';
+  const missingInputs = missingInputsText
+    ? missingInputsText
+        .split(',')
+        .map((item) => item.trim())
+        .filter((item) => item.length > 0)
+        .slice(0, 12)
+    : [];
+  const detected = hasCommand || (hasCategory && hasDataGapToken);
+  return {
+    detected,
+    hasCommand,
+    hasCategory,
+    missingInputsText,
+    missingInputs
+  };
+}
+
+function looksLikeDataGapMarker(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  return DATA_GAPS_GENERIC_REGEX.test(value);
+}
+
+function isDataGapMonitorRow(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row.dataGapDetected === true) return true;
+  return [
+    row.reason,
+    row.restartDecisionReason,
+    row.restartDispatchStatus,
+    row.recognitionSummary,
+    row.resumeDecisionSource,
+    row.recognitionSource
+  ].some((value) => looksLikeDataGapMarker(value));
+}
+
 function normalizeReloadResumeSummary(rawSummary) {
   const source = rawSummary && typeof rawSummary === 'object' ? rawSummary : {};
   return {
@@ -524,6 +583,8 @@ function normalizeReloadResumeSummary(rawSummary) {
     reload_total: toNonNegativeInt(source.reload_total, 0),
     prompt_blocks: toNonNegativeInt(source.prompt_blocks, 0),
     response_blocks: toNonNegativeInt(source.response_blocks, 0),
+    missing_replies_detected: toNonNegativeInt(source.missing_replies_detected, 0),
+    data_gaps_detected: toNonNegativeInt(source.data_gaps_detected, 0),
     detected_prompts: toNonNegativeInt(source.detected_prompts, 0),
     recognized_saved_stage: toNonNegativeInt(source.recognized_saved_stage, 0),
     recognized_chat_detection: toNonNegativeInt(source.recognized_chat_detection, 0),
@@ -588,6 +649,11 @@ function sanitizeReloadResumeMonitorRow(rawRow) {
     restartMissingAssistantReply: rawRow.restartMissingAssistantReply === true
       ? true
       : (rawRow.restartMissingAssistantReply === false ? false : null),
+    dataGapDetected: rawRow.dataGapDetected === true,
+    dataGapSignal: typeof rawRow.dataGapSignal === 'string' ? rawRow.dataGapSignal : '',
+    dataGapMissingInputs: typeof rawRow.dataGapMissingInputs === 'string'
+      ? rawRow.dataGapMissingInputs.slice(0, 320)
+      : '',
     userMessageCount: Number.isInteger(rawRow.userMessageCount) ? rawRow.userMessageCount : null,
     assistantMessageCount: Number.isInteger(rawRow.assistantMessageCount) ? rawRow.assistantMessageCount : null,
     responseBlockCount: Number.isInteger(rawRow.responseBlockCount) ? rawRow.responseBlockCount : null,
@@ -665,6 +731,8 @@ function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
         : (Number.isInteger(row?.assistantMessageCount) ? row.assistantMessageCount : 0)
     )
   ), 0);
+  const missingRepliesDetected = sourceRows.filter((row) => row?.restartMissingAssistantReply === true).length;
+  const dataGapsDetected = sourceRows.filter((row) => isDataGapMonitorRow(row)).length;
   const detectedPrompts = sourceRows.reduce((sum, row) => (
     sum + (Number.isInteger(row?.detectedPromptNumber) ? 1 : 0)
   ), 0);
@@ -724,6 +792,8 @@ function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
     reload_total: reloadTotal,
     prompt_blocks: promptBlocks,
     response_blocks: responseBlocks,
+    missing_replies_detected: missingRepliesDetected,
+    data_gaps_detected: dataGapsDetected,
     detected_prompts: detectedPrompts,
     recognized_saved_stage: recognitionCounts.savedStage,
     recognized_chat_detection: recognitionCounts.chatDetection,
@@ -3063,6 +3133,12 @@ async function readFullConversationFromTab(tabId, options = {}) {
           sum + (entry.role === 'assistant' ? 1 : 0)
         ), 0);
         const latestTotalMessages = latestConversationFinal.length;
+        const lastAssistantEntry = [...latestConversationFinal]
+          .reverse()
+          .find((entry) => entry && entry.role === 'assistant');
+        const lastAssistantText = lastAssistantEntry
+          ? compact(lastAssistantEntry.text || '')
+          : '';
 
         return {
           success: true,
@@ -3079,6 +3155,7 @@ async function readFullConversationFromTab(tabId, options = {}) {
           scanDurationMs: Date.now() - startedAt,
           userMetaTotal: allUserMeta.length,
           userMetaTruncated: allUserMeta.length > transferLimit,
+          lastAssistantText,
           messages,
           messageMeta: userMeta
         };
@@ -3137,7 +3214,8 @@ async function extractLastUserMessageFromTab(tabId) {
     latestAssistantCount: Number.isInteger(scanned.latestAssistantCount) ? scanned.latestAssistantCount : null,
     latestTotalMessages: Number.isInteger(scanned.latestTotalMessages) ? scanned.latestTotalMessages : null,
     hardForceApplied: scanned.hardForceApplied === true,
-    scanDurationMs: Number.isInteger(scanned.scanDurationMs) ? scanned.scanDurationMs : null
+    scanDurationMs: Number.isInteger(scanned.scanDurationMs) ? scanned.scanDurationMs : null,
+    lastAssistantText: typeof scanned.lastAssistantText === 'string' ? scanned.lastAssistantText : ''
   };
 }
 
@@ -3462,6 +3540,16 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         ? result.persistedSaveResult
         : null;
       const savedViaInjectedMessage = result?.persistedViaMessage === true && !!injectedSaveResult?.success;
+      const persistedSaveErrorFromInject = typeof result?.persistedSaveError === 'string'
+        ? result.persistedSaveError.trim()
+        : '';
+      if (!savedViaInjectedMessage && persistedSaveErrorFromInject) {
+        console.warn('[auto-resume] saveResponse fallback in background', {
+          processId,
+          responseId: providedResponseId || '',
+          persistedSaveError: persistedSaveErrorFromInject
+        });
+      }
 
       let saveResult = null;
       if (hasResultLastResponse) {
@@ -3491,8 +3579,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         hasResponse: hasResultLastResponse,
         saveResult,
         saveError: hasResultLastResponse && !saveResult?.success
-          ? (typeof result?.persistedSaveError === 'string' && result.persistedSaveError.trim()
-            ? result.persistedSaveError.trim()
+          ? (persistedSaveErrorFromInject
+            ? persistedSaveErrorFromInject
             : 'save_response_failed')
           : ''
       });
@@ -3778,6 +3866,8 @@ async function runResetScanStartAllTabs(options = {}) {
       reload_total: 0,
       prompt_blocks: 0,
       response_blocks: 0,
+      missing_replies_detected: 0,
+      data_gaps_detected: 0,
       detected_prompts: 0,
       recognized_saved_stage: 0,
       recognized_chat_detection: 0,
@@ -4108,6 +4198,16 @@ async function runResetScanStartAllTabs(options = {}) {
       const context = processContexts[index] || {};
       const process = context?.process || null;
       const key = getResultKey(context, index);
+      const processDataGapSignal = parseDataGapsStopFromText([
+        typeof process?.statusText === 'string' ? process.statusText : '',
+        typeof process?.reason === 'string' ? process.reason : '',
+        typeof process?.error === 'string' ? process.error : ''
+      ].filter(Boolean).join('\n'));
+      const processMentionsDataGap = (
+        looksLikeDataGapMarker(process?.reason || '')
+        || looksLikeDataGapMarker(process?.statusText || '')
+        || looksLikeDataGapMarker(process?.error || '')
+      );
       const row = {
         key,
         runId: typeof process?.id === 'string' && process.id.trim() ? process.id.trim() : '',
@@ -4163,6 +4263,11 @@ async function runResetScanStartAllTabs(options = {}) {
         restartDecisionSource: '',
         restartDispatchStatus: '',
         restartMissingAssistantReply: null,
+        dataGapDetected: processDataGapSignal.detected || processMentionsDataGap,
+        dataGapSignal: processDataGapSignal.detected
+          ? 'process_state'
+          : (processMentionsDataGap ? 'process_marker' : ''),
+        dataGapMissingInputs: processDataGapSignal.missingInputsText || '',
         resumeDecisionSource: '',
         recognitionStage: '',
         recognitionStatus: '',
@@ -4181,6 +4286,18 @@ async function runResetScanStartAllTabs(options = {}) {
         eligibleForReload: false
       };
       appendRecognitionStep(row, 'init', 'queued', 'process_enqueued_for_reload_resume');
+      if (row.dataGapDetected) {
+        const dataGapDetail = row.dataGapMissingInputs
+          ? `source=${row.dataGapSignal || 'process_state'}, missing_inputs=${row.dataGapMissingInputs}`
+          : `source=${row.dataGapSignal || 'process_state'}`;
+        appendRecognitionStep(row, 'data_gap', 'detected', dataGapDetail);
+        console.warn('[reset-scan-start] Data gap marker inherited from process state', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          signal: row.dataGapSignal || '',
+          missingInputs: row.dataGapMissingInputs || ''
+        });
+      }
 
       let tab = Number.isInteger(row.tabId) ? await getTabByIdSafe(row.tabId) : null;
       if (!tab && Number.isInteger(row.windowId)) {
@@ -4561,6 +4678,26 @@ async function runResetScanStartAllTabs(options = {}) {
         row.assistantMessageCount = Number.isInteger(extraction.assistantCount) ? extraction.assistantCount : 0;
         row.responseBlockCount = row.assistantMessageCount;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
+        const dataGapStopSignal = parseDataGapsStopFromText(extraction.lastAssistantText || '');
+        if (dataGapStopSignal.detected) {
+          row.dataGapDetected = true;
+          row.dataGapSignal = 'assistant_system_command';
+          row.dataGapMissingInputs = dataGapStopSignal.missingInputsText || '';
+          const dataGapDetail = row.dataGapMissingInputs
+            ? `source=assistant_system_command, missing_inputs=${row.dataGapMissingInputs}`
+            : 'source=assistant_system_command';
+          appendRecognitionStep(row, 'data_gap', 'detected', dataGapDetail);
+          console.warn('[reset-scan-start] Detected DATA_GAPS stop command in assistant response', {
+            runId: row.runId || '',
+            tabId: row.tabId,
+            missingInputs: row.dataGapMissingInputs || ''
+          });
+          await appendReloadResumeMonitorEvent(monitorSessionId, {
+            level: 'warn',
+            code: 'data_gap_detected',
+            message: `Tab ${row.tabId}: wykryto DATA_GAPS stop${row.dataGapMissingInputs ? ` (${row.dataGapMissingInputs})` : ''}`
+          });
+        }
         appendRecognitionStep(
           row,
           'chat_extract',
@@ -5261,6 +5398,9 @@ async function runResetScanStartAllTabs(options = {}) {
         detectedPromptIndex: null,
         detectedPromptNumber: null,
         detectedStageName: null,
+        dataGapDetected: false,
+        dataGapSignal: '',
+        dataGapMissingInputs: '',
         recognitionStage: 'finalize',
         recognitionStatus: 'failed',
         recognitionSource: 'detect_unresolved',
@@ -5296,6 +5436,10 @@ async function runResetScanStartAllTabs(options = {}) {
       summary,
       actionCounts
     });
+    console.log('[reset-scan-start] Data quality counters', {
+      missingRepliesDetected: summary.missing_replies_detected,
+      dataGapsDetected: summary.data_gaps_detected
+    });
     results.forEach((item) => {
       console.log('[reset-scan-start] Process result', item);
     });
@@ -5325,6 +5469,13 @@ async function runResetScanStartAllTabs(options = {}) {
         ? 'Summary validation passed'
         : `Summary mismatch detected (${summaryCheck.mismatches.length})`
     });
+    if ((summary.data_gaps_detected || 0) > 0) {
+      await appendReloadResumeMonitorEvent(monitorSessionId, {
+        level: 'warn',
+        code: 'data_gap_summary',
+        message: `Wykryto DATA_GAPS w ${summary.data_gaps_detected} procesach`
+      });
+    }
 
     return {
       success: true,
@@ -5359,6 +5510,8 @@ async function runResetScanStartAllTabs(options = {}) {
       reload_total: 0,
       prompt_blocks: 0,
       response_blocks: 0,
+      missing_replies_detected: 0,
+      data_gaps_detected: 0,
       detected_prompts: 0,
       recognized_saved_stage: 0,
       recognized_chat_detection: 0,
@@ -6338,7 +6491,8 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
     userMetaTruncated: scanned.userMetaTruncated === true,
     userMetaTotal: Number.isInteger(scanned.userMetaTotal) ? scanned.userMetaTotal : null,
     hardForceApplied: scanned.hardForceApplied === true,
-    scanDurationMs: Number.isInteger(scanned.scanDurationMs) ? scanned.scanDurationMs : null
+    scanDurationMs: Number.isInteger(scanned.scanDurationMs) ? scanned.scanDurationMs : null,
+    lastAssistantText: typeof scanned.lastAssistantText === 'string' ? scanned.lastAssistantText : ''
   };
 }
 
@@ -6961,7 +7115,10 @@ async function countCompanyConversationMessages(tabId, options = {}) {
   if (lowQualityReplyRows.length > 0) processIssueFlags.push('assistant_reply_below_threshold');
   if (missingPromptNumbers.length > 0) processIssueFlags.push('unrecognized_prompt_stage');
   if (sequenceIssues.length > 0) processIssueFlags.push('sequence_issue');
-  const processState = missingReplyRows.length > 0
+  const dataGapStopSignal = parseDataGapsStopFromText(scanned?.lastAssistantText || '');
+  const dataGapStopDetected = dataGapStopSignal.detected;
+  if (dataGapStopDetected) processIssueFlags.push('data_gap_stop');
+  const processState = (missingReplyRows.length > 0 || dataGapStopDetected)
     ? 'needs_action'
     : ((lowQualityReplyRows.length > 0 || processIssueFlags.length > 0) ? 'warning' : 'ok');
   const runResets = [];
@@ -7066,6 +7223,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
         missingReplyStageText ? `missing_reply=${missingReplyStageText}` : '',
         lowQualityStageText ? `low_quality=${lowQualityStageText}` : '',
         unrecognizedStageText ? `unrecognized=${unrecognizedStageText}` : '',
+        dataGapStopDetected ? `data_gap_stop=${DATA_GAPS_STOP_COMMAND}` : '',
         sequenceIssues.length > 0 ? `sequence_issues=${sequenceIssues.length}` : ''
       ].filter(Boolean).join(' | ');
       const signature = [
@@ -7118,6 +7276,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       duplicatePromptNumbers,
       promptRepliesMissing,
       promptRepliesBelowThreshold,
+      dataGapStopDetected,
+      dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
       missingReplyPromptNumbers,
       lowQualityReplyPromptNumbers,
       processIssueFlags,
@@ -7188,6 +7348,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       promptRepliesPassingThreshold,
       promptRepliesBelowThreshold,
       missingReplyPromptCount: missingReplyPromptNumbers.length,
+      dataGapStopDetected: dataGapStopDetected ? 1 : 0,
       lowQualityReplyPromptCount: lowQualityReplyPromptNumbers.length
     },
     verification: {
@@ -7195,6 +7356,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       allMatchedPromptsHaveReply: promptRepliesMissing === 0,
       allMatchedRepliesPassThreshold: promptRepliesBelowThreshold === 0,
       sequenceNonDecreasing: sequenceIssues.length === 0,
+      dataGapStopDetected,
       userMetaTruncated: scanned?.userMetaTruncated === true
     },
     processState,
@@ -7204,6 +7366,9 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     duplicatePromptNumbers,
     missingReplyPromptNumbers,
     lowQualityReplyPromptNumbers,
+    dataGapStopDetected,
+    dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
+    dataGapMissingInputsList: dataGapStopSignal.missingInputs,
     missingReplyRows,
     lowQualityReplyRows,
     promptCoverage,
@@ -10239,6 +10404,29 @@ async function runAutoRestoreWindowsCycle(options = {}) {
   }
 }
 
+const PROMPT_SEPARATOR_LINE_REGEX = /\n[ \t]*(?:\u25C4|\u00E2\u2014\u201E)?PROMPT_SEPARATOR(?:\u25BA|\u00E2\u2013\u015F)?[ \t]*\n/g;
+const PROMPT_SEPARATOR_INLINE_REGEX = /(?:\u25C4|\u00E2\u2014\u201E)?PROMPT_SEPARATOR(?:\u25BA|\u00E2\u2013\u015F)?/g;
+
+function parsePromptChainText(rawText) {
+  const normalizedText = typeof rawText === 'string'
+    ? rawText.replace(/\uFEFF/g, '').replace(/\r\n?/g, '\n')
+    : '';
+  if (!normalizedText.trim()) return [];
+
+  const splitAndClean = (text, separatorRegex) => text
+    .split(separatorRegex)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  const lineSeparated = splitAndClean(normalizedText, PROMPT_SEPARATOR_LINE_REGEX);
+  if (lineSeparated.length > 1) return lineSeparated;
+
+  const inlineSeparated = splitAndClean(normalizedText, PROMPT_SEPARATOR_INLINE_REGEX);
+  if (inlineSeparated.length > 1) return inlineSeparated;
+
+  return [normalizedText.trim()];
+}
+
 // Load prompts from txt files.
 async function loadPrompts() {
   try {
@@ -10248,11 +10436,12 @@ async function loadPrompts() {
     const companyResponse = await fetch(companyUrl);
     const companyText = await companyResponse.text();
 
-    // Parse by PROMPT_SEPARATOR token in an encoding-safe way.
-    PROMPTS_COMPANY = companyText
-      .split(/\W+PROMPT_SEPARATOR\W+/)
-      .map((p) => p.trim())
-      .filter((p) => p.length > 0);
+    // Parse in a way that tolerates UTF-8 and mojibake separator variants.
+    PROMPTS_COMPANY = parsePromptChainText(companyText);
+
+    if (PROMPTS_COMPANY.length <= 1 && companyText.includes('PROMPT_SEPARATOR')) {
+      console.warn('[prompts] Separator token found but parsed as a single prompt - verify file encoding.');
+    }
 
     console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}`);
   } catch (error) {
@@ -11240,6 +11429,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             reload_total: 0,
             prompt_blocks: 0,
             response_blocks: 0,
+            missing_replies_detected: 0,
+            data_gaps_detected: 0,
             detected_prompts: 0,
             recognized_saved_stage: 0,
             recognized_chat_detection: 0,
@@ -12516,6 +12707,16 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           ? result.persistedSaveResult
           : null;
         const savedViaInjectedMessage = result?.persistedViaMessage === true && !!injectedSaveResult?.success;
+        const persistedSaveErrorFromInject = typeof result?.persistedSaveError === 'string'
+          ? result.persistedSaveError.trim()
+          : '';
+        if (!savedViaInjectedMessage && persistedSaveErrorFromInject) {
+          console.warn('[copy-flow] [process:save-fallback-background]', {
+            processId,
+            responseId: providedResponseId || '',
+            persistedSaveError: persistedSaveErrorFromInject
+          });
+        }
 
         const saveResult = savedViaInjectedMessage
           ? injectedSaveResult
@@ -12533,8 +12734,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           saveResult,
           saveError: saveResult?.success
             ? ''
-            : (typeof result?.persistedSaveError === 'string' && result.persistedSaveError.trim()
-              ? result.persistedSaveError.trim()
+            : (persistedSaveErrorFromInject
+              ? persistedSaveErrorFromInject
               : 'save_response_failed')
         });
         finalStatusText = persistenceSummary.statusText;
@@ -14269,6 +14470,122 @@ async function injectToChat(
       return `${safeRunId}_${promptPart}_${fp}`;
     }
 
+    function normalizeRuntimeBridgeError(rawError = '') {
+      const normalized = typeof rawError === 'string'
+        ? rawError.trim()
+        : String(rawError ?? '').trim();
+      const lowered = normalized.toLowerCase();
+      if (!lowered) return 'runtime_error';
+      if (lowered === 'runtime_timeout') return 'runtime_timeout';
+      if (lowered === 'runtime_unavailable') return 'runtime_unavailable';
+      if (lowered.includes('extension context invalidated')) return 'runtime_unavailable';
+      if (lowered.includes('receiving end does not exist')) return 'runtime_unavailable';
+      if (lowered.includes('message port closed')) return 'runtime_unavailable';
+      if (lowered.includes('could not establish connection')) return 'runtime_unavailable';
+      if (lowered.includes('runtime.lasterror')) return 'runtime_unavailable';
+      return normalized;
+    }
+
+    async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null) {
+      const normalizedText = typeof responseText === 'string' ? responseText : '';
+      if (!normalizedText.trim()) {
+        return { success: false, reason: 'empty_response' };
+      }
+      if (!chrome?.storage?.local?.get || !chrome?.storage?.local?.set) {
+        return { success: false, reason: 'local_storage_unavailable' };
+      }
+
+      const promptFromStage = Number.isInteger(stageMeta?.selected_response_prompt)
+        ? stageMeta.selected_response_prompt
+        : null;
+      const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
+        ? responseId.trim()
+        : buildInjectedResponseId(normalizedText, promptFromStage);
+      const normalizedRunId = typeof runId === 'string' && runId.trim()
+        ? runId.trim()
+        : '';
+      const timestamp = Date.now();
+      const source = typeof articleTitle === 'string' ? articleTitle : '';
+      const normalizedAnalysisType = typeof analysisType === 'string' ? analysisType : '';
+      const stage = stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
+        ? stageMeta
+        : null;
+      const conversationUrl = typeof location?.href === 'string' ? location.href : '';
+
+      const responseRecord = {
+        text: normalizedText,
+        timestamp,
+        source,
+        analysisType: normalizedAnalysisType,
+        responseId: normalizedResponseId
+      };
+      if (normalizedRunId) {
+        responseRecord.runId = normalizedRunId;
+      }
+      if (stage && Object.keys(stage).length > 0) {
+        responseRecord.stage = stage;
+      }
+      if (conversationUrl) {
+        responseRecord.conversationUrl = conversationUrl;
+      }
+
+      const dispatchPayload = {
+        schema: 'economist.response.v1',
+        responseId: normalizedResponseId,
+        runId: normalizedRunId || null,
+        text: normalizedText,
+        source,
+        analysisType: normalizedAnalysisType,
+        timestamp
+      };
+      if (stage && Object.keys(stage).length > 0) {
+        dispatchPayload.stage = stage;
+      }
+      if (conversationUrl) {
+        dispatchPayload.conversationUrl = conversationUrl;
+      }
+
+      const snapshot = await chrome.storage.local.get(['responses', 'watchlist_dispatch_outbox']);
+      const storedResponses = Array.isArray(snapshot?.responses) ? snapshot.responses : [];
+      const storedOutbox = Array.isArray(snapshot?.watchlist_dispatch_outbox) ? snapshot.watchlist_dispatch_outbox : [];
+
+      let responseStored = false;
+      const nextResponses = storedResponses.slice();
+      const existingResponseIndex = nextResponses.findIndex((item) => item?.responseId === normalizedResponseId);
+      if (existingResponseIndex === -1) {
+        nextResponses.push(responseRecord);
+        responseStored = true;
+      }
+
+      let outboxQueued = false;
+      const nextOutbox = storedOutbox.slice();
+      const outboxExists = nextOutbox.some((item) => item?.payload?.responseId === normalizedResponseId);
+      if (!outboxExists) {
+        nextOutbox.push({
+          payload: dispatchPayload,
+          queuedAt: timestamp,
+          attemptCount: 0,
+          nextAttemptAt: 0,
+          lastError: ''
+        });
+        outboxQueued = true;
+      }
+
+      await chrome.storage.local.set({
+        responses: nextResponses,
+        watchlist_dispatch_outbox: nextOutbox
+      });
+
+      return {
+        success: true,
+        responseId: normalizedResponseId,
+        responseStored,
+        outboxQueued,
+        responseCount: nextResponses.length,
+        queueSize: nextOutbox.length
+      };
+    }
+
     async function sendRuntimeMessageWithTimeout(message, timeoutMs = 15000) {
       if (!chrome?.runtime?.sendMessage) {
         return { ok: false, error: 'runtime_unavailable' };
@@ -14287,7 +14604,7 @@ async function injectToChat(
         }
         return { ok: true, response };
       } catch (error) {
-        return { ok: false, error: error?.message || String(error) };
+        return { ok: false, error: normalizeRuntimeBridgeError(error?.message || String(error)) };
       }
     }
 
@@ -14853,17 +15170,65 @@ async function injectToChat(
 
       const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);
       if (!saveAttempt.ok) {
-        return { ok: false, error: saveAttempt.error || 'save_message_failed' };
+        const normalizedError = normalizeRuntimeBridgeError(saveAttempt.error || 'save_message_failed');
+        let emergencyLocalSave = null;
+        if (normalizedError === 'runtime_unavailable' || normalizedError === 'runtime_timeout') {
+          try {
+            emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
+              normalizedText,
+              responseId,
+              stageMeta
+            );
+          } catch (error) {
+            emergencyLocalSave = {
+              success: false,
+              reason: error?.message || String(error)
+            };
+          }
+        }
+        return {
+          ok: false,
+          error: normalizedError,
+          saveResult: emergencyLocalSave
+            ? {
+              success: false,
+              emergencyLocalSave
+            }
+            : null
+        };
       }
 
       const runtimeResponse = saveAttempt.response && typeof saveAttempt.response === 'object'
         ? saveAttempt.response
         : null;
       if (!runtimeResponse?.success) {
+        const normalizedError = normalizeRuntimeBridgeError(
+          runtimeResponse?.error || 'save_response_failed'
+        );
+        let emergencyLocalSave = null;
+        if (normalizedError === 'runtime_unavailable' || normalizedError === 'runtime_timeout') {
+          try {
+            emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
+              normalizedText,
+              responseId,
+              stageMeta
+            );
+          } catch (error) {
+            emergencyLocalSave = {
+              success: false,
+              reason: error?.message || String(error)
+            };
+          }
+        }
         return {
           ok: false,
-          error: runtimeResponse?.error || 'save_response_failed',
-          saveResult: runtimeResponse?.saveResult || null
+          error: normalizedError,
+          saveResult: emergencyLocalSave
+            ? {
+              success: false,
+              emergencyLocalSave
+            }
+            : (runtimeResponse?.saveResult || null)
         };
       }
 
@@ -17760,60 +18125,99 @@ async function injectToChat(
     }
     
     console.log("✓ Znaleziono edytor");
+    const normalizedPromptText = typeof promptText === 'string'
+      ? promptText.replace(/\r\n?/g, '\n')
+      : '';
+    const editorTagName = String(editor.tagName || '').toLowerCase();
+    const isTextInputEditor = editorTagName === 'textarea' || editorTagName === 'input';
     
     // Focus i wyczyść - ulepszona wersja
     editor.focus();
     await new Promise(resolve => setTimeout(resolve, 300));
-    
-    // Wyczyść zawartość - najpierw spróbuj nowoczesnym API
-    try {
-      // Metoda 1: Selection API (najbardziej niezawodna)
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      selection.removeAllRanges();
-      selection.addRange(range);
-      
-      // Usuń przez KeyboardEvent (symuluje naturalne usuwanie)
-      editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', code: 'Delete', bubbles: true }));
-      document.execCommand('delete', false, null);
-      
-    } catch (e) {
-      console.warn("⚠️ Fallback czyszczenia:", e);
+
+    if (isTextInputEditor) {
+      // ChatGPT często używa textarea sterowanego przez React - użyj natywnego setter-a value.
+      try {
+        const valueDescriptor = editorTagName === 'textarea'
+          ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+          : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+        const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
+          ? valueDescriptor.set
+          : null;
+        if (nativeSetter) {
+          nativeSetter.call(editor, normalizedPromptText);
+        } else {
+          editor.value = normalizedPromptText;
+        }
+      } catch (e) {
+        console.warn("⚠️ Fallback ustawiania value:", e);
+        editor.value = normalizedPromptText;
+      }
+
+      try {
+        if (typeof editor.setSelectionRange === 'function') {
+          const caretPos = normalizedPromptText.length;
+          editor.setSelectionRange(caretPos, caretPos);
+        }
+      } catch (e) {
+        console.warn("⚠️ Nie udało się ustawić kursora:", e);
+      }
+
+      editor.dispatchEvent(new Event('input', { bubbles: true }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+    } else {
+      // Wyczyść zawartość - najpierw spróbuj nowoczesnym API
+      try {
+        // Metoda 1: Selection API (najbardziej niezawodna)
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        selection.removeAllRanges();
+        selection.addRange(range);
+
+        // Usuń przez KeyboardEvent (symuluje naturalne usuwanie)
+        editor.dispatchEvent(new KeyboardEvent('keydown', { key: 'Delete', code: 'Delete', bubbles: true }));
+        document.execCommand('delete', false, null);
+      } catch (e) {
+        console.warn("⚠️ Fallback czyszczenia:", e);
+      }
+
+      editor.innerHTML = '';
+      editor.textContent = '';
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
+      await new Promise(resolve => setTimeout(resolve, 200));
+
+      // Wstaw tekst jako node'y aby zachować nowe linie bez wstrzykiwania HTML.
+      const fragment = document.createDocumentFragment();
+      const lines = normalizedPromptText.split('\n');
+      lines.forEach((line, index) => {
+        if (index > 0) {
+          fragment.appendChild(document.createElement('br'));
+        }
+        fragment.appendChild(document.createTextNode(line));
+      });
+      editor.appendChild(fragment);
+
+      // Przesuń kursor na koniec
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editor);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch (e) {
+        console.warn("⚠️ Nie udało się przesunąć kursora:", e);
+      }
+
+      // Triggeruj więcej eventów dla pewności
+      editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText' }));
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
     }
-    
-    // Wymuś czyszczenie przez innerHTML i textContent
-    editor.innerHTML = '';
-    editor.textContent = '';
-    
-    // Triggeruj event czyszczenia
-    editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContent' }));
-    
-    await new Promise(resolve => setTimeout(resolve, 300));
-    
-    // Wstaw tekst - ulepszona wersja z zachowaniem formatowania
-    // Użyj innerHTML zamiast createTextNode aby zachować HTML i nowe linie
-    editor.innerHTML = promptText.replace(/\n/g, '<br>');
-    
-    // Przesuń kursor na koniec
-    try {
-      const selection = window.getSelection();
-      const range = document.createRange();
-      range.selectNodeContents(editor);
-      range.collapse(false);
-      selection.removeAllRanges();
-      selection.addRange(range);
-    } catch (e) {
-      console.warn("⚠️ Nie udało się przesunąć kursora:", e);
-    }
-    
-    // Triggeruj więcej eventów dla pewności
-    editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText' }));
-    editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-    editor.dispatchEvent(new Event('change', { bubbles: true }));
-    editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
-    
-    console.log(`✓ Tekst wstawiony (${promptText.length} znaków): "${promptText.substring(0, 50)}..."`);
+
+    console.log(`✓ Tekst wstawiony (${normalizedPromptText.length} znaków): "${normalizedPromptText.substring(0, 50)}..."`);
     
     // Czekaj aż przycisk Send będzie enabled - zwiększony timeout
     let submitButton = null;
@@ -17902,7 +18306,7 @@ async function injectToChat(
         const lastUserMessage = userMessages[userMessages.length - 1];
         const messageText = lastUserMessage.textContent || lastUserMessage.innerText || '';
         // Sprawdź czy ostatnia wiadomość użytkownika zawiera fragment naszego prompta
-        const promptFragment = promptText.substring(0, 50);
+        const promptFragment = normalizedPromptText.substring(0, 50);
         if (messageText.includes(promptFragment)) {
           messageInDOM = true;
           console.log(`✅ Znaleziono naszą wiadomość w DOM (${messageText.length} znaków)`);
@@ -18592,9 +18996,15 @@ async function injectToChat(
             persistedSaveResult = tabSaveResult.saveResult && typeof tabSaveResult.saveResult === 'object'
               ? tabSaveResult.saveResult
               : null;
+            const emergencyLocalSave = persistedSaveResult?.emergencyLocalSave && typeof persistedSaveResult.emergencyLocalSave === 'object'
+              ? persistedSaveResult.emergencyLocalSave
+              : null;
             console.warn(
-              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}`
+              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}${emergencyLocalSave ? ` emergencyLocal=${emergencyLocalSave.success === true ? 'ok' : 'failed'}` : ''}`
             );
+            if (emergencyLocalSave) {
+              console.warn('[copy-flow] [capture:tab-save:emergency-local]', emergencyLocalSave);
+            }
           }
         }
         notifyProcess('PROCESS_PROGRESS', {

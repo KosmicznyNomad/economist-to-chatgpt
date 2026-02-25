@@ -97,6 +97,23 @@ function isPendingRow(row) {
   );
 }
 
+function hasDataGapMarker(value) {
+  if (typeof value !== 'string' || !value.trim()) return false;
+  return /\bdata[_\s-]?gaps?\b/i.test(value);
+}
+
+function isDataGapRow(row) {
+  if (!row || typeof row !== 'object') return false;
+  if (row?.dataGapDetected === true) return true;
+  return [
+    row?.reason,
+    row?.restartDecisionReason,
+    row?.recognitionSummary,
+    row?.resumeDecisionSource,
+    row?.recognitionSource
+  ].some((value) => hasDataGapMarker(value));
+}
+
 function formatPromptInfo(promptNumber, totalPrompts, stageName) {
   if (!Number.isInteger(promptNumber) || promptNumber <= 0) return '-';
   const total = Number.isInteger(totalPrompts) && totalPrompts > 0 ? `/${totalPrompts}` : '';
@@ -203,6 +220,12 @@ function renderSummaryMeta(state) {
     || row?.action === 'reload_failed'
     || row?.action === 'start_failed'
   )).length;
+  const missingRepliesDetected = Number.isInteger(summary.missing_replies_detected)
+    ? summary.missing_replies_detected
+    : rows.filter((row) => row?.restartMissingAssistantReply === true).length;
+  const dataGapsDetected = Number.isInteger(summary.data_gaps_detected)
+    ? summary.data_gaps_detected
+    : rows.filter((row) => isDataGapRow(row)).length;
   const requested = Number.isInteger(state?.counts?.requestedProcesses)
     ? state.counts.requestedProcesses
     : rows.length;
@@ -214,7 +237,7 @@ function renderSummaryMeta(state) {
     `Strony: requested=${requested}, eligible=${eligible}`,
     `Wznowione: ${resumed}, pending: ${pending}, bledy: ${failed}`,
     `Summary: started=${summary.started || 0}, detect_failed=${summary.detect_failed || 0}, reload_failed=${summary.reload_failed || 0}, final=${summary.final_stage_completed || 0}, start_failed=${summary.start_failed || 0}`,
-    `Liczniki: reload_ok=${summary.reload_ok || 0}/${summary.reload_total || 0}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, detected_prompts=${summary.detected_prompts || 0}`,
+    `Liczniki: reload_ok=${summary.reload_ok || 0}/${summary.reload_total || 0}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, missing_reply=${missingRepliesDetected}, data_gaps=${dataGapsDetected}, detected_prompts=${summary.detected_prompts || 0}`,
     `Rozpoznanie: saved=${summary.recognized_saved_stage || 0}, chat=${summary.recognized_chat_detection || 0}, counter_fb=${summary.recognized_chat_counter_fallback || 0}, progress_fb=${summary.recognized_progress_last_resort || 0}, unresolved=${summary.recognized_unresolved || 0}`,
     'Pipeline: saved_stage -> chat_extract -> chat_direct_signature -> chat_recent_history -> chat_resolution -> decision -> fallback_* -> start_dispatch'
   ].join('\n');
@@ -281,7 +304,7 @@ function renderRows(state) {
   rowsBody.innerHTML = '';
   const rows = Array.isArray(state?.rows) ? state.rows : [];
   if (rows.length === 0) {
-    rowsBody.appendChild(createPlaceholderRow(12, 'Czekam na dane sesji...'));
+    rowsBody.appendChild(createPlaceholderRow(13, 'Czekam na dane sesji...'));
     return;
   }
 
@@ -327,6 +350,17 @@ function renderRows(state) {
     const missingReply = item?.restartMissingAssistantReply === true
       ? 'TAK'
       : (item?.restartMissingAssistantReply === false ? 'NIE' : '-');
+    const dataGapDetected = isDataGapRow(item);
+    const dataGapSignal = typeof item?.dataGapSignal === 'string' && item.dataGapSignal.trim()
+      ? item.dataGapSignal.trim()
+      : '';
+    const dataGapMissingInputs = toCompactRecognitionText(
+      typeof item?.dataGapMissingInputs === 'string' ? item.dataGapMissingInputs : '',
+      70
+    );
+    const dataGapLabel = dataGapDetected
+      ? `TAK${dataGapSignal ? ` (${dataGapSignal})` : ''}${dataGapMissingInputs ? ` [${dataGapMissingInputs}]` : ''}`
+      : 'NIE';
     const recognitionSource = formatRecognitionSource(item);
     const recognitionPipeline = formatRecognitionPipeline(item);
     const reloadMethod = typeof item?.reloadMethod === 'string' && item.reloadMethod.trim()
@@ -358,6 +392,7 @@ function renderRows(state) {
       recognitionPipeline,
       startFrom,
       missingReply,
+      dataGapLabel,
       reloadMethod,
       action,
       resumeState.label,
@@ -371,8 +406,11 @@ function renderRows(state) {
         if (item?.restartMissingAssistantReply === true) cell.className = 'status-warn';
         if (item?.restartMissingAssistantReply === false) cell.className = 'status-ok';
       }
-      if (cellIndex === 9 && actionClass) cell.className = actionClass;
-      if (cellIndex === 10 && resumeState.className) cell.className = resumeState.className;
+      if (cellIndex === 8) {
+        cell.className = dataGapDetected ? 'status-warn' : 'status-ok';
+      }
+      if (cellIndex === 10 && actionClass) cell.className = actionClass;
+      if (cellIndex === 11 && resumeState.className) cell.className = resumeState.className;
       row.appendChild(cell);
     });
 
