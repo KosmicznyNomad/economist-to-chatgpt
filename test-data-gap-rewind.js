@@ -1,0 +1,381 @@
+#!/usr/bin/env node
+'use strict';
+
+const fs = require('fs');
+const path = require('path');
+const assert = require('assert');
+
+const PROMPTS_PATH = path.join(__dirname, 'prompts-company.txt');
+const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i;
+const MAX_REPLAYS_PER_STAGE = 2;
+
+const STAGE_TO_PROMPT_INDEX = new Map([
+  ['1', 2],
+  ['2', 3],
+  ['2.5', 4],
+  ['3', 5],
+  ['4', 6],
+  ['5', 7],
+  ['6', 8],
+  ['7', 9],
+  ['8', 10],
+  ['9', 11]
+]);
+
+function normalizeStageId(value) {
+  const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  if (!raw) return '';
+  const match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+  if (!match) return '';
+  const whole = String(Number.parseInt(match[1], 10));
+  const fractionRaw = typeof match[2] === 'string' ? match[2] : '';
+  if (!fractionRaw) return whole;
+  const fraction = fractionRaw.replace(/0+$/, '');
+  return fraction ? `${whole}.${fraction}` : whole;
+}
+
+function parseDirective(responseText) {
+  if (typeof responseText !== 'string') return null;
+  const lines = responseText
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length !== 1) return null;
+  const match = lines[0].match(DATA_GAP_DIRECTIVE_REGEX);
+  if (!match) return null;
+  const stageId = normalizeStageId(match[1]);
+  if (!stageId) return null;
+  return { stageId, rawLine: lines[0] };
+}
+
+function normalizePromptText(text) {
+  return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function findMatchingPromptIndexByText(chain, promptText, fromIndex = 0) {
+  const target = normalizePromptText(promptText);
+  if (!target) return -1;
+  for (let idx = Math.max(0, fromIndex); idx < chain.length; idx += 1) {
+    if (normalizePromptText(chain[idx]) === target) return idx;
+  }
+  return -1;
+}
+
+function findPromptNumberByTextInCanonicalPrompts(prompts, promptText) {
+  if (!Array.isArray(prompts) || prompts.length === 0) return null;
+  const target = normalizePromptText(promptText);
+  if (!target) return null;
+  for (let idx = 0; idx < prompts.length; idx += 1) {
+    if (normalizePromptText(prompts[idx]) === target) {
+      return idx + 1;
+    }
+  }
+  return null;
+}
+
+function queueMissingPromptForDataGap({
+  stageId,
+  currentPromptText,
+  localPromptIndex,
+  promptChain,
+  canonicalPrompts,
+  promptByStageId,
+  replayCounts
+}) {
+  const normalizedStageId = normalizeStageId(stageId);
+  if (!normalizedStageId) return { inserted: false, error: 'invalid_stage_id' };
+
+  const replayCount = (replayCounts.get(normalizedStageId) || 0) + 1;
+  replayCounts.set(normalizedStageId, replayCount);
+  if (replayCount > MAX_REPLAYS_PER_STAGE) {
+    return { inserted: false, error: 'data_gap_replay_limit', stageId: normalizedStageId, replayCount };
+  }
+
+  const fromIndex = Math.max(0, localPromptIndex + 1);
+  const missingPromptText = promptByStageId.get(normalizedStageId);
+  if (!missingPromptText) {
+    return { inserted: false, error: 'missing_prompt_for_stage', stageId: normalizedStageId, replayCount };
+  }
+  const missingPromptNumber = findPromptNumberByTextInCanonicalPrompts(canonicalPrompts, missingPromptText);
+  const currentPromptNumber = findPromptNumberByTextInCanonicalPrompts(canonicalPrompts, currentPromptText);
+
+  const currentNormalized = normalizePromptText(currentPromptText);
+  const missingNormalized = normalizePromptText(missingPromptText);
+  if (!missingNormalized) {
+    return { inserted: false, error: 'data_gap_self_reference', stageId: normalizedStageId, replayCount };
+  }
+  if (missingNormalized === currentNormalized) {
+    const selfReferenceReplayStart = Number.isInteger(missingPromptNumber) && missingPromptNumber > 1
+      ? missingPromptNumber - 1
+      : (Number.isInteger(currentPromptNumber) && currentPromptNumber > 1 ? currentPromptNumber - 1 : null);
+    const canRecoverSelfReference = (
+      Array.isArray(canonicalPrompts)
+      && Number.isInteger(selfReferenceReplayStart)
+      && Number.isInteger(currentPromptNumber)
+      && selfReferenceReplayStart > 0
+      && currentPromptNumber > 0
+      && selfReferenceReplayStart <= currentPromptNumber
+    );
+    if (canRecoverSelfReference) {
+      const replayRange = canonicalPrompts
+        .slice(selfReferenceReplayStart - 1, currentPromptNumber)
+        .map((item) => (typeof item === 'string' ? item.trim() : ''))
+        .filter((item) => item.length > 0);
+      if (replayRange.length > 0) {
+        promptChain.splice(fromIndex, 0, ...replayRange);
+        return {
+          inserted: true,
+          stageId: normalizedStageId,
+          replayCount,
+          mode: 'self_reference_replay'
+        };
+      }
+    }
+    return { inserted: false, error: 'data_gap_self_reference', stageId: normalizedStageId, replayCount };
+  }
+
+  const canReplayRange = (
+    Array.isArray(canonicalPrompts)
+    && Number.isInteger(missingPromptNumber)
+    && Number.isInteger(currentPromptNumber)
+    && missingPromptNumber > 0
+    && currentPromptNumber > 0
+    && missingPromptNumber < currentPromptNumber
+  );
+  if (canReplayRange) {
+    const replayRange = canonicalPrompts
+      .slice(missingPromptNumber - 1, currentPromptNumber)
+      .map((item) => (typeof item === 'string' ? item.trim() : ''))
+      .filter((item) => item.length > 0);
+    if (replayRange.length > 0) {
+      promptChain.splice(fromIndex, 0, ...replayRange);
+      return {
+        inserted: true,
+        stageId: normalizedStageId,
+        replayCount,
+        mode: 'inserted_replay_range'
+      };
+    }
+  }
+
+  const existingIndex = findMatchingPromptIndexByText(promptChain, missingPromptText, fromIndex);
+  let mode = 'inserted_new';
+  if (existingIndex === fromIndex) {
+    promptChain.splice(fromIndex + 1, 0, currentPromptText);
+    mode = 'reuse_next';
+  } else if (existingIndex > fromIndex) {
+    const [movedPrompt] = promptChain.splice(existingIndex, 1);
+    promptChain.splice(fromIndex, 0, movedPrompt, currentPromptText);
+    mode = 'moved_existing';
+  } else {
+    promptChain.splice(fromIndex, 0, missingPromptText, currentPromptText);
+  }
+
+  return { inserted: true, stageId: normalizedStageId, replayCount, mode };
+}
+
+function loadPromptByStage() {
+  const promptsText = fs.readFileSync(PROMPTS_PATH, 'utf8');
+  const prompts = promptsText
+    .split(/\W+PROMPT_SEPARATOR\W+/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  const promptByStageId = new Map();
+  for (const [stageId, index] of STAGE_TO_PROMPT_INDEX.entries()) {
+    if (Number.isInteger(index) && index >= 0 && index < prompts.length) {
+      promptByStageId.set(stageId, prompts[index]);
+    }
+  }
+  return { prompts, promptByStageId };
+}
+
+function run() {
+  const { prompts, promptByStageId } = loadPromptByStage();
+  assert(prompts.length >= 12, 'prompts-company.txt should contain full prompt chain');
+  assert(promptByStageId.has('2') && promptByStageId.has('3'), 'stage prompts 2 and 3 must be present');
+
+  // Test 1: parser should accept only strict one-line DATA_GAP directive.
+  assert.strictEqual(parseDirective('DATA_GAP_STAGE=2.5').stageId, '2.5');
+  assert.strictEqual(parseDirective('  DATA_GAP_STAGE = 7  ').stageId, '7');
+  assert.strictEqual(parseDirective('DATA_GAP_STAGE=2\nextra'), null);
+  assert.strictEqual(parseDirective('SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN'), null);
+
+  // Test 2: stage sequence should rollback exactly as requested: 3 -> 2 -> 3 -> next.
+  const promptChain = prompts.slice(2); // starts from stage 1 prompt in this project
+  const replayCounts = new Map();
+  const stageByPrompt = new Map();
+  for (const [stageId, promptText] of promptByStageId.entries()) {
+    stageByPrompt.set(normalizePromptText(promptText), stageId);
+  }
+
+  const executed = [];
+  let injected = false;
+  for (let i = 0; i < promptChain.length; i += 1) {
+    const stageId = stageByPrompt.get(normalizePromptText(promptChain[i])) || '?';
+    executed.push(stageId);
+
+    if (!injected && stageId === '3') {
+      const directive = parseDirective('DATA_GAP_STAGE=2');
+      const queueResult = queueMissingPromptForDataGap({
+        stageId: directive.stageId,
+        currentPromptText: promptChain[i],
+        localPromptIndex: i,
+        promptChain,
+        canonicalPrompts: prompts,
+        promptByStageId,
+        replayCounts
+      });
+      assert.strictEqual(queueResult.inserted, true, 'queue insertion should succeed');
+      injected = true;
+      continue;
+    }
+  }
+
+  const expected = ['1', '2', '2.5', '3', '2', '2.5', '3', '4', '5', '6', '7', '8', '9'];
+  assert.deepStrictEqual(executed, expected);
+
+  // Test 2b: if missing stage is far earlier (e.g. at stage 7), replay must start
+  // from missing stage and continue sequentially up to current stage.
+  const promptChainFar = prompts.slice(2);
+  const executedFar = [];
+  let injectedFar = false;
+  for (let i = 0; i < promptChainFar.length; i += 1) {
+    const stageId = stageByPrompt.get(normalizePromptText(promptChainFar[i])) || '?';
+    executedFar.push(stageId);
+
+    if (!injectedFar && stageId === '7') {
+      const queueResult = queueMissingPromptForDataGap({
+        stageId: '2',
+        currentPromptText: promptChainFar[i],
+        localPromptIndex: i,
+        promptChain: promptChainFar,
+        canonicalPrompts: prompts,
+        promptByStageId,
+        replayCounts: new Map()
+      });
+      assert.strictEqual(queueResult.inserted, true);
+      injectedFar = true;
+      continue;
+    }
+  }
+  const expectedFar = [
+    '1', '2', '2.5', '3', '4', '5', '6', '7',
+    '2', '2.5', '3', '4', '5', '6', '7', '8', '9'
+  ];
+  assert.deepStrictEqual(executedFar, expectedFar);
+
+  // Test 2d: self-reference directive (missing stage == current stage) should
+  // recover by rewinding one prompt and replaying up to current stage.
+  const promptChainSelf = prompts.slice(2);
+  const executedSelf = [];
+  let injectedSelf = false;
+  for (let i = 0; i < promptChainSelf.length; i += 1) {
+    const stageId = stageByPrompt.get(normalizePromptText(promptChainSelf[i])) || '?';
+    executedSelf.push(stageId);
+    if (!injectedSelf && stageId === '3') {
+      const queueResult = queueMissingPromptForDataGap({
+        stageId: '3',
+        currentPromptText: promptChainSelf[i],
+        localPromptIndex: i,
+        promptChain: promptChainSelf,
+        canonicalPrompts: prompts,
+        promptByStageId,
+        replayCounts: new Map()
+      });
+      assert.strictEqual(queueResult.inserted, true);
+      assert.strictEqual(queueResult.mode, 'self_reference_replay');
+      injectedSelf = true;
+      continue;
+    }
+  }
+  const expectedSelf = [
+    '1', '2', '2.5', '3',
+    '2.5', '3',
+    '4', '5', '6', '7', '8', '9'
+  ];
+  assert.deepStrictEqual(executedSelf, expectedSelf);
+
+  // Test 2c: generic rollback rule for many stage pairs.
+  // For each current stage C and missing stage M where M < C (by prompt number),
+  // expect replay sequence M..C inserted right after C.
+  const orderedStages = ['1', '2', '2.5', '3', '4', '5', '6', '7', '8', '9'];
+  const orderedByPromptNumber = orderedStages
+    .map((stageId) => ({
+      stageId,
+      promptNumber: findPromptNumberByTextInCanonicalPrompts(prompts, promptByStageId.get(stageId))
+    }))
+    .filter((item) => Number.isInteger(item.promptNumber))
+    .sort((a, b) => a.promptNumber - b.promptNumber);
+  const stagesByPromptNumber = orderedByPromptNumber.map((item) => item.stageId);
+  for (let c = 1; c < stagesByPromptNumber.length; c += 1) {
+    const currentStage = stagesByPromptNumber[c];
+    for (let m = 0; m < c; m += 1) {
+      const missingStage = stagesByPromptNumber[m];
+      const chain = prompts.slice(2);
+      const trace = [];
+      let injectedPair = false;
+      for (let i = 0; i < chain.length; i += 1) {
+        const stageId = stageByPrompt.get(normalizePromptText(chain[i])) || '?';
+        trace.push(stageId);
+        if (!injectedPair && stageId === currentStage) {
+          const queueResult = queueMissingPromptForDataGap({
+            stageId: missingStage,
+            currentPromptText: chain[i],
+            localPromptIndex: i,
+            promptChain: chain,
+            canonicalPrompts: prompts,
+            promptByStageId,
+            replayCounts: new Map()
+          });
+          assert.strictEqual(queueResult.inserted, true);
+          injectedPair = true;
+          continue;
+        }
+      }
+      const currentIdx = trace.indexOf(currentStage);
+      assert(currentIdx >= 0, `current stage ${currentStage} should exist in trace`);
+      const replaySlice = trace.slice(currentIdx + 1, currentIdx + 1 + (c - m + 1));
+      const expectedSlice = stagesByPromptNumber.slice(m, c + 1);
+      assert.deepStrictEqual(
+        replaySlice,
+        expectedSlice,
+        `expected replay ${expectedSlice.join('->')} for current=${currentStage}, missing=${missingStage}, got=${replaySlice.join('->')}`
+      );
+    }
+  }
+
+  // Test 3: replay guard should stop infinite loops after max retries for the same stage id.
+  const replayGuardChain = [
+    promptByStageId.get('1'),
+    promptByStageId.get('2'),
+    promptByStageId.get('2.5'),
+    promptByStageId.get('3'),
+    promptByStageId.get('4')
+  ];
+  const replayGuardCounts = new Map();
+  let replayLimitHit = false;
+  for (let i = 0; i < replayGuardChain.length; i += 1) {
+    const stageId = stageByPrompt.get(normalizePromptText(replayGuardChain[i])) || '?';
+    if (stageId !== '3') continue;
+    const queueResult = queueMissingPromptForDataGap({
+      stageId: '2',
+      currentPromptText: replayGuardChain[i],
+      localPromptIndex: i,
+      promptChain: replayGuardChain,
+      canonicalPrompts: prompts,
+      promptByStageId,
+      replayCounts: replayGuardCounts
+    });
+    if (!queueResult.inserted) {
+      replayLimitHit = queueResult.error === 'data_gap_replay_limit';
+      break;
+    }
+  }
+  assert.strictEqual(replayLimitHit, true, 'replay guard should trigger after repeated unresolved gaps');
+
+  console.log('PASS test-data-gap-rewind');
+  console.log(`Executed rollback sequence: ${executed.join(' -> ')}`);
+}
+
+run();

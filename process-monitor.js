@@ -18,6 +18,12 @@ const processCardMap = new Map();
 const processSeenAt = new Map();
 let stageNamesCompany = [];
 let stageNamesLoaded = false;
+const processConversationAuditCache = new Map();
+const processConversationAuditInFlight = new Map();
+const processCompanySnapshotCache = new Map();
+const processCompanySnapshotInFlight = new Map();
+const PROCESS_AUDIT_CACHE_TTL_MS = 45_000;
+const PROCESS_COMPANY_SNAPSHOT_TTL_MS = 60_000;
 
 console.log('[panel] Monitor procesow uruchomiony');
 
@@ -110,6 +116,21 @@ const persistenceErrorLabels = {
   empty_response: 'pusta odpowiedz'
 };
 const RESPONSE_STORAGE_KEY = 'responses';
+
+function sendRuntimeMessage(payload) {
+  return new Promise((resolve) => {
+    chrome.runtime.sendMessage(payload, (response) => {
+      if (chrome.runtime.lastError) {
+        resolve({
+          success: false,
+          error: chrome.runtime.lastError.message || 'runtime_error'
+        });
+        return;
+      }
+      resolve(response && typeof response === 'object' ? response : {});
+    });
+  });
+}
 
 function normalizeCodeToken(value) {
   return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -227,12 +248,265 @@ function getPersistenceLogLines(process, maxLines = 4) {
   return lines.slice(0, normalizedMaxLines);
 }
 
+function parseDispatchCountFromSummary(summaryText, key) {
+  if (typeof summaryText !== 'string' || !summaryText.trim() || typeof key !== 'string' || !key.trim()) {
+    return null;
+  }
+  const pattern = new RegExp(`\\b${key}\\s*=\\s*(\\d+)\\b`, 'i');
+  const match = summaryText.match(pattern);
+  if (!match) return null;
+  const value = Number.parseInt(match[1], 10);
+  return Number.isInteger(value) && value >= 0 ? value : null;
+}
+
+function resolveProcessDatabaseDelivery(process) {
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  const dispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
+    ? persistenceStatus.dispatch
+    : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
+      ? process.completedResponseDispatch
+      : null);
+  const summaryText = [
+    typeof persistenceStatus?.dispatchSummary === 'string' ? persistenceStatus.dispatchSummary : '',
+    typeof finalStagePersistence?.dispatchSummary === 'string' ? finalStagePersistence.dispatchSummary : '',
+    typeof process?.completedResponseDispatchSummary === 'string' ? process.completedResponseDispatchSummary : ''
+  ].find((item) => typeof item === 'string' && item.trim()) || '';
+
+  let sent = Number.isInteger(dispatch?.sent) ? dispatch.sent : null;
+  let failed = Number.isInteger(dispatch?.failed) ? dispatch.failed : null;
+  let deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : null;
+  let remaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : null;
+
+  if (sent === null) sent = parseDispatchCountFromSummary(summaryText, 'sent');
+  if (failed === null) failed = parseDispatchCountFromSummary(summaryText, 'failed');
+  if (deferred === null) deferred = parseDispatchCountFromSummary(summaryText, 'deferred');
+  if (remaining === null) remaining = parseDispatchCountFromSummary(summaryText, 'remaining');
+
+  const hasNumericDispatch = sent !== null || failed !== null || deferred !== null || remaining !== null;
+  const safeSent = sent ?? 0;
+  const safeFailed = failed ?? 0;
+  const safeDeferred = deferred ?? 0;
+  const safeRemaining = remaining ?? 0;
+  const pending = safeDeferred + safeRemaining;
+
+  let saveOk = null;
+  if (typeof persistenceStatus?.saveOk === 'boolean') {
+    saveOk = persistenceStatus.saveOk;
+  } else if (typeof process?.completedResponseSaved === 'boolean') {
+    saveOk = process.completedResponseSaved;
+  } else if (typeof finalStagePersistence?.success === 'boolean') {
+    saveOk = finalStagePersistence.success;
+  }
+
+  return {
+    saveOk,
+    sent: safeSent,
+    failed: safeFailed,
+    deferred: safeDeferred,
+    remaining: safeRemaining,
+    pending,
+    hasNumericDispatch,
+    queueSkipped: dispatch?.queueSkipped === true || finalStagePersistence?.queueSkipped === true,
+    summaryText: typeof summaryText === 'string' ? summaryText.trim() : ''
+  };
+}
+
+function getDatabaseBadgeModel(process) {
+  const delivery = resolveProcessDatabaseDelivery(process);
+  const hasSignal = delivery.saveOk !== null || delivery.hasNumericDispatch || !!delivery.summaryText;
+  if (!hasSignal) {
+    return {
+      visible: false,
+      text: '',
+      className: 'db-badge db-info',
+      detailText: ''
+    };
+  }
+
+  if (delivery.saveOk === false) {
+    const failedChunk = delivery.hasNumericDispatch ? `, blad=${delivery.failed}` : '';
+    return {
+      visible: true,
+      text: `Baza: BLAD${failedChunk}`,
+      className: 'db-badge db-error',
+      detailText: `Baza danych: BLAD zapisu${failedChunk}`
+    };
+  }
+
+  if (delivery.saveOk === true) {
+    if (delivery.hasNumericDispatch) {
+      const parts = [`Baza: ${delivery.sent} OK`];
+      if (delivery.pending > 0) parts.push(`pending=${delivery.pending}`);
+      if (delivery.failed > 0) parts.push(`blad=${delivery.failed}`);
+      const severityClass = delivery.failed > 0
+        ? (delivery.sent > 0 ? 'db-warning' : 'db-error')
+        : (delivery.pending > 0 || delivery.queueSkipped ? 'db-warning' : 'db-success');
+      return {
+        visible: true,
+        text: parts.join(', '),
+        className: `db-badge ${severityClass}`,
+        detailText: `Baza danych: wyslano=${delivery.sent}, pending=${delivery.pending}, bledy=${delivery.failed}`
+      };
+    }
+    return {
+      visible: true,
+      text: 'Baza: OK',
+      className: 'db-badge db-success',
+      detailText: 'Baza danych: zapis OK'
+    };
+  }
+
+  if (delivery.hasNumericDispatch) {
+    return {
+      visible: true,
+      text: `Baza: sent=${delivery.sent}, pending=${delivery.pending}, blad=${delivery.failed}`,
+      className: 'db-badge db-info',
+      detailText: `Baza danych: sent=${delivery.sent}, pending=${delivery.pending}, bledy=${delivery.failed}`
+    };
+  }
+
+  return {
+    visible: true,
+    text: 'Baza: status nieznany',
+    className: 'db-badge db-info',
+    detailText: delivery.summaryText ? `Baza danych: ${delivery.summaryText}` : 'Baza danych: status nieznany'
+  };
+}
+
 function getNormalizedStatus(process) {
   if (!process || typeof process.status !== 'string') return '';
   return process.status.trim().toLowerCase();
 }
 
+function normalizePromptNumberList(values) {
+  if (!Array.isArray(values)) return [];
+  const unique = new Set();
+  values.forEach((value) => {
+    const asNumber = Number.parseInt(String(value || '').trim(), 10);
+    if (Number.isInteger(asNumber) && asNumber > 0) {
+      unique.add(asNumber);
+    }
+  });
+  return Array.from(unique).sort((left, right) => left - right);
+}
+
+function normalizeCompanyConversationAudit(rawAudit) {
+  if (!rawAudit || typeof rawAudit !== 'object' || rawAudit.success !== true) {
+    return null;
+  }
+  const totals = rawAudit?.totals && typeof rawAudit.totals === 'object'
+    ? rawAudit.totals
+    : {};
+  const verification = rawAudit?.verification && typeof rawAudit.verification === 'object'
+    ? rawAudit.verification
+    : {};
+  const stageMappingCheck = rawAudit?.stageMappingCheck && typeof rawAudit.stageMappingCheck === 'object'
+    ? rawAudit.stageMappingCheck
+    : {};
+
+  const promptCatalogCount = Number.isInteger(rawAudit?.promptCatalogCount)
+    ? rawAudit.promptCatalogCount
+    : 0;
+  const matchedPromptMessages = Number.isInteger(totals?.matchedPromptMessages)
+    ? totals.matchedPromptMessages
+    : 0;
+  const recognizedUniquePrompts = Number.isInteger(totals?.recognizedUniquePrompts)
+    ? totals.recognizedUniquePrompts
+    : 0;
+  const missingReplyPromptNumbers = normalizePromptNumberList(rawAudit?.missingReplyPromptNumbers);
+  const lowQualityReplyPromptNumbers = normalizePromptNumberList(rawAudit?.lowQualityReplyPromptNumbers);
+  const missingPromptNumbers = normalizePromptNumberList(rawAudit?.missingPromptNumbers);
+  const processIssueFlags = Array.isArray(rawAudit?.processIssueFlags)
+    ? rawAudit.processIssueFlags.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+
+  const promptRepliesMissing = Number.isInteger(totals?.promptRepliesMissing)
+    ? totals.promptRepliesMissing
+    : missingReplyPromptNumbers.length;
+  const promptRepliesBelowThreshold = Number.isInteger(totals?.promptRepliesBelowThreshold)
+    ? totals.promptRepliesBelowThreshold
+    : lowQualityReplyPromptNumbers.length;
+
+  const dataGapStopDetected = rawAudit?.dataGapStopDetected === true
+    || verification?.dataGapStopDetected === true
+    || processIssueFlags.includes('data_gap_stop');
+  const dataGapMissingInputsList = Array.isArray(rawAudit?.dataGapMissingInputsList)
+    ? rawAudit.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+  const dataGapMissingInputsText = typeof rawAudit?.dataGapMissingInputs === 'string'
+    ? rawAudit.dataGapMissingInputs.trim()
+    : '';
+
+  return {
+    success: true,
+    fetchedAt: Date.now(),
+    tabId: Number.isInteger(rawAudit?.tabId) ? rawAudit.tabId : null,
+    processState: typeof rawAudit?.processState === 'string' ? rawAudit.processState.trim() : '',
+    promptCatalogCount,
+    matchedPromptMessages,
+    recognizedUniquePrompts,
+    promptRepliesMissing,
+    promptRepliesBelowThreshold,
+    missingReplyPromptNumbers,
+    lowQualityReplyPromptNumbers,
+    missingPromptNumbers,
+    dataGapStopDetected,
+    dataGapMissingInputsList,
+    dataGapMissingInputsText,
+    processIssueFlags,
+    stageMappingCheck: {
+      promptCount: Number.isInteger(stageMappingCheck?.promptCount) ? stageMappingCheck.promptCount : promptCatalogCount,
+      stageNameCount: Number.isInteger(stageMappingCheck?.stageNameCount) ? stageMappingCheck.stageNameCount : 0,
+      alignedByCount: stageMappingCheck?.alignedByCount === true,
+      missingStageNames: normalizePromptNumberList(stageMappingCheck?.missingStageNames)
+    }
+  };
+}
+
+function getProcessAuditCacheEntry(process) {
+  if (!process || !process.id) return null;
+  return processConversationAuditCache.get(String(process.id)) || null;
+}
+
+function getCachedProcessAudit(process) {
+  const entry = getProcessAuditCacheEntry(process);
+  if (!entry || !entry.audit) return null;
+  const ageMs = Date.now() - (Number.isInteger(entry.fetchedAt) ? entry.fetchedAt : 0);
+  if (ageMs > PROCESS_AUDIT_CACHE_TTL_MS) return null;
+
+  const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  if (Number.isInteger(entry.tabId) && Number.isInteger(processTabId) && entry.tabId !== processTabId) {
+    return null;
+  }
+  return entry.audit;
+}
+
+function setProcessAuditCache(process, audit) {
+  if (!process || !process.id || !audit) return;
+  processConversationAuditCache.set(String(process.id), {
+    audit,
+    fetchedAt: Number.isInteger(audit?.fetchedAt) ? audit.fetchedAt : Date.now(),
+    tabId: Number.isInteger(audit?.tabId) ? audit.tabId : (Number.isInteger(process?.tabId) ? process.tabId : null)
+  });
+}
+
+function getProcessSignalFromAudit(process) {
+  const audit = getCachedProcessAudit(process);
+  if (!audit) return null;
+  return {
+    hasDataGap: audit.dataGapStopDetected === true,
+    hasMissingReply: (audit.promptRepliesMissing || 0) > 0 || audit.missingReplyPromptNumbers.length > 0
+  };
+}
+
 function isDataGapProcess(process) {
+  const auditSignal = getProcessSignalFromAudit(process);
+  if (auditSignal) return auditSignal.hasDataGap;
   if (!process || typeof process !== 'object') return false;
   const marker = [
     typeof process?.reason === 'string' ? process.reason : '',
@@ -243,6 +517,8 @@ function isDataGapProcess(process) {
 }
 
 function isMissingReplyProcess(process) {
+  const auditSignal = getProcessSignalFromAudit(process);
+  if (auditSignal) return auditSignal.hasMissingReply;
   if (!process || typeof process !== 'object') return false;
   const marker = [
     typeof process?.reason === 'string' ? process.reason : '',
@@ -460,6 +736,222 @@ async function readResponsesFromStorage() {
   }
 
   return [];
+}
+
+function formatPromptList(values) {
+  const list = normalizePromptNumberList(values);
+  if (list.length === 0) return '-';
+  return list.map((value) => `P${value}`).join(', ');
+}
+
+function parseDecisionRecordLine(text) {
+  const raw = typeof text === 'string' ? text.trim() : '';
+  if (!raw) return null;
+  const parts = raw
+    .split(';')
+    .map((item) => item.trim())
+    .filter((item, index, all) => !(index === all.length - 1 && item === ''));
+  const fieldCount = parts.length;
+  if (fieldCount !== 12 && fieldCount !== 13 && fieldCount !== 15) return null;
+
+  if (fieldCount === 15) {
+    return {
+      decisionDate: parts[0],
+      decisionStatus: parts[1],
+      company: parts[2],
+      sourceMaterial: parts[4],
+      thesis: parts[5],
+      asymmetry: parts[8],
+      bear: '',
+      base: '',
+      bull: '',
+      voi: parts[9],
+      sector: parts[10],
+      region: parts[11],
+      currency: parts[12],
+      recordFormat: 'legacy_15'
+    };
+  }
+
+  if (fieldCount === 13) {
+    return {
+      decisionDate: parts[0],
+      decisionStatus: parts[1],
+      company: parts[2],
+      sourceMaterial: parts[3],
+      thesis: parts[4],
+      asymmetry: parts[5],
+      bear: parts[6],
+      base: parts[7],
+      bull: parts[8],
+      voi: parts[9],
+      sector: parts[10],
+      region: parts[11],
+      currency: parts[12],
+      recordFormat: 'transitional_13'
+    };
+  }
+
+  const thesisText = typeof parts[4] === 'string' ? parts[4] : '';
+  const asymmetryMatch = thesisText.match(/(?:Asymetria|Asymmetry)\s*:\s*[^,;]+/i);
+  return {
+    decisionDate: parts[0],
+    decisionStatus: parts[1],
+    company: parts[2],
+    sourceMaterial: parts[3],
+    thesis: parts[4],
+    asymmetry: asymmetryMatch ? asymmetryMatch[0].trim() : '',
+    bear: parts[5],
+    base: parts[6],
+    bull: parts[7],
+    voi: parts[8],
+    sector: parts[9],
+    region: parts[10],
+    currency: parts[11],
+    recordFormat: 'current_12'
+  };
+}
+
+function extractDecisionRecordFromText(text) {
+  const source = typeof text === 'string' ? text : '';
+  if (!source.trim()) return null;
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const parsed = parseDecisionRecordLine(lines[i]);
+    if (parsed) return parsed;
+  }
+
+  if (!source.includes(';')) return null;
+  const parsedWhole = parseDecisionRecordLine(source.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim());
+  return parsedWhole || null;
+}
+
+function getProcessCompanySnapshotCacheEntry(process) {
+  if (!process || !process.id) return null;
+  return processCompanySnapshotCache.get(String(process.id)) || null;
+}
+
+function getCachedProcessCompanySnapshot(process) {
+  const entry = getProcessCompanySnapshotCacheEntry(process);
+  if (!entry || !entry.snapshot) return null;
+  const ageMs = Date.now() - (Number.isInteger(entry.fetchedAt) ? entry.fetchedAt : 0);
+  if (ageMs > PROCESS_COMPANY_SNAPSHOT_TTL_MS) return null;
+  return entry.snapshot;
+}
+
+function setProcessCompanySnapshotCache(process, snapshot) {
+  if (!process || !process.id || !snapshot) return;
+  processCompanySnapshotCache.set(String(process.id), {
+    snapshot,
+    fetchedAt: Date.now()
+  });
+}
+
+function refreshSummaryUsingCurrentPartitions() {
+  const allItems = allProcessesCache.length > 0 ? allProcessesCache : currentProcesses;
+  const activeItems = currentProcesses.slice();
+  const activeIds = new Set(activeItems.map((process) => process.id));
+  const historyItems = allItems.filter((process) => !activeIds.has(process.id));
+  updateSummaryPanels(allItems, activeItems, historyItems);
+}
+
+async function fetchProcessConversationAudit(process, options = {}) {
+  if (!process || !process.id || !Number.isInteger(process.tabId)) return null;
+  const processId = String(process.id);
+  const force = options?.force === true;
+
+  if (!force) {
+    const cached = getCachedProcessAudit(process);
+    if (cached) return cached;
+  }
+
+  const existingRequest = processConversationAuditInFlight.get(processId);
+  if (existingRequest) return existingRequest;
+
+  const request = (async () => {
+    const response = await sendRuntimeMessage({
+      type: 'COUNT_COMPANY_CONVERSATION_MESSAGES',
+      tabId: process.tabId,
+      origin: 'process-monitor-company-audit'
+    });
+    const audit = normalizeCompanyConversationAudit(response);
+    if (!audit) return null;
+    setProcessAuditCache(process, audit);
+    return audit;
+  })()
+    .catch((error) => {
+      console.warn('[panel] company audit fetch failed:', error?.message || error);
+      return null;
+    })
+    .finally(() => {
+      if (processConversationAuditInFlight.get(processId) === request) {
+        processConversationAuditInFlight.delete(processId);
+      }
+    });
+
+  processConversationAuditInFlight.set(processId, request);
+  const result = await request;
+  if (result) {
+    refreshSummaryUsingCurrentPartitions();
+  }
+  return result;
+}
+
+async function fetchProcessCompanySnapshot(process, options = {}) {
+  if (!process || !process.id) return null;
+  const processId = String(process.id);
+  const force = options?.force === true;
+
+  if (!force) {
+    const cached = getCachedProcessCompanySnapshot(process);
+    if (cached) return cached;
+  }
+
+  const existingRequest = processCompanySnapshotInFlight.get(processId);
+  if (existingRequest) return existingRequest;
+
+  const request = (async () => {
+    const responses = await readResponsesFromStorage();
+    const completed = findCompletedResponseForProcess(process, responses);
+    const rawText = extractResponseText(completed) || extractCompletedTextFromProcess(process);
+    const decisionRecord = extractDecisionRecordFromText(rawText);
+
+    const snapshot = {
+      processId,
+      hasCompletedResponse: !!completed || !!rawText,
+      responseTimestamp: Number.isInteger(completed?.timestamp) ? completed.timestamp : null,
+      company: decisionRecord?.company || (process.title || ''),
+      decisionStatus: decisionRecord?.decisionStatus || '',
+      asymmetry: decisionRecord?.asymmetry || '',
+      bear: decisionRecord?.bear || '',
+      base: decisionRecord?.base || '',
+      bull: decisionRecord?.bull || '',
+      sector: decisionRecord?.sector || '',
+      region: decisionRecord?.region || '',
+      currency: decisionRecord?.currency || '',
+      voi: decisionRecord?.voi || '',
+      hasDecisionRecord: !!decisionRecord
+    };
+
+    setProcessCompanySnapshotCache(process, snapshot);
+    return snapshot;
+  })()
+    .catch((error) => {
+      console.warn('[panel] company snapshot fetch failed:', error?.message || error);
+      return null;
+    })
+    .finally(() => {
+      if (processCompanySnapshotInFlight.get(processId) === request) {
+        processCompanySnapshotInFlight.delete(processId);
+      }
+    });
+
+  processCompanySnapshotInFlight.set(processId, request);
+  return request;
 }
 
 function isProcessCompleted(process) {
@@ -686,6 +1178,13 @@ function buildProcessCard() {
   status.appendChild(statusLine);
   status.appendChild(statusBadge);
 
+  const dbDelivery = document.createElement('div');
+  dbDelivery.className = 'db-delivery';
+
+  const dbBadge = document.createElement('span');
+  dbBadge.className = 'db-badge db-info';
+  dbDelivery.appendChild(dbBadge);
+
   const progressBar = document.createElement('div');
   progressBar.className = 'progress-bar';
 
@@ -729,6 +1228,7 @@ function buildProcessCard() {
 
   card.appendChild(header);
   card.appendChild(status);
+  card.appendChild(dbDelivery);
   card.appendChild(progressBar);
   card.appendChild(stageMeta);
   card.appendChild(statusMeta);
@@ -745,6 +1245,8 @@ function buildProcessCard() {
       type,
       statusLine,
       statusBadge,
+      dbDelivery,
+      dbBadge,
       progressFill,
       stageMeta,
       statusMeta,
@@ -834,6 +1336,17 @@ function updateProcessCard(entry, process, isSelected) {
 
   refs.statusBadge.textContent = statusBadgeText;
   refs.statusBadge.className = `status-badge ${statusBadgeClass}`;
+
+  const dbBadgeModel = getDatabaseBadgeModel(process);
+  if (dbBadgeModel.visible) {
+    refs.dbBadge.textContent = dbBadgeModel.text;
+    refs.dbBadge.className = dbBadgeModel.className;
+    refs.dbDelivery.style.display = 'block';
+  } else {
+    refs.dbBadge.textContent = '';
+    refs.dbBadge.className = 'db-badge db-info';
+    refs.dbDelivery.style.display = 'none';
+  }
 
   refs.progressFill.style.width = `${progress}%`;
 
@@ -1271,10 +1784,89 @@ function sendProcessResumeNextStage(process, options = {}) {
         startIndex: Number.isInteger(response?.startIndex) ? response.startIndex : null,
         startPromptNumber: Number.isInteger(response?.startPromptNumber) ? response.startPromptNumber : null,
         detectedPromptNumber: Number.isInteger(response?.detectedPromptNumber) ? response.detectedPromptNumber : null,
-        detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : ''
+        detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : '',
+        finalStagePersistence: response?.finalStagePersistence && typeof response.finalStagePersistence === 'object'
+          ? response.finalStagePersistence
+          : null
       });
     });
   });
+}
+
+function formatFinalStagePersistenceShort(finalStagePersistence) {
+  const sent = Number.isInteger(finalStagePersistence?.sent) ? finalStagePersistence.sent : null;
+  const failed = Number.isInteger(finalStagePersistence?.failed) ? finalStagePersistence.failed : null;
+  const pending = Number.isInteger(finalStagePersistence?.pending)
+    ? finalStagePersistence.pending
+    : (
+      (Number.isInteger(finalStagePersistence?.deferred) ? finalStagePersistence.deferred : 0)
+      + (Number.isInteger(finalStagePersistence?.remaining) ? finalStagePersistence.remaining : 0)
+    );
+  const hasNumericDispatch = sent !== null || failed !== null || pending !== null;
+
+  if (hasNumericDispatch) {
+    const safeSent = sent ?? 0;
+    const safeFailed = failed ?? 0;
+    const safePending = pending ?? 0;
+    const queueSkipped = finalStagePersistence?.queueSkipped === true;
+    const flushSkipped = finalStagePersistence?.flushSkipped === true;
+    const skipReasonCode = queueSkipped
+      ? (typeof finalStagePersistence?.queueSkipReason === 'string' ? finalStagePersistence.queueSkipReason : '')
+      : (flushSkipped
+        ? (typeof finalStagePersistence?.flushSkipReason === 'string' ? finalStagePersistence.flushSkipReason : '')
+        : '');
+    const reason = typeof skipReasonCode === 'string' && skipReasonCode.trim()
+      ? skipReasonCode.trim()
+      : '';
+    const failureStage = typeof finalStagePersistence?.failureStage === 'string'
+      ? finalStagePersistence.failureStage.trim()
+      : '';
+    const failureReasonCodeRaw = typeof finalStagePersistence?.failureReason === 'string'
+      ? finalStagePersistence.failureReason.trim()
+      : '';
+    const failureReason = failureReasonCodeRaw || reason;
+    const failureStatus = Number.isInteger(finalStagePersistence?.failureStatus)
+      ? finalStagePersistence.failureStatus
+      : null;
+    const failureRequestId = typeof finalStagePersistence?.failureRequestId === 'string'
+      ? finalStagePersistence.failureRequestId.trim()
+      : '';
+    const diagParts = [];
+    if (failureStage) diagParts.push(`stage=${failureStage}`);
+    if (failureReason) diagParts.push(`reason=${failureReason}`);
+    if (failureStatus !== null) diagParts.push(`http=${failureStatus}`);
+    if (failureRequestId) diagParts.push(`requestId=${shortenText(failureRequestId, 28)}`);
+    const diagText = diagParts.length > 0 ? `, ${diagParts.join(', ')}` : '';
+
+    if (safeSent > 0 && safePending === 0 && safeFailed === 0) {
+      return `baza=OK, sent=${safeSent}`;
+    }
+    if (safeSent > 0 && (safePending > 0 || safeFailed > 0)) {
+      const parts = [`baza=partial`, `sent=${safeSent}`];
+      if (safePending > 0) parts.push(`pending=${safePending}`);
+      if (safeFailed > 0) parts.push(`failed=${safeFailed}`);
+      return `${parts.join(', ')}${diagText}`;
+    }
+    if (safePending > 0 && safeSent === 0 && safeFailed === 0) {
+      return `baza=local_only, pending=${safePending}${diagText}`;
+    }
+    if (
+      flushSkipped
+      && reason === 'flush_in_progress'
+      && finalStagePersistence?.flushFollowUpScheduled === true
+    ) {
+      return `baza=local_only, wait=active_flush_follow_up${diagText}`;
+    }
+    if (safeFailed > 0 && safeSent === 0) {
+      return `baza=local_only, failed=${safeFailed}${diagText}`;
+    }
+    return `baza=local_only, sent=0, unconfirmed${diagText}`;
+  }
+
+  const dispatchSummary = typeof finalStagePersistence?.dispatchSummary === 'string'
+    ? finalStagePersistence.dispatchSummary.trim()
+    : '';
+  return dispatchSummary || 'baza=local_only';
 }
 
 async function resumeNextStageFromPanel(process, button, options = {}) {
@@ -1294,6 +1886,9 @@ async function resumeNextStageFromPanel(process, button, options = {}) {
         if (openDialogOnly) {
           const promptText = Number.isInteger(response.startPromptNumber) ? `Prompt ${response.startPromptNumber}` : 'wybrany prompt';
           button.textContent = `Otwarto dialog (${promptText})`;
+        } else if (response.mode === 'final_stage_persisted') {
+          const persistenceText = formatFinalStagePersistenceShort(response?.finalStagePersistence);
+          button.textContent = `Final zapisany (${persistenceText})`;
         } else {
           const promptText = Number.isInteger(response.startPromptNumber) ? `Prompt ${response.startPromptNumber}` : 'kolejny etap';
           button.textContent = `Wznowiono: ${promptText}`;
@@ -1358,6 +1953,10 @@ function updateUI(processes, options = {}) {
     lastSignature = '';
     processCardMap.clear();
     processSeenAt.clear();
+    processConversationAuditCache.clear();
+    processConversationAuditInFlight.clear();
+    processCompanySnapshotCache.clear();
+    processCompanySnapshotInFlight.clear();
     renderDetails();
     updateResumeAllButtonState();
     return;
@@ -1417,9 +2016,11 @@ function updateUI(processes, options = {}) {
       const persistenceSaveOk = typeof persistenceStatus?.saveOk === 'boolean'
         ? String(persistenceStatus.saveOk)
         : '';
+      const dbDelivery = resolveProcessDatabaseDelivery(process);
+      const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}`;
       const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${persistenceLog}`;
+      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -1447,6 +2048,10 @@ function updateUI(processes, options = {}) {
         entry.card.remove();
         processCardMap.delete(processId);
         processSeenAt.delete(processId);
+        processConversationAuditCache.delete(processId);
+        processConversationAuditInFlight.delete(processId);
+        processCompanySnapshotCache.delete(processId);
+        processCompanySnapshotInFlight.delete(processId);
       }
     }
   }
@@ -1663,6 +2268,135 @@ async function openHistoryProcess(process) {
   });
 }
 
+function buildDetailsAuditCard(titleText) {
+  const card = document.createElement('section');
+  card.className = 'details-audit-card';
+
+  const title = document.createElement('div');
+  title.className = 'details-audit-title';
+  title.textContent = titleText;
+
+  const body = document.createElement('div');
+  body.className = 'details-audit-line';
+  body.textContent = 'Ladowanie...';
+
+  card.appendChild(title);
+  card.appendChild(body);
+
+  return { card, body };
+}
+
+function setAuditBody(body, text, level = '') {
+  if (!body) return;
+  body.className = 'details-audit-line';
+  if (level === 'ok' || level === 'warn' || level === 'err') {
+    body.classList.add(level);
+  }
+  body.textContent = text;
+}
+
+function formatCompanySnapshotText(snapshot) {
+  if (!snapshot) return 'Brak danych o spolce dla wybranego procesu.';
+  const lines = [];
+  const companyLabel = snapshot.company || 'brak';
+  lines.push(`Spolka: ${companyLabel}`);
+
+  if (!snapshot.hasDecisionRecord) {
+    lines.push('Rekord Four-Gate (12/13/15 pol) nie zostal jeszcze rozpoznany.');
+    if (snapshot.hasCompletedResponse) {
+      lines.push('Jest zapisana odpowiedz koncowa, ale bez finalnej linii decyzyjnej.');
+    } else {
+      lines.push('Brak zapisanej odpowiedzi koncowej dla tego runId.');
+    }
+    return lines.join('\n');
+  }
+
+  lines.push(`Decyzja: ${snapshot.decisionStatus || 'brak'} | Asymetria: ${snapshot.asymmetry || 'brak'}`);
+  lines.push(`Scenariusze: ${snapshot.bear || 'Bear N/A'} | ${snapshot.base || 'Base N/A'} | ${snapshot.bull || 'Bull N/A'}`);
+  lines.push(`Sektor/Region/Waluta: ${snapshot.sector || '-'} | ${snapshot.region || '-'} | ${snapshot.currency || '-'}`);
+  if (snapshot.voi) {
+    lines.push(`VOI/Fals: ${snapshot.voi}`);
+  }
+  return lines.join('\n');
+}
+
+function formatConversationAuditText(audit) {
+  if (!audit) return 'Brak audytu etapow dla tej karty (niedostepny tabId lub dane wygasly).';
+
+  const coverage = audit.promptCatalogCount > 0
+    ? `${audit.recognizedUniquePrompts}/${audit.promptCatalogCount}`
+    : `${audit.recognizedUniquePrompts}/0`;
+  const lines = [
+    `Stan: ${audit.processState || 'n/a'} | Pokrycie etapow: ${coverage}`,
+    `Instancje promptow: ${audit.matchedPromptMessages} | Braki odpowiedzi: ${audit.promptRepliesMissing} (${formatPromptList(audit.missingReplyPromptNumbers)})`,
+    `Niska jakosc: ${audit.promptRepliesBelowThreshold} (${formatPromptList(audit.lowQualityReplyPromptNumbers)}) | Braki etapow: ${formatPromptList(audit.missingPromptNumbers)}`
+  ];
+
+  const stageCheck = audit.stageMappingCheck || {};
+  lines.push(
+    `Mapowanie prompt->stage: prompts=${stageCheck.promptCount || 0}, stage_names=${stageCheck.stageNameCount || 0}, align=${stageCheck.alignedByCount ? 'TAK' : 'NIE'}`
+  );
+  if (Array.isArray(stageCheck.missingStageNames) && stageCheck.missingStageNames.length > 0) {
+    lines.push(`Brak nazw stage dla: ${formatPromptList(stageCheck.missingStageNames)}`);
+  }
+
+  if (audit.dataGapStopDetected) {
+    const missingInputsText = audit.dataGapMissingInputsList.length > 0
+      ? audit.dataGapMissingInputsList.join(', ')
+      : (audit.dataGapMissingInputsText || 'brak');
+    lines.push(`DATA_GAPS: TAK | missing_inputs: ${missingInputsText}`);
+  } else {
+    lines.push('DATA_GAPS: NIE');
+  }
+
+  if (Array.isArray(audit.processIssueFlags) && audit.processIssueFlags.length > 0) {
+    lines.push(`Issue flags: ${audit.processIssueFlags.join(', ')}`);
+  }
+
+  return lines.join('\n');
+}
+
+async function hydrateDetailsCards(process, snapshotBody, auditBody) {
+  if (!process || !process.id) return;
+  const expectedProcessId = String(process.id);
+
+  if (snapshotBody) {
+    const cachedSnapshot = getCachedProcessCompanySnapshot(process);
+    if (cachedSnapshot) {
+      setAuditBody(snapshotBody, formatCompanySnapshotText(cachedSnapshot), cachedSnapshot.hasDecisionRecord ? 'ok' : 'warn');
+    }
+  }
+
+  if (auditBody) {
+    const cachedAudit = getCachedProcessAudit(process);
+    if (cachedAudit) {
+      const cachedLevel = cachedAudit.dataGapStopDetected
+        ? 'err'
+        : ((cachedAudit.promptRepliesMissing || 0) > 0 || (cachedAudit.promptRepliesBelowThreshold || 0) > 0 ? 'warn' : 'ok');
+      setAuditBody(auditBody, formatConversationAuditText(cachedAudit), cachedLevel);
+    }
+  }
+
+  const [snapshot, audit] = await Promise.all([
+    fetchProcessCompanySnapshot(process),
+    fetchProcessConversationAudit(process)
+  ]);
+
+  if (selectedProcessId !== expectedProcessId) return;
+
+  if (snapshotBody?.isConnected) {
+    const snapshotLevel = snapshot?.hasDecisionRecord ? 'ok' : 'warn';
+    setAuditBody(snapshotBody, formatCompanySnapshotText(snapshot), snapshotLevel);
+  }
+
+  if (auditBody?.isConnected) {
+    const auditLevel = audit?.dataGapStopDetected
+      ? 'err'
+      : ((audit?.promptRepliesMissing || 0) > 0 || (audit?.promptRepliesBelowThreshold || 0) > 0 ? 'warn' : 'ok');
+    setAuditBody(auditBody, formatConversationAuditText(audit), auditLevel);
+  }
+}
+
 function escapeHtml(text) {
   const div = document.createElement('div');
   div.textContent = text;
@@ -1756,6 +2490,13 @@ function renderDetails() {
   }
 
   const persistenceLines = getPersistenceLogLines(selected, 6);
+  const dbBadgeModel = getDatabaseBadgeModel(selected);
+  if (dbBadgeModel.visible && dbBadgeModel.detailText) {
+    const databaseLine = document.createElement('div');
+    databaseLine.className = 'details-subtitle';
+    databaseLine.textContent = dbBadgeModel.detailText;
+    header.appendChild(databaseLine);
+  }
   if (persistenceLines.length > 0) {
     const persistenceLine = document.createElement('div');
     persistenceLine.className = 'details-subtitle';
@@ -1823,6 +2564,12 @@ function renderDetails() {
     header.appendChild(actions);
   }
   detailsContainer.appendChild(header);
+
+  const companySnapshotCard = buildDetailsAuditCard('Snapshot spolki (z finalnej odpowiedzi)');
+  const companyAuditCard = buildDetailsAuditCard('Audit etapow + DATA_GAPS (liczenie backend)');
+  detailsContainer.appendChild(companySnapshotCard.card);
+  detailsContainer.appendChild(companyAuditCard.card);
+  void hydrateDetailsCards(selected, companySnapshotCard.body, companyAuditCard.body);
 
   const messageList = document.createElement('div');
   messageList.className = 'message-list';

@@ -18,9 +18,12 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - `background.js` - core orchestration and ChatGPT automation.
 - `popup.js` - run, stop, resume and navigation.
 - `process-monitor.js` - process control panel.
+- `problem-log.js` - diagnostics panel for runtime/process errors.
 - `responses.js` - responses view, copy/clear, storage migration.
+- `reload-resume-monitor.js` - monitored reload+resume workflow.
 - `youtube-content.js` - transcript extraction for YouTube.
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains.
+- `COMPANY_CHAIN_STAGE_MAP.md` - readable stage contract for `prompts-company.txt` + runtime mapping.
 
 ## Storage
 - Responses are written in worker to `chrome.storage.session.responses`.
@@ -32,6 +35,7 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - Prompt #1 is payload template with `{{articlecontent}}`.
 - Remaining prompts are executed as chain in ChatGPT.
 - Only final chain response is persisted.
+- Company stage labels/descriptions are served from `STAGE_METADATA_COMPANY` (`background.js`) and documented in `COMPANY_CHAIN_STAGE_MAP.md`.
 
 ## Install (unpacked)
 1. Open `chrome://extensions/`.
@@ -76,6 +80,11 @@ Manual PDF mode behavior:
 - Open from popup or shortcut `Ctrl+Shift+R`.
 - Copy single response or copy all by analysis type.
 
+### Problem log view
+- Open from popup (`Problem log` button).
+- Review runtime/process issues with stage/status/reason context.
+- Use refresh and clear controls to validate recovery after fixes.
+
 ### Watchlist intake setup
 1. Open popup -> `Watchlist intake`.
 2. Set `Intake URL`, `Key ID`, `Secret`.
@@ -99,5 +108,14 @@ Keep these in sync when adding/removing domains:
 - Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
 - YouTube transcript support is best-effort and depends on caption availability for a given video.
 - On restart/restore flows, ChatGPT tabs are automatically ungrouped from Chrome tab groups to keep workflow tabs independent.
+
+## Quick validation (before commit)
+1. JS syntax:
+   `Get-ChildItem -Filter *.js | ForEach-Object { node --check $_.FullName }`
+2. Manifest JSON validity:
+   `python -c "import json; json.load(open('manifest.json', encoding='utf-8')); print('manifest ok')"`
+3. Manual smoke:
+   - run one company chain and confirm response in `responses.html`
+   - open `problem-log.html` and verify refresh/clear behavior
 
 

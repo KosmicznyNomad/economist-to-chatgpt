@@ -43,6 +43,9 @@ function openReloadResumeMonitorWindow(sessionId, options = {}) {
   if (typeof options?.composerThinkingEffort === 'string' && options.composerThinkingEffort.trim()) {
     params.set('composerThinkingEffort', options.composerThinkingEffort.trim());
   }
+  if (Number.isInteger(options?.autoCloseAfterMs) && options.autoCloseAfterMs > 0) {
+    params.set('autoCloseAfterMs', String(options.autoCloseAfterMs));
+  }
   const targetUrl = chrome.runtime.getURL(`reload-resume-monitor.html?${params.toString()}`);
   chrome.windows.create({
     url: targetUrl,
@@ -304,6 +307,8 @@ const DISPATCH_REASON_LABELS = {
   missing_dispatch_credentials: 'brak sekretu HMAC',
   empty_token: 'pusty sekret',
   storage_unavailable: 'storage niedostepny',
+  invalid_queue_item: 'niepoprawny wpis kolejki',
+  pending_retry_window: 'oczekiwanie na okno retry',
   runtime_unavailable: 'most runtime niedostepny',
   runtime_timeout: 'timeout mostu runtime',
   flush_in_progress: 'flush juz trwa',
@@ -336,6 +341,8 @@ const DISPATCH_PROCESS_CODE_LABELS = {
   flush_item_invalid: 'pozycja kolejki niepoprawna',
   flush_item_deferred: 'pozycja odlozona',
   flush_item_failed: 'pozycja nieudana (requeue)',
+  flush_budget_stop: 'osiagnieto budzet flush',
+  flush_stale_lock_reset: 'reset stale lock flush',
   flush_done: 'flush zakonczony',
   flush_exception: 'wyjatek flush',
   flush_follow_up_scheduled: 'zaplanowano follow-up flush',
@@ -426,7 +433,19 @@ function formatDispatchStatus(status) {
     ? ` Ostatni blad: ${formatDispatchErrorText(status.latestOutboxError)}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
     : '';
   const latestProcessLogText = formatLatestDispatchProcessLog(status.recentProcessLogs);
-  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${retryText}${errorText}${latestProcessLogText}`;
+  const flushInProgressAgeMs = Number.isInteger(status.flushInProgressAgeMs)
+    ? Math.max(0, status.flushInProgressAgeMs)
+    : 0;
+  const flushInProgressSinceText = Number.isInteger(status.flushInProgressSince)
+    ? new Date(status.flushInProgressSince).toLocaleString()
+    : '';
+  const flushInProgressReason = typeof status.flushInProgressReason === 'string'
+    ? status.flushInProgressReason.trim()
+    : '';
+  const flushInProgressText = status.flushInProgress
+    ? ` Flush aktywny: tak${flushInProgressAgeMs > 0 ? `, wiek=${Math.round(flushInProgressAgeMs / 1000)}s` : ''}${flushInProgressReason ? `, reason=${flushInProgressReason}` : ''}${flushInProgressSinceText ? `, start=${flushInProgressSinceText}` : ''}.`
+    : '';
+  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${flushInProgressText}${retryText}${errorText}${latestProcessLogText}`;
 
   if (status.configured) {
     if (status.tokenSource === 'inline_config') {
@@ -444,7 +463,11 @@ function formatDispatchStatus(status) {
 function formatDispatchFlushResult(flushResult) {
   if (!flushResult || typeof flushResult !== 'object') return 'brak danych';
   if (flushResult.skipped) {
-    return `skip (${getDispatchReasonLabel(flushResult.reason || 'unknown') || 'unknown'})`;
+    const label = getDispatchReasonLabel(flushResult.reason || 'unknown') || 'unknown';
+    const ageText = Number.isInteger(flushResult.lockAgeMs) && flushResult.lockAgeMs > 0
+      ? `, lock_age=${Math.round(flushResult.lockAgeMs / 1000)}s`
+      : '';
+    return `skip (${label}${ageText})`;
   }
   if (flushResult.success === false) {
     return `blad (${formatDispatchErrorText(flushResult.error || 'unknown') || 'unknown'})`;
@@ -511,7 +534,9 @@ const COMPANY_COUNT_PROCESS_ISSUE_LABELS = {
   missing_assistant_reply: 'brak odpowiedzi assistant po prompcie',
   assistant_reply_below_threshold: 'odpowiedzi ponizej progu jakosci',
   unrecognized_prompt_stage: 'nierozpoznane etapy promptow',
-  sequence_issue: 'naruszona kolejnosc etapow'
+  sequence_issue: 'naruszona kolejnosc etapow',
+  data_gap_stop: 'wykryto sygnal DATA_GAPS_STOP',
+  unmatched_user_messages: 'nierozpoznane wiadomosci user'
 };
 
 function getCompanyCountProcessIssueLabel(code) {
@@ -546,6 +571,11 @@ function formatCompanyProcessCounterAlert(response) {
   const totals = response?.totals && typeof response.totals === 'object' ? response.totals : {};
   const missingReplyCount = Number.isInteger(totals?.promptRepliesMissing) ? totals.promptRepliesMissing : 0;
   const lowQualityCount = Number.isInteger(totals?.promptRepliesBelowThreshold) ? totals.promptRepliesBelowThreshold : 0;
+  const dataGapStopDetected = response?.dataGapStopDetected === true
+    || (Number.isInteger(totals?.dataGapStopDetected) && totals.dataGapStopDetected > 0);
+  const dataGapMissingInputsList = Array.isArray(response?.dataGapMissingInputsList)
+    ? response.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
+    : [];
   const missingReplyPromptNumbers = Array.isArray(response?.missingReplyPromptNumbers)
     ? response.missingReplyPromptNumbers
     : [];
@@ -553,7 +583,7 @@ function formatCompanyProcessCounterAlert(response) {
     ? response.lowQualityReplyPromptNumbers
     : [];
 
-  if (missingReplyCount <= 0 && lowQualityCount <= 0) {
+  if (missingReplyCount <= 0 && lowQualityCount <= 0 && !dataGapStopDetected) {
     return 'Licznik procesu: OK (brak brakujacych i niskiej jakosci odpowiedzi).';
   }
 
@@ -569,6 +599,12 @@ function formatCompanyProcessCounterAlert(response) {
       ? `; etapy=${lowQualityReplyPromptNumbers.map((item) => `P${item}`).join(',')}`
       : '';
     parts.push(`jakosc_niska=${lowQualityCount}${lowQualityPromptText}`);
+  }
+  if (dataGapStopDetected) {
+    const missingInputsText = dataGapMissingInputsList.length > 0
+      ? `; missing_inputs=${dataGapMissingInputsList.join(',')}`
+      : '';
+    parts.push(`data_gaps_stop=1${missingInputsText}`);
   }
   return `Licznik procesu: WYMAGA AKCJI (${parts.join(' | ')}).`;
 }
@@ -614,14 +650,50 @@ function formatCompanyConversationCountStatus(response) {
   const unmatchedUserSamples = Array.isArray(response?.unmatchedUserSamples) ? response.unmatchedUserSamples : [];
   const sequenceIssues = Array.isArray(response?.sequenceIssues) ? response.sequenceIssues : [];
   const runResets = Array.isArray(response?.runResets) ? response.runResets : [];
+  const dataGapStopDetected = response?.dataGapStopDetected === true
+    || (Number.isInteger(totals?.dataGapStopDetected) && totals.dataGapStopDetected > 0);
+  const dataGapMissingInputsList = Array.isArray(response?.dataGapMissingInputsList)
+    ? response.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+  const dataGapMissingInputsText = typeof response?.dataGapMissingInputs === 'string'
+    ? response.dataGapMissingInputs.trim()
+    : '';
+  const matchedPromptMessages = Number.isInteger(totals?.matchedPromptMessages)
+    ? totals.matchedPromptMessages
+    : 0;
+  const unmatchedUserMessages = Number.isInteger(totals?.unmatchedUserMessages)
+    ? totals.unmatchedUserMessages
+    : 0;
+  const recognizedUniquePrompts = Number.isInteger(totals?.recognizedUniquePrompts)
+    ? totals.recognizedUniquePrompts
+    : 0;
+  const promptCatalogCount = Number.isInteger(response?.promptCatalogCount)
+    ? response.promptCatalogCount
+    : 0;
+  const recognitionDenominator = matchedPromptMessages + unmatchedUserMessages;
+  const recognitionRate = recognitionDenominator > 0
+    ? Math.round((matchedPromptMessages / recognitionDenominator) * 100)
+    : 0;
+  const missingReplyStageCount = Number.isInteger(totals?.missingReplyPromptCount)
+    ? totals.missingReplyPromptCount
+    : missingReplyPromptNumbers.length;
+  const lowQualityStageCount = Number.isInteger(totals?.lowQualityReplyPromptCount)
+    ? totals.lowQualityReplyPromptCount
+    : lowQualityReplyPromptNumbers.length;
+  const dataGapMissingInputsResolved = dataGapMissingInputsList.length > 0
+    ? dataGapMissingInputsList.join(', ')
+    : (dataGapMissingInputsText || 'brak');
 
   const lines = [];
   lines.push('[Company count]');
+  lines.push('[Podsumowanie]');
   lines.push(`Konwersacja: user=${totals.totalUserMessages || 0}, assistant=${totals.totalAssistantMessages || 0}, wszystkie=${totals.totalMessages || 0}`);
-  lines.push(`Prompty rozpoznane: ${totals.matchedPromptMessages || 0}/${response.promptCatalogCount || 0} (unique=${totals.recognizedUniquePrompts || 0}, nierozpoznane_user=${totals.unmatchedUserMessages || 0}, runy=${totals.detectedRuns || 0})`);
-  lines.push(`Odpowiedzi: present=${totals.promptRepliesPresent || 0}, missing=${totals.promptRepliesMissing || 0}, quality_ok=${totals.promptRepliesPassingThreshold || 0}, quality_low=${totals.promptRepliesBelowThreshold || 0} (prog: ${thresholds.minAssistantWords || 0} slow, ${thresholds.minAssistantSentences || 0} zdan)`);
+  lines.push(`Rozpoznanie wiadomosci: instancje_promptow=${matchedPromptMessages}, etapy_unique=${recognizedUniquePrompts}/${promptCatalogCount}, nierozpoznane_user=${unmatchedUserMessages}, skutecznosc=${recognitionRate}%, runy=${totals.detectedRuns || 0}`);
+  lines.push(`Odpowiedzi (instancje): present=${totals.promptRepliesPresent || 0}, missing=${totals.promptRepliesMissing || 0}, quality_ok=${totals.promptRepliesPassingThreshold || 0}, quality_low=${totals.promptRepliesBelowThreshold || 0} (prog: ${thresholds.minAssistantWords || 0} slow, ${thresholds.minAssistantSentences || 0} zdan)`);
+  lines.push(`Odpowiedzi (etapy): missing=${missingReplyStageCount}, quality_low=${lowQualityStageCount}`);
+  lines.push(`Data gaps: stop_marker=${dataGapStopDetected ? 'TAK' : 'NIE'}, missing_inputs=${dataGapStopDetected ? dataGapMissingInputsResolved : 'brak'}`);
   const resolvedProcessState = processState || (
-    (totals.promptRepliesMissing || 0) > 0
+    ((totals.promptRepliesMissing || 0) > 0 || dataGapStopDetected)
       ? 'needs_action'
       : ((totals.promptRepliesBelowThreshold || 0) > 0 ? 'warning' : 'ok')
   );
@@ -636,6 +708,8 @@ function formatCompanyConversationCountStatus(response) {
       .join(', ');
     lines.push(`Alert procesu: ${processIssueText || 'wykryto problemy procesu'}`);
   }
+  lines.push('');
+  lines.push('[Luki i akcje]');
 
   const missingReplyItemsText = missingReplyRows
     .slice(0, 6)
@@ -649,6 +723,9 @@ function formatCompanyConversationCountStatus(response) {
   lines.push(`Brakujace odpowiedzi (etapy): ${missingReplyStagesText}`);
   if ((totals.promptRepliesMissing || 0) > 0) {
     lines.push('Akcja procesu: uruchom "Powtorz ostatni prompt (wszystkie)" albo "Reload + wznow wszystkie".');
+  }
+  if (dataGapStopDetected) {
+    lines.push(`Akcja data gaps: uzupelnij brakujace dane (${dataGapMissingInputsResolved}), potem wznow pipeline od etapu data-gap.`);
   }
 
   const lowQualityItemsText = lowQualityReplyRows
@@ -664,11 +741,11 @@ function formatCompanyConversationCountStatus(response) {
 
   const missingText = missingPromptNumbers.length > 0 ? missingPromptNumbers.join(', ') : 'brak';
   const duplicateText = duplicatePromptNumbers.length > 0 ? duplicatePromptNumbers.join(', ') : 'brak';
-  lines.push(`Brakujace prompty (nierozpoznane w konwersacji): ${missingText}`);
+  lines.push(`Brakujace prompty (nierozpoznane w konwersacji): ${missingText}${missingPromptNumbers.length > 0 ? ` (count=${missingPromptNumbers.length})` : ''}`);
   lines.push(`Duplikaty promptow: ${duplicateText}`);
 
   lines.push(
-    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
+    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}, data_gaps=${verification.dataGapStopDetected ? 'NIE' : 'OK'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
   );
   lines.push('');
 
@@ -952,7 +1029,8 @@ async function executeResumeAllFromPopup(button, options = {}) {
   );
   openReloadResumeMonitorWindow(monitorSessionId, {
     origin,
-    composerThinkingEffort
+    composerThinkingEffort,
+    autoCloseAfterMs: 40_000
   });
 
   try {
@@ -1036,6 +1114,104 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   }
 }
 
+function formatFinalStagePersistenceStatus(finalStagePersistence) {
+  const sent = Number.isInteger(finalStagePersistence?.sent) ? finalStagePersistence.sent : null;
+  const failed = Number.isInteger(finalStagePersistence?.failed) ? finalStagePersistence.failed : null;
+  const pending = Number.isInteger(finalStagePersistence?.pending)
+    ? finalStagePersistence.pending
+    : (
+      (Number.isInteger(finalStagePersistence?.deferred) ? finalStagePersistence.deferred : 0)
+      + (Number.isInteger(finalStagePersistence?.remaining) ? finalStagePersistence.remaining : 0)
+    );
+  const queueSkipped = finalStagePersistence?.queueSkipped === true;
+  const flushSkipped = finalStagePersistence?.flushSkipped === true;
+  const skipReasonCode = queueSkipped
+    ? (typeof finalStagePersistence?.queueSkipReason === 'string' ? finalStagePersistence.queueSkipReason : '')
+    : (flushSkipped
+      ? (typeof finalStagePersistence?.flushSkipReason === 'string' ? finalStagePersistence.flushSkipReason : '')
+      : '');
+  const skipReasonLabel = skipReasonCode ? (getDispatchReasonLabel(skipReasonCode) || skipReasonCode) : '';
+  const failureStage = typeof finalStagePersistence?.failureStage === 'string'
+    ? finalStagePersistence.failureStage.trim()
+    : '';
+  const failureReasonCodeRaw = typeof finalStagePersistence?.failureReason === 'string'
+    ? finalStagePersistence.failureReason.trim()
+    : '';
+  const failureReasonCode = failureReasonCodeRaw || skipReasonCode;
+  const failureReasonLabel = failureReasonCode
+    ? (getDispatchReasonLabel(failureReasonCode) || failureReasonCode)
+    : '';
+  const failureStatus = Number.isInteger(finalStagePersistence?.failureStatus)
+    ? finalStagePersistence.failureStatus
+    : null;
+  const failureRequestId = typeof finalStagePersistence?.failureRequestId === 'string'
+    ? finalStagePersistence.failureRequestId.trim()
+    : '';
+  const failureIntakeUrl = typeof finalStagePersistence?.failureIntakeUrl === 'string'
+    ? finalStagePersistence.failureIntakeUrl.trim()
+    : '';
+  const diagnosticParts = [];
+  if (failureStage) diagnosticParts.push(`etap=${failureStage}`);
+  if (failureReasonLabel) diagnosticParts.push(`powod=${failureReasonLabel}`);
+  if (failureStatus !== null) diagnosticParts.push(`http=${failureStatus}`);
+  if (failureRequestId) diagnosticParts.push(`request_id=${safePreview(failureRequestId, failureRequestId)}`);
+  if (failureIntakeUrl) diagnosticParts.push(`url=${safePreview(failureIntakeUrl, failureIntakeUrl)}`);
+  const diagnosticSuffix = diagnosticParts.length > 0
+    ? ` Diagnostyka: ${diagnosticParts.join(', ')}.`
+    : '';
+  const hasNumericDispatch = sent !== null || failed !== null || pending !== null;
+
+  if (hasNumericDispatch) {
+    const safeSent = sent ?? 0;
+    const safeFailed = failed ?? 0;
+    const safePending = pending ?? 0;
+
+    if (safeSent > 0 && safePending === 0 && safeFailed === 0) {
+      return `BAZA OK: zapis lokalny + wysylka potwierdzona (wyslano_do_bazy=${safeSent}).`;
+    }
+
+    if (safeSent > 0 && (safePending > 0 || safeFailed > 0)) {
+      const parts = [`wyslano_do_bazy=${safeSent}`];
+      if (safePending > 0) parts.push(`pending=${safePending}`);
+      if (safeFailed > 0) parts.push(`bledy=${safeFailed}`);
+      return `BAZA CZESCIOWO: ${parts.join(', ')}.${diagnosticSuffix}`;
+    }
+
+    if (safePending > 0 && safeSent === 0 && safeFailed === 0) {
+      const reasonPart = skipReasonLabel ? `, powod=${skipReasonLabel}` : '';
+      return `BAZA: zapis lokalny OK, wysylka do bazy w kolejce (pending=${safePending}${reasonPart}).${diagnosticSuffix}`;
+    }
+
+    if (safeFailed > 0 && safeSent === 0) {
+      const reasonPart = skipReasonLabel ? `, powod=${skipReasonLabel}` : '';
+      return `BAZA: zapis lokalny OK, wysylka nieudana (bledy=${safeFailed}${reasonPart}).${diagnosticSuffix}`;
+    }
+
+    if (
+      flushSkipped
+      && skipReasonCode === 'flush_in_progress'
+      && finalStagePersistence?.flushFollowUpScheduled === true
+    ) {
+      return `BAZA: zapis lokalny OK, wysylka do bazy oczekuje na aktywny flush (follow-up zaplanowany).${diagnosticSuffix}`;
+    }
+
+    const fallbackReason = skipReasonLabel ? ` (${skipReasonLabel})` : '';
+    return `BAZA: zapis lokalny OK, wysylka do bazy niepotwierdzona (wyslano_do_bazy=0${fallbackReason}).${diagnosticSuffix}`;
+  }
+
+  const dispatchSummary = typeof finalStagePersistence?.dispatchSummary === 'string'
+    ? finalStagePersistence.dispatchSummary.trim()
+    : '';
+  if (dispatchSummary) {
+    return `BAZA: zapis lokalny OK, ${dispatchSummary}${diagnosticSuffix ? ` ${diagnosticSuffix.trim()}` : ''}`;
+  }
+
+  if (finalStagePersistence?.success === true) {
+    return 'BAZA: zapis lokalny OK, brak danych o wysylce.';
+  }
+  return 'BAZA: brak potwierdzenia zapisu.';
+}
+
 function formatSmartResumeStatus(response) {
   const startPromptNumber = Number.isInteger(response?.startPromptNumber)
     ? response.startPromptNumber
@@ -1047,6 +1223,10 @@ function formatSmartResumeStatus(response) {
   const retryReason = typeof response?.retryReason === 'string' ? response.retryReason : '';
 
   if (response?.success) {
+    if (response?.mode === 'final_stage_persisted') {
+      const persistenceSummary = formatFinalStagePersistenceStatus(response?.finalStagePersistence);
+      return `Proces zakonczony. Zapisano odpowiedz koncowa. ${persistenceSummary}`;
+    }
     if (retrySamePrompt && startPromptNumber) {
       if (retryReason === 'assistant_reply_too_short') {
         return `Wznowiono ponownie Prompt ${startPromptNumber} (odpowiedz byla za krotka).`;

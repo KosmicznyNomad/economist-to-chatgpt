@@ -1,4 +1,5 @@
 const refreshBtn = document.getElementById('refresh-btn');
+const autoCloseMeta = document.getElementById('auto-close-meta');
 const sessionMeta = document.getElementById('session-meta');
 const summaryMeta = document.getElementById('summary-meta');
 const validationMeta = document.getElementById('validation-meta');
@@ -10,6 +11,13 @@ const searchParams = new URLSearchParams(window.location.search);
 let sessionId = typeof searchParams.get('sessionId') === 'string'
   ? searchParams.get('sessionId').trim()
   : '';
+const rawAutoCloseAfterMs = Number.parseInt(searchParams.get('autoCloseAfterMs') || '', 10);
+const autoCloseAfterMs = Number.isInteger(rawAutoCloseAfterMs) && rawAutoCloseAfterMs > 0
+  ? Math.min(rawAutoCloseAfterMs, 10 * 60 * 1000)
+  : 0;
+const autoCloseDeadline = autoCloseAfterMs > 0 ? Date.now() + autoCloseAfterMs : 0;
+let autoCloseTimeoutId = null;
+let autoCloseIntervalId = null;
 let lastRenderedSessionId = '';
 let lastRenderedUpdatedAt = 0;
 
@@ -24,6 +32,39 @@ const ACTION_LABELS = {
   skipped_outside_invest: 'Skipped outside INVEST',
   final_stage_already_sent: 'Final stage already done'
 };
+
+function renderAutoCloseInfo() {
+  if (!autoCloseMeta) return;
+  if (!autoCloseDeadline) {
+    autoCloseMeta.hidden = true;
+    autoCloseMeta.textContent = '';
+    return;
+  }
+  const remainingMs = Math.max(0, autoCloseDeadline - Date.now());
+  const remainingSeconds = Math.ceil(remainingMs / 1000);
+  autoCloseMeta.hidden = false;
+  autoCloseMeta.textContent = `Auto-zamkniecie monitora za ${remainingSeconds}s.`;
+}
+
+function initializeAutoClose() {
+  if (!autoCloseAfterMs) {
+    renderAutoCloseInfo();
+    return;
+  }
+
+  renderAutoCloseInfo();
+  autoCloseTimeoutId = window.setTimeout(() => {
+    window.close();
+  }, autoCloseAfterMs);
+
+  autoCloseIntervalId = window.setInterval(() => {
+    renderAutoCloseInfo();
+    if (Date.now() >= autoCloseDeadline && autoCloseIntervalId !== null) {
+      window.clearInterval(autoCloseIntervalId);
+      autoCloseIntervalId = null;
+    }
+  }, 1000);
+}
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
@@ -524,6 +565,18 @@ if (refreshBtn) {
   });
 }
 
+window.addEventListener('beforeunload', () => {
+  if (autoCloseTimeoutId !== null) {
+    window.clearTimeout(autoCloseTimeoutId);
+    autoCloseTimeoutId = null;
+  }
+  if (autoCloseIntervalId !== null) {
+    window.clearInterval(autoCloseIntervalId);
+    autoCloseIntervalId = null;
+  }
+});
+
+initializeAutoClose();
 void fetchState();
 setInterval(() => {
   void fetchState();

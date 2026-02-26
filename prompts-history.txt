@@ -77,32 +77,26 @@ Catalyst (6-12 months)
 
 Portfolio Summary with asymmetry distribution
 
-If missing: No objective basis for comparing finalists. Cannot determine which companies have best risk/reward profiles.
+DuPont ROE quality block for the lead candidate:
+- Current ROE decomposition (Net Margin × Asset Turnover × Leverage)
+- Year 3 thesis-adjusted ROE components
+- Assessment whether returns are operationally driven or leverage-driven
 
-STAGE 5: Pairwise Flip-Gate (#1 vs #2)
+If missing: No objective basis for comparing finalists. Cannot determine which companies have best risk/reward profiles or whether return quality is durable.
+
+STAGE 5: Revaluation Parameter Selection
 Core outputs:
 
-Thesis-Company Alignment Analysis (which thesis phases each benefits from)
-Mechanism Delta Comparison (key differentiating dimensions)
-Scenario-Based Decision Framework (conditions where each outperforms)
-Value of Information specification (leading indicators to monitor)
-Positioning Strategy (initial sizing, scaling triggers, exit conditions)
-Risk Assessment (thesis-level and company-specific risks)
+One measurable Revaluation Parameter (RP) per finalist
+Upside surprise threshold vs market-implied expectations
+Valuation force mapping (which DCF lever flips and by how much)
+VOI window (6-18 months) with explicit event timing
+Deliverability path and probability bucket
+Winner selection based on probability-weighted revaluation impact
 
-If missing: No framework for choosing between top candidates. Risk of anchoring on first choice without rigorous comparison. Cannot determine optimal position management.
+If missing: No catalyst-linked bridge from thesis to re-rating. Hard to prioritize which name has the highest near-term repricing potential.
 
-STAGE 6: DuPont ROE Quality Assessment
-Core outputs:
-
-Current ROE decomposition: Net Margin × Asset Turnover × Leverage = ROE%
-Year 3 projections under thesis for each component
-Assessment: Are high returns from operations or leverage?
-Quality assessment: Does thesis improve or degrade ROE quality?
-Pass to next stage: Current and thesis-adjusted margins and turnover
-
-If missing: Cannot distinguish quality companies from leveraged mediocrity. Risk of overestimating durability of returns.
-
-STAGE 7: Thesis Monetization Quantification
+STAGE 6: Thesis Monetization Quantification
 Core outputs:
 
 Base assumptions collected (currency, tax rate, WACC, shares outstanding, etc.)
@@ -117,7 +111,7 @@ Monitoring variables and exit conditions
 
 If missing: Thesis remains qualitative story without financial backing. Cannot assess if opportunity size justifies position.
 
-STAGE 8: Reverse DCF
+STAGE 7: Reverse DCF
 Core outputs:
 
 Market-implied growth rate (what's priced in)
@@ -127,11 +121,11 @@ Expected value calculation (probability-weighted)
 Asymmetry ratio (upside:downside)
 5-year return CAGRs for each scenario
 The Divergence (why your view differs from market)
-Tier Classification: STRONG BUY / ATTRACTIVE / FAIR VALUE / AVOID
+Tier Classification: HIGH ASYMMETRY / ATTRACTIVE / FAIR VALUE / AVOID
 
 If missing: No understanding of market expectations. Risk of buying story that's already fully priced.
 
-STAGE 9: Four-Gate Framework
+STAGE 8: Four-Gate Framework
 Core outputs:
 
 Gate 1 (Quality): PASS/RISK/FAIL for each criterion (Moat, Financial Durability, Management, Measurability, External Risks) with company-specific explanations
@@ -141,9 +135,20 @@ Gate 4 (Execution): Confidence level, practical guidance on position building/ma
 VOI triggers (what would increase position)
 Falsifiers (what invalidates thesis)
 Primary risk
-Final decision: BUY with specific guidance OR AVOID with clear reasoning
+Final decision: WATCH with specific guidance OR AVOID with clear reasoning
 
 If missing: No systematic risk filter. No clear position sizing logic. Decision lacks accountability structure.
+
+STAGE 9: Position State Machine
+Core outputs:
+
+Explicit position state definitions (entry, add, hold, reduce, exit, cooldown, re-entry)
+Trigger map tied to observable KPIs and valuation bands
+Profit-protection logic (partial takes, trailing rules, volatility spikes)
+Hard invalidation exits and risk-budget limits
+Review cadence and event-driven overrides
+
+If missing: Decision cannot be operated consistently over time. High risk of discretionary drift after entry.
 
 STAGE 10: Simple Story (Plain Polish Language)
 Core outputs:
@@ -182,12 +187,12 @@ Your Output Format
 Stage 1:  ✅/⚠️/❌  Investment Thesis (First Principles)
 Stage 2:  ✅/⚠️/❌  Porter's Five Forces + Capital Cycle + S-Curve
 Stage 3:  ✅/⚠️/❌  Stock Selection (15 companies)
-Stage 4:  ✅/⚠️/❌  Competitive Position (4 finalists)
-Stage 5:  ✅/⚠️/❌  Pairwise Flip-Gate
-Stage 6:  ✅/⚠️/❌  DuPont ROE Assessment
-Stage 7:  ✅/⚠️/❌  Thesis Monetization
-Stage 8:  ✅/⚠️/❌  Reverse DCF
-Stage 9:  ✅/⚠️/❌  Four-Gate Framework
+Stage 4:  ✅/⚠️/❌  Competitive Position + DuPont ROE
+Stage 5:  ✅/⚠️/❌  Revaluation Parameter Selection
+Stage 6:  ✅/⚠️/❌  Thesis Monetization
+Stage 7:  ✅/⚠️/❌  Reverse DCF
+Stage 8:  ✅/⚠️/❌  Four-Gate Framework
+Stage 9:  ✅/⚠️/❌  Position State Machine
 Stage 10: ✅/⚠️/❌  Simple Story (Polish)
 Stage 11: ✅/⚠️/❌  This verification
 
@@ -205,7 +210,7 @@ List only the gaps that would invalidate or seriously distort the investment dec
 Missing foundational analysis (thesis, industry selection)
 Incomplete quantification (no NPV, no DCF)
 Absent risk framework (no gates, no falsifiers)
-Missing decision output (no clear BUY/AVOID)
+Missing decision output (no clear WATCH/AVOID)
 
 4. Final Verdict
 Choose one:

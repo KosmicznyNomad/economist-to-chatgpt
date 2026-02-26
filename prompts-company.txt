@@ -22,6 +22,9 @@ You will work through a strict sequence to maintain auditability and avoid narra
 
 **Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
 # Key Definitions
 
 **Thesis (premise)**: The author's implicit "If X, then Y" claim about a persistent structural shift.
@@ -76,7 +79,7 @@ Prefer the author's specific nouns, levers, and mechanisms over generic macro fr
 ## Compliance Guardrail
 Compliance/legal/training can be mentioned, but it cannot be the CORE thesis unless ALL are true:
 1. It is a true critical-path gate to output (not just "required in principle")
-2. It is economically material (≈ >5% of incremental spend) OR highly recurring and inelastic
+2. It is economically material ( >5% of incremental spend) OR highly recurring and inelastic
 3. Supplier set is structurally limited (certification/liability/rare capability/long cycle)
 
 Otherwise, treat compliance as timing/catalyst, not value capture.
@@ -498,19 +501,19 @@ For each critical gate:
 
 # Your Analysis Process
 
-Before producing your final structured output, work through your analysis systematically inside your thinking block:
+Before producing your final structured output, work through your analysis systematically in this order:
 
-1. Work through Steps 0.1-0.7 (Evidence Ledger through Contract-Form Test) inside <analysis> tags in your thinking block
+1. Work through Steps 0.1-0.7 (Evidence Ledger through Contract-Form Test)
 
-2. Evaluate whether your winning thesis passes the Contract-Form Test inside <thesis_evaluation> tags in your thinking block
+2. Evaluate whether your winning thesis passes the Contract-Form Test
 
-3. Work through Steps 1A-1C (Payer Graph, Contract/Invoice/KPI Map, Gate Ledger) inside <capital_physics> tags in your thinking block
+3. Work through Steps 1A-1C (Payer Graph, Contract/Invoice/KPI Map, Gate Ledger)
 
-4. Work through Steps 2-2.5 (Consequences and Opportunity Swarm) inside <opportunity_reasoning> tags in your thinking block
+4. Work through Steps 2-2.5 (Consequences and Opportunity Swarm)
 
-5. After completing your chain-of-thought analysis in the thinking block, provide your final structured output following the Required Output Structure exactly
+5. After completing your analysis, provide your final structured output following the Required Output Structure exactly
 
-Your final output should consist only of the structured sections (0 through 4) as specified in the Required Output Structure, and should not duplicate or rehash any of the detailed working you did in the thinking block.
+Your final output should consist only of the structured sections (0 through 4) as specified in the Required Output Structure, and should not duplicate or rehash your intermediate working.
 
 Begin your analysis now.
 
@@ -523,6 +526,14 @@ OPERATING PRINCIPLES
 Assume the thesis is correct; do not debate it.
 Use first principles and deduction; avoid generic MBA frameworks unless a stage explicitly calls for a tool. When structure is needed, use the workflow’s invoice-first mechanics: payer → contract mechanism → invoice items → gates/bottlenecks → timing funnel → delivered pool.
 Be conservative when data is missing; label DATA vs ASSUMPTION vs INFERENCE.
+
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+
 
 CONTEXT IS THE DATASET (critical)
 No extra input data will be provided.
@@ -559,7 +570,7 @@ Stage 2 — Stock Universe (15 names)
 We care about producing 15 public companies mapped to the top sub-segments with a clear thesis exposure mechanism, value-chain role, and the single biggest risk.
 
 Stage 2.5 — Reverse DCF Lite + Driver-of-Value Screen (fast filter)
-We care about checking whether the market is already pricing the base case and identifying whether value is driven mainly by growth, margins, or WACC, then classifying names as ADVANCE/WATCH/DROP.
+We care about checking whether the market is already pricing the base case and identifying whether value is driven mainly by growth, margins, or WACC, then classifying names as ADVANCE/WATCH/DROP (screening only, not final Stage 8 decision).
 
 Stage 3 — Competitive Position (4 finalists)
 We care about selecting 4 finalists with the strongest value-capture position (replaceability, scarce assets/capacity, qualification, relationships) and explicit fit to gating constraints.
@@ -576,14 +587,14 @@ We care about quantifying only incremental thesis cash flows (Bear/Base/Bull) an
 Stage 7 — Reverse DCF (whole company, consistent valuation object)
 We care about solving market-implied growth/margins via root-finding on a whole-company valuation (or consistent SoP) and measuring divergence versus your Base case.
 
-Stage 8 — Four-Gate Decision (final BUY/WATCH/AVOID)
-We care about producing the only allowed final decision using Quality, Value, Proof, and Execution gates, plus an executable entry/add/reduce/exit plan.
+Stage 8 — Four-Gate Decision (final WATCH/AVOID)
+We care about producing a conservative final decision using Quality, Value, Proof, and Execution gates, plus an executable entry/add/reduce/exit plan.
 
 Stage 9 — Position State Machine (final)
 We care about managing an open position mechanically (profit protection, spike handling, exits, cooldown, and re-entry) using explicit observable triggers.
 
 START RULE
-Don't execute them. just remmeber this fact, think about it, and starting from the next stage follow.
+Don't execute them. just remember this fact, think about it, and starting from the next stage follow.
 
 This will help for the next stage: Stage 1 - Sub-segment Validation (thesis-derived only).
 ◄PROMPT_SEPARATOR►
@@ -597,6 +608,14 @@ You are an investment research engineer working within a multi-stage investment 
 - `contract_map`: Inherited elements from prior analysis including payer/buyer, possible contract vehicles, example invoice line items, gates/bottlenecks, and timing bands (0–12m, 12–36m, 36m+)
 - `control_tokens`: Concrete nouns and mechanisms that anchor sub-segments to the thesis and prevent drift into generic categories
 - `disconfirmers`: Breakpoints for designing measurable Value of Information (VOI) indicators in later stages
+
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+
 
 ## Your Task: Four Required Mechanics
 
@@ -754,7 +773,7 @@ Ensuring precision and completeness in your outputs is essential for these downs
 
 ## Process and Output Structure
 
-Work through your analysis systematically inside `<scratchpad>` tags in your thinking block. It's OK for this section to be quite long given the complexity of the analysis. Follow this process:
+Work through your analysis systematically. It's OK for this section to be quite long given the complexity of the analysis. Follow this process:
 
 1. **Extract inherited elements**: From the contract_map, list out all the inherited elements:
    - All payer/buyer types mentioned
@@ -798,7 +817,7 @@ Work through your analysis systematically inside `<scratchpad>` tags in your thi
    - For each sub-segment, write explicit reasoning for its score on each axis
    - Based on the ranking, identify the top 2–3 sub-segments and justify the selection
 
-**After completing your scratchpad work**, provide your final output in this structure:
+**After completing this analysis**, provide your final output in this structure:
 
 [For each of 5–8 sub-segments:]
 
@@ -900,9 +919,17 @@ When you cannot find a critical number, do NOT stop your analysis. Instead:
 
 **Critical Rule:** Never silently invent numbers. Every proxy must be explicitly explained with your reasoning.
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+
+
 ## Seven-Phase Analysis Framework
 
-Work through these seven phases systematically. Conduct all your reasoning, research queries, calculations, and filtering decisions inside <systematic_analysis> tags in your thinking block before presenting your final recommendations.
+Work through these seven phases systematically. Conduct all reasoning, research queries, calculations, and filtering decisions before presenting your final recommendations.
 
 ### Phase 1: Thesis Decomposition & Capital Flow Analysis
 
@@ -1008,17 +1035,17 @@ Work through these seven phases systematically. Conduct all your reasoning, rese
    **Then, compute thesis exposure using one of these methods:**
 
    **Method A: Backlog/Orders-Based (for project businesses)**
-   - Formula: Exposure ≈ (Revenue or backlog tied to thesis sub-segment invoice items) / Total revenue
+   - Formula: Exposure  (Revenue or backlog tied to thesis sub-segment invoice items) / Total revenue
    - Data sources: Filings/IR segment revenue disclosures, backlog disclosures
    - If only backlog disclosed: Annual conversion = Backlog / Average project duration (use range)
    - If data missing: Cap exposure at 20% maximum and downgrade to Material or Catalytic tier
 
    **Method B: Budget/Program-Based (for defense/government services integrators)**
-   - Formula: Exposure ≈ (Revenue from relevant agencies/programs/budget line items) / Total revenue
+   - Formula: Exposure  (Revenue from relevant agencies/programs/budget line items) / Total revenue
    - Data sources: Customer concentration disclosures, agency revenue mix, contract backlog by customer
 
    **Method C: Installed Base/Recurring Mix (for software/subscription businesses)**
-   - Formula: Exposure ≈ (Recurring revenue tied to thesis invoice items) / Total revenue
+   - Formula: Exposure  (Recurring revenue tied to thesis invoice items) / Total revenue
    - Data sources: ARR disclosures, recurring revenue mix, product segment breakdowns
 
    **Method D: Peer-Implied Exposure (ALWAYS-RUN fallback when A/B/C unavailable)**
@@ -1224,7 +1251,7 @@ For each candidate, write out:
 - -1 pt: New customer wins disclosed in last quarterly report
 
 **Classification:**
-- **Score <2**: STRONG BUY WINDOW
+- **Score <2**: STRONG ENTRY WINDOW
 - **Score 2-4**: HEALTHY
 - **Score 5-7**: ELEVATED (consider waiting for 10-15% pullback)
 - **Score 8+**: OVERHEATED (avoid entirely or size at <2% of portfolio)
@@ -1313,7 +1340,7 @@ After completing all 7 phases, select your final 15 stocks according to these re
 
 ## Required Output Format
 
-After completing your systematic analysis in your thinking block, present your final 15 stock recommendations using this exact structure for each:
+After completing your systematic analysis, present your final 15 stock recommendations using this exact structure for each:
 
 ---
 
@@ -1333,7 +1360,8 @@ After completing your systematic analysis in your thinking block, present your f
 
 ---
 
-Your final output should consist only of the 15 stock recommendations in the format specified above, without duplicating or rehashing any of the systematic analysis work you did in your thinking block.◄PROMPT_SEPARATOR►
+Your final output should consist only of the 15 stock recommendations in the format specified above, without duplicating or rehashing any intermediate analysis work.
+◄PROMPT_SEPARATOR►
 
 STAGE 2.5 — REVERSE DCF LITE + DRIVER-OF-VALUE SCREEN (Two-Layer Asymmetry)
 
@@ -1364,6 +1392,14 @@ OPERATING PRINCIPLES
 • This is a screening stage: prioritize clarity, comparability, and error-avoidance over precision.
 • ALWAYS-RUN rule: You must complete the stage for all companies. Missing inputs must trigger explicit proxy methods (not silent guessing), wide ranges, and stricter decision thresholds — not a stage-level stop.
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+
+
 ---
 
 PHASE 0 — NORMALIZATION & SANITY CHECK
@@ -1385,8 +1421,8 @@ B) Official exchange data for price and shares outstanding.
 C) Reputable aggregators (use at least 2; reconcile; note differences).
 D) EV-first proxy (preferred when net debt or diluted shares are unclear):
 
-* Use MarketCap and EV from reputable sources; infer net debt ≈ EV − MarketCap (same date).
-* If diluted shares are missing, approximate Shares ≈ MarketCap / Price and add a dilution add-on:
+* Use MarketCap and EV from reputable sources; infer net debt  EV  MarketCap (same date).
+* If diluted shares are missing, approximate Shares  MarketCap / Price and add a dilution add-on:
   2%–5% mature/industrial, 5%–10% growth/tech (ASSUMPTION; conservative Base).
   E) Conservative priors with wide ranges only as last resort.
 
@@ -1457,7 +1493,7 @@ You must state explicitly whether thesis effects are modeled as:
 
 PHASE 4 — THESIS WEDGE ISOLATION
 For each scenario:
-V_wedge = V_total − V_core
+V_wedge = V_total  V_core
 
 Compute:
 • Wedge share of current price
@@ -1470,7 +1506,7 @@ Interpretation matters:
 Mandatory “wedge realism” computation (how to check wedge is not fantasy):
 
 * Compute the equity wedge (per share) and translate into an implied steady-state annual FCF requirement:
-  Required_Annual_FCF ≈ (EquityWedge_Value_per_share × DilutedShares) × WACC_total
+  Required_Annual_FCF  (EquityWedge_Value_per_share × DilutedShares) × WACC_total
   (This is a screening approximation; it is NOT a valuation method.)
 * Convert that required annual FCF into an implied required revenue using a conservative incremental FCF margin range, chosen by business type:
 
@@ -1506,7 +1542,7 @@ Using TOTAL values:
 Compute:
 • Upside to Bull
 • Downside to Bear
-• Total Asymmetry = (Bull − Price) / (Price − Bear)
+• Total Asymmetry = (Bull  Price) / (Price  Bear)
 
 Separately report:
 • Core asymmetry
@@ -1651,10 +1687,16 @@ This will help for the next stage: Stage 3 - Competitive Position.
 ◄PROMPT_SEPARATOR►
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
 
 Your goal is to select 4 companies through systematic qualitative analysis based on asymmetric return potential, competitive advantages, and market adoption timing. Focus on identifying companies with the highest risk/reward ratios (upside/downside >3:1 preferred) rather than simply the strongest current market positions.
 
-Before providing your final selections, conduct a comprehensive analysis using the systematic framework below. Do all your detailed analytical work inside <company_analysis> tags within your thinking block.
+Before providing your final selections, conduct a comprehensive analysis using the systematic framework below.
 
 ## Systematic Analysis Framework
 
@@ -1823,7 +1865,7 @@ Portfolio Construction Rules:
 
 ## Analysis Instructions
 
-In your <company_analysis> section within your thinking block:
+In your analysis:
 
 1. **Company Inventory**: Start by listing all companies from the investment context to ensure comprehensive coverage
 2. **Phase-by-Phase Tracking**: Create a table showing which companies advance or are eliminated at each phase, with specific reasoning for eliminations
@@ -1917,19 +1959,107 @@ Portfolio Metrics:
 
 Remember: Prioritize asymmetric risk/reward ratios and favorable S-curve positioning over pure market leadership strength. Seek companies with >3:1 upside/downside ratios at attractive entry points, positioned before or during major adoption inflection points.
 
-Your final output should consist only of the Competitive Position Analysis Results and should not duplicate or rehash any of the detailed analytical work you conducted in the thinking block.
+Your final output should consist only of the Competitive Position Analysis Results and should not duplicate or rehash your detailed intermediate analytical work.
 
 This will help for the next stage: Stage 4 - DuPont ROE Quality.
 ◄PROMPT_SEPARATOR►
+# DuPont ROE Quality Assessment
+
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+## Context
+
+You selected one company through competitive position analysis. Bottom-Up validated business model strength and thesis-fit. Now assess financial performance quality by decomposing return on equity into operational drivers and evaluating how thesis transformation impacts these drivers.
+
+## Analytical Purpose
+
+DuPont framework disaggregates ROE into three components revealing whether returns stem from operational excellence, asset efficiency, or financial leverage. For thesis-driven investments, the critical question is whether market transformation improves ROE quality by strengthening operational drivers or merely maintains returns through increased leverage.
+
+## Framework Application
+
+Calculate ROE decomposition using most recent fiscal year data. Return on Equity equals Net Profit Margin multiplied by Asset Turnover multiplied by Equity Multiplier. Net Profit Margin measures operational efficiency through net income divided by revenue. Asset Turnover measures asset utilization through revenue divided by total assets. Equity Multiplier measures financial leverage through total assets divided by shareholders equity.
+
+Show your calculations for each component and verify that their multiplication produces the reported ROE. If discrepancies exist, explain the variance source.
+
+## Component Analysis
+
+Evaluate each driver independently then assess their interaction. For Net Profit Margin, determine whether current margin reflects sustainable operational efficiency or temporary factors. Compare to industry benchmarks and identify margin trajectory over past three years. Assess whether margin expansion or compression is occurring and what drives the trend.
+
+For Asset Turnover, evaluate how efficiently the company generates revenue from its asset base. Compare to capital-intensive versus asset-light peers in the sector. Determine whether low turnover reflects strategic positioning requiring heavy assets or operational inefficiency. Identify turnover trajectory and whether asset base is growing faster or slower than revenue.
+
+For Equity Multiplier, assess leverage appropriateness for the business model and industry. Distinguish between financial leverage enhancing returns and leverage creating financial fragility. Evaluate debt maturity profile, interest coverage, and covenant headroom. Determine whether leverage is increasing or decreasing and the strategic rationale.
+
+## Thesis Impact on ROE Drivers
+
+This is where DuPont analysis integrates with your investment thesis. Assess how market transformation will impact each component over the next three years.
+
+For margin trajectory under thesis, determine whether transformation enables pricing power expansion through increased differentiation or market consolidation. Consider whether thesis drives unit cost reduction through scale economies or automation. Evaluate whether competitive dynamics intensify margin pressure through commoditization or new entry. Conclude whether thesis improves, maintains, or compresses net profit margins.
+
+For asset efficiency evolution, assess whether thesis drives revenue growth on existing asset base improving turnover. Consider whether thesis requires significant asset additions reducing turnover. Determine whether business model shifts toward asset-light operations. Conclude whether thesis improves, maintains, or deteriorates asset turnover.
+
+For leverage implications, evaluate whether thesis requires debt-financed capital expenditures increasing equity multiplier. Consider whether thesis generates excess cash enabling deleveraging. Assess whether transformation risk necessitates balance sheet conservatism. Conclude whether thesis increases, maintains, or reduces financial leverage.
+
+## Integrated ROE Forecast
+
+Synthesize component trajectories into forward ROE projection. State current ROE from your calculations. Project thesis-adjusted ROE three years forward based on component analysis. Identify which component contributes most to ROE change under thesis. Determine whether projected ROE improvement stems from operational enhancement or financial engineering.
+
+## Quality Assessment
+
+Conclude whether current ROE represents sustainable competitive advantage or financial structure artifact. High ROE driven by superior margins and asset efficiency with moderate leverage indicates durable quality. High ROE driven primarily by equity multiplier with mediocre operational metrics indicates financial engineering masking operational weakness.
+
+Assess whether thesis transformation improves ROE quality by strengthening operational components or degrades quality by requiring margin sacrifice or asset-heavy investment despite revenue growth. Compare ROE quality versus finalists from competitive position analysis if multiple companies were evaluated.
+
+## Required Output
+
+# DuPont ROE Quality Assessment - Output Requirements
+
+**ROE Decomposition:**
+- Net Profit Margin = ___%
+- Asset Turnover = __x
+- Equity Multiplier = __x
+- ROE = NPM × Turnover × Multiplier = ___%
+
+Verify calculation matches reported ROE.
+
+**Thesis Impact (Year 3 projection):**
+- Net Profit Margin: baseline __% → thesis-adjusted __% (reason: ___)
+- Asset Turnover: baseline __x → thesis-adjusted __x (reason: ___)
+- Equity Multiplier: baseline __x → thesis-adjusted __x (reason: ___)
+- Projected ROE Year 3: ___%
+
+**Quality Assessment:**
+Does ROE stem from operational excellence (margins + efficiency) or financial leverage?
+Does thesis improve or degrade ROE quality?
+
+**Pass to Thesis Monetization:**
+- Current Net Profit Margin: ___%
+- Thesis-adjusted Net Profit Margin (Y3): ___%
+- Current Asset Turnover: __x
+- Thesis-adjusted Asset Turnover (Y3): __x
+
+Advance to Thesis Monetization Quantification.
+
+This will help for the next stage: Stage 5 - Revaluation Parameter Selection.
+◄PROMPT_SEPARATOR►
 # STAGE 5 — REVALUATION PARAMETER SELECTION
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
 (Formerly referenced as "KPI Selection" or "Single Metric Decision")
 
 You are a quantitative investment analyst working on the final decision stage of a multi-stage analysis pipeline. Your task is to select exactly ONE company from a shortlist of finalists based on a specific criterion: which company has the highest probability-weighted potential to force a near-term market revaluation.
 
 # Context and Inputs
 
-You will have recived inputs from previous analysis stages:
+You will have received inputs from previous analysis stages:
 
 
 **What each input contains:**
@@ -2055,7 +2185,7 @@ To answer this question properly:
 
 3. **Confirm the RP connects to actual revenue-driving mechanisms**. The KPI should be consistent with the payer→contract→revenue logic from earlier stages.
 
-Work through your analysis systematically inside <analysis> tags in your thinking block. It's OK for this section to be quite long. For each company, you must:
+Work through your analysis systematically. It's OK for this section to be quite long. For each company, you must:
 
 - **First**, list out all companies from the company list to ensure you analyze every single one
 - **For each company**, work through all 5 steps explicitly:
@@ -2066,7 +2196,7 @@ Work through your analysis systematically inside <analysis> tags in your thinkin
   - If the company passes all tests, show the calculation: Valuation Impact % × Probability Multiplier = RevaluationExpectedImpact score
   - Mark failures clearly with the reason
 
-After completing your analysis in the thinking block, provide your final output in two parts:
+After completing your analysis, provide your final output in two parts:
 
 # Output Requirements
 
@@ -2136,82 +2266,6 @@ Begin your analysis now.
 This will help for the next stage: Stage 6 - Thesis Monetization Quantification.
 ◄PROMPT_SEPARATOR►
 
-# DuPont ROE Quality Assessment
-
-## Context
-
-You selected one company through competitive position analysis. Bottom-Up validated business model strength and thesis-fit. Now assess financial performance quality by decomposing return on equity into operational drivers and evaluating how thesis transformation impacts these drivers.
-
-## Analytical Purpose
-
-DuPont framework disaggregates ROE into three components revealing whether returns stem from operational excellence, asset efficiency, or financial leverage. For thesis-driven investments, the critical question is whether market transformation improves ROE quality by strengthening operational drivers or merely maintains returns through increased leverage.
-
-## Framework Application
-
-Calculate ROE decomposition using most recent fiscal year data. Return on Equity equals Net Profit Margin multiplied by Asset Turnover multiplied by Equity Multiplier. Net Profit Margin measures operational efficiency through net income divided by revenue. Asset Turnover measures asset utilization through revenue divided by total assets. Equity Multiplier measures financial leverage through total assets divided by shareholders equity.
-
-Show your calculations for each component and verify that their multiplication produces the reported ROE. If discrepancies exist, explain the variance source.
-
-## Component Analysis
-
-Evaluate each driver independently then assess their interaction. For Net Profit Margin, determine whether current margin reflects sustainable operational efficiency or temporary factors. Compare to industry benchmarks and identify margin trajectory over past three years. Assess whether margin expansion or compression is occurring and what drives the trend.
-
-For Asset Turnover, evaluate how efficiently the company generates revenue from its asset base. Compare to capital-intensive versus asset-light peers in the sector. Determine whether low turnover reflects strategic positioning requiring heavy assets or operational inefficiency. Identify turnover trajectory and whether asset base is growing faster or slower than revenue.
-
-For Equity Multiplier, assess leverage appropriateness for the business model and industry. Distinguish between financial leverage enhancing returns and leverage creating financial fragility. Evaluate debt maturity profile, interest coverage, and covenant headroom. Determine whether leverage is increasing or decreasing and the strategic rationale.
-
-## Thesis Impact on ROE Drivers
-
-This is where DuPont analysis integrates with your investment thesis. Assess how market transformation will impact each component over the next three years.
-
-For margin trajectory under thesis, determine whether transformation enables pricing power expansion through increased differentiation or market consolidation. Consider whether thesis drives unit cost reduction through scale economies or automation. Evaluate whether competitive dynamics intensify margin pressure through commoditization or new entry. Conclude whether thesis improves, maintains, or compresses net profit margins.
-
-For asset efficiency evolution, assess whether thesis drives revenue growth on existing asset base improving turnover. Consider whether thesis requires significant asset additions reducing turnover. Determine whether business model shifts toward asset-light operations. Conclude whether thesis improves, maintains, or deteriorates asset turnover.
-
-For leverage implications, evaluate whether thesis requires debt-financed capital expenditures increasing equity multiplier. Consider whether thesis generates excess cash enabling deleveraging. Assess whether transformation risk necessitates balance sheet conservatism. Conclude whether thesis increases, maintains, or reduces financial leverage.
-
-## Integrated ROE Forecast
-
-Synthesize component trajectories into forward ROE projection. State current ROE from your calculations. Project thesis-adjusted ROE three years forward based on component analysis. Identify which component contributes most to ROE change under thesis. Determine whether projected ROE improvement stems from operational enhancement or financial engineering.
-
-## Quality Assessment
-
-Conclude whether current ROE represents sustainable competitive advantage or financial structure artifact. High ROE driven by superior margins and asset efficiency with moderate leverage indicates durable quality. High ROE driven primarily by equity multiplier with mediocre operational metrics indicates financial engineering masking operational weakness.
-
-Assess whether thesis transformation improves ROE quality by strengthening operational components or degrades quality by requiring margin sacrifice or asset-heavy investment despite revenue growth. Compare ROE quality versus finalists from competitive position analysis if multiple companies were evaluated.
-
-## Required Output
-
-# DuPont ROE Quality Assessment - Output Requirements
-
-**ROE Decomposition:**
-- Net Profit Margin = ___%
-- Asset Turnover = __x
-- Equity Multiplier = __x
-- ROE = NPM × Turnover × Multiplier = ___%
-
-Verify calculation matches reported ROE.
-
-**Thesis Impact (Year 3 projection):**
-- Net Profit Margin: baseline __% → thesis-adjusted __% (reason: ___)
-- Asset Turnover: baseline __x → thesis-adjusted __x (reason: ___)
-- Equity Multiplier: baseline __x → thesis-adjusted __x (reason: ___)
-- Projected ROE Year 3: ___%
-
-**Quality Assessment:**
-Does ROE stem from operational excellence (margins + efficiency) or financial leverage?
-Does thesis improve or degrade ROE quality?
-
-**Pass to Thesis Monetization:**
-- Current Net Profit Margin: ___%
-- Thesis-adjusted Net Profit Margin (Y3): ___%
-- Current Asset Turnover: __x
-- Thesis-adjusted Asset Turnover (Y3): __x
-
-Advance to Thesis Monetization Quantification.
-
-This will help for the next stage: Stage 5 - Revaluation Parameter Selection.
-◄PROMPT_SEPARATOR►
 STAGE 6 — THESIS MONETIZATION QUANTIFICATION
 Incremental Wedge + SoP-Compatible + Path-Routed + Search-When-Needed
 
@@ -2235,6 +2289,14 @@ SEARCH POLICY (IMPORTANT)
 - Cite sources used.
 - Do not “research everything”; search only to unblock missing essentials or to validate a suspicious/conflicting number.
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+
+
 HARD QC RULES
 A) All numerical calculations must be done in Python. Show intermediate numbers and final results.
 B) Every assumption must be labeled SOURCE (if backed by a cited source or a quote/excerpt in context) or ASSUMPTION. Add CONFIDENCE (H/M/L).
@@ -2246,6 +2308,17 @@ F) Anti-double-count: incremental means “thesis path minus the same baseline p
 G) Wedge persistence: do not assume the wedge is perpetual by default. Classify persistence (wave/cycle vs durable steady-state change) and only then decide whether a long-term component exists.
 H) Wedge sanity checks: wedge should be monotonic (Bear ≤ Base ≤ Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
 
+PIPELINE HALT COMMAND (MANDATORY WHEN DATA GAPS BLOCK THE STAGE)
+If critical inputs are still missing after required search/proxy attempts, you must output this exact command block and stop:
+SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
+SYSTEM_COMMAND_REASON: <one sentence naming the blocking missing inputs>
+DECISION: WATCH
+CATEGORY: DATA_GAPS
+MISSING_INPUTS: <comma-separated list>
+NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
+After this block, STOP and do not continue with extra sections.
+
+
 
 
 STEP 1 — EXTRACT THE STAGE 2.5 HANDOFF (FROM CONTEXT)
@@ -2256,7 +2329,7 @@ Create a “Context Pack” table with:
 - CORE value per share (V_core_base at minimum; bear/bull if available)
 - Monetization Path A/B/C and Dominant Driver (from Stage 2.5)
 - One-line thesis stream definition (what is included)
-If any of the following are missing from context: price, diluted shares, and a usable baseline definition, run search to obtain them; if still unavailable, list exactly what is missing and STOP.
+If any of the following are missing from context: price, diluted shares, and a usable baseline definition, run search to obtain them; if still unavailable, output the PIPELINE HALT COMMAND block above, list exactly what is missing, and STOP.
 
 ANCHOR INHERITANCE: Stage 6 must inherit the Anchor Date/Year 0 baseline from Stage 2.5 (Revenue₀, FCF₀/margin₀, diluted shares, net debt/cash). If Stage 2.5 does not explicitly provide any of these, estimate them by rebuilding the same Anchor Date baseline from the latest available filings and proceed with clearly labeled assumptions.
 STEP 2 — DEFINE THE WEDGE OBJECT (PRECISELY)
@@ -2299,7 +2372,7 @@ Wedge persistence classification (mandatory):
 - Wave: no terminal value; or terminal with explicit fade schedule to 0 by year 6–8.
 - Durable shift: terminal allowed with conservative g.
 - Step-change with reinvestment: terminal allowed only if incremental maintenance reinvestment is modeled.
-If persistence is not classified, STOP.
+If persistence is not classified because required inputs are missing, output the PIPELINE HALT COMMAND block above and STOP.
 Anti-double-count numeric test:
 Compute baseline_FCF_core_year0 and baseline_FCF_wedge_year0 on same scope.
 If |baseline_FCF_core - baseline_FCF_wedge| > 5% of baseline_FCF_core, flag DOUBLE COUNT RISK and reconcile before proceeding.
@@ -2308,6 +2381,12 @@ This will help for the next stage: Stage 7 - Reverse DCF (whole company / TOTAL)
 ◄PROMPT_SEPARATOR►
 # STAGE 7 — REVERSE DCF (TOTAL / WHOLE COMPANY)
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
 You are conducting a Reverse DCF analysis to extract what expectations are already priced into a stock and determine whether there is actionable mispricing versus a thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
 
 CORE PRINCIPLE — CONSISTENCY OF THE VALUATION OBJECT
@@ -2322,6 +2401,14 @@ COMPUTATION + DATA REQUIREMENTS
 * IMPORTANT: “Diluted shares outstanding” means current shares outstanding plus in-the-money dilution (RSUs, options, convertibles). Do NOT use diluted weighted-average shares from the income statement.
 
 PREREQUISITES CHECK — STOP IF ANY ARE MISSING
+If prerequisites are missing after required search/proxy attempts, output this exact command block and stop:
+SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
+SYSTEM_COMMAND_REASON: <one sentence naming the blocking missing inputs>
+DECISION: WATCH
+CATEGORY: DATA_GAPS
+MISSING_INPUTS: <comma-separated list>
+NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
+
 Step 0.1 Identify which inputs you have:
 
 TIME CONSISTENCY REQUIREMENT: Use the same workflow Anchor Date/Year 0 baseline as Stage 2.5/Stage 6 for Revenue₀ and FCF₀/margin₀. If any inputs (price date, shares date, net debt date, financial baseline) are on different cutoffs or FY vs TTM, automatically rebase/align them to the Anchor Date and then run the root-finding for market-implied growth and margin.
@@ -2344,12 +2431,12 @@ You have Bear/Base/Bull NPVs that represent ONLY incremental thesis value (not t
   2. Base-business multiple on normalized FCF/EBIT
 * A clear definition of what is “incremental” so you do NOT double-count cash flows already included in the base business.
 
-If you cannot construct whole-company Bear/Base/Bull equity values per share with the inputs available, STOP and list exactly what is missing.
+If you cannot construct whole-company Bear/Base/Bull equity values per share with the inputs available, output the command block above, then STOP and list exactly what is missing.
 
 NEW — Step 0.2 HORIZON CALIBRATION (MANDATORY, PRE-PRICE)
 Purpose: avoid compressing long-cycle theses into a 3-year model which can distort market-implied assumptions.
 Rules:
-* Choose an explicit horizon N for the DCF cash-flow projection from this set: N ∈ {3, 5, 7, 10}.
+* Choose an explicit horizon N for the DCF cash-flow projection from this set: N  {3, 5, 7, 10}.
 * Select N BEFORE solving any market-implied parameter and BEFORE comparing to current price diagnostics.
 * N must be justified using Stage 0/1/6 (thesis structure, procurement cycle, persistence), not market price.
 
@@ -2388,7 +2475,7 @@ Build SoP at the EV level:
 • EV_total_s = EV_core_s + EV_wedge_s
 • NetDebt_total_s = NetDebt_core_s + ΔNetDebt_s (only if wedge requires financing; else 0)
 • DilutedShares_total_s = DilutedShares_core + ΔShares_s (only if wedge causes dilution; else 0)
-• EquityValuePerShare_total_s = (EV_total_s − NetDebt_total_s) / DilutedShares_total_s
+• EquityValuePerShare_total_s = (EV_total_s  NetDebt_total_s) / DilutedShares_total_s
 Only if ΔNetDebt_s = 0 and ΔShares_s = 0 may you safely add per-share values (EV-level is still preferred).
 Persistence (inherit from Stage 6):
 • Wave wedge: model explicit ΔFCF through a fade schedule (e.g., out to year 6–8) and set wedge terminal contribution = 0.
@@ -2411,10 +2498,10 @@ Mechanics:
 * Revenue_t = Revenue_0 × (1 + growth) ^ t  (or your explicit path)
 * FCF_t = Revenue_t × FCFMargin_t
 * PV_FCF = Σ_{t=1..3} FCF_t / (1+WACC)^t
-* TV = FCF_3 × (1+g) / (WACC − g)
+* TV = FCF_3 × (1+g) / (WACC  g)
 * PV_TV = TV / (1+WACC)^3
 * EV = PV_FCF + PV_TV
-* EquityValue = EV − NetDebt
+* EquityValue = EV  NetDebt
 * EquityValuePerShare = EquityValue / DilutedShares
 
 NEW — Step 2.1 CASH FLOW CONSISTENCY CHECK (MANDATORY)
@@ -2430,15 +2517,15 @@ If Horizon N (from Step 0.2) is > 3, extend the DCF mechanics WITHOUT changing t
 * For margin, default to holding margin_3 constant for years 4..N unless the thesis persistence in Stage 6 requires a fade (Wave case) or explicit reinvestment logic (Durable case).
 * Compute PV_FCF for t=1..N and terminal value at year N:
   - PV_FCF = Σ_{t=1..N} FCF_t / (1+WACC)^t
-  - TV = FCF_N × (1+g_terminal) / (WACC − g_terminal)
+  - TV = FCF_N × (1+g_terminal) / (WACC  g_terminal)
   - PV_TV = TV / (1+WACC)^N
 * Mandatory diagnostic: report terminal share = PV_TV / (PV_FCF + PV_TV). High terminal share implies WACC sensitivity.
 
 STEP 3 — MARKET POSITION VS YOUR SCENARIOS (WHOLE-COMPANY)
 Compute using whole-company Bear/Base/Bull Equity Value per share:
-* %PricedIn = (Price − Bear) / (Bull − Bear) × 100
-* Gap_to_Base = (Base − Price) / Price
-* Gap_to_Bull = (Bull − Price) / Price
+* %PricedIn = (Price  Bear) / (Bull  Bear) × 100
+* Gap_to_Base = (Base  Price) / Price
+* Gap_to_Bull = (Bull  Price) / Price
 If %PricedIn < 0 or > 100, treat it as “outside range” diagnostic, not a basis for interpolation.
 
 STEP 4 — SOLVE MARKET-IMPLIED ASSUMPTIONS (ROOT-FINDING, PYTHON)
@@ -2460,7 +2547,7 @@ You must solve directly, not interpolate.
 * Report 3–5 representative points to show trade-offs (e.g., high growth/low margin vs lower growth/higher margin).
 
 4.4 If SoP is used (thesis-incremental inputs)
-* Compute implied thesis value per share = CurrentPrice − BaseBusinessValuePerShare_current.
+* Compute implied thesis value per share = CurrentPrice  BaseBusinessValuePerShare_current.
 * Within the thesis incremental DCF, solve for one implied thesis driver (preferably capture rate or thesis CAGR) such that ThesisNPVPerShare == implied thesis value per share.
 * Do not compare thesis-only NPV to full price.
 
@@ -2475,18 +2562,18 @@ If Price ≤ Bear or Bull ≤ Price, treat as “outside range” and do not com
 
 Compute (Python):
 • ExpectedValue = pBearBear + pBaseBase + pBull*Bull
-• ExpectedValueUpside% = ExpectedValue / Price − 1
+• ExpectedValueUpside% = ExpectedValue / Price  1
 
 CORRECTION (do not remove the original line, but use this for calculations):
 • ExpectedValue = pBear*Bear + pBase*Base + pBull*Bull
 
 Risk/Reward (percent-based):
-• Upside% = Bull / Price − 1
-• Downside% = 1 − Bear / Price
+• Upside% = Bull / Price  1
+• Downside% = 1  Bear / Price
 • AsymmetryRatio = Upside% / Downside%
 
 Cross-check (must match numerically):
-• AsymmetryRatio_check = (Bull − Price) / (Price − Bear)
+• AsymmetryRatio_check = (Bull  Price) / (Price  Bear)
 
 Optional reporting (do NOT use to compute asymmetry):
 • BullMultiple = Bull / Price
@@ -2550,11 +2637,17 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 Style: concise, decision-oriented, auditable. No generic filler. No linear interpolation. No object mismatch.
 Focus on actionable conclusions. Show all key calculations and assumptions explicitly, and ensure the object of valuation is consistent throughout.
 
-This will help for the next stage: Stage 8 - Four-Gate Decision (BUY/WATCH/AVOID).
+This will help for the next stage: Stage 8 - Four-Gate Decision (WATCH/AVOID).
 ◄PROMPT_SEPARATOR►
 ROLE
-You are the Stage 8 decision engine in our thesis-driven investment pipeline. For ONE company, you must produce a single actionable decision: BUY / WATCH / AVOID.
+You are the Stage 8 decision engine in our thesis-driven investment pipeline. For ONE company, you must produce a single decision: WATCH / AVOID.
 
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
 You do not invent a new thesis.
 You do not “research for fun.”
 You do not create new numbers.
@@ -2575,18 +2668,23 @@ We have three different valuation objects. Mixing them produces wrong decisions.
 - TOTAL: CORE + WEDGE (the only object that can be compared to the stock price)
 
 Hard rules:
-1) Asymmetry, priced-in, reverse DCF, divergence, tier signals, and the final BUY/WATCH/AVOID decision must be computed ONLY on TOTAL.
+1) Asymmetry, priced-in, reverse DCF, divergence, tier signals, and the final WATCH/AVOID decision must be computed ONLY on TOTAL.
 2) WEDGE may be compared to price ONLY as a “thesis contribution ratio”:
    Wedge_to_Price = Expected_WEDGE / Price
    WEDGE is never a price target and never the intrinsic value of the stock.
 3) If you cannot construct consistent TOTAL Bear/Base/Bull scenarios, you MUST output:
+   SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
+   SYSTEM_COMMAND_REASON: Missing inputs to construct consistent TOTAL scenarios
    DECISION: WATCH
    CATEGORY: DATA_GAPS
+   MISSING_INPUTS: <comma-separated list>
+   NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
    and STOP.
 
-AVOID rule:
-- AVOID is reserved for structural/quality failure (Gate 1 FAIL: permanent impairment risk).
-- “Too expensive” or “not enough proof yet” is WATCH, not AVOID.
+Binary rule:
+- Do not emit BUY.
+- Structural failure maps to AVOID + STRUCTURAL.
+- “Too expensive” or “not enough proof yet” maps to WATCH.
 
 ────────────────────────────────────────────────────────────────────────────
 WHERE EACH INPUT COMES FROM (stage-to-stage map)
@@ -2659,9 +2757,12 @@ C) Stage 2.5 dominant driver and path (A/B/C) are known and will be respected in
    - Path C (WACC-dominated): this is a regime bet unless there is a real incremental cash-flow mechanism.
 
 If any of A/B/C is not satisfied:
+- SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
+- SYSTEM_COMMAND_REASON: Missing mandatory Gate 0 integrity inputs
 - DECISION: WATCH
 - CATEGORY: DATA_GAPS
 - List exactly what is missing and which stage must provide it
+- NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
 Then STOP.
 
 ────────────────────────────────────────────────────────────────────────────
@@ -2690,18 +2791,18 @@ This gate is computed ONLY on TOTAL.
 
 Required formulas (TOTAL):
 1) Total asymmetry:
-   Asymmetry_TOTAL = (Bull_TOTAL − Price) / (Price − Bear_TOTAL)
+   Asymmetry_TOTAL = (Bull_TOTAL  Price) / (Price  Bear_TOTAL)
 
 2) Expected value (TOTAL):
    EV_TOTAL = 0.25*Bear_TOTAL + 0.50*Base_TOTAL + 0.25*Bull_TOTAL
-   EV_Upside = (EV_TOTAL / Price) − 1
+   EV_Upside = (EV_TOTAL / Price)  1
 
 3) Priced-in diagnostic (not a valuation, just a check):
-   PricedIn% = (Price − Bear_TOTAL) / (Bull_TOTAL − Bear_TOTAL)
+   PricedIn% = (Price  Bear_TOTAL) / (Bull_TOTAL  Bear_TOTAL)
 
 4) Divergence vs market (from Stage 7 reverse DCF):
-   Divergence_growth = Base_CAGR − MarketImplied_CAGR
-   Divergence_margin = Base_FCFmY3 − MarketImplied_FCFmY3
+   Divergence_growth = Base_CAGR  MarketImplied_CAGR
+   Divergence_margin = Base_FCFmY3  MarketImplied_FCFmY3
 Report both if available. If only one exists, report it and state the limitation.
 
 WEDGE diagnostic (allowed, but not a target):
@@ -2751,26 +2852,26 @@ Provide:
    - one thesis falsifier (Stage 6)
    - one company-specific exit (Stage 3/5)
    - one valuation-too-expensive trigger (Stage 7)
-5) If current decision is WATCH, you must state an explicit upgrade-to-BUY rule:
+5) If current decision is WATCH, you must state an explicit upgrade condition (price and/or VOI/KPI trigger):
    - a price trigger and/or
-   - a VOI/KPI trigger that would justify today’s price
+   - a VOI/KPI trigger that would justify stronger conviction
 
 ────────────────────────────────────────────────────────────────────────────
 FINAL DECISION LOGIC
 1) If Gate 0 fails: WATCH / DATA_GAPS
 2) If Gate 1 has any FAIL: AVOID / STRUCTURAL
 3) If Gate 1 PASS and Gate 2 FAIL: WATCH / TOO_EXPENSIVE
-4) If Gate 1 PASS, Gate 2 PASS, and Gate 3 is not LOW: BUY / OK
+4) If Gate 1 PASS, Gate 2 PASS, and Gate 3 is not LOW: WATCH / OK
 5) Otherwise: WATCH / INSUFFICIENT_PROOF or TIMING (choose the real blocker)
 
 ────────────────────────────────────────────────────────────────────────────
 OUTPUT FORMAT (English, plain and readable, no new claims)
 [Company] (Ticker:Exchange)
-DECISION: BUY / WATCH / AVOID
+DECISION: WATCH / AVOID
 CATEGORY: OK / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
 
 Gate 0 — Integrity: PASS/FAIL
-- If FAIL: list missing stage outputs and STOP.
+- If FAIL: output SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN, then list missing stage outputs and STOP.
 
 Gate 1 — Quality: PASS/RISK/FAIL
 - Moat/replaceability (Stage 3)
@@ -2793,7 +2894,7 @@ Gate 4 — Execution plan
 - Tranches and conditions
 - Monitoring cadence
 - Reduce/exit triggers
-- Upgrade-to-BUY rule (if WATCH)
+- Upgrade condition (if WATCH)
 
 Main risk (one sentence, cause → effect)
 VOI trigger (one line)
@@ -2811,6 +2912,14 @@ This will help for the next stage: Stage 9 - Four-Gate Framework — Decision Ou
 ## 🎯 Cel
 
 Wygeneruj jedną linię tekstu — standardowy rekord decyzyjny według metodologii Four-Gate Framework. To nie jest podsumowanie analizy, lecz logiczny zapis decyzji inwestycyjnej — z uzasadnieniem, asymetrią i kluczowymi ryzykami — w języku strategicznym, nadającym się do briefingów najwyższego szczebla (rząd, fundusz, zarząd).
+
+DataGap Rule:
+If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 2.5, 6, 7). Do not output anything else.
+
+Example outputs (only one line):
+DATA_GAP_STAGE=2.5
+DATA_GAP_STAGE=7
+
 
 ---
 
@@ -2833,51 +2942,60 @@ Wewnątrz pola używaj:
 
 ---
 
-## 📋 STRUKTURA OUTPUT — 15 pól oddzielonych średnikami
+## 📋 STRUKTURA OUTPUT — 12 pol oddzielonych srednikami
 
-| Kolumna | Nazwa pola                    | Przykład                                                  |
-|---------|-------------------------------|-----------------------------------------------------------|
-| 1       | Data decyzji                  | 2025-10-14                                                |
-| 2       | Status decyzji                | BUY / AVOID / WATCH                                       |
-| 3       | Spółka                        | Richemont (CFR:SW)                                        |
-| 4       | Krótkie streszczenie tezy     | Bifurkacja rynku diamentów i migracja marż                |
-| 5       | Materiał źródłowy             | Podcast: The Economist Money Talks                        |
-| 6       | Teza inwestycyjna             | (pełny opis, 3-5 zdań)                                    |
-| 7       | Wątpliwości/ryzyka            | (lista zagrożeń)                                          |
-| 8       | Gate rating                   | G1:PASS G2:RISK G3:HIGH G4:ACTIVE                         |
-| 9       | Asymetria/Divergence          | Asymetria: 3.5:1, Divergence: 1.4×                        |
-| 10      | VOI/Falsifiers                | VOI: X, Fals: Y, Primary risk: Z                          |
-| 11      | Sektor                        | Handel & zachowania konsumenta                             |
-| 12      | Region                        | Szwajcaria                                                 |
-| 13      | Waluta                        | CHF                                                        |
-| 14      | WHY BUY                       | #tag1 #tag2 #tag3                                          |
-| 15      | WHY AVOID                     | #tag1 #tag2                                                |
+| Kolumna | Nazwa pola             | Przyklad                                           |
+|---------|------------------------|----------------------------------------------------|
+| 1       | Data decyzji           | 2025-10-14                                         |
+| 2       | Status decyzji         | WATCH / AVOID                                      |
+| 3       | Spolka                 | Richemont (CFR:SW)                                 |
+| 4       | Material zrodlowy      | Podcast: The Economist Money Talks                 |
+| 5       | Teza inwestycyjna      | (pelny opis, 4-6 zdan)                             |
+| 6       | Bear scenario (TOTAL)  | Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%       |
+| 7       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
+| 8       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
+| 9       | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z              |
+| 10      | Sektor                 | Handel & zachowania konsumenta                     |
+| 11      | Region                 | Szwajcaria                                          |
+| 12      | Waluta                 | CHF                                                |
 
 ---
 
-## 📊 Szczegółowy opis pól
+## Kontrakt danych (obowiazkowy)
+
+- Ten format ma **dokladnie 12 pol** i sluzy do bezposredniego importu do Watchlist.
+- Nie dodawaj ani nie usuwaj pol.
+- Nie przesuwaj tresci miedzy polami: kazda kolumna ma stale znaczenie.
+- Pole 4 (`Material zrodlowy`) ma zawierac **tylko zrodlo i kontekst zrodla**, nie analize.
+- Pole 5 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
+- Pola 6-8 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
+- Pole 9 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ...`.
+- Nie uzywaj formatu legacy 15-polowego (`watpliwosci`, `gate rating`, `why buy`, `why avoid`) w tym rekordzie.
+
+---
+
+##  Szczegolowy opis pol
 
 ### 1. Data decyzji
 
-Format: `RRRR-MM-DD`
+Format: RRRR-MM-DD
 
 ---
 
 ### 2. Status decyzji
 
-Wybierz dokładnie jedno:
+Wybierz dokladnie jedno:
 
-- **BUY** — kupuj
-- **AVOID** — unikaj
-- **WATCH** — obserwuj
+- **WATCH**  obserwuj, gdy potrzeba dalszych potwierdzen albo cena/asymetria nie uzasadnia decyzji AVOID
+- **AVOID**  unikaj, gdy wystepuje strukturalny problem jakosciowy lub trwala destrukcja wartosci
 
 ---
 
-### 3. Spółka
+### 3. Spolka
 
-Format: `Nazwa Spółki (TICKER:GIEŁDA)`
+Format: Nazwa Spolki (TICKER:GIELDA)
 
-Przykłady:
+Przyklady:
 
 - Richemont (CFR:SW)
 - Tradeweb Markets Inc. (TW:NASDAQ)
@@ -2885,220 +3003,229 @@ Przykłady:
 
 Zasady:
 
-- Bez cudzysłowów i przecinków
-- Jeśli ticker nieznany → tylko nazwa, np. Palantir Technologies
-- Używaj standardowych kodów giełd: NASDAQ, NYSE, SW, LSE, GPW itd.
-- Format kompatybilny z Google Sheets i funkcją `=GOOGLEFINANCE()`
+- Bez cudzyslowow i przecinkow
+- Jesli ticker nieznany  tylko nazwa, np. Palantir Technologies
+- Uzywaj standardowych kodow gield: NASDAQ, NYSE, SW, LSE, GPW itd.
+- Format kompatybilny z Google Sheets i funkcja =GOOGLEFINANCE()
 
 ---
 
-### 4. Krótkie streszczenie tezy
+### 4. Material zrodlowy / podcast
 
-1-2 zdania — esencja mechanizmu wartości.
+Zrodlo, z ktorego pochodzi teza lub inspiracja.
 
-Przykład:
-> Bifurkacja rynku diamentów i migracja marż do marek natural-only
+**Co ma byc w tym polu:**
+
+- Typ zrodla + nazwa + waski kontekst (max 1 krotkie zdanie).
+- Mozesz dopisac techniczne zrodlo liczb scenariuszowych, np. Stage 7/2.5.
+
+**Czego nie wpisywac:**
+
+- Opisu rynku
+- Opisu modelu biznesowego spolki
+- Asymetrii/dywergencji
+- VOI/Fals/Primary risk
+
+Przyklady:
+
+- Podcast: The Economist Money Talks  De Beers i diamenty laboratoryjne (teza popytowo-podazowa)
+- Raport spolki: FactSet FY2025 10-K + prezentacja IR (segmenty, marze, retencja)
+- Artykul + model: YouTube transcript Inside Robinhood Ventures Fund I Bill Ackman with Vlad Tenev + Stage 7 Reverse DCF
 
 ---
 
-### 5. Materiał źródłowy / podcast
+### 5. Teza inwestycyjna (dlaczego ta firma)
 
-Źródło, z którego pochodzi teza lub inspiracja.
-
-Przykłady:
-
-- Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne
-- Raport: Morgan Stanley Semiconductors Q4 2024
-- Artykuł: WSJ — The End of Cloud CAPEX
-
----
-
-### 6. Teza inwestycyjna (dlaczego ta firma)
-
-3-5 zdań, pisane językiem strategicznym.
+4-6 zdan, rzeczowo i czytelnie.
 
 **Struktura:**
 
-- **Kontekst** — co się zmienia w branży (trend, katalizator, regulacja)
-- **Pozycja** — jak firma jest ustawiona wobec tej zmiany (technologia, zasób, sieć, dostęp)
-- **Logika inwestycyjna** — dlaczego rynek tego nie wycenia (mispricing, timing, błędna percepcja)
+- **Rynek**  opisz, jak wyglada rynek dzis: kto kupuje, co rosnie, czego brakuje (np. mocy, komponentow, przepustowosci, finansowania)
+- **Spolka i miejsce zarabiania**  napisz konkretnie, co firma sprzedaje i gdzie generuje przychod (segment, produkt, usluga, typ klienta)
+- **Przyklad monetyzacji**  podaj 1 konkretny przyklad: kto placi, za co placi i jak to przechodzi w przychod/marze
+- **Dlaczego teraz**  wskaz, jaka luka rynkowa lub napiecie popyt-podaz sprawia, ze ten model zarabiania ma przewage w horyzoncie 12-36 miesiecy
+- **Osadzenie asymetrii/dywergencji**  zakoncz 1 zdaniem, co rynek najpewniej niedoszacowuje wzgledem tezy; jesli masz liczby ze Stage 7 (Asymetria_TOTAL, Divergence_growth/Divergence_margin), dodaj je w tym samym polu jako czesc narracji
 
-**Przykład:**
+**Reguly jakosciowe (obowiazkowe):**
 
-> Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej.
+- Minimum 1 zdanie o rynku i 1 zdanie o tym, gdzie spolka realnie zarabia.
+- Minimum 1 przyklad fakturowania/monetyzacji (kto placi -> za co -> jaki efekt na przychod/marze).
+- Asymetria/dywergencja nie jest osobnym polem: ma byc tylko w koncowym zdaniu tezy.
+- Nie uzywaj srednika `;` w tym polu.
+- Nie kopiuj 1:1 etykiet kolumn (`Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`) do pola tezy.
 
-**Nie używaj:**
+**Przyklad:**
 
-- Żargonu finansowego
-- Surowych wskaźników (P/E, EV/EBITDA)
+> Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy i silnej selekcji klienta. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC, gdzie kontroluje cene, ekspozycje kolekcji i relacje z klientem o najwyzszej sile nabywczej. Przyklad monetyzacji: premiera kapsulowej kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa, a wartosc capture wynika z projektu, kuracji kamieni, certyfikacji i dystrybucji bez rabatowania hurtowego. Dzis rynek ma niedobor globalnie skalowalnych marek z porownywalnym zaufaniem i siecia relacji VIC, co ogranicza substytucje po stronie popytu. Dlatego dyskonto rynkowe jest nieadekwatne do trwalosci marz i tempa normalizacji popytu, co w Stage 7 zwykle objawia sie dodatnia dywergencja wzrostu i marzy wobec scenariusza implied.
+
+**Nie uzywaj:**
+
+- Zargonu finansowego
+- Surowych wskaznikow (P/E, EV/EBITDA)
 - Fraz typu "atrakcyjna wycena" bez kontekstu
+- Oglonikow typu "firma jest liderem", bez wskazania gdzie i na czym realnie zarabia
+- Osobnego mini-pola typu `Asymetria: ...` (to ma byc element narracji tezy, nie oddzielna sekcja)
 
 ---
 
-### 7. Wątpliwości / ryzyka
+### 6. Bear scenario (TOTAL)
 
-Przedstaw jasno co może pójść nie tak i dlaczego.
-Nie opisuj wskaźników — tylko zależności przyczynowo-skutkowe.
+Podaj scenariusz Bear jako osobne pole.
 
-Przykłady:
+**Skad wziac dane (obowiazkowe):**
 
-- Tempo adopcji może być niższe, jeśli integracja systemów partnerów się opóźni
-- Rosnące koszty finansowania mogą zredukować atrakcyjność CAPEX-u elektryfikacyjnego
-- Brak wspólnego standardu może zatrzymać efekt sieciowy
+- Najpierw z **Stage 7 — Reverse DCF (WHOLE COMPANY / TOTAL)**, z tabeli `Scenario Comparison Table`, wiersz `Bear`
+- Jesli Stage 7 nie jest dostepny: fallback do **Stage 2.5 — Reverse DCF Lite**, wartosc `Bear_TOTAL`
+- Jesli brak danych w Stage 7 i Stage 2.5: wpisz `N/A (brak danych w Stage 7 i Stage 2.5)` i nie estymuj.
 
----
+**Format pola:**
 
-### 8. Gate rating (G1–G4)
+`Bear_TOTAL: [wartosc na akcje], CAGR [x%], FCFmY3 [y%]`
 
-Dla każdej z czterech bram podaj: status oraz krótkie uzasadnienie (dlaczego przeszło/nie przeszło i co się dowiedzieliśmy).
+**Przyklad pola:**
 
-**Format:**
+`Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%`
 
-```
-G1:[STATUS] - [uzasadnienie]; G2:[STATUS] - [uzasadnienie]; G3:[LEVEL] - [uzasadnienie]; G4:[STATUS] - [uzasadnienie]
-```
+**Przyklad fallback (gdy brak danych):**
 
-**Statusy:**
-
-- G1, G2, G4: `PASS` / `FAIL` / `RISK`
-- G3: `LOW` / `MEDIUM` / `HIGH`
-
-⚠️ **UWAGA:** Używaj przecinków i myślników w uzasadnieniach, **NIE** średników.
-
-**Przykład:**
-
-> G1:PASS - bifurkacja rynku potwierdzona danymi De Beers, trend nieodwracalny; G2:PASS - marki Cartier i Van Cleef mają ugruntowaną pozycję w segmencie natural-only; G3:HIGH - kontrola narracji i kanałów DTC daje trwałą przewagę cenową; G4:ACTIVE - wzrost udziału high jewelry w miksie widoczny w raportach kwartalnych
+`N/A (brak danych w Stage 7 i Stage 2.5)`
 
 ---
 
-### 9. Asymetria / Divergence
+### 7. Base scenario (TOTAL)
 
-Krótka ocena relacji ryzyko/nagroda i percepcji rynku.
+Podaj scenariusz Base jako osobne pole.
 
-**Format:**
+**Skad wziac dane (obowiazkowe):**
 
-```
-Asymetria: X:1, Divergence: Y× — krótki komentarz
-```
+- Najpierw z **Stage 7 — Reverse DCF (WHOLE COMPANY / TOTAL)**, z tabeli `Scenario Comparison Table`, wiersz `Base`
+- Jesli Stage 7 nie jest dostepny: fallback do **Stage 2.5 — Reverse DCF Lite**, wartosc `Base_TOTAL`
+- Jesli brak danych w Stage 7 i Stage 2.5: wpisz `N/A (brak danych w Stage 7 i Stage 2.5)` i nie estymuj.
 
-**Przykład:**
+**Format pola:**
 
-> Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only
+`Base_TOTAL: [wartosc na akcje], CAGR [x%], FCFmY3 [y%]`
 
----
+**Przyklad pola:**
 
-### 10. VOI / Falsifiers / Primary risk
+`Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%`
 
-Zawiera trzy elementy oddzielone przecinkami lub średnikami wewnętrznymi:
+**Przyklad fallback (gdy brak danych):**
 
-- **VOI** (Value of Information) — co musi się wydarzyć, żeby zwiększyć pozycję
-- **Falsifiers** — co unieważni tezę
-- **Primary risk** — główny czynnik destrukcji wartości
-
-**Przykład:**
-
-> VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów
+`N/A (brak danych w Stage 7 i Stage 2.5)`
 
 ---
 
-### 11. Sektor
+### 8. Bull scenario (TOTAL)
 
-Wybierz **TYLKO** jedną nazwę z poniższej listy (bez opisów, nawiasów, myślników):
+Podaj scenariusz Bull jako osobne pole.
+
+**Skad wziac dane (obowiazkowe):**
+
+- Najpierw z **Stage 7 — Reverse DCF (WHOLE COMPANY / TOTAL)**, z tabeli `Scenario Comparison Table`, wiersz `Bull`
+- Jesli Stage 7 nie jest dostepny: fallback do **Stage 2.5 — Reverse DCF Lite**, wartosc `Bull_TOTAL`
+- Jesli brak danych w Stage 7 i Stage 2.5: wpisz `N/A (brak danych w Stage 7 i Stage 2.5)` i nie estymuj.
+
+**Format pola:**
+
+`Bull_TOTAL: [wartosc na akcje], CAGR [x%], FCFmY3 [y%]`
+
+**Przyklad pola:**
+
+`Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%`
+
+**Przyklad fallback (gdy brak danych):**
+
+`N/A (brak danych w Stage 7 i Stage 2.5)`
+
+---
+
+### 9. VOI / Falsifiers / Primary risk
+
+Zawiera trzy elementy oddzielone przecinkami:
+
+- **VOI** (Value of Information)  co musi sie wydarzyc, zeby zwiekszyc pozycje
+- **Falsifiers**  co uniewazni teze
+- **Primary risk**  glowny czynnik destrukcji wartosci
+
+**Przyklad:**
+
+> VOI: udzial high jewelry w przychodach >10% oraz dodatni trend przez 2 kolejne kwartaly, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy jednoczesnym wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow o nizszej marzy i slabszej retencji klienta
+
+---
+
+### 10. Sektor
+
+Wybierz **TYLKO** jedna nazwe z ponizszej listy (bez opisow, nawiasow, myslnikow):
 
 | Sektor                                   | Teza sektorowa (kontekst)                                                                        |
 |------------------------------------------|---------------------------------------------------------------------------------------------------|
-| AI & infrastruktura danych               | Wzrost popytu na compute i dane napędza nową falę CAPEX-u infrastrukturalnego                     |
-| Aplikacje AI & automatyzacja decyzji     | AI przesuwa wartość z pracy ludzkiej do oprogramowania decyzyjnego                                |
-| Bezpieczeństwo & odporność systemowa     | Świat z rosnącą niepewnością strukturalną premiuje dostawców bezpieczeństwa                        |
-| Energia & elektryfikacja                 | Zmiana kosztu kapitału i regulacji przesuwa marże w stronę infrastruktury elektrycznej             |
-| Zaawansowany przemysł & robotyka         | Wzrost produktywności i deficyt pracy fizycznej napędzają automatyzację procesów realnych          |
-| Biologia & zdrowie obliczeniowe          | Cyfryzacja biologii zmienia medycynę z reaktywnej na predykcyjną                                  |
-| Finanse & infrastruktura rynków          | Monetyzacja przepływu wartości i danych w gospodarce kapitału                                     |
-| Handel & zachowania konsumenta           | Zachowania konsumentów stają się algorytmiczne – przewaga zależy od danych o intencji             |
+| AI & infrastruktura danych               | Wzrost popytu na compute i dane napedza nowa fale CAPEX-u infrastrukturalnego                    |
+| Aplikacje AI & automatyzacja decyzji     | AI przesuwa wartosc z pracy ludzkiej do oprogramowania decyzyjnego                               |
+| Bezpieczenstwo & odpornosc systemowa     | Swiat z rosnaca niepewnoscia strukturalna premiuje dostawcow bezpieczenstwa                      |
+| Energia & elektryfikacja                 | Zmiana kosztu kapitalu i regulacji przesuwa marze w strone infrastruktury elektrycznej           |
+| Zaawansowany przemysl & robotyka         | Wzrost produktywnosci i deficyt pracy fizycznej napedza automatyzacje procesow realnych          |
+| Biologia & zdrowie obliczeniowe          | Cyfryzacja biologii zmienia medycyne z reaktywnej na predykcyjna                                 |
+| Finanse & infrastruktura rynkow          | Monetyzacja przeplywu wartosci i danych w gospodarce kapitalu                                    |
+| Handel & zachowania konsumenta           | Zachowania konsumentow staja sie algorytmiczne  przewaga zalezy od danych o intencji            |
 
-⚠️ **WAŻNE:** W outputcie wpisz **TYLKO** nazwę sektora (np. `Biologia & zdrowie obliczeniowe`), bez dodatkowych opisów.
-
----
-
-### 12. Region
-
-Główny region operacyjny lub ekspozycji.
-
-Przykłady: USA, Szwajcaria, Chiny, Europa, Globalny
+ **WAZNE:** W outputcie wpisz **TYLKO** nazwe sektora (np. Biologia & zdrowie obliczeniowe), bez dodatkowych opisow.
 
 ---
 
-### 13. Waluta
+### 11. Region
 
-Waluta raportowania lub główna waluta przychodów.
+Glowny region operacyjny lub ekspozycji.
 
-Przykłady: USD, CHF, EUR, PLN
-
----
-
-### 14. WHY BUY (tagi wspierające)
-
-Wybierz 2-5 tagów z poniższej listy:
-
-```
-#rosnacy_moat
-#dodatni_spread_roic_wacc
-#silny_wzrost
-#dlugoterminowe_kontrakty
-#katalizatory_w_horyzoncie
-#atrakcyjna_wycena
-#przelom_technologiczny
-#skalowalny_model
-#zdrowy_bilans
-#przyspieszajaca_adopcja
-```
+Przyklady: USA, Szwajcaria, Chiny, Europa, Globalny
 
 ---
 
-### 15. WHY AVOID (tagi ryzyka)
+### 12. Waluta
 
-Wybierz 2-5 tagów z poniższej listy:
+Waluta raportowania lub glowna waluta przychodow.
 
-```
-#brak_moatu
-#ujemny_spread_roic_wacc
-#wysokie_zadluzenie
-#spalanie_gotowki
-#przewartosciowanie
-#ryzyko_regulacyjne
-#slaba_trakcja_klientow
-#ryzyko_podazowe
-#koncentracja_klientow
-#opoznienia_operacyjne
-```
-
-⚠️ **WAŻNE:** Zawsze wypełnij oba pola (WHY BUY i WHY AVOID), niezależnie od decyzji końcowej.
+Przyklady: USD, CHF, EUR, PLN
 
 ---
 
-## ✅ Przykład kompletnego outputu
+##  Przyklad kompletnego outputu
 
 ### Bez numeracji (finalna forma):
 
 ```
-2025-10-14; BUY; Richemont (CFR:SW); Bifurkacja rynku diamentów i migracja marż do marek natural-only; Podcast: The Economist Money Talks — De Beers a diamenty laboratoryjne; Globalny rynek diamentów ulega bifurkacji – tańsze kamienie laboratoryjne poszerzają rynek, podczas gdy wartość i marże koncentrują się w segmencie natural high jewelry. Richemont, poprzez marki Cartier i Van Cleef & Arpels, kontroluje narrację rzadkości oraz kanały DTC, co umożliwia utrzymanie premium pricing i stabilnych przepływów w segmencie VIC. Rynek nadal wycenia spółkę jak tradycyjnego jubilera, pomijając trwały efekt miksu produktowego i przeniesienia popytu do kategorii kolekcjonerskiej; Spowolnienie popytu w Azji i USA oraz umocnienie CHF mogą ograniczyć rotację w segmencie high jewelry, a regulacje dotyczące pochodzenia kamieni mogą wprowadzić dodatkowe tarcia operacyjne; G1:PASS - bifurkacja rynku potwierdzona danymi De Beers, trend nieodwracalny; G2:PASS - marki Cartier i Van Cleef mają ugruntowaną pozycję w segmencie natural-only; G3:HIGH - kontrola narracji i kanałów DTC daje trwałą przewagę cenową; G4:ACTIVE - wzrost udziału high jewelry w miksie widoczny w raportach kwartalnych; Asymetria: 3.5:1, Divergence: 1.4× — rynek nie doszacowuje trwałej przewagi marek natural-only; VOI: potwierdzenie wzrostu udziału high jewelry powyżej 10%, Fals: brak ożywienia popytu w Chinach do 2Q, Primary risk: trwałe przesunięcie popytu w stronę laboratoryjnych diamentów; Handel & zachowania konsumenta; Szwajcaria; CHF; #rosnacy_moat #zdrowy_bilans #katalizatory_w_horyzoncie #przyspieszajaca_adopcja; #slaba_trakcja_klientow #ryzyko_regulacyjne #ryzyko_podazowe
+2025-10-14; WATCH; Richemont (CFR:SW); Podcast: The Economist Money Talks  De Beers i diamenty laboratoryjne + Stage 7 Reverse DCF; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy i silnej selekcji klienta. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC, gdzie kontroluje cene i ekspozycje kolekcji. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa, a wartosc capture wynika z projektu, kuracji kamieni, certyfikacji i dystrybucji bez rabatowania hurtowego. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy, a rynek nadal niedoszacowuje trwalosc tego mechanizmu.; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry w przychodach >10% oraz dodatni trend przez 2 kolejne kwartaly, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy jednoczesnym wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow o nizszej marzy i slabszej retencji klienta; Handel & zachowania konsumenta; Szwajcaria; CHF
 ```
 
 ---
 
-## ✍️ Zasady stylistyczne
+##  Zasady stylistyczne
 
-- Output = dokładnie jedna linia tekstu
-- Pola oddzielone tylko średnikami (;)
-- Żadnych średników wewnątrz pól
+- Output = dokladnie jedna linia tekstu
+- Pola oddzielone tylko srednikami (;)
+- Zadnych srednikow wewnatrz pol
 - Bez nazw kolumn i komentarzy
-- Styl: jasny, briefingowy, precyzyjny, bez przymiotników-wypełniaczy
-- Język: polski, ton strategiczny i analityczny
+- Styl: jasny, briefingowy, precyzyjny, bez przymiotnikow-wypelniaczy
+- Jezyk: polski, ton strategiczny i analityczny
 
 ---
 
-## 🎯 Finalna instrukcja
+##  Walidacja przed zwrotem (obowiazkowa)
 
-Wygeneruj dokładnie jedną linię tekstu zgodną z powyższą strukturą — 15 pól oddzielonych średnikami — bez numeracji, bez nagłówków, bez komentarzy.
+- Sprawdz liczbe separatorow: rekord ma miec dokladnie **11** srednikow separatora (12 pol).
+- Sprawdz prefiksy pol scenariuszowych:
+- Pole 6 zaczyna sie od `Bear_TOTAL:`
+- Pole 7 zaczyna sie od `Base_TOTAL:`
+- Pole 8 zaczyna sie od `Bull_TOTAL:`
+- Pole 9 zaczyna sie od `VOI:`
+- Jesli brak danych Stage 7 i Stage 2.5, w polach 6-8 wpisz literalnie: `N/A (brak danych w Stage 7 i Stage 2.5)`.
+- Nie zwracaj formatu legacy 15-polowego.
 
+---
+
+##  Finalna instrukcja
+
+Wygeneruj dokladnie jedna linie tekstu zgodna z powyzsza struktura — 12 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy.
 This will help for the next stage: Final output delivery.
+
+

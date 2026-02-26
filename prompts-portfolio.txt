@@ -306,6 +306,7 @@ Adjustment Notes (lease adjustments, one-offs, etc.)
 
 
 ◄PROMPT_SEPARATOR►
+Stage 3 — Sensitivity & Scenario Analysis
  You are a financial analyst conducting sensitivity testing and scenario analysis for a company's credit risk assessment.
  You will use the Stage 2 outputs from the context window above (Metrics Table, Preliminary Scores, Adjustment Notes) as input data.
 Here are the shock scenarios to test: demand shocks, interest rate increases, FX moves, energy price spikes, and asset impairments.
@@ -377,6 +378,7 @@ Quality Control Verification (vs. CDS spreads, pricing consistency)
 
 
 ◄PROMPT_SEPARATOR►
+Stage 5 — Trade Construction & Execution
  You are a quantitative risk analyst tasked with constructing specific trading positions based on comprehensive risk analysis.
  You will use the Stage 4 outputs from the context window above (Refinancing Heat Map, Trigger Timeline, Contagion Scenario Tree, Probability Assessment) as input data.
 Here are the current market parameters provided separately.

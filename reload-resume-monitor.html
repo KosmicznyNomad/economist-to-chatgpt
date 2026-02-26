@@ -44,6 +44,16 @@
       display: flex;
       gap: 8px;
     }
+    .auto-close-note {
+      width: 100%;
+      margin-top: 6px;
+      font-size: 12px;
+      color: #334155;
+      background: #e2e8f0;
+      border: 1px solid #cbd5e1;
+      border-radius: 8px;
+      padding: 7px 10px;
+    }
     .btn {
       border: 1px solid var(--border);
       background: #fff;
@@ -241,6 +251,7 @@
     <div class="header-actions">
       <button class="btn" id="refresh-btn">Odswiez</button>
     </div>
+    <div class="auto-close-note" id="auto-close-meta" hidden></div>
   </div>
 
   <div class="meta-grid">

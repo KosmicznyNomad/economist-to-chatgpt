@@ -48,6 +48,8 @@ const WATCHLIST_DISPATCH = {
   secret: "233bf044070040d30391b224219635080696bbe1bf4eda74317213f49f01b862",
   // Fallback for networks where outbound 80/443 to server is blocked.
   // Use with: ssh -N -L 18080:127.0.0.1:8080 iskierka
+  // Local tunnel fallback is opt-in only; keep disabled for central/inline configs.
+  enableLocalTunnelFallback: false,
   localTunnelIntakeUrl: "http://127.0.0.1:18080/api/v1/intake/economist-response",
   intakeUrlStorageKey: "watchlist_intake_url",
   intakeUrlSyncStorageKey: "watchlist_intake_url",
@@ -59,6 +61,9 @@ const WATCHLIST_DISPATCH = {
   retryCount: 3,
   backoffMs: 1500,
   maxBackoffMs: 30 * 60 * 1000,
+  flushMaxItemsPerRun: 8,
+  flushMaxRuntimeMs: 25 * 1000,
+  flushStaleLockMs: 6 * 60 * 1000,
   outboxStorageKey: "watchlist_dispatch_outbox",
   outboxMaxItems: 5000,
   historyStorageKey: "watchlist_dispatch_history",
@@ -108,6 +113,9 @@ let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
 let watchlistDispatchFlushPending = false;
 let watchlistDispatchFlushPendingReason = '';
+let watchlistDispatchFlushStartedAt = 0;
+let watchlistDispatchFlushStartedReason = '';
+let watchlistOutboxMutationQueue = Promise.resolve();
 let watchlistDispatchCredentialsCache = null;
 let watchlistDispatchProcessLogEntries = [];
 let watchlistDispatchProcessLogReady = null;
@@ -1708,6 +1716,165 @@ function extractResponseIdFromCopyTrace(copyTrace, expectedRunId = '') {
   return responsePart;
 }
 
+function collectKnownProcessResponseIds(process, expectedRunId = '') {
+  const ids = new Set();
+  if (!process || typeof process !== 'object') return ids;
+
+  const runId = typeof expectedRunId === 'string' ? expectedRunId.trim() : '';
+  const traces = [];
+
+  if (typeof process?.completedResponseSaveTrace === 'string' && process.completedResponseSaveTrace.trim()) {
+    traces.push(process.completedResponseSaveTrace.trim());
+  }
+  if (typeof process?.persistenceStatus?.copyTrace === 'string' && process.persistenceStatus.copyTrace.trim()) {
+    traces.push(process.persistenceStatus.copyTrace.trim());
+  }
+  if (typeof process?.restartReplay?.copyTrace === 'string' && process.restartReplay.copyTrace.trim()) {
+    traces.push(process.restartReplay.copyTrace.trim());
+  }
+
+  for (const trace of traces) {
+    const responseId = extractResponseIdFromCopyTrace(trace, runId);
+    if (responseId) ids.add(responseId);
+  }
+
+  const directIds = [
+    process?.finalStagePersistence?.responseId,
+    process?.restartReplay?.responseId
+  ];
+  for (const candidate of directIds) {
+    if (typeof candidate !== 'string') continue;
+    const normalized = candidate.trim();
+    if (normalized) ids.add(normalized);
+  }
+
+  return ids;
+}
+
+function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '') {
+  const prev = previousDispatch && typeof previousDispatch === 'object'
+    ? previousDispatch
+    : {};
+  const sent = Number.isInteger(prev.sent) ? Math.max(prev.sent, 1) : 1;
+  const failed = Number.isInteger(prev.failed) ? Math.max(0, prev.failed) : 0;
+  const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+  return {
+    ...prev,
+    queued: true,
+    queueSize: 0,
+    queueSkipped: false,
+    queueSkipReason: '',
+    flushSkipped: false,
+    flushSkipReason: '',
+    flushFollowUpScheduled: false,
+    sent,
+    failed,
+    deferred: 0,
+    remaining: 0,
+    firstFailure: '',
+    failureStage: '',
+    failureReason: '',
+    failureStatus: null,
+    failureRequestId: '',
+    failureIntakeUrl: '',
+    state: 'dispatch_confirmed',
+    responseId: normalizedResponseId || (typeof prev.responseId === 'string' ? prev.responseId : '')
+  };
+}
+
+async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = '', details = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) return false;
+
+  const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+  const process = processRegistry.get(normalizedRunId) || null;
+  if (!process || typeof process !== 'object') return false;
+
+  if (normalizedResponseId) {
+    const knownResponseIds = collectKnownProcessResponseIds(process, normalizedRunId);
+    if (knownResponseIds.size > 0 && !knownResponseIds.has(normalizedResponseId)) {
+      return false;
+    }
+  }
+
+  const now = Date.now();
+  const previousPersistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : {};
+  const previousDispatch = previousPersistenceStatus?.dispatch && typeof previousPersistenceStatus.dispatch === 'object'
+    ? previousPersistenceStatus.dispatch
+    : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
+      ? process.completedResponseDispatch
+      : {});
+
+  const nextDispatch = createDeliveredDispatchSnapshot(previousDispatch, normalizedResponseId);
+  const dispatchSummary = formatDispatchUiSummary(nextDispatch);
+  const previousLog = Array.isArray(previousPersistenceStatus?.dispatchProcessLog)
+    ? previousPersistenceStatus.dispatchProcessLog
+    : [];
+  const deliveryLogEntry = [
+    'dispatch_delivery',
+    'ok',
+    `responseId=${normalizedResponseId || 'n/a'}`,
+    `status=${Number.isInteger(details?.status) ? details.status : 'n/a'}`,
+    `eventId=${typeof details?.eventId === 'string' && details.eventId.trim() ? details.eventId.trim() : 'n/a'}`,
+    `requestId=${typeof details?.requestId === 'string' && details.requestId.trim() ? details.requestId.trim() : 'n/a'}`
+  ].join('|');
+  const nextLog = [...previousLog.slice(-15), deliveryLogEntry];
+
+  const patch = {
+    completedResponseDispatch: nextDispatch,
+    completedResponseDispatchSummary: dispatchSummary,
+    completedResponseDispatchProcessLog: nextLog.slice(-16),
+    persistenceStatus: {
+      ...previousPersistenceStatus,
+      hasResponse: true,
+      saveOk: true,
+      saveError: '',
+      dispatch: nextDispatch,
+      dispatchSummary,
+      dispatchProcessLog: nextLog.slice(-16),
+      updatedAt: now
+    },
+    timestamp: now
+  };
+
+  const previousFinalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  if (previousFinalStagePersistence && previousFinalStagePersistence.success === true) {
+    const previousFinalSent = Number.isInteger(previousFinalStagePersistence.sent)
+      ? previousFinalStagePersistence.sent
+      : 0;
+    const previousFinalFailed = Number.isInteger(previousFinalStagePersistence.failed)
+      ? previousFinalStagePersistence.failed
+      : 0;
+    patch.finalStagePersistence = {
+      ...previousFinalStagePersistence,
+      sent: Math.max(previousFinalSent, nextDispatch.sent || 0),
+      failed: Math.max(previousFinalFailed, nextDispatch.failed || 0),
+      deferred: 0,
+      remaining: 0,
+      pending: 0,
+      queueSkipped: false,
+      queueSkipReason: '',
+      flushSkipped: false,
+      flushSkipReason: '',
+      failureStage: '',
+      failureReason: '',
+      failureStatus: null,
+      failureRequestId: '',
+      failureIntakeUrl: '',
+      state: 'dispatch_confirmed',
+      dispatchSummary,
+      updatedAt: now
+    };
+  }
+
+  await upsertProcess(normalizedRunId, patch);
+  return true;
+}
+
 function buildRestartReplayResponseId(runId = '', responseText = '', promptNumber = 0) {
   const safeRunId = typeof runId === 'string' && runId.trim()
     ? runId.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -1891,6 +2058,7 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     reason: 'saved',
     responseId,
     responseLength: responseText.length,
+    verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
     copyTrace: typeof saveResult.copyTrace === 'string' ? saveResult.copyTrace : '',
     dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
       ? saveResult.dispatch
@@ -1902,13 +2070,53 @@ async function replayCompletedResponseForProcess(process, options = {}) {
 
 function summarizeFinalStagePersistence(result) {
   if (!result || typeof result !== 'object') return null;
+  const dispatch = result?.dispatch && typeof result.dispatch === 'object'
+    ? result.dispatch
+    : null;
+  const sent = Number.isInteger(dispatch?.sent) ? dispatch.sent : null;
+  const failed = Number.isInteger(dispatch?.failed) ? dispatch.failed : null;
+  const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : null;
+  const remaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : null;
+  const failureStage = typeof dispatch?.failureStage === 'string' && dispatch.failureStage.trim()
+    ? dispatch.failureStage.trim()
+    : '';
+  const failureReason = typeof dispatch?.failureReason === 'string' && dispatch.failureReason.trim()
+    ? dispatch.failureReason.trim()
+    : '';
+  const failureStatus = Number.isInteger(dispatch?.failureStatus) ? dispatch.failureStatus : null;
+  const failureRequestId = typeof dispatch?.failureRequestId === 'string' && dispatch.failureRequestId.trim()
+    ? dispatch.failureRequestId.trim()
+    : '';
+  const failureIntakeUrl = typeof dispatch?.failureIntakeUrl === 'string' && dispatch.failureIntakeUrl.trim()
+    ? dispatch.failureIntakeUrl.trim()
+    : '';
+  const state = typeof dispatch?.state === 'string' && dispatch.state.trim()
+    ? dispatch.state.trim()
+    : '';
   return {
     attempted: result.attempted === true,
     success: result.success === true,
     reason: typeof result.reason === 'string' ? result.reason : '',
     responseId: typeof result.responseId === 'string' ? result.responseId : '',
     copyTrace: typeof result.copyTrace === 'string' ? result.copyTrace : '',
-    dispatchSummary: typeof result.dispatchSummary === 'string' ? result.dispatchSummary : ''
+    dispatchSummary: typeof result.dispatchSummary === 'string' ? result.dispatchSummary : '',
+    verifiedCount: Number.isInteger(result?.verifiedCount) ? result.verifiedCount : null,
+    sent,
+    failed,
+    deferred,
+    remaining,
+    pending: (deferred ?? 0) + (remaining ?? 0),
+    queueSkipped: dispatch?.queueSkipped === true,
+    queueSkipReason: typeof dispatch?.queueSkipReason === 'string' ? dispatch.queueSkipReason : '',
+    flushSkipped: dispatch?.flushSkipped === true,
+    flushSkipReason: typeof dispatch?.flushSkipReason === 'string' ? dispatch.flushSkipReason : '',
+    flushFollowUpScheduled: dispatch?.flushFollowUpScheduled === true,
+    failureStage,
+    failureReason,
+    failureStatus,
+    failureRequestId,
+    failureIntakeUrl,
+    state
   };
 }
 
@@ -2618,21 +2826,97 @@ async function handleProcessDecisionAllMessage(message) {
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
 
-// Nazwy etapów dla company analysis (synchronizowane z prompts-company.txt)
-const STAGE_NAMES_COMPANY = [
-  "Stage 0: Evidence Ledger + Thesis",
-  "Pipeline Setup (Stages 0-10)",
-  "Stage 1: Sub-segment Validation (Porter + S-curve)",
-  "Stage 2: Stock Universe (15 names)",
-  "Stage 2.5: Reverse DCF Lite + Driver Screen",
-  "Stage 3: Competitive Position (4 finalists)",
-  "Stage 3.5: Revaluation Parameter (RP)",
-  "Stage 4: DuPont ROE Quality",
-  "Stage 6: Thesis Monetization Quantification",
-  "Reverse DCF (Full / TOTAL)",
-  "Stage 8: Four-Gate Decision",
-  "Stage 10: Position State Machine"
+// Jedno źródło prawdy dla etapów company chain.
+// Kolejność musi być zsynchronizowana z prompts-company.txt (po separatorze).
+const STAGE_METADATA_COMPANY = [
+  {
+    promptIndex: 0,
+    promptNumber: 1,
+    stageId: '0',
+    stageName: "Stage 0: Evidence Ledger + Thesis",
+    description: "Evidence ledger, worldview reconstruction, thesis selection, contract-form pass."
+  },
+  {
+    promptIndex: 1,
+    promptNumber: 2,
+    stageId: 'setup',
+    stageName: "Pipeline Setup (Rules + Data Contract)",
+    description: "Stage inheritance, time-anchor rules, data discipline, and execution order lock."
+  },
+  {
+    promptIndex: 2,
+    promptNumber: 3,
+    stageId: '1',
+    stageName: "Stage 1: Sub-segment Validation",
+    description: "Invoice-first sub-segment map, gates, timing funnel, delivered pool."
+  },
+  {
+    promptIndex: 3,
+    promptNumber: 4,
+    stageId: '2',
+    stageName: "Stage 2: Stock Universe (15 names)",
+    description: "Exposure-based company mapping from invoice items to listed names."
+  },
+  {
+    promptIndex: 4,
+    promptNumber: 5,
+    stageId: '2.5',
+    stageName: "Stage 2.5: Reverse DCF Lite + Driver Screen",
+    description: "Core vs wedge vs total, asymmetry pre-filter, dominant valuation driver."
+  },
+  {
+    promptIndex: 5,
+    promptNumber: 6,
+    stageId: '3',
+    stageName: "Stage 3: Competitive Position (4 finalists)",
+    description: "Replaceability, moat durability, and S-curve timing selection."
+  },
+  {
+    promptIndex: 6,
+    promptNumber: 7,
+    stageId: '4',
+    stageName: "Stage 4: DuPont ROE Quality",
+    description: "ROE decomposition (margin x turnover x leverage) under thesis impact."
+  },
+  {
+    promptIndex: 7,
+    promptNumber: 8,
+    stageId: '5',
+    stageName: "Stage 5: Revaluation Parameter Selection",
+    description: "Single KPI with VOI window and measurable re-rate force."
+  },
+  {
+    promptIndex: 8,
+    promptNumber: 9,
+    stageId: '6',
+    stageName: "Stage 6: Thesis Monetization Quantification",
+    description: "Incremental wedge cash flows (Bear/Base/Bull), SoP-compatible NPV block."
+  },
+  {
+    promptIndex: 9,
+    promptNumber: 10,
+    stageId: '7',
+    stageName: "Stage 7: Reverse DCF (TOTAL)",
+    description: "Market-implied growth/margin extraction and divergence diagnostics."
+  },
+  {
+    promptIndex: 10,
+    promptNumber: 11,
+    stageId: '8',
+    stageName: "Stage 8: Four-Gate Decision",
+    description: "Integrity/Quality/Value/Proof/Execution gates with BUY-WATCH-AVOID output."
+  },
+  {
+    promptIndex: 11,
+    promptNumber: 12,
+    stageId: '9',
+    stageName: "Stage 9: Four-Gate Output Record",
+    description: "Single-line decision record for downstream ingestion."
+  }
 ];
+
+// Backward-compatible list used by existing UI components.
+const STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
 
 // Stage-id hints for dynamic DATA_GAP_STAGE recovery.
 // The map is intentionally explicit because some stage prompts do not expose
@@ -2643,14 +2927,14 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['2', 3],
   ['2.5', 4],
   ['3', 5],
-  ['3.5', 6],
+  ['3.5', 6], // legacy alias: old chain treated DuPont as 3.5
   ['4', 6],
   ['5', 7],
   ['6', 8],
   ['7', 9],
   ['8', 10],
   ['9', 11],
-  ['10', 11]
+  ['10', 11] // legacy alias: old chain used Stage 10 for final record
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -7116,6 +7400,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
   if (missingReplyRows.length > 0) processIssueFlags.push('missing_assistant_reply');
   if (lowQualityReplyRows.length > 0) processIssueFlags.push('assistant_reply_below_threshold');
   if (missingPromptNumbers.length > 0) processIssueFlags.push('unrecognized_prompt_stage');
+  if (unmatchedRows.length > 0) processIssueFlags.push('unmatched_user_messages');
   if (sequenceIssues.length > 0) processIssueFlags.push('sequence_issue');
   const dataGapStopSignal = parseDataGapsStopFromText(scanned?.lastAssistantText || '');
   const dataGapStopDetected = dataGapStopSignal.detected;
@@ -7219,6 +7504,9 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       const missingReplyStageText = missingReplyPromptNumbers.map((value) => `P${value}`).join(',');
       const lowQualityStageText = lowQualityReplyPromptNumbers.map((value) => `P${value}`).join(',');
       const unrecognizedStageText = missingPromptNumbers.map((value) => `P${value}`).join(',');
+      const dataGapInputsText = dataGapStopSignal.missingInputs.length > 0
+        ? dataGapStopSignal.missingInputs.join(',')
+        : '';
       const summaryMessage = [
         `state=${processState}`,
         processIssueText ? `issues=${processIssueText}` : '',
@@ -7226,6 +7514,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
         lowQualityStageText ? `low_quality=${lowQualityStageText}` : '',
         unrecognizedStageText ? `unrecognized=${unrecognizedStageText}` : '',
         dataGapStopDetected ? `data_gap_stop=${DATA_GAPS_STOP_COMMAND}` : '',
+        dataGapInputsText ? `data_gap_inputs=${dataGapInputsText}` : '',
         sequenceIssues.length > 0 ? `sequence_issues=${sequenceIssues.length}` : ''
       ].filter(Boolean).join(' | ');
       const signature = [
@@ -7280,6 +7569,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       promptRepliesBelowThreshold,
       dataGapStopDetected,
       dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
+      dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
       missingReplyPromptNumbers,
       lowQualityReplyPromptNumbers,
       processIssueFlags,
@@ -7351,6 +7641,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       promptRepliesBelowThreshold,
       missingReplyPromptCount: missingReplyPromptNumbers.length,
       dataGapStopDetected: dataGapStopDetected ? 1 : 0,
+      dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
       lowQualityReplyPromptCount: lowQualityReplyPromptNumbers.length
     },
     verification: {
@@ -7698,6 +7989,23 @@ function openResumeStagePopup(startIndex, title = '', options = {}) {
 
 async function handleProcessResumeNextStageMessage(message) {
   const runId = await resolveProcessId(message, { tab: { id: message?.tabId } });
+  const buildFinalStageResumeResult = (payload = {}, finalStagePersistence = null) => {
+    const basePayload = payload && typeof payload === 'object' ? payload : {};
+    if (finalStagePersistence?.success === true) {
+      return {
+        success: true,
+        mode: 'final_stage_persisted',
+        ...basePayload,
+        finalStagePersistence
+      };
+    }
+    return {
+      success: false,
+      error: 'already_at_last_prompt',
+      ...basePayload,
+      ...(finalStagePersistence ? { finalStagePersistence } : {})
+    };
+  };
   if (!runId) {
     const tabId = Number.isInteger(message?.tabId) ? message.tabId : null;
     if (!Number.isInteger(tabId)) {
@@ -7776,16 +8084,13 @@ async function handleProcessResumeNextStageMessage(message) {
         finalStagePersistence = summarizeFinalStagePersistence(finalStagePersistResult);
       }
 
-      return {
-        success: false,
-        error: 'already_at_last_prompt',
+      return buildFinalStageResumeResult({
         detectedPromptIndex,
         detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
         detectedMethod,
         retrySamePrompt,
-        retryReason,
-        ...(finalStagePersistence ? { finalStagePersistence } : {})
-      };
+        retryReason
+      }, finalStagePersistence);
     }
 
     if (message?.openDialogOnly) {
@@ -7921,16 +8226,13 @@ async function handleProcessResumeNextStageMessage(message) {
     });
     const finalStagePersistence = summarizeFinalStagePersistence(finalStagePersistResult);
 
-    return {
-      success: false,
-      error: 'already_at_last_prompt',
+    return buildFinalStageResumeResult({
       detectedPromptIndex,
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
       retrySamePrompt,
-      retryReason,
-      ...(finalStagePersistence ? { finalStagePersistence } : {})
-    };
+      retryReason
+    }, finalStagePersistence);
   }
 
   const title = typeof message?.title === 'string' && message.title.trim()
@@ -7973,9 +8275,7 @@ async function handleProcessResumeNextStageMessage(message) {
       finalStagePersistence = summarizeFinalStagePersistence(finalStagePersistResult);
     }
 
-    return {
-      success: false,
-      error: resumeResult?.error || 'resume_failed',
+    const failedResponsePayload = {
       startIndex: Number.isInteger(resumeResult?.resolvedStartIndex)
         ? resumeResult.resolvedStartIndex
         : nextStartIndex,
@@ -7986,8 +8286,17 @@ async function handleProcessResumeNextStageMessage(message) {
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
       retrySamePrompt,
-      retryReason,
-      ...(finalStagePersistence ? { finalStagePersistence } : {})
+      retryReason
+    };
+
+    if (resumeResult?.error === 'already_at_last_prompt') {
+      return buildFinalStageResumeResult(failedResponsePayload, finalStagePersistence);
+    }
+
+    return {
+      success: false,
+      error: resumeResult?.error || 'resume_failed',
+      ...failedResponsePayload
     };
   }
 
@@ -8106,11 +8415,30 @@ function formatDispatchUiSummary(dispatchOutcome) {
     : null;
   if (!dispatch) return 'Dispatch: brak danych';
 
+  const failureStage = typeof dispatch.failureStage === 'string' && dispatch.failureStage.trim()
+    ? dispatch.failureStage.trim()
+    : '';
+  const failureReason = typeof dispatch.failureReason === 'string' && dispatch.failureReason.trim()
+    ? dispatch.failureReason.trim()
+    : '';
+  const failureStatus = Number.isInteger(dispatch.failureStatus) ? dispatch.failureStatus : null;
+  const failureRequestId = typeof dispatch.failureRequestId === 'string' && dispatch.failureRequestId.trim()
+    ? dispatch.failureRequestId.trim()
+    : '';
+  const diagnosticParts = [];
+  if (failureStage) diagnosticParts.push(`stage=${failureStage}`);
+  if (failureReason) diagnosticParts.push(`reason=${failureReason}`);
+  if (failureStatus !== null) diagnosticParts.push(`http=${failureStatus}`);
+  if (failureRequestId) diagnosticParts.push(`requestId=${failureRequestId}`);
+  const diagnosticSuffix = diagnosticParts.length > 0
+    ? `, diag=[${diagnosticParts.join(', ')}]`
+    : '';
+
   if (dispatch.queueSkipped) {
     const reason = typeof dispatch.queueSkipReason === 'string' && dispatch.queueSkipReason.trim()
       ? dispatch.queueSkipReason.trim()
       : 'unknown';
-    return `Dispatch: pominieto (${reason})`;
+    return `Dispatch: STOP@queue (${reason})${diagnosticSuffix}`;
   }
 
   if (dispatch.queued) {
@@ -8119,14 +8447,27 @@ function formatDispatchUiSummary(dispatchOutcome) {
       const reason = typeof dispatch.flushSkipReason === 'string' && dispatch.flushSkipReason.trim()
         ? dispatch.flushSkipReason.trim()
         : 'unknown';
-      return `Dispatch: kolejka=${queueSize}, flush pominiety (${reason})`;
+      if (reason === 'flush_in_progress' && dispatch.flushFollowUpScheduled === true) {
+        return `Dispatch: WAIT@flush kolejka=${queueSize}, flush w toku (follow-up zaplanowany)${diagnosticSuffix}`;
+      }
+      return `Dispatch: STOP@flush kolejka=${queueSize}, flush pominiety (${reason})${diagnosticSuffix}`;
     }
 
     const sent = Number.isInteger(dispatch.sent) ? dispatch.sent : 0;
     const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
     const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
     const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
-    return `Dispatch: sent=${sent}, failed=${failed}, deferred=${deferred}, remaining=${remaining}`;
+    const pending = deferred + remaining;
+    if (failed > 0 && sent === 0) {
+      return `Dispatch: FAIL sent=${sent}, failed=${failed}, pending=${pending}${diagnosticSuffix}`;
+    }
+    if (failed > 0 && sent > 0) {
+      return `Dispatch: PARTIAL sent=${sent}, failed=${failed}, pending=${pending}${diagnosticSuffix}`;
+    }
+    if (sent === 0 && pending > 0) {
+      return `Dispatch: WAIT sent=${sent}, pending=${pending}${diagnosticSuffix}`;
+    }
+    return `Dispatch: sent=${sent}, failed=${failed}, deferred=${deferred}, remaining=${remaining}${diagnosticSuffix}`;
   }
 
   return 'Dispatch: brak wysylki';
@@ -8654,6 +8995,19 @@ async function writeWatchlistOutbox(items) {
   return normalized;
 }
 
+function withWatchlistOutboxMutationLock(task) {
+  const taskFn = typeof task === 'function' ? task : null;
+  if (!taskFn) {
+    return Promise.reject(new Error('outbox_mutation_task_required'));
+  }
+  const next = watchlistOutboxMutationQueue.then(
+    () => taskFn(),
+    () => taskFn()
+  );
+  watchlistOutboxMutationQueue = next.catch(() => {});
+  return next;
+}
+
 function sanitizeWatchlistDispatchHistory(rawItems) {
   const items = Array.isArray(rawItems) ? rawItems : [];
   const normalized = [];
@@ -8908,18 +9262,20 @@ async function enqueueWatchlistDispatch(response, copyTrace = 'no-run/no-respons
     return { skipped: true, reason: 'invalid_payload' };
   }
 
-  const current = await readWatchlistOutbox();
-  const next = [
-    ...current,
-    {
-      payload,
-      queuedAt: Date.now(),
-      attemptCount: 0,
-      nextAttemptAt: 0,
-      lastError: ''
-    }
-  ];
-  const saved = await writeWatchlistOutbox(next);
+  const saved = await withWatchlistOutboxMutationLock(async () => {
+    const current = await readWatchlistOutbox();
+    const next = [
+      ...current,
+      {
+        payload,
+        queuedAt: Date.now(),
+        attemptCount: 0,
+        nextAttemptAt: 0,
+        lastError: ''
+      }
+    ];
+    return writeWatchlistOutbox(next);
+  });
   console.log('[copy-flow] [dispatch:queued]', {
     trace: copyTrace,
     queueSize: saved.length,
@@ -8965,6 +9321,9 @@ function buildWatchlistDispatchUrlCandidates(primaryIntakeUrl) {
   if (!primary) return [];
 
   const urls = [primary];
+  if (WATCHLIST_DISPATCH.enableLocalTunnelFallback !== true) {
+    return urls;
+  }
   const fallback = normalizeWatchlistIntakeUrl(WATCHLIST_DISPATCH.localTunnelIntakeUrl || '');
   if (!fallback || fallback === primary) {
     return urls;
@@ -9234,6 +9593,15 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     reason: config.reason,
     queueSize: outboxItems.length,
     flushInProgress: !!watchlistDispatchFlushInProgress,
+    flushInProgressSince: Number.isInteger(watchlistDispatchFlushStartedAt) && watchlistDispatchFlushStartedAt > 0
+      ? watchlistDispatchFlushStartedAt
+      : null,
+    flushInProgressAgeMs: watchlistDispatchFlushInProgress && watchlistDispatchFlushStartedAt > 0
+      ? Math.max(0, Date.now() - watchlistDispatchFlushStartedAt)
+      : 0,
+    flushInProgressReason: watchlistDispatchFlushInProgress
+      ? (watchlistDispatchFlushStartedReason || '')
+      : '',
     historySize: Array.isArray(history) ? history.length : 0,
     lastFlush,
     recentProcessLogs: Array.isArray(recentProcessLogs) ? recentProcessLogs : [],
@@ -9436,15 +9804,24 @@ function buildWatchlistCanonicalString({ method, path, timestamp, nonce, bodyHas
     String(timestamp || ''),
     String(nonce || ''),
     String(bodyHash || ''),
-  ].join('\\n');
+  ].join('\n');
 }
 
-async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') {
+function createDispatchTimeoutError(timeoutMs) {
+  const error = new Error(`dispatch_timeout_after_${timeoutMs}ms`);
+  error.name = 'TimeoutError';
+  error.dispatchMeta = {
+    reason: 'timeout'
+  };
+  return error;
+}
+
+async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', options = {}) {
   if (!WATCHLIST_DISPATCH.enabled) {
     emitWatchlistDispatchProcessLog('warn', 'send_skipped_disabled', 'Send skipped because dispatch is disabled', {
       trace: copyTrace
     });
-    return { skipped: true, reason: 'dispatch_disabled' };
+    return { skipped: true, reason: 'dispatch_disabled', stage: 'send_config' };
   }
 
   const dispatchConfig = await resolveWatchlistDispatchConfiguration();
@@ -9456,7 +9833,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
       keyIdSource: dispatchConfig.keyIdSource || 'missing',
       secretSource: dispatchConfig.secretSource || 'missing'
     });
-    return { skipped: true, reason: dispatchConfig.reason || 'missing_dispatch_credentials' };
+    return {
+      skipped: true,
+      reason: dispatchConfig.reason || 'missing_dispatch_credentials',
+      stage: 'send_config'
+    };
   }
 
   const urlCandidates = buildWatchlistDispatchUrlCandidates(dispatchConfig.intakeUrl);
@@ -9464,7 +9845,12 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
     emitWatchlistDispatchProcessLog('error', 'send_missing_url', 'Send failed because intake URL candidate list is empty', {
       trace: copyTrace
     });
-    return { success: false, reason: 'missing_intake_url', error: 'missing_intake_url' };
+    return {
+      success: false,
+      reason: 'missing_intake_url',
+      error: 'missing_intake_url',
+      stage: 'send_config'
+    };
   }
   const body = JSON.stringify(payload);
   const normalizedTrace = typeof copyTrace === 'string' ? copyTrace.trim() : '';
@@ -9482,8 +9868,23 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
       || extractResponseIdFromCopyTrace(normalizedTrace)
     );
   const traceForHistory = normalizedTrace || buildCopyTrace(traceRunId, traceResponseId);
-  const maxAttempts = Math.max(1, Number(WATCHLIST_DISPATCH.retryCount || 0) + 1);
-  let lastFailure = { success: false, error: 'unknown', reason: 'dispatch_error', status: null, requestId: '' };
+  const configuredMaxAttempts = Math.max(1, Number(WATCHLIST_DISPATCH.retryCount || 0) + 1);
+  const maxAttemptsOverride = Number.isInteger(options?.maxAttempts) && options.maxAttempts > 0
+    ? Math.max(1, Math.min(options.maxAttempts, configuredMaxAttempts))
+    : null;
+  const maxAttempts = maxAttemptsOverride || configuredMaxAttempts;
+  const timeoutMs = Number.isInteger(options?.timeoutMs) && options.timeoutMs > 0
+    ? Math.max(1000, options.timeoutMs)
+    : Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
+  let lastFailure = {
+    success: false,
+    error: 'unknown',
+    reason: 'dispatch_error',
+    stage: 'send_http',
+    status: null,
+    requestId: '',
+    intakeUrl: ''
+  };
   let lastAttemptedIntakeUrl = '';
 
   for (let candidateIndex = 0; candidateIndex < urlCandidates.length; candidateIndex += 1) {
@@ -9500,7 +9901,7 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
       urlCandidatesCount: urlCandidates.length,
       keyId: dispatchConfig.keyId,
       maxAttempts,
-      timeoutMs: WATCHLIST_DISPATCH.timeoutMs,
+      timeoutMs,
       credentialSources: {
         secret: dispatchConfig.secretSource || 'unknown',
         intakeUrl: dispatchConfig.intakeUrlSource || 'unknown',
@@ -9515,12 +9916,12 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
       urlCandidateIndex: candidateIndex + 1,
       urlCandidatesCount: urlCandidates.length,
       maxAttempts,
-      timeoutMs: WATCHLIST_DISPATCH.timeoutMs
+      timeoutMs
     });
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
       const controller = new AbortController();
-      const timeoutId = setTimeout(() => controller.abort(), WATCHLIST_DISPATCH.timeoutMs);
+      let timeoutId = null;
       try {
         const timestamp = Math.floor(Date.now() / 1000).toString();
         const nonce = generateWatchlistNonce();
@@ -9542,19 +9943,34 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
           maxAttempts,
           usingFallbackUrl
         });
-        const response = await fetch(url, {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            'X-Watchlist-Key-Id': dispatchConfig.keyId,
-            'X-Watchlist-Timestamp': timestamp,
-            'X-Watchlist-Nonce': nonce,
-            'X-Watchlist-Signature': signature,
-          },
-          body,
-          signal: controller.signal
-        });
-        clearTimeout(timeoutId);
+        const response = await Promise.race([
+          fetch(url, {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Watchlist-Key-Id': dispatchConfig.keyId,
+              'X-Watchlist-Timestamp': timestamp,
+              'X-Watchlist-Nonce': nonce,
+              'X-Watchlist-Signature': signature,
+            },
+            body,
+            signal: controller.signal
+          }),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              try {
+                controller.abort();
+              } catch {
+                // Ignore abort exceptions; timeout is already terminal.
+              }
+              reject(createDispatchTimeoutError(timeoutMs));
+            }, timeoutMs);
+          })
+        ]);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
 
         if (!response.ok) {
           const errorText = await response.text().catch(() => '');
@@ -9618,14 +10034,36 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
           intakeUrl: url,
           status: response.status
         }).catch(() => {});
-        return { success: true, status: response.status, eventId: responseJson?.event_id || null };
+        await updateProcessDispatchAfterSendSuccess(traceRunId, traceResponseId, {
+          status: response.status,
+          eventId: typeof responseJson?.event_id === 'string' ? responseJson.event_id : '',
+          requestId,
+          intakeUrl: url
+        }).catch((error) => {
+          console.warn('[copy-flow] [dispatch:process-update-failed]', {
+            runId: traceRunId,
+            responseId: traceResponseId,
+            error: error?.message || String(error)
+          });
+        });
+        return {
+          success: true,
+          status: response.status,
+          eventId: responseJson?.event_id || null,
+          requestId,
+          intakeUrl: url,
+          stage: 'send_http'
+        };
       } catch (error) {
-        clearTimeout(timeoutId);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
         const errorMessage = error?.message || String(error);
         const dispatchMeta = error?.dispatchMeta && typeof error.dispatchMeta === 'object'
           ? error.dispatchMeta
           : {};
-        if (!dispatchMeta.reason && error?.name === 'AbortError') {
+        if (!dispatchMeta.reason && (error?.name === 'AbortError' || error?.name === 'TimeoutError')) {
           dispatchMeta.reason = 'timeout';
         }
         const dispatchReason = dispatchMeta.reason || 'dispatch_error';
@@ -9684,8 +10122,10 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
           success: false,
           error: errorMessage,
           reason: dispatchReason,
+          stage: 'send_http',
           status: dispatchMeta.status || null,
-          requestId: dispatchMeta.requestId || ''
+          requestId: dispatchMeta.requestId || '',
+          intakeUrl: url
         };
 
         const failedLogMethod = hasAnotherUrlCandidate ? 'warn' : 'error';
@@ -9719,6 +10159,7 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
   emitWatchlistDispatchProcessLog('error', 'send_failed_all_candidates', 'Dispatch failed for all intake URL candidates', {
     trace: copyTrace,
     reason: lastFailure?.reason || 'dispatch_error',
+    stage: lastFailure?.stage || 'send_http',
     status: lastFailure?.status ?? null,
     requestId: lastFailure?.requestId || '',
     error: truncateDispatchLogText(lastFailure?.error || 'unknown', 500)
@@ -9740,7 +10181,7 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response') 
     runId: traceRunId,
     responseId: traceResponseId,
     requestId: lastFailure?.requestId || '',
-    intakeUrl: lastAttemptedIntakeUrl,
+    intakeUrl: lastFailure?.intakeUrl || lastAttemptedIntakeUrl,
     status: Number.isInteger(lastFailure?.status) ? lastFailure.status : null
   }).catch(() => {});
   return lastFailure;
@@ -9756,6 +10197,9 @@ function normalizeWatchlistFlushReason(rawReason, fallback = 'manual') {
 async function flushWatchlistDispatchOutbox(reason = 'manual') {
   const normalizedReason = normalizeWatchlistFlushReason(reason, 'manual');
   const ts = Date.now();
+  const lockAgeMs = watchlistDispatchFlushStartedAt > 0
+    ? Math.max(0, ts - watchlistDispatchFlushStartedAt)
+    : 0;
   if (!WATCHLIST_DISPATCH.enabled) {
     appendWatchlistDispatchHistory({
       ts,
@@ -9772,7 +10216,29 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     emitWatchlistDispatchProcessLog('warn', 'flush_skipped_disabled', 'Flush skipped because dispatch is disabled', {
       reason: normalizedReason
     });
-    return { skipped: true, reason: 'dispatch_disabled' };
+    return { skipped: true, reason: 'dispatch_disabled', stage: 'flush' };
+  }
+  const staleLockLimitMs = Number.isInteger(WATCHLIST_DISPATCH.flushStaleLockMs) && WATCHLIST_DISPATCH.flushStaleLockMs > 0
+    ? WATCHLIST_DISPATCH.flushStaleLockMs
+    : (6 * 60 * 1000);
+  if (watchlistDispatchFlushInProgress && lockAgeMs > staleLockLimitMs) {
+    console.warn('[copy-flow] [dispatch:flush-stale-lock-reset]', {
+      reason: normalizedReason,
+      lockAgeMs,
+      staleLockLimitMs,
+      previousReason: watchlistDispatchFlushStartedReason || ''
+    });
+    emitWatchlistDispatchProcessLog('warn', 'flush_stale_lock_reset', 'Stale flush lock detected and reset', {
+      reason: normalizedReason,
+      lockAgeMs,
+      staleLockLimitMs,
+      previousReason: watchlistDispatchFlushStartedReason || ''
+    });
+    watchlistDispatchFlushInProgress = false;
+    watchlistDispatchFlushPending = false;
+    watchlistDispatchFlushPendingReason = '';
+    watchlistDispatchFlushStartedAt = 0;
+    watchlistDispatchFlushStartedReason = '';
   }
   if (watchlistDispatchFlushInProgress) {
     watchlistDispatchFlushPending = true;
@@ -9792,16 +10258,22 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       remaining: 0
     }).catch(() => {});
     emitWatchlistDispatchProcessLog('info', 'flush_skipped_in_progress', 'Flush skipped because another flush is in progress', {
-      reason: normalizedReason
+      reason: normalizedReason,
+      lockAgeMs,
+      activeReason: watchlistDispatchFlushStartedReason || ''
     });
     return {
       skipped: true,
       reason: 'flush_in_progress',
-      followUpScheduled: true
+      stage: 'flush',
+      followUpScheduled: true,
+      lockAgeMs
     };
   }
 
   watchlistDispatchFlushInProgress = true;
+  watchlistDispatchFlushStartedAt = Date.now();
+  watchlistDispatchFlushStartedReason = normalizedReason;
   try {
     const queued = await readWatchlistOutbox();
     console.log(`[copy-flow] [dispatch:flush-start] reason=${normalizedReason} queued=${queued.length}`);
@@ -9825,21 +10297,86 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         deferred: 0,
         remaining: 0
       }).catch(() => {});
-      return { success: true, sent: 0, failed: 0, deferred: 0, remaining: 0 };
+      return {
+        success: true,
+        sent: 0,
+        failed: 0,
+        deferred: 0,
+        remaining: 0,
+        firstFailure: '',
+        firstFailureStage: '',
+        firstFailureReason: '',
+        firstFailureStatus: null,
+        firstFailureRequestId: '',
+        firstFailureIntakeUrl: ''
+      };
     }
 
     const remaining = [];
     let sent = 0;
     let failed = 0;
     let deferred = 0;
-    const now = Date.now();
     let firstFailure = '';
+    let firstFailureStage = '';
+    let firstFailureReason = '';
+    let firstFailureStatus = null;
+    let firstFailureRequestId = '';
+    let firstFailureIntakeUrl = '';
+    let budgetStopReason = '';
+    const flushStartedAt = watchlistDispatchFlushStartedAt || Date.now();
+    const flushMaxItemsPerRun = Number.isInteger(WATCHLIST_DISPATCH.flushMaxItemsPerRun) && WATCHLIST_DISPATCH.flushMaxItemsPerRun > 0
+      ? WATCHLIST_DISPATCH.flushMaxItemsPerRun
+      : 8;
+    const flushMaxRuntimeMs = Number.isInteger(WATCHLIST_DISPATCH.flushMaxRuntimeMs) && WATCHLIST_DISPATCH.flushMaxRuntimeMs > 0
+      ? WATCHLIST_DISPATCH.flushMaxRuntimeMs
+      : (25 * 1000);
+    const sendTimeoutMs = Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
+    let scannedInThisRun = 0;
+    let attemptedInThisRun = 0;
 
-    for (const item of queued) {
+    for (let index = 0; index < queued.length; index += 1) {
+      const item = queued[index];
+      scannedInThisRun += 1;
+      const elapsedMs = Math.max(0, Date.now() - flushStartedAt);
+      const limitByItemsReached = attemptedInThisRun >= flushMaxItemsPerRun;
+      const limitByRuntimeReached = elapsedMs >= flushMaxRuntimeMs;
+      if (limitByItemsReached || limitByRuntimeReached) {
+        const unprocessed = queued.slice(index);
+        const hasReadyUnprocessed = unprocessed.some((queuedItem) => {
+          const queuedItemNextAttemptAt = Number.isInteger(queuedItem?.nextAttemptAt) ? queuedItem.nextAttemptAt : 0;
+          return queuedItemNextAttemptAt <= Date.now();
+        });
+        remaining.push(...unprocessed);
+        deferred += unprocessed.length;
+        budgetStopReason = limitByItemsReached
+          ? `limit_items_${flushMaxItemsPerRun}`
+          : `limit_runtime_${flushMaxRuntimeMs}ms`;
+        if (hasReadyUnprocessed) {
+          watchlistDispatchFlushPending = true;
+          if (!watchlistDispatchFlushPendingReason) {
+            watchlistDispatchFlushPendingReason = 'budget_limit';
+          }
+        }
+        console.log(
+          `[copy-flow] [dispatch:flush-budget-stop] reason=${normalizedReason} budget=${budgetStopReason} elapsedMs=${elapsedMs} attempted=${attemptedInThisRun} scanned=${scannedInThisRun} carryOver=${unprocessed.length} followUp=${hasReadyUnprocessed}`
+        );
+        emitWatchlistDispatchProcessLog('info', 'flush_budget_stop', 'Flush budget reached, carrying over remaining items', {
+          reason: normalizedReason,
+          budgetStopReason,
+          elapsedMs,
+          attemptedInThisRun,
+          scannedInThisRun,
+          carryOver: unprocessed.length,
+          hasReadyUnprocessed
+        });
+        break;
+      }
       if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
         failed += 1;
         if (!firstFailure) {
           firstFailure = 'invalid_queue_item';
+          firstFailureStage = 'queue_item';
+          firstFailureReason = 'invalid_queue_item';
         }
         console.warn('[copy-flow] [dispatch:item-invalid] reason=invalid_queue_item');
         emitWatchlistDispatchProcessLog('warn', 'flush_item_invalid', 'Skipping invalid dispatch queue item', {
@@ -9849,9 +10386,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       }
 
       const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
-      if (nextAttemptAt > now) {
+      if (nextAttemptAt > Date.now()) {
         deferred += 1;
-        const waitMs = Math.max(0, nextAttemptAt - now);
+        const waitMs = Math.max(0, nextAttemptAt - Date.now());
         const trace = buildCopyTrace(item.payload.runId || '', item.payload.responseId || '');
         console.log(`[copy-flow] [dispatch:item-deferred] trace=${trace} waitMs=${waitMs}`);
         emitWatchlistDispatchProcessLog('info', 'flush_item_deferred', 'Dispatch item deferred until next attempt window', {
@@ -9863,9 +10400,13 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         continue;
       }
 
+      attemptedInThisRun += 1;
       const payload = item.payload;
       const trace = buildCopyTrace(payload.runId || '', payload.responseId || '');
-      const dispatchResult = await sendWatchlistDispatch(payload, trace);
+      const dispatchResult = await sendWatchlistDispatch(payload, trace, {
+        maxAttempts: 1,
+        timeoutMs: sendTimeoutMs
+      });
       if (dispatchResult.success) {
         sent += 1;
         continue;
@@ -9878,15 +10419,43 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         Math.max(1000, WATCHLIST_DISPATCH.backoffMs * attemptCount)
       );
       const dispatchError = dispatchResult.reason || dispatchResult.error || 'dispatch_failed';
+      const dispatchErrorMessageRaw = typeof dispatchResult?.error === 'string'
+        ? dispatchResult.error.trim()
+        : '';
+      const dispatchErrorMessage = dispatchErrorMessageRaw && dispatchErrorMessageRaw !== dispatchError
+        ? truncateDispatchLogText(dispatchErrorMessageRaw, 240)
+        : '';
+      const dispatchStage = typeof dispatchResult?.stage === 'string' && dispatchResult.stage.trim()
+        ? dispatchResult.stage.trim()
+        : 'send';
+      const dispatchStatus = Number.isInteger(dispatchResult?.status) ? dispatchResult.status : null;
+      const dispatchRequestId = typeof dispatchResult?.requestId === 'string'
+        ? dispatchResult.requestId.trim()
+        : '';
+      const dispatchIntakeUrl = typeof dispatchResult?.intakeUrl === 'string'
+        ? dispatchResult.intakeUrl.trim()
+        : '';
       if (!firstFailure) {
-        firstFailure = truncateDispatchLogText(`${trace}:${dispatchError}`, 300);
+        const firstFailureSuffix = dispatchErrorMessage ? `:${dispatchErrorMessage}` : '';
+        firstFailure = truncateDispatchLogText(`${trace}:${dispatchError}${firstFailureSuffix}`, 300);
+        firstFailureStage = dispatchStage;
+        firstFailureReason = dispatchError;
+        firstFailureStatus = dispatchStatus;
+        firstFailureRequestId = dispatchRequestId;
+        firstFailureIntakeUrl = dispatchIntakeUrl;
       }
       console.warn(
-        `[copy-flow] [dispatch:item-failed] trace=${trace} attemptCount=${attemptCount} retryInMs=${retryDelayMs} error=${truncateDispatchLogText(dispatchError, 400)}`
+        `[copy-flow] [dispatch:item-failed] trace=${trace} stage=${dispatchStage} attemptCount=${attemptCount} retryInMs=${retryDelayMs} reason=${truncateDispatchLogText(dispatchError, 200)} error=${truncateDispatchLogText(dispatchErrorMessage || dispatchError, 400)} status=${dispatchStatus ?? 'n/a'} requestId=${dispatchRequestId || 'n/a'}`
       );
       emitWatchlistDispatchProcessLog('warn', 'flush_item_failed', 'Dispatch item failed and was re-queued', {
         reason: normalizedReason,
         trace,
+        stage: dispatchStage,
+        dispatchReason: dispatchError,
+        dispatchErrorMessage: dispatchErrorMessage || '',
+        status: dispatchStatus,
+        requestId: dispatchRequestId,
+        intakeUrl: dispatchIntakeUrl,
         attemptCount,
         retryDelayMs,
         error: truncateDispatchLogText(dispatchError, 400)
@@ -9895,13 +10464,39 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         ...item,
         attemptCount,
         nextAttemptAt: Date.now() + retryDelayMs,
-        lastError: dispatchError
+        lastError: `${dispatchStage}:${dispatchError}${dispatchErrorMessage ? `:${dispatchErrorMessage}` : ''}`
       });
     }
 
-    const persisted = await writeWatchlistOutbox(remaining);
+    const flushPersistResult = await withWatchlistOutboxMutationLock(async () => {
+      const latestOutbox = await readWatchlistOutbox();
+      const queuedKeys = new Set(
+        queued
+          .map((item) => getWatchlistOutboxDedupKey(item))
+          .filter((key) => key)
+      );
+      const mergedRemaining = Array.isArray(latestOutbox) ? [...remaining] : [...remaining];
+      let mergedConcurrentCount = 0;
+      if (Array.isArray(latestOutbox)) {
+        for (const item of latestOutbox) {
+          const dedupKey = getWatchlistOutboxDedupKey(item);
+          if (!dedupKey || queuedKeys.has(dedupKey)) continue;
+          mergedRemaining.push(item);
+          mergedConcurrentCount += 1;
+        }
+      }
+      const persistedOutbox = await writeWatchlistOutbox(mergedRemaining);
+      return {
+        persistedOutbox,
+        mergedConcurrentCount
+      };
+    });
+    const persisted = Array.isArray(flushPersistResult?.persistedOutbox) ? flushPersistResult.persistedOutbox : [];
+    const mergedConcurrentCount = Number.isInteger(flushPersistResult?.mergedConcurrentCount)
+      ? flushPersistResult.mergedConcurrentCount
+      : 0;
     console.log(
-      `[copy-flow] [dispatch:flush] reason=${normalizedReason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length}`
+      `[copy-flow] [dispatch:flush] reason=${normalizedReason} sent=${sent} failed=${failed} deferred=${deferred} remaining=${persisted.length} mergedConcurrent=${mergedConcurrentCount}`
     );
     emitWatchlistDispatchProcessLog('info', 'flush_done', 'Flush finished', {
       reason: normalizedReason,
@@ -9910,7 +10505,16 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       failed,
       deferred,
       remaining: persisted.length,
-      firstFailure: firstFailure || ''
+      mergedConcurrent: mergedConcurrentCount,
+      budgetStopReason: budgetStopReason || '',
+      attemptedInThisRun,
+      scannedInThisRun,
+      firstFailure: firstFailure || '',
+      firstFailureStage: firstFailureStage || '',
+      firstFailureReason: firstFailureReason || '',
+      firstFailureStatus: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null,
+      firstFailureRequestId: firstFailureRequestId || '',
+      firstFailureIntakeUrl: firstFailureIntakeUrl || ''
     });
     appendWatchlistDispatchHistory({
       ts,
@@ -9922,7 +10526,10 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       failed,
       deferred,
       remaining: persisted.length,
-      error: firstFailure || ''
+      error: firstFailure || '',
+      requestId: firstFailureRequestId || '',
+      intakeUrl: firstFailureIntakeUrl || '',
+      status: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null
     }).catch(() => {});
     return {
       success: true,
@@ -9930,7 +10537,13 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       failed,
       deferred,
       remaining: persisted.length,
-      firstFailure: firstFailure || ''
+      budgetStopReason: budgetStopReason || '',
+      firstFailure: firstFailure || '',
+      firstFailureStage: firstFailureStage || '',
+      firstFailureReason: firstFailureReason || '',
+      firstFailureStatus: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null,
+      firstFailureRequestId: firstFailureRequestId || '',
+      firstFailureIntakeUrl: firstFailureIntakeUrl || ''
     };
   } catch (error) {
     emitWatchlistDispatchProcessLog('error', 'flush_exception', 'Flush crashed with unexpected error', {
@@ -9954,6 +10567,8 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     throw error;
   } finally {
     watchlistDispatchFlushInProgress = false;
+    watchlistDispatchFlushStartedAt = 0;
+    watchlistDispatchFlushStartedReason = '';
     if (watchlistDispatchFlushPending) {
       const pendingReason = normalizeWatchlistFlushReason(
         `follow_up:${watchlistDispatchFlushPendingReason || normalizedReason}`,
@@ -10779,6 +11394,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       deferred: 0,
       remaining: 0,
       firstFailure: '',
+      failureStage: '',
+      failureReason: '',
+      failureStatus: null,
+      failureRequestId: '',
+      failureIntakeUrl: '',
+      state: '',
       processLog: []
     };
     const dispatchProcessLog = [];
@@ -10813,6 +11434,10 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.flushSkipped = true;
           dispatchOutcome.flushSkipReason = flushSkipReason;
           dispatchOutcome.flushFollowUpScheduled = flushResult?.followUpScheduled === true;
+          dispatchOutcome.failureStage = typeof flushResult?.stage === 'string' && flushResult.stage.trim()
+            ? flushResult.stage.trim()
+            : 'flush';
+          dispatchOutcome.failureReason = flushSkipReason;
           appendDispatchProcessLog(
             'flush_result',
             'skipped',
@@ -10827,10 +11452,25 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
           dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
           dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
+          dispatchOutcome.failureStage = typeof flushResult?.firstFailureStage === 'string'
+            ? flushResult.firstFailureStage.trim()
+            : '';
+          dispatchOutcome.failureReason = typeof flushResult?.firstFailureReason === 'string'
+            ? flushResult.firstFailureReason.trim()
+            : '';
+          dispatchOutcome.failureStatus = Number.isInteger(flushResult?.firstFailureStatus)
+            ? flushResult.firstFailureStatus
+            : null;
+          dispatchOutcome.failureRequestId = typeof flushResult?.firstFailureRequestId === 'string'
+            ? flushResult.firstFailureRequestId.trim()
+            : '';
+          dispatchOutcome.failureIntakeUrl = typeof flushResult?.firstFailureIntakeUrl === 'string'
+            ? flushResult.firstFailureIntakeUrl.trim()
+            : '';
           appendDispatchProcessLog(
             'flush_result',
             dispatchOutcome.failed > 0 ? 'partial' : 'ok',
-            `sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}`
+            `sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
           );
           console.log(
             `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
@@ -10840,6 +11480,8 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       } else if (dispatchQueueResult?.skipped) {
         dispatchOutcome.queueSkipped = true;
         dispatchOutcome.queueSkipReason = typeof dispatchQueueResult?.reason === 'string' ? dispatchQueueResult.reason : 'unknown';
+        dispatchOutcome.failureStage = 'queue';
+        dispatchOutcome.failureReason = dispatchOutcome.queueSkipReason;
         appendDispatchProcessLog('queue_result', 'skipped', `reason=${dispatchOutcome.queueSkipReason}`);
         console.log(
           `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${dispatchQueueResult.reason || 'unknown'}`
@@ -10854,7 +11496,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       appendDispatchProcessLog(
         'dispatch_final',
         dispatchOutcome.failed > 0 ? 'warn' : 'ok',
-        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}`
+        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
       );
     } catch (dispatchError) {
       appendDispatchProcessLog('dispatch_exception', 'error', dispatchError?.message || String(dispatchError));
@@ -10871,6 +11513,17 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       if (dispatchOutcome.queued) return 'dispatch_queued_no_flush_result';
       return 'dispatch_unknown';
     })();
+    if (!dispatchOutcome.failureStage && dispatchOutcome.failed > 0) {
+      dispatchOutcome.failureStage = 'send';
+    }
+    if (!dispatchOutcome.failureReason && dispatchOutcome.failed > 0) {
+      dispatchOutcome.failureReason = 'dispatch_failed';
+    }
+    if (!dispatchOutcome.failureStage && (dispatchOutcome.deferred > 0 || dispatchOutcome.remaining > 0)) {
+      dispatchOutcome.failureStage = 'flush';
+      dispatchOutcome.failureReason = 'pending_retry_window';
+    }
+    dispatchOutcome.state = pipelineDispatchState;
     const pipelineLogLevel = pipelineDispatchState === 'dispatch_failed'
       ? 'error'
       : (pipelineDispatchState === 'dispatch_confirmed' ? 'info' : 'warn');
@@ -10892,7 +11545,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
         queueSkipReason: dispatchOutcome.queueSkipReason || '',
         flushSkipped: dispatchOutcome.flushSkipped,
         flushSkipReason: dispatchOutcome.flushSkipReason || '',
-        firstFailure: dispatchOutcome.firstFailure || ''
+        firstFailure: dispatchOutcome.firstFailure || '',
+        failureStage: dispatchOutcome.failureStage || '',
+        failureReason: dispatchOutcome.failureReason || '',
+        failureStatus: Number.isInteger(dispatchOutcome.failureStatus) ? dispatchOutcome.failureStatus : null,
+        failureRequestId: dispatchOutcome.failureRequestId || '',
+        failureIntakeUrl: dispatchOutcome.failureIntakeUrl || ''
       }
     );
     appendWatchlistDispatchHistory({
@@ -10904,12 +11562,18 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       skipReason: dispatchOutcome.queueSkipped
         ? (dispatchOutcome.queueSkipReason || 'queue_skipped')
         : (dispatchOutcome.flushSkipped ? (dispatchOutcome.flushSkipReason || 'flush_skipped') : ''),
-      error: dispatchOutcome.firstFailure || '',
+      error: dispatchOutcome.firstFailure
+        || (dispatchOutcome.failureStage && dispatchOutcome.failureReason
+          ? `${dispatchOutcome.failureStage}:${dispatchOutcome.failureReason}`
+          : ''),
       queued: dispatchOutcome.queued ? 1 : 0,
       sent: dispatchOutcome.sent,
       failed: dispatchOutcome.failed,
       deferred: dispatchOutcome.deferred,
       remaining: dispatchOutcome.remaining,
+      requestId: dispatchOutcome.failureRequestId || '',
+      intakeUrl: dispatchOutcome.failureIntakeUrl || '',
+      status: Number.isInteger(dispatchOutcome.failureStatus) ? dispatchOutcome.failureStatus : null,
       trace: copyTrace,
       runId: normalizedRunId || '',
       responseId: normalizedResponseId
@@ -11600,8 +12264,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ prompts: PROMPTS_COMPANY });
     return false;
   } else if (message.type === 'GET_STAGE_NAMES') {
-    // Zwróć nazwy etapów
-    sendResponse({ stageNames: STAGE_NAMES_COMPANY });
+    // Zwróć nazwy + opisy etapów (wstecznie kompatybilnie).
+    sendResponse({
+      stageNames: STAGE_NAMES_COMPANY,
+      stageMetadata: STAGE_METADATA_COMPANY
+    });
     return false;
   } else if (message.type === 'RESUME_STAGE_START') {
     // Uruchom analizę od konkretnego etapu
