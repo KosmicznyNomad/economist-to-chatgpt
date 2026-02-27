@@ -14785,6 +14785,14 @@ async function injectToChat(
       return 'P?';
     }
 
+    function buildDataGapReplayKey(stageId, currentPromptNumber) {
+      const normalizedStageId = normalizeDataGapStageId(stageId);
+      if (!normalizedStageId) return '';
+      const hasPromptNumber = Number.isInteger(currentPromptNumber) && currentPromptNumber > 0;
+      if (!hasPromptNumber) return `${normalizedStageId}@P?`;
+      return `${normalizedStageId}@P${currentPromptNumber}`;
+    }
+
     const forceStopResult = () => ({
       success: false,
       lastResponse: '',
@@ -15582,7 +15590,7 @@ async function injectToChat(
       };
     }
 
-    async function queueMissingPromptForDataGap(stageId, currentPromptText, localPromptIndex) {
+    async function queueMissingPromptForDataGap(stageId, currentPromptText, localPromptIndex, currentPromptNumberHint = null) {
       const normalizedStageId = normalizeDataGapStageId(stageId);
       if (!normalizedStageId) {
         logDataGap('ROLLBACK_REJECTED_INVALID_STAGE', {
@@ -15591,17 +15599,29 @@ async function injectToChat(
         return { inserted: false, error: 'invalid_stage_id', stageId: '' };
       }
 
-      const replayCount = (dataGapReplayCountsByStage.get(normalizedStageId) || 0) + 1;
-      dataGapReplayCountsByStage.set(normalizedStageId, replayCount);
       const safeLocalPromptIndex = Number.isInteger(localPromptIndex) && localPromptIndex >= 0
         ? localPromptIndex
         : 0;
+      const requestedPromptNumberForReplay = (
+        Number.isInteger(currentPromptNumberHint) && currentPromptNumberHint > 0
+      )
+        ? currentPromptNumberHint
+        : (
+          Number.isInteger(promptOffset) && promptOffset >= 0
+            ? (promptOffset + safeLocalPromptIndex + 1)
+            : null
+        );
+      const replayKey = buildDataGapReplayKey(normalizedStageId, requestedPromptNumberForReplay);
+      const replayCount = (dataGapReplayCountsByStage.get(replayKey) || 0) + 1;
+      dataGapReplayCountsByStage.set(replayKey, replayCount);
       const fromIndex = safeLocalPromptIndex + 1;
       const chainLengthBefore = Array.isArray(promptChain) ? promptChain.length : 0;
       logDataGap('ROLLBACK_REQUESTED', {
         requestedStageId: normalizedStageId,
+        replayKey,
         replayCount,
         replayLimit: DATA_GAP_MAX_REPLAYS_PER_STAGE,
+        currentPromptNumber: requestedPromptNumberForReplay,
         localPromptIndex: safeLocalPromptIndex,
         insertAfterIndex: fromIndex,
         chainLengthBefore
@@ -15609,13 +15629,16 @@ async function injectToChat(
       if (replayCount > DATA_GAP_MAX_REPLAYS_PER_STAGE) {
         logDataGap('ROLLBACK_BLOCKED_REPLAY_LIMIT', {
           requestedStageId: normalizedStageId,
+          replayKey,
           replayCount,
-          replayLimit: DATA_GAP_MAX_REPLAYS_PER_STAGE
+          replayLimit: DATA_GAP_MAX_REPLAYS_PER_STAGE,
+          currentPromptNumber: requestedPromptNumberForReplay
         }, 'error');
         return {
           inserted: false,
           error: 'data_gap_replay_limit',
           stageId: normalizedStageId,
+          replayKey,
           replayCount
         };
       }
@@ -15665,6 +15688,7 @@ async function injectToChat(
           inserted: false,
           error: runtimeLookup.error || 'missing_prompt_for_stage',
           stageId: normalizedStageId,
+          replayKey,
           replayCount,
           source: source || runtimeLookup.source || ''
         };
@@ -15681,6 +15705,7 @@ async function injectToChat(
           inserted: false,
           error: 'missing_prompt_empty',
           stageId: normalizedStageId,
+          replayKey,
           replayCount,
           source
         };
@@ -15749,6 +15774,7 @@ async function injectToChat(
             return {
               inserted: true,
               stageId: normalizedStageId,
+              replayKey,
               replayCount,
               source: `${source || 'runtime_lookup'}+self_reference_replay`,
               mode: 'self_reference_replay',
@@ -15774,6 +15800,7 @@ async function injectToChat(
           inserted: false,
           error: 'data_gap_self_reference',
           stageId: normalizedStageId,
+          replayKey,
           replayCount,
           source,
           promptNumber: missingPromptNumber,
@@ -15809,6 +15836,7 @@ async function injectToChat(
           return {
             inserted: true,
             stageId: normalizedStageId,
+            replayKey,
             replayCount,
             source: `${source || 'runtime_lookup'}+range_replay`,
             mode: 'inserted_replay_range',
@@ -15850,6 +15878,7 @@ async function injectToChat(
       return {
         inserted: true,
         stageId: normalizedStageId,
+        replayKey,
         replayCount,
         source,
         mode,
@@ -18243,10 +18272,17 @@ async function injectToChat(
           console.log(`📝 Preview (ostatnie 200 znaków): "...${text.substring(Math.max(0, text.length - 200))}"`);
           
           // Weryfikacja kompletności
+          const parsedDataGapDirective = parseDataGapDirectiveResponse(text);
           if (textSize < 50) {
-            console.warn('⚠️ UWAGA: Odpowiedź bardzo krótka (<50 znaków) - może być niepełna lub błędna');
+            if (parsedDataGapDirective) {
+              console.log(
+                `ℹ️ Krótka odpowiedź to poprawna dyrektywa DATA_GAP_STAGE=${parsedDataGapDirective.stageId}`
+              );
+            } else {
+              console.warn('⚠️ UWAGA: Odpowiedź bardzo krótka (<50 znaków) - może być niepełna lub błędna');
+            }
           }
-          if (textSize < 10) {
+          if (textSize < 10 && !parsedDataGapDirective) {
             console.warn('❌ KRYTYCZNE: Odpowiedź ekstremalnie krótka (<10 znaków) - prawdopodobnie błąd');
           }
           
@@ -19590,13 +19626,19 @@ async function injectToChat(
               totalPromptsForRun,
               `Data gap: stage ${dataGapStageId} - uzupelniam`
             );
-            const queueResult = await queueMissingPromptForDataGap(dataGapStageId, prompt, i);
+            const queueResult = await queueMissingPromptForDataGap(
+              dataGapStageId,
+              prompt,
+              i,
+              absoluteCurrentPrompt
+            );
             if (!queueResult.inserted) {
               const dataGapError = queueResult.error || 'data_gap_queue_failed';
               logDataGap('ROLLBACK_FAILED', {
                 requestedStageId: dataGapStageId,
                 currentPrompt: absoluteCurrentPrompt,
                 error: dataGapError,
+                replayKey: queueResult.replayKey || '',
                 replayCount: queueResult.replayCount
               }, 'error');
               console.error(

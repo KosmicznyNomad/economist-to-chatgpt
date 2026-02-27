@@ -73,10 +73,18 @@ function findPromptNumberByTextInCanonicalPrompts(prompts, promptText) {
   return null;
 }
 
+function buildReplayKey(stageId, currentPromptNumber) {
+  const normalizedStageId = normalizeStageId(stageId);
+  if (!normalizedStageId) return '';
+  const hasPrompt = Number.isInteger(currentPromptNumber) && currentPromptNumber > 0;
+  return hasPrompt ? `${normalizedStageId}@P${currentPromptNumber}` : `${normalizedStageId}@P?`;
+}
+
 function queueMissingPromptForDataGap({
   stageId,
   currentPromptText,
   localPromptIndex,
+  currentPromptNumberHint = null,
   promptChain,
   canonicalPrompts,
   promptByStageId,
@@ -85,16 +93,22 @@ function queueMissingPromptForDataGap({
   const normalizedStageId = normalizeStageId(stageId);
   if (!normalizedStageId) return { inserted: false, error: 'invalid_stage_id' };
 
-  const replayCount = (replayCounts.get(normalizedStageId) || 0) + 1;
-  replayCounts.set(normalizedStageId, replayCount);
+  const inferredCurrentPromptNumber = (
+    Number.isInteger(currentPromptNumberHint) && currentPromptNumberHint > 0
+  )
+    ? currentPromptNumberHint
+    : findPromptNumberByTextInCanonicalPrompts(canonicalPrompts, currentPromptText);
+  const replayKey = buildReplayKey(normalizedStageId, inferredCurrentPromptNumber);
+  const replayCount = (replayCounts.get(replayKey) || 0) + 1;
+  replayCounts.set(replayKey, replayCount);
   if (replayCount > MAX_REPLAYS_PER_STAGE) {
-    return { inserted: false, error: 'data_gap_replay_limit', stageId: normalizedStageId, replayCount };
+    return { inserted: false, error: 'data_gap_replay_limit', stageId: normalizedStageId, replayKey, replayCount };
   }
 
   const fromIndex = Math.max(0, localPromptIndex + 1);
   const missingPromptText = promptByStageId.get(normalizedStageId);
   if (!missingPromptText) {
-    return { inserted: false, error: 'missing_prompt_for_stage', stageId: normalizedStageId, replayCount };
+    return { inserted: false, error: 'missing_prompt_for_stage', stageId: normalizedStageId, replayKey, replayCount };
   }
   const missingPromptNumber = findPromptNumberByTextInCanonicalPrompts(canonicalPrompts, missingPromptText);
   const currentPromptNumber = findPromptNumberByTextInCanonicalPrompts(canonicalPrompts, currentPromptText);
@@ -102,7 +116,7 @@ function queueMissingPromptForDataGap({
   const currentNormalized = normalizePromptText(currentPromptText);
   const missingNormalized = normalizePromptText(missingPromptText);
   if (!missingNormalized) {
-    return { inserted: false, error: 'data_gap_self_reference', stageId: normalizedStageId, replayCount };
+    return { inserted: false, error: 'data_gap_self_reference', stageId: normalizedStageId, replayKey, replayCount };
   }
   if (missingNormalized === currentNormalized) {
     const selfReferenceReplayStart = Number.isInteger(missingPromptNumber) && missingPromptNumber > 1
@@ -126,12 +140,13 @@ function queueMissingPromptForDataGap({
         return {
           inserted: true,
           stageId: normalizedStageId,
+          replayKey,
           replayCount,
           mode: 'self_reference_replay'
         };
       }
     }
-    return { inserted: false, error: 'data_gap_self_reference', stageId: normalizedStageId, replayCount };
+    return { inserted: false, error: 'data_gap_self_reference', stageId: normalizedStageId, replayKey, replayCount };
   }
 
   const canReplayRange = (
@@ -152,6 +167,7 @@ function queueMissingPromptForDataGap({
       return {
         inserted: true,
         stageId: normalizedStageId,
+        replayKey,
         replayCount,
         mode: 'inserted_replay_range'
       };
@@ -171,7 +187,7 @@ function queueMissingPromptForDataGap({
     promptChain.splice(fromIndex, 0, missingPromptText, currentPromptText);
   }
 
-  return { inserted: true, stageId: normalizedStageId, replayCount, mode };
+  return { inserted: true, stageId: normalizedStageId, replayKey, replayCount, mode };
 }
 
 function loadPromptByStage() {
@@ -373,6 +389,41 @@ function run() {
     }
   }
   assert.strictEqual(replayLimitHit, true, 'replay guard should trigger after repeated unresolved gaps');
+
+  // Test 3b: replay counters should be scoped by stage+current prompt number.
+  const perPromptReplayCounts = new Map();
+  const chainForStage3 = prompts.slice(2);
+  const chainForStage4 = prompts.slice(2);
+  const stage3Prompt = promptByStageId.get('3');
+  const stage4Prompt = promptByStageId.get('4');
+  const stage3Index = chainForStage3.findIndex((item) => normalizePromptText(item) === normalizePromptText(stage3Prompt));
+  const stage4Index = chainForStage4.findIndex((item) => normalizePromptText(item) === normalizePromptText(stage4Prompt));
+  assert(stage3Index >= 0 && stage4Index >= 0, 'stage 3/4 prompts should exist in chain');
+  const replayFromStage3 = queueMissingPromptForDataGap({
+    stageId: '2',
+    currentPromptText: chainForStage3[stage3Index],
+    localPromptIndex: stage3Index,
+    promptChain: chainForStage3,
+    canonicalPrompts: prompts,
+    promptByStageId,
+    replayCounts: perPromptReplayCounts
+  });
+  const replayFromStage4 = queueMissingPromptForDataGap({
+    stageId: '2',
+    currentPromptText: chainForStage4[stage4Index],
+    localPromptIndex: stage4Index,
+    promptChain: chainForStage4,
+    canonicalPrompts: prompts,
+    promptByStageId,
+    replayCounts: perPromptReplayCounts
+  });
+  assert.strictEqual(replayFromStage3.inserted, true, 'stage 3 replay should insert');
+  assert.strictEqual(replayFromStage4.inserted, true, 'stage 4 replay should insert');
+  assert.strictEqual(
+    replayFromStage4.replayCount,
+    1,
+    'replay counter should reset for a different current prompt location'
+  );
 
   console.log('PASS test-data-gap-rewind');
   console.log(`Executed rollback sequence: ${executed.join(' -> ')}`);
