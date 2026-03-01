@@ -23,7 +23,14 @@ You will work through a strict sequence to maintain auditability and avoid narra
 **Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 # Key Definitions
 
@@ -528,11 +535,14 @@ Use first principles and deduction; avoid generic MBA frameworks unless a stage 
 Be conservative when data is missing; label DATA vs ASSUMPTION vs INFERENCE.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 
 CONTEXT IS THE DATASET (critical)
@@ -613,11 +623,14 @@ You are an investment research engineer working within a multi-stage investment 
 - `disconfirmers`: Breakpoints for designing measurable Value of Information (VOI) indicators in later stages
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 
 ## Your Task: Four Required Mechanics
@@ -923,11 +936,14 @@ When you cannot find a critical number, do NOT stop your analysis. Instead:
 **Critical Rule:** Never silently invent numbers. Every proxy must be explicitly explained with your reasoning.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 
 ## Seven-Phase Analysis Framework
@@ -1475,7 +1491,7 @@ TS3: Binding award exists with obligated/funded amount (or equivalent committed 
 TS4: Funded backlog + delivery schedule implies revenue recognition within modeled horizon; backlog conversion is visible.
 TS5: Delivered + cash conversion and/or renewals/option exercises prove repeatability.
 
-Rule: score conservatively when evidence is ambiguous. If uncertain between two levels, take the lower and flag DATA_GAP.
+Rule: score conservatively when evidence is ambiguous. If uncertain between two levels, take the lower, flag DATA_GAP (non-blocking), and continue under the DataGap Rule.
 
 Step 6 — Score TQ (Traction Quality, 0–5) for contract realism + cash conversion
 TQ0: Unclear; no reliable disclosure for thesis stream.
@@ -1589,11 +1605,14 @@ OPERATING PRINCIPLES
 • ALWAYS-RUN rule: You must complete the stage for all companies. Missing inputs must trigger explicit proxy methods (not silent guessing), wide ranges, and stricter decision thresholds — not a stage-level stop.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 
 ---
@@ -1884,11 +1903,14 @@ This will help for the next stage: Stage 5 - Competitive Position.
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 Your goal is to select 4 companies through systematic qualitative analysis based on asymmetric return potential, competitive advantages, and market adoption timing. Focus on identifying companies with the highest risk/reward ratios (upside/downside >3:1 preferred) rather than simply the strongest current market positions.
 
@@ -2162,11 +2184,15 @@ This will help for the next stage: Stage 6 - DuPont ROE Quality.
 # DuPont ROE Quality Assessment
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
 ## Context
 
 You selected one company through competitive position analysis. Bottom-Up validated business model strength and thesis-fit. Now assess financial performance quality by decomposing return on equity into operational drivers and evaluating how thesis transformation impacts these drivers.
@@ -2244,11 +2270,15 @@ This will help for the next stage: Stage 7 - Revaluation Parameter Selection.
 # STAGE 7 — REVALUATION PARAMETER SELECTION
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
 (Formerly referenced as "KPI Selection" or "Single Metric Decision")
 
 You are a quantitative investment analyst working on the final decision stage of a multi-stage analysis pipeline. Your task is to select exactly ONE company from a shortlist of finalists based on a specific criterion: which company has the highest probability-weighted potential to force a near-term market revaluation.
@@ -2486,11 +2516,14 @@ SEARCH POLICY (IMPORTANT)
 - Do not “research everything”; search only to unblock missing essentials or to validate a suspicious/conflicting number.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 
 HARD QC RULES
@@ -2504,15 +2537,10 @@ F) Anti-double-count: incremental means “thesis path minus the same baseline p
 G) Wedge persistence: do not assume the wedge is perpetual by default. Classify persistence (wave/cycle vs durable steady-state change) and only then decide whether a long-term component exists.
 H) Wedge sanity checks: wedge should be monotonic (Bear ≤ Base ≤ Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
 
-PIPELINE HALT COMMAND (MANDATORY WHEN DATA GAPS BLOCK THE STAGE)
-If critical inputs are still missing after required search/proxy attempts, you must output this exact command block and stop:
-SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
-SYSTEM_COMMAND_REASON: <one sentence naming the blocking missing inputs>
-DECISION: WATCH
-CATEGORY: DATA_GAPS
-MISSING_INPUTS: <comma-separated list>
-NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
-After this block, STOP and do not continue with extra sections.
+DATA GAP FALLBACK (EMERGENCY ONLY)
+If critical inputs are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
+DATA_GAP_STAGE=<previous_stage_number>
+After that line, STOP and do not continue with extra sections.
 
 
 
@@ -2525,7 +2553,7 @@ Create a “Context Pack” table with:
 - CORE value per share (V_core_base at minimum; bear/bull if available)
 - Monetization Path A/B/C and Dominant Driver (from Stage 4)
 - One-line thesis stream definition (what is included)
-If any of the following are missing from context: price, diluted shares, and a usable baseline definition, run search to obtain them; if still unavailable, output the PIPELINE HALT COMMAND block above, list exactly what is missing, and STOP.
+If any of the following are missing from context: price, diluted shares, and a usable baseline definition, first try DataGap Rule steps 1-2 and run search/proxy to obtain them; only if still unavailable, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
 
 ANCHOR INHERITANCE: Stage 8 must inherit the Anchor Date/Year 0 baseline from Stage 4 (Revenue₀, FCF₀/margin₀, diluted shares, net debt/cash). If Stage 4 does not explicitly provide any of these, estimate them by rebuilding the same Anchor Date baseline from the latest available filings and proceed with clearly labeled assumptions.
 STEP 2 — DEFINE THE WEDGE OBJECT (PRECISELY)
@@ -2568,7 +2596,7 @@ Wedge persistence classification (mandatory):
 - Wave: no terminal value; or terminal with explicit fade schedule to 0 by year 6–8.
 - Durable shift: terminal allowed with conservative g.
 - Step-change with reinvestment: terminal allowed only if incremental maintenance reinvestment is modeled.
-If persistence is not classified because required inputs are missing, output the PIPELINE HALT COMMAND block above and STOP.
+If persistence is not classified because required inputs are missing, first try DataGap Rule steps 1-2; only if still unresolved, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
 Anti-double-count numeric test:
 Compute baseline_FCF_core_year0 and baseline_FCF_wedge_year0 on same scope.
 If |baseline_FCF_core - baseline_FCF_wedge| > 5% of baseline_FCF_core, flag DOUBLE COUNT RISK and reconcile before proceeding.
@@ -2578,11 +2606,15 @@ This will help for the next stage: Stage 9 - Reverse DCF (whole company / TOTAL)
 # STAGE 9 — REVERSE DCF (TOTAL / WHOLE COMPANY)
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
 You are conducting a Reverse DCF analysis to extract what expectations are already priced into a stock and determine whether there is actionable mispricing versus a thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
 
 CORE PRINCIPLE — CONSISTENCY OF THE VALUATION OBJECT
@@ -2596,14 +2628,9 @@ COMPUTATION + DATA REQUIREMENTS
 * Use Enterprise Value (EV) as the primary reverse-DCF anchor, then convert to Equity Value per share using net debt and current diluted shares outstanding.
 * IMPORTANT: “Diluted shares outstanding” means current shares outstanding plus in-the-money dilution (RSUs, options, convertibles). Do NOT use diluted weighted-average shares from the income statement.
 
-PREREQUISITES CHECK — STOP IF ANY ARE MISSING
-If prerequisites are missing after required search/proxy attempts, output this exact command block and stop:
-SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
-SYSTEM_COMMAND_REASON: <one sentence naming the blocking missing inputs>
-DECISION: WATCH
-CATEGORY: DATA_GAPS
-MISSING_INPUTS: <comma-separated list>
-NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
+PREREQUISITES CHECK � LAST-RESORT STOP ONLY IF STILL MISSING
+If prerequisites are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
+DATA_GAP_STAGE=<previous_stage_number>
 
 Step 0.1 Identify which inputs you have:
 
@@ -2627,7 +2654,7 @@ You have Bear/Base/Bull NPVs that represent ONLY incremental thesis value (not t
   2. Base-business multiple on normalized FCF/EBIT
 * A clear definition of what is “incremental” so you do NOT double-count cash flows already included in the base business.
 
-If you cannot construct whole-company Bear/Base/Bull equity values per share with the inputs available, output the command block above, then STOP and list exactly what is missing.
+If you cannot construct whole-company Bear/Base/Bull equity values per share after applying DataGap Rule steps 1-2, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
 
 NEW — Step 0.2 HORIZON CALIBRATION (MANDATORY, PRE-PRICE)
 Purpose: avoid compressing long-cycle theses into a 3-year model which can distort market-implied assumptions.
@@ -2839,11 +2866,15 @@ ROLE
 You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ONE company, you must produce a single decision: WATCH / AVOID.
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
 You do not invent a new thesis.
 You do not “research for fun.”
 You do not create new numbers.
@@ -2868,13 +2899,8 @@ Hard rules:
 2) WEDGE may be compared to price ONLY as a “thesis contribution ratio”:
    Wedge_to_Price = Expected_WEDGE / Price
    WEDGE is never a price target and never the intrinsic value of the stock.
-3) If you cannot construct consistent TOTAL Bear/Base/Bull scenarios, you MUST output:
-   SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
-   SYSTEM_COMMAND_REASON: Missing inputs to construct consistent TOTAL scenarios
-   DECISION: WATCH
-   CATEGORY: DATA_GAPS
-   MISSING_INPUTS: <comma-separated list>
-   NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
+3) If you still cannot construct consistent TOTAL Bear/Base/Bull scenarios after applying DataGap Rule steps 1-2, you MUST output exactly one line (last resort):
+   DATA_GAP_STAGE=<previous_stage_number>
    and STOP.
 
 Binary rule:
@@ -2947,7 +2973,7 @@ Stage 9 — Reverse DCF (WHOLE COMPANY / TOTAL)
 ────────────────────────────────────────────────────────────────────────────
 THE DECISION PROCESS (follow strictly)
 
-GATE 0 — INTEGRITY (mandatory STOP gate)
+GATE 0 � INTEGRITY (mandatory gate; STOP only as last resort)
 Purpose: prevent methodological failure before debating the stock.
 
 You must confirm:
@@ -2958,13 +2984,8 @@ C) Stage 4 dominant driver and path (A/B/C) are known and will be respected in i
    - Path B (margin-reset): mix/pricing/utilization drives value.
    - Path C (WACC-dominated): this is a regime bet unless there is a real incremental cash-flow mechanism.
 
-If any of A/B/C is not satisfied:
-- SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN
-- SYSTEM_COMMAND_REASON: Missing mandatory Gate 0 integrity inputs
-- DECISION: WATCH
-- CATEGORY: DATA_GAPS
-- List exactly what is missing and which stage must provide it
-- NEXT_REQUIRED_STAGE: <which stage must provide the missing inputs>
+If any of A/B/C is not satisfied after applying DataGap Rule steps 1-2:
+- DATA_GAP_STAGE=<previous_stage_number>
 Then STOP.
 
 ────────────────────────────────────────────────────────────────────────────
@@ -3073,7 +3094,7 @@ DECISION: WATCH / AVOID
 CATEGORY: OK / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
 
 Gate 0 — Integrity: PASS/FAIL
-- If FAIL: output SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN, then list missing stage outputs and STOP.
+- If FAIL after applying DataGap Rule steps 1-2: STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number> (last resort).
 
 Gate 1 — Quality: PASS/RISK/FAIL
 - Moat/replaceability (Stage 5)
@@ -3116,11 +3137,14 @@ This will help for the next stage: Stage 11 - Four-Gate Framework — Decision O
 Wygeneruj jedną linię tekstu — standardowy rekord decyzyjny według metodologii Four-Gate Framework. To nie jest podsumowanie analizy, lecz logiczny zapis decyzji inwestycyjnej — z uzasadnieniem, asymetrią i kluczowymi ryzykami — w języku strategicznym, nadającym się do briefingów najwyższego szczebla (rząd, fundusz, zarząd).
 
 DataGap Rule:
-If any critical input required for the current stage is missing, first derive/compute it from the data already available in context. If it cannot be derived without inventing assumptions, STOP immediately and output exactly one line in this format: DATA_GAP_STAGE=<X> where <X> is the current stage identifier (e.g., 4, 8, 9). Do not output anything else.
-
-Example outputs (only one line):
-DATA_GAP_STAGE=4
-DATA_GAP_STAGE=9
+Use this only as an emergency fallback. Default behavior is to keep working in the current stage.
+1) First, always try to derive/compute missing inputs from context, prior outputs, and allowed conservative proxy logic.
+2) Only if a required dependency truly comes from a not-yet-executed previous stage and cannot be reconstructed reliably, go back and run that specific previous stage.
+3) Only if still blocked after steps 1-2, STOP and output exactly one line (nothing else):
+DATA_GAP_STAGE=<previous_stage_number>
+Use a real previous stage number (not a placeholder).
+Example: if current stage is 7 and required stage 6 was not executed, output DATA_GAP_STAGE=6.
+Example: if current stage is 10 and required stage 9 was not executed, output DATA_GAP_STAGE=9.
 
 
 ---
@@ -3429,5 +3453,21 @@ Przyklady: USD, CHF, EUR, PLN
 
 Wygeneruj dokladnie jedna linie tekstu zgodna z powyzsza struktura — 12 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy.
 This will help for the next stage: Final output delivery.
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
 
 
