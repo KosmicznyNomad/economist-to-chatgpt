@@ -3270,7 +3270,9 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['10', 11],
   ['11', 12],
   ['2.5', 5], // legacy alias: old chain used 2.5 for Reverse DCF Lite
-  ['3.5', 7] // legacy alias: old chain treated DuPont as 3.5
+  ['3.2', 5], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
+  ['3.5', 7], // legacy alias: old chain treated DuPont as 3.5
+  ['6.5', 7] // compatibility alias: midpoint naming for DuPont
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -19022,18 +19024,8 @@ async function injectToChat(
         responseSeenInDOM = true;
       }
 
-      const dataGapReady = (
-        responseSeenInDOM &&
-        !!currentDataGapDirective &&
-        (Date.now() - lastAssistantChangeAt >= 1200)
-      );
-      if (dataGapReady) {
-        console.log('[FAZA 2] Wykryto stabilny DATA_GAP directive - koncze czekanie.', {
-          stageId: currentDataGapDirective.stageId,
-          source: responseNodes.source
-        });
-        return true;
-      }
+      // DATA_GAP activation happens only after full response capture + validation.
+      // Do not short-circuit waitForResponse on partial/still-streaming output.
 
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
       const hasThinkingInMessage = !!(lastAssistantMsg && lastAssistantMsg.querySelector('[class*="thinking"]'));
@@ -20976,6 +20968,9 @@ function waitForTabComplete(tabId) {
     });
   });
 }
+
+
+
 
 
 

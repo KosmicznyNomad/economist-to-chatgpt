@@ -3,12 +3,12 @@
 This document is the readable contract for `prompts-company.txt` and runtime stage labels.
 
 ## Source Of Truth In Code
-- Stage metadata is defined in `background.js` as `STAGE_METADATA_COMPANY`.
-- UI consumers fetch it via runtime message: `GET_STAGE_NAMES`.
+- Stage metadata is maintained in `background.js` as `STAGE_METADATA_COMPANY`.
+- UI consumers fetch it via runtime message `GET_STAGE_NAMES`.
 - Backward-compatible field: `stageNames`.
-- New structured field: `stageMetadata`.
+- Structured field: `stageMetadata`.
 
-## Prompt Index Mapping
+## Prompt Index Mapping (13 prompts)
 - `promptIndex` is 0-based in code.
 - `promptNumber` is 1-based in UI and logs.
 
@@ -30,11 +30,14 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 
 ## Legacy Stage Id Aliases
 These aliases are still accepted by `findCompanyPromptIndexByStageIdentifier()`:
-- `2.5 -> promptIndex 5` (legacy Reverse DCF Lite numbering)
-- `3.5 -> promptIndex 7` (legacy midpoint naming for DuPont)
+- `2.5` -> `promptIndex 5` (legacy Reverse DCF Lite numbering)
+- `3.2` -> `promptIndex 5` (compatibility alias collapsed to Stage 4 prompt)
+- `3.5` -> `promptIndex 7` (legacy midpoint naming for DuPont)
+- `6.5` -> `promptIndex 7` (compatibility midpoint alias for DuPont)
 
 ## Editing Checklist
 1. Update `prompts-company.txt` with `◄PROMPT_SEPARATOR►` boundaries.
-2. Update `STAGE_METADATA_COMPANY` in `background.js` to keep count/order aligned.
-3. Verify `stageMetadata.length === PROMPTS_COMPANY.length` in logs (`company-count` diagnostics).
-4. Check resume UI labels in `resume-stage.html` / `resume-stage.js`.
+2. Keep metadata order/count in `background.js` aligned to prompt order.
+3. Verify logs contain `[prompts] Loaded company prompts: ...`.
+4. Verify `stageMetadata.length === PROMPTS_COMPANY.length` in diagnostics.
+5. Check resume labels in `resume-stage.html` / `resume-stage.js`.
