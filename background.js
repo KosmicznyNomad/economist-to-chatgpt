@@ -91,18 +91,39 @@ const PROBLEM_LOG_STORAGE_KEY = 'problem_log_entries';
 const PROBLEM_LOG_MAX_ITEMS = 400;
 const PROBLEM_LOG_BURST_DEDUPE_MS = 7000;
 const PROBLEM_LOG_MAX_TEXT_LENGTH = 600;
+const PROCESS_STREAM_HEARTBEAT_MS = 30000;
+const PROCESS_MONITOR_HEARTBEAT = {
+  alarmName: 'process-monitor-heartbeat',
+  alarmPeriodMinutes: 1,
+  // Keep local process state fresh while the run is actively waiting on ChatGPT output.
+  touchIntervalMs: PROCESS_STREAM_HEARTBEAT_MS,
+  // Treat runs as stale when no progress update arrives within TTL.
+  staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
+  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2
+};
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
 const PROBLEM_LOG_CONSOLE_CAPTURE_ENABLED = true;
 const PROBLEM_LOG_CONSOLE_CAPTURE_DEDUPE_MS = 15000;
 const PROBLEM_LOG_CONSOLE_CAPTURE_MAX_KEYS = 600;
 const PROBLEM_LOG_CONSOLE_CAPTURE_MESSAGE_MAX_LENGTH = 300;
+const WATCHLIST_CONNECTION_LOG_DEDUPE_MS = 15 * 60 * 1000;
 const EXTENSION_INSTALLATION_ID_STORAGE_KEY = 'extension_installation_id';
 const WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY = 'watchlist_dispatch_process_log';
 const WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS = 800;
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
+const PROCESS_CONVERSATION_URL_HISTORY_LIMIT = 12;
+const UNFINISHED_RESUME_BATCH_STORAGE_KEY = 'unfinished_resume_batch_state';
+const UNFINISHED_RESUME_BATCH_MAX_ROWS = 500;
+const UNFINISHED_RESUME_BATCH_STATUSES = new Set([
+  'idle',
+  'running',
+  'completed',
+  'completed_with_errors',
+  'interrupted'
+]);
 const CLOSED_PROCESS_STATUSES = new Set([
   'completed',
   'failed',
@@ -132,14 +153,23 @@ let watchlistDispatchProcessLogReady = null;
 let autoRestoreWindowsInProgress = false;
 let reloadResumeMonitorState = null;
 let reloadResumeMonitorReady = null;
+let unfinishedResumeBatchState = null;
+let unfinishedResumeBatchStateReady = null;
+let unfinishedResumeBatchInProgress = false;
+let unfinishedResumeBatchActiveJobId = '';
 let problemLogEntries = [];
 let problemLogReady = null;
 let extensionInstallationId = '';
 let extensionInstallationIdReady = null;
 const problemLogLastSignatureByRunId = new Map();
+const processLogLastEmitTsByRunId = new Map();
+const processStaleWarnLastEmitTsByRunId = new Map();
 const problemLogConsoleErrorDedup = new Map();
 let problemLogConsoleCaptureInstalled = false;
 let problemLogConsoleCaptureInProgress = false;
+let watchlistConnectionLogLastSignature = '';
+let watchlistConnectionLogLastTs = 0;
+let processMonitorHeartbeatSweepInProgress = false;
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -381,7 +411,26 @@ function normalizeProcessRecord(record) {
   if (typeof normalized.statusText !== 'string') delete normalized.statusText;
   if (typeof normalized.stageName !== 'string') delete normalized.stageName;
   if (!Number.isInteger(normalized.stageIndex)) delete normalized.stageIndex;
-  if (typeof normalized.chatUrl !== 'string') delete normalized.chatUrl;
+  const normalizedChatUrl = normalizeChatConversationUrl(
+    typeof normalized.chatUrl === 'string' ? normalized.chatUrl : ''
+  );
+  if (normalizedChatUrl) {
+    normalized.chatUrl = normalizedChatUrl;
+  } else {
+    delete normalized.chatUrl;
+  }
+  const normalizedConversationUrls = normalizeConversationUrlList([
+    ...(Array.isArray(normalized.conversationUrls) ? normalized.conversationUrls : []),
+    normalized.chatUrl || ''
+  ]);
+  if (normalizedConversationUrls.length > 0) {
+    normalized.conversationUrls = normalizedConversationUrls;
+    if (!normalized.chatUrl) {
+      normalized.chatUrl = normalizedConversationUrls[normalizedConversationUrls.length - 1];
+    }
+  } else {
+    delete normalized.conversationUrls;
+  }
   if (typeof normalized.sourceUrl !== 'string') delete normalized.sourceUrl;
   if (typeof normalized.error !== 'string') delete normalized.error;
   if (!Number.isInteger(normalized.finishedAt)) delete normalized.finishedAt;
@@ -434,6 +483,39 @@ function normalizeProcessRecord(record) {
   }
 
   return normalized;
+}
+
+function normalizeConversationUrlList(rawValues, limit = PROCESS_CONVERSATION_URL_HISTORY_LIMIT) {
+  const values = Array.isArray(rawValues) ? rawValues : [];
+  const dedup = [];
+  const seen = new Set();
+  for (const value of values) {
+    const normalized = normalizeChatConversationUrl(typeof value === 'string' ? value : '');
+    if (!normalized || seen.has(normalized)) continue;
+    seen.add(normalized);
+    dedup.push(normalized);
+  }
+  if (!Number.isInteger(limit) || limit <= 0 || dedup.length <= limit) return dedup;
+  return dedup.slice(dedup.length - limit);
+}
+
+function mergeProcessConversationUrls(existingRecord, nextRecord) {
+  if (!nextRecord || typeof nextRecord !== 'object') return;
+  const merged = normalizeConversationUrlList([
+    ...(Array.isArray(existingRecord?.conversationUrls) ? existingRecord.conversationUrls : []),
+    typeof existingRecord?.chatUrl === 'string' ? existingRecord.chatUrl : '',
+    ...(Array.isArray(nextRecord?.conversationUrls) ? nextRecord.conversationUrls : []),
+    typeof nextRecord?.chatUrl === 'string' ? nextRecord.chatUrl : ''
+  ]);
+  if (merged.length === 0) {
+    delete nextRecord.conversationUrls;
+    return;
+  }
+  nextRecord.conversationUrls = merged;
+  const latest = merged[merged.length - 1];
+  if (!normalizeChatConversationUrl(nextRecord.chatUrl || '')) {
+    nextRecord.chatUrl = latest;
+  }
 }
 
 function pruneProcessRecords(records) {
@@ -517,6 +599,153 @@ async function broadcastProcessUpdate() {
     // Ignore: no listeners currently connected.
   }
   return processes;
+}
+
+function ensureProcessMonitorHeartbeatAlarm() {
+  if (!chrome?.alarms?.create) return;
+  try {
+    chrome.alarms.create(PROCESS_MONITOR_HEARTBEAT.alarmName, {
+      periodInMinutes: PROCESS_MONITOR_HEARTBEAT.alarmPeriodMinutes
+    });
+  } catch (error) {
+    console.warn('[monitor] process heartbeat alarm failed:', error);
+  }
+}
+
+function pruneProcessStaleWarnMap(nowTs = Date.now()) {
+  if (processStaleWarnLastEmitTsByRunId.size <= PROBLEM_LOG_MAX_ITEMS) return;
+  const staleThreshold = nowTs - (PROCESS_MONITOR_HEARTBEAT.staleWarnCooldownMs * 8);
+  for (const [key, value] of processStaleWarnLastEmitTsByRunId.entries()) {
+    if (!Number.isInteger(value) || value < staleThreshold) {
+      processStaleWarnLastEmitTsByRunId.delete(key);
+    }
+    if (processStaleWarnLastEmitTsByRunId.size <= PROBLEM_LOG_MAX_ITEMS) {
+      return;
+    }
+  }
+}
+
+function shouldEmitProcessStaleWarning(runId, nowTs = Date.now()) {
+  if (!runId) return false;
+  const previousTs = processStaleWarnLastEmitTsByRunId.get(runId);
+  if (
+    Number.isInteger(previousTs)
+    && (nowTs - previousTs) < PROCESS_MONITOR_HEARTBEAT.staleWarnCooldownMs
+  ) {
+    return false;
+  }
+  processStaleWarnLastEmitTsByRunId.set(runId, nowTs);
+  return true;
+}
+
+async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowTs) {
+  if (!process || typeof process !== 'object') return false;
+  const runId = typeof process.id === 'string' ? process.id : '';
+  if (!runId) return false;
+  const status = normalizeProcessStatus(process.status || '');
+  const staleSeconds = Math.max(0, Math.round(staleMs / 1000));
+  const safeCurrentPrompt = Number.isInteger(process.currentPrompt) ? process.currentPrompt : null;
+  const safeTotalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : null;
+  const safeStageIndex = Number.isInteger(process.stageIndex) ? process.stageIndex : null;
+  const stageName = typeof process.stageName === 'string' ? process.stageName : '';
+  const statusText = `origin=${origin || 'heartbeat'} stale_for_s=${staleSeconds}`;
+  const signatureBucket = Math.floor(nowTs / PROCESS_MONITOR_HEARTBEAT.staleWarnCooldownMs);
+
+  const entry = await appendProblemLog({
+    timestamp: nowTs,
+    level: 'warn',
+    source: 'process-monitor-heartbeat',
+    category: 'process_state',
+    runId,
+    title: typeof process.title === 'string' ? process.title : '',
+    analysisType: typeof process.analysisType === 'string' ? process.analysisType : '',
+    status,
+    reason: 'heartbeat_stale',
+    statusText,
+    message: `No process progress update for ${staleSeconds}s`,
+    currentPrompt: safeCurrentPrompt,
+    totalPrompts: safeTotalPrompts,
+    stageIndex: safeStageIndex,
+    stageName,
+    tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+    windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+    chatUrl: typeof process.chatUrl === 'string' ? process.chatUrl : '',
+    signature: [
+      'process-monitor-heartbeat-stale',
+      runId,
+      status,
+      Number.isInteger(safeCurrentPrompt) ? safeCurrentPrompt : '',
+      Number.isInteger(safeTotalPrompts) ? safeTotalPrompts : '',
+      Number.isInteger(safeStageIndex) ? safeStageIndex : '',
+      stageName,
+      signatureBucket
+    ].join('|')
+  });
+  return !!entry;
+}
+
+async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
+  if (processMonitorHeartbeatSweepInProgress) {
+    return { success: false, skipped: true, reason: 'heartbeat_sweep_in_progress' };
+  }
+  processMonitorHeartbeatSweepInProgress = true;
+  try {
+    await ensureProcessRegistryReady();
+    const snapshot = pruneProcessRecords(Array.from(processRegistry.values()));
+    const nowTs = Date.now();
+    const active = snapshot.filter((process) => process && !isClosedProcessStatus(process.status));
+
+    let staleDetected = 0;
+    let staleLogged = 0;
+    let touched = 0;
+    let fresh = 0;
+
+    for (const process of active) {
+      const runId = typeof process?.id === 'string' ? process.id : '';
+      if (!runId) continue;
+
+      const processTs = Number.isInteger(process.timestamp) ? process.timestamp : 0;
+      const ageMs = processTs > 0 ? Math.max(0, nowTs - processTs) : Number.MAX_SAFE_INTEGER;
+
+      if (ageMs >= PROCESS_MONITOR_HEARTBEAT.staleTtlMs) {
+        staleDetected += 1;
+        if (shouldEmitProcessStaleWarning(runId, nowTs)) {
+          const appended = await appendProcessHeartbeatStaleWarning(process, ageMs, origin, nowTs);
+          if (appended) staleLogged += 1;
+        }
+      } else {
+        processStaleWarnLastEmitTsByRunId.delete(runId);
+      }
+
+      if (ageMs < PROCESS_MONITOR_HEARTBEAT.touchIntervalMs) {
+        fresh += 1;
+        continue;
+      }
+
+      const touchedRecord = await upsertProcess(runId, { timestamp: nowTs });
+      if (touchedRecord) touched += 1;
+    }
+
+    pruneProcessStaleWarnMap(nowTs);
+    return {
+      success: true,
+      origin,
+      active: active.length,
+      touched,
+      fresh,
+      staleDetected,
+      staleLogged
+    };
+  } catch (error) {
+    console.warn('[monitor] process heartbeat sweep failed:', error);
+    return {
+      success: false,
+      origin,
+      error: error?.message || String(error)
+    };
+  } finally {
+    processMonitorHeartbeatSweepInProgress = false;
+  }
 }
 
 function createReloadResumeMonitorSessionId(prefix = 'reload-resume') {
@@ -1042,6 +1271,697 @@ async function updateReloadResumeMonitorSession(sessionId, patch = {}) {
   return setReloadResumeMonitorState(next);
 }
 
+function createUnfinishedResumeBatchJobId(prefix = 'unfinished-resume') {
+  const normalizedPrefix = typeof prefix === 'string' && prefix.trim()
+    ? prefix.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-')
+    : 'unfinished-resume';
+  const safePrefix = normalizedPrefix || 'unfinished-resume';
+  return `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function normalizeUnfinishedResumeBatchStatus(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
+  if (UNFINISHED_RESUME_BATCH_STATUSES.has(normalized)) return normalized;
+  return 'idle';
+}
+
+function normalizeUnfinishedResumeRow(rawRow) {
+  if (!rawRow || typeof rawRow !== 'object') return null;
+  const outcomeRaw = typeof rawRow.outcome === 'string' ? rawRow.outcome.trim().toLowerCase() : '';
+  const allowedOutcomes = new Set([
+    'resumed',
+    'skipped_missing_chat_url',
+    'skipped_not_found',
+    'skipped_already_completed',
+    'failed'
+  ]);
+  const outcome = allowedOutcomes.has(outcomeRaw) ? outcomeRaw : 'failed';
+  return {
+    runId: typeof rawRow.runId === 'string' ? rawRow.runId : '',
+    title: typeof rawRow.title === 'string' ? rawRow.title : '',
+    startedAt: Number.isInteger(rawRow.startedAt) ? rawRow.startedAt : null,
+    finishedAt: Number.isInteger(rawRow.finishedAt) ? rawRow.finishedAt : null,
+    outcome,
+    reason: typeof rawRow.reason === 'string' ? rawRow.reason : '',
+    error: typeof rawRow.error === 'string' ? rawRow.error : '',
+    detectedPromptNumber: Number.isInteger(rawRow.detectedPromptNumber) ? rawRow.detectedPromptNumber : null,
+    startPromptNumber: Number.isInteger(rawRow.startPromptNumber) ? rawRow.startPromptNumber : null,
+    detectedMethod: typeof rawRow.detectedMethod === 'string' ? rawRow.detectedMethod : '',
+    retrySamePrompt: rawRow.retrySamePrompt === true,
+    retryReason: typeof rawRow.retryReason === 'string' ? rawRow.retryReason : '',
+    chatUrl: typeof rawRow.chatUrl === 'string' ? rawRow.chatUrl : ''
+  };
+}
+
+function normalizeUnfinishedResumeBatchTotals(rawTotals) {
+  const source = rawTotals && typeof rawTotals === 'object' ? rawTotals : {};
+  return {
+    total: toNonNegativeInt(source.total, 0),
+    runnable: toNonNegativeInt(source.runnable, 0),
+    skippedMissingUrl: toNonNegativeInt(source.skippedMissingUrl, 0),
+    processed: toNonNegativeInt(source.processed, 0),
+    resumed: toNonNegativeInt(source.resumed, 0),
+    skipped_missing_chat_url: toNonNegativeInt(source.skipped_missing_chat_url, 0),
+    skipped_not_found: toNonNegativeInt(source.skipped_not_found, 0),
+    skipped_already_completed: toNonNegativeInt(source.skipped_already_completed, 0),
+    failed: toNonNegativeInt(source.failed, 0)
+  };
+}
+
+function sanitizeUnfinishedResumeBatchState(rawState) {
+  const source = rawState && typeof rawState === 'object' ? rawState : {};
+  const rows = (Array.isArray(source.rows) ? source.rows : [])
+    .map(normalizeUnfinishedResumeRow)
+    .filter(Boolean)
+    .slice(-UNFINISHED_RESUME_BATCH_MAX_ROWS);
+  return {
+    jobId: typeof source.jobId === 'string' ? source.jobId : '',
+    status: normalizeUnfinishedResumeBatchStatus(source.status),
+    startedAt: Number.isInteger(source.startedAt) ? source.startedAt : null,
+    finishedAt: Number.isInteger(source.finishedAt) ? source.finishedAt : null,
+    updatedAt: Number.isInteger(source.updatedAt) ? source.updatedAt : Date.now(),
+    origin: typeof source.origin === 'string' ? source.origin : '',
+    totals: normalizeUnfinishedResumeBatchTotals(source.totals),
+    rows,
+    activeRunId: typeof source.activeRunId === 'string' ? source.activeRunId : '',
+    error: typeof source.error === 'string' ? source.error : ''
+  };
+}
+
+function cloneUnfinishedResumeBatchState(state) {
+  if (!state || typeof state !== 'object') return null;
+  try {
+    return structuredClone(state);
+  } catch (error) {
+    return JSON.parse(JSON.stringify(state));
+  }
+}
+
+async function ensureUnfinishedResumeBatchStateReady() {
+  if (!unfinishedResumeBatchStateReady) {
+    unfinishedResumeBatchStateReady = (async () => {
+      try {
+        const stored = await chrome.storage.local.get([UNFINISHED_RESUME_BATCH_STORAGE_KEY]);
+        const existing = stored?.[UNFINISHED_RESUME_BATCH_STORAGE_KEY];
+        if (existing && typeof existing === 'object') {
+          unfinishedResumeBatchState = sanitizeUnfinishedResumeBatchState(existing);
+        } else {
+          unfinishedResumeBatchState = sanitizeUnfinishedResumeBatchState({
+            status: 'idle',
+            startedAt: null,
+            finishedAt: null,
+            totals: {},
+            rows: [],
+            activeRunId: '',
+            error: ''
+          });
+        }
+      } catch (error) {
+        console.warn('[unfinished-resume] failed to load batch state:', error?.message || String(error));
+        unfinishedResumeBatchState = sanitizeUnfinishedResumeBatchState({
+          status: 'idle',
+          startedAt: null,
+          finishedAt: null,
+          totals: {},
+          rows: [],
+          activeRunId: '',
+          error: ''
+        });
+      }
+      unfinishedResumeBatchInProgress = unfinishedResumeBatchState?.status === 'running';
+      unfinishedResumeBatchActiveJobId = unfinishedResumeBatchInProgress
+        ? (unfinishedResumeBatchState?.jobId || '')
+        : '';
+    })();
+  }
+  await unfinishedResumeBatchStateReady;
+  return unfinishedResumeBatchState;
+}
+
+async function setUnfinishedResumeBatchState(nextState, options = {}) {
+  await ensureUnfinishedResumeBatchStateReady();
+  const normalized = sanitizeUnfinishedResumeBatchState(nextState);
+  normalized.updatedAt = Date.now();
+  unfinishedResumeBatchState = normalized;
+  unfinishedResumeBatchInProgress = normalized.status === 'running';
+  unfinishedResumeBatchActiveJobId = unfinishedResumeBatchInProgress ? (normalized.jobId || '') : '';
+  await chrome.storage.local.set({
+    [UNFINISHED_RESUME_BATCH_STORAGE_KEY]: normalized
+  });
+  if (options?.broadcast === false) {
+    return normalized;
+  }
+  try {
+    await chrome.runtime.sendMessage({
+      type: 'UNFINISHED_RESUME_BATCH_UPDATED',
+      state: normalized
+    });
+  } catch (error) {
+    // Ignore: no active listeners.
+  }
+  return normalized;
+}
+
+async function getUnfinishedResumeBatchState(jobId = '') {
+  await ensureUnfinishedResumeBatchStateReady();
+  if (!jobId) {
+    return cloneUnfinishedResumeBatchState(unfinishedResumeBatchState);
+  }
+  const currentJobId = typeof unfinishedResumeBatchState?.jobId === 'string'
+    ? unfinishedResumeBatchState.jobId
+    : '';
+  if (currentJobId && currentJobId !== jobId) {
+    return null;
+  }
+  return cloneUnfinishedResumeBatchState(unfinishedResumeBatchState);
+}
+
+async function markRunningUnfinishedResumeBatchInterruptedOnBoot() {
+  const state = await ensureUnfinishedResumeBatchStateReady();
+  if (!state || state.status !== 'running') {
+    return state;
+  }
+  const interruptedState = {
+    ...state,
+    status: 'interrupted',
+    finishedAt: Date.now(),
+    activeRunId: '',
+    error: state.error || 'service_worker_restarted'
+  };
+  const saved = await setUnfinishedResumeBatchState(interruptedState);
+  reportAdminActionEvent('resume_unfinished_batch_completed_with_errors', {
+    level: 'warn',
+    status: 'interrupted',
+    reason: 'service_worker_restarted',
+    origin: 'service-worker-boot',
+    details: {
+      jobId: interruptedState.jobId || '',
+      processed: interruptedState?.totals?.processed || 0,
+      total: interruptedState?.totals?.total || 0
+    }
+  });
+  return saved;
+}
+
+function extractProcessChatUrl(process) {
+  const direct = normalizeChatConversationUrl(
+    typeof process?.chatUrl === 'string' ? process.chatUrl : ''
+  );
+  if (direct) return direct;
+  const links = Array.isArray(process?.conversationUrls) ? process.conversationUrls : [];
+  for (let index = links.length - 1; index >= 0; index -= 1) {
+    const normalized = normalizeChatConversationUrl(typeof links[index] === 'string' ? links[index] : '');
+    if (normalized) return normalized;
+  }
+  const sourceUrl = normalizeChatConversationUrl(
+    typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+  );
+  if (sourceUrl) return sourceUrl;
+  return '';
+}
+
+function resolveUnfinishedProcessStageName(process) {
+  const stageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
+  if (stageName) return stageName;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null;
+  if (Number.isInteger(currentPrompt) && currentPrompt > 0) {
+    return STAGE_NAMES_COMPANY[currentPrompt - 1] || `Prompt ${currentPrompt}`;
+  }
+  return '';
+}
+
+function buildUnfinishedProcessItem(process) {
+  const chatUrl = extractProcessChatUrl(process);
+  const runId = typeof process?.id === 'string' ? process.id : '';
+  return {
+    runId,
+    title: typeof process?.title === 'string' ? process.title : '',
+    status: normalizeProcessStatus(process?.status || ''),
+    needsAction: process?.needsAction === true,
+    currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0,
+    totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0,
+    stageName: resolveUnfinishedProcessStageName(process),
+    timestamp: Number.isInteger(process?.timestamp) ? process.timestamp : 0,
+    chatUrl,
+    hasChatUrl: !!chatUrl,
+    sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : '',
+    lastError: typeof process?.error === 'string' ? process.error : ''
+  };
+}
+
+async function listUnfinishedProcessesForResume(options = {}) {
+  const includeNonCompleted = options?.includeNonCompleted !== false;
+  const snapshot = await getProcessSnapshot();
+  const items = (Array.isArray(snapshot) ? snapshot : [])
+    .filter((process) => process && typeof process === 'object')
+    .filter((process) => {
+      const status = normalizeProcessStatus(process?.status || '');
+      if (includeNonCompleted) {
+        return status !== 'completed';
+      }
+      return !isClosedProcessStatus(status);
+    })
+    .map((process) => buildUnfinishedProcessItem(process))
+    .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+
+  const runnable = items.filter((item) => item.hasChatUrl).length;
+  const skippedMissingUrl = items.length - runnable;
+
+  return {
+    success: true,
+    generatedAt: Date.now(),
+    total: items.length,
+    runnable,
+    skippedMissingUrl,
+    items
+  };
+}
+
+function getUnfinishedRowLogLevel(outcome) {
+  if (outcome === 'resumed') return 'info';
+  if (outcome === 'failed') return 'error';
+  return 'warn';
+}
+
+function getUnfinishedRowActionName(outcome) {
+  if (outcome === 'resumed') return 'resume_unfinished_process_resumed';
+  if (outcome === 'skipped_missing_chat_url') return 'resume_unfinished_process_skipped_missing_chat_url';
+  if (outcome === 'skipped_not_found') return 'resume_unfinished_process_skipped_not_found';
+  if (outcome === 'failed') return 'resume_unfinished_process_failed';
+  return 'resume_unfinished_process_skipped_already_completed';
+}
+
+function getUnfinishedRowStatus(outcome) {
+  if (outcome === 'resumed') return 'completed';
+  if (outcome === 'failed') return 'failed';
+  return 'skipped';
+}
+
+async function logUnfinishedResumeRow(row, context = {}) {
+  const actionName = getUnfinishedRowActionName(row?.outcome);
+  const level = getUnfinishedRowLogLevel(row?.outcome);
+  const status = getUnfinishedRowStatus(row?.outcome);
+  reportAdminActionEvent(actionName, {
+    level,
+    status,
+    reason: row?.reason || row?.outcome || 'unfinished_resume',
+    origin: context?.origin || 'unfinished-resume',
+    error: typeof row?.error === 'string' ? row.error : '',
+    details: {
+      jobId: context?.jobId || '',
+      runId: row?.runId || '',
+      title: row?.title || '',
+      detectedPromptNumber: Number.isInteger(row?.detectedPromptNumber) ? row.detectedPromptNumber : null,
+      startPromptNumber: Number.isInteger(row?.startPromptNumber) ? row.startPromptNumber : null,
+      detectedMethod: row?.detectedMethod || '',
+      retrySamePrompt: row?.retrySamePrompt === true,
+      retryReason: row?.retryReason || ''
+    }
+  });
+  try {
+    await appendProblemLog({
+      timestamp: Date.now(),
+      level,
+      source: 'unfinished-resume-batch',
+      category: 'recovery',
+      analysisType: 'admin',
+      runId: typeof row?.runId === 'string' ? row.runId : '',
+      title: typeof row?.title === 'string' ? row.title : '',
+      status,
+      reason: typeof row?.reason === 'string' ? row.reason : '',
+      error: typeof row?.error === 'string' ? row.error : '',
+      statusText: `job=${context?.jobId || ''} outcome=${row?.outcome || ''}`,
+      message: actionName,
+      signature: [
+        'unfinished-resume-row',
+        context?.jobId || '',
+        row?.runId || '',
+        row?.outcome || '',
+        row?.reason || '',
+        Number.isInteger(row?.startedAt) ? row.startedAt : Date.now()
+      ].join('|')
+    });
+  } catch (error) {
+    console.warn('[unfinished-resume] row log append failed:', error?.message || String(error));
+  }
+}
+
+async function resumeSingleUnfinishedProcess(candidate, context = {}) {
+  const startedAt = Date.now();
+  const baseRow = {
+    runId: typeof candidate?.runId === 'string' ? candidate.runId : '',
+    title: typeof candidate?.title === 'string' ? candidate.title : '',
+    startedAt,
+    finishedAt: Date.now(),
+    outcome: 'failed',
+    reason: 'unknown',
+    error: '',
+    detectedPromptNumber: null,
+    startPromptNumber: null,
+    detectedMethod: '',
+    retrySamePrompt: false,
+    retryReason: '',
+    chatUrl: typeof candidate?.chatUrl === 'string' ? candidate.chatUrl : ''
+  };
+  if (!baseRow.runId) {
+    const row = {
+      ...baseRow,
+      finishedAt: Date.now(),
+      outcome: 'skipped_not_found',
+      reason: 'missing_run_id'
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  }
+
+  await ensureProcessRegistryReady();
+  const latest = processRegistry.get(baseRow.runId);
+  if (!latest) {
+    const row = {
+      ...baseRow,
+      finishedAt: Date.now(),
+      outcome: 'skipped_not_found',
+      reason: 'process_not_found'
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  }
+
+  const latestStatus = normalizeProcessStatus(latest.status || '');
+  if (latestStatus === 'completed') {
+    const row = {
+      ...baseRow,
+      title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+      finishedAt: Date.now(),
+      outcome: 'skipped_already_completed',
+      reason: 'already_completed'
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  }
+
+  const chatUrl = extractProcessChatUrl(latest);
+  if (!chatUrl) {
+    const row = {
+      ...baseRow,
+      title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+      finishedAt: Date.now(),
+      outcome: 'skipped_missing_chat_url',
+      reason: 'missing_chat_url'
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  }
+
+  try {
+    const resumeResult = await handleProcessResumeNextStageMessage({
+      runId: baseRow.runId,
+      tabId: Number.isInteger(latest?.tabId) ? latest.tabId : null,
+      windowId: Number.isInteger(latest?.windowId) ? latest.windowId : null,
+      title: typeof latest?.title === 'string' ? latest.title : '',
+      chatUrl,
+      origin: context?.origin || 'unfinished-resume-batch'
+    });
+
+    const detectedPromptNumber = Number.isInteger(resumeResult?.detectedPromptNumber)
+      ? resumeResult.detectedPromptNumber
+      : null;
+    const startPromptNumber = Number.isInteger(resumeResult?.startPromptNumber)
+      ? resumeResult.startPromptNumber
+      : null;
+    const detectedMethod = typeof resumeResult?.detectedMethod === 'string'
+      ? resumeResult.detectedMethod
+      : '';
+    const retrySamePrompt = resumeResult?.retrySamePrompt === true;
+    const retryReason = typeof resumeResult?.retryReason === 'string' ? resumeResult.retryReason : '';
+
+    if (resumeResult?.success === true) {
+      const row = {
+        ...baseRow,
+        title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+        finishedAt: Date.now(),
+        outcome: 'resumed',
+        reason: 'resume_dispatched',
+        detectedPromptNumber,
+        startPromptNumber,
+        detectedMethod,
+        retrySamePrompt,
+        retryReason,
+        chatUrl
+      };
+      await logUnfinishedResumeRow(row, context);
+      return row;
+    }
+
+    const normalizedError = typeof resumeResult?.error === 'string'
+      ? resumeResult.error.trim()
+      : 'resume_failed';
+    if (normalizedError === 'already_at_last_prompt') {
+      const row = {
+        ...baseRow,
+        title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+        finishedAt: Date.now(),
+        outcome: 'skipped_already_completed',
+        reason: 'already_at_last_prompt',
+        detectedPromptNumber,
+        startPromptNumber,
+        detectedMethod,
+        retrySamePrompt,
+        retryReason,
+        chatUrl
+      };
+      await logUnfinishedResumeRow(row, context);
+      return row;
+    }
+
+    const row = {
+      ...baseRow,
+      title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+      finishedAt: Date.now(),
+      outcome: 'failed',
+      reason: normalizedError || 'resume_failed',
+      error: normalizedError || 'resume_failed',
+      detectedPromptNumber,
+      startPromptNumber,
+      detectedMethod,
+      retrySamePrompt,
+      retryReason,
+      chatUrl
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  } catch (error) {
+    const errorText = error?.message || String(error);
+    const row = {
+      ...baseRow,
+      title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+      finishedAt: Date.now(),
+      outcome: 'failed',
+      reason: 'resume_exception',
+      error: errorText,
+      chatUrl
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  }
+}
+
+function applyUnfinishedResumeOutcomeToTotals(totals, row) {
+  const nextTotals = normalizeUnfinishedResumeBatchTotals(totals);
+  nextTotals.processed += 1;
+  const outcome = typeof row?.outcome === 'string' ? row.outcome : '';
+  if (outcome === 'resumed') nextTotals.resumed += 1;
+  if (outcome === 'skipped_missing_chat_url') nextTotals.skipped_missing_chat_url += 1;
+  if (outcome === 'skipped_not_found') nextTotals.skipped_not_found += 1;
+  if (outcome === 'skipped_already_completed') nextTotals.skipped_already_completed += 1;
+  if (outcome === 'failed') nextTotals.failed += 1;
+  return nextTotals;
+}
+
+async function runResumeUnfinishedProcessesBatch(jobId, options = {}) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return null;
+  const context = {
+    jobId: safeJobId,
+    origin: typeof options?.origin === 'string' && options.origin.trim()
+      ? options.origin.trim()
+      : 'unfinished-resume'
+  };
+
+  try {
+    const providedCandidates = Array.isArray(options?.candidates) ? options.candidates : null;
+    const listing = providedCandidates
+      ? null
+      : await listUnfinishedProcessesForResume({ includeNonCompleted: true });
+    const candidates = providedCandidates || (Array.isArray(listing?.items) ? listing.items : []);
+    let state = await getUnfinishedResumeBatchState(safeJobId);
+    if (!state || state.status !== 'running') {
+      return state;
+    }
+
+    for (const candidate of candidates) {
+      state = await getUnfinishedResumeBatchState(safeJobId);
+      if (!state || state.status !== 'running') {
+        break;
+      }
+      state.activeRunId = typeof candidate?.runId === 'string' ? candidate.runId : '';
+      await setUnfinishedResumeBatchState(state);
+
+      const row = await resumeSingleUnfinishedProcess(candidate, context);
+      const nextRows = (Array.isArray(state.rows) ? state.rows : []).concat([row]).slice(-UNFINISHED_RESUME_BATCH_MAX_ROWS);
+      const nextTotals = applyUnfinishedResumeOutcomeToTotals(state.totals, row);
+
+      state = {
+        ...state,
+        rows: nextRows,
+        totals: nextTotals,
+        activeRunId: ''
+      };
+      await setUnfinishedResumeBatchState(state);
+    }
+
+    state = await getUnfinishedResumeBatchState(safeJobId);
+    if (!state) return null;
+    if (state.status !== 'running') {
+      return state;
+    }
+
+    const totalIssues = (state?.totals?.failed || 0)
+      + (state?.totals?.skipped_missing_chat_url || 0)
+      + (state?.totals?.skipped_not_found || 0);
+    const completedStatus = totalIssues > 0 ? 'completed_with_errors' : 'completed';
+    const finishedState = {
+      ...state,
+      status: completedStatus,
+      activeRunId: '',
+      finishedAt: Date.now()
+    };
+    const saved = await setUnfinishedResumeBatchState(finishedState);
+    reportAdminActionEvent(
+      completedStatus === 'completed'
+        ? 'resume_unfinished_batch_completed'
+        : 'resume_unfinished_batch_completed_with_errors',
+      {
+        level: completedStatus === 'completed' ? 'info' : 'warn',
+        status: completedStatus,
+        reason: completedStatus === 'completed' ? 'batch_completed' : 'batch_completed_with_errors',
+        origin: context.origin,
+        details: {
+          jobId: safeJobId,
+          totals: saved?.totals || {}
+        },
+        error: completedStatus === 'completed' ? '' : (saved?.error || '')
+      }
+    );
+    return saved;
+  } catch (error) {
+    const current = await getUnfinishedResumeBatchState(safeJobId);
+    if (!current) {
+      unfinishedResumeBatchInProgress = false;
+      unfinishedResumeBatchActiveJobId = '';
+      throw error;
+    }
+    const failedState = await setUnfinishedResumeBatchState({
+      ...current,
+      status: 'completed_with_errors',
+      activeRunId: '',
+      finishedAt: Date.now(),
+      error: error?.message || String(error)
+    });
+    reportAdminActionEvent('resume_unfinished_batch_completed_with_errors', {
+      level: 'error',
+      status: 'failed',
+      reason: 'batch_exception',
+      origin: context.origin,
+      error: error?.message || String(error),
+      details: {
+        jobId: safeJobId,
+        totals: failedState?.totals || {}
+      }
+    });
+    return failedState;
+  } finally {
+    if (unfinishedResumeBatchActiveJobId === safeJobId) {
+      unfinishedResumeBatchInProgress = false;
+      unfinishedResumeBatchActiveJobId = '';
+    }
+  }
+}
+
+async function startResumeUnfinishedProcessesBatch(options = {}) {
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'runtime-message';
+  const forceRestartIfRunning = options?.forceRestartIfRunning === true;
+  const current = await getUnfinishedResumeBatchState();
+  if (current?.status === 'running') {
+    if (!forceRestartIfRunning) {
+      return {
+        success: true,
+        started: false,
+        jobId: current.jobId || '',
+        alreadyRunning: true,
+        state: current
+      };
+    }
+    await setUnfinishedResumeBatchState({
+      ...current,
+      status: 'interrupted',
+      finishedAt: Date.now(),
+      activeRunId: '',
+      error: current.error || 'force_restarted'
+    });
+  }
+
+  const listing = await listUnfinishedProcessesForResume({ includeNonCompleted: true });
+  const jobId = createUnfinishedResumeBatchJobId('unfinished-resume');
+  const initialState = {
+    jobId,
+    status: 'running',
+    startedAt: Date.now(),
+    finishedAt: null,
+    origin,
+    totals: normalizeUnfinishedResumeBatchTotals({
+      total: listing.total,
+      runnable: listing.runnable,
+      skippedMissingUrl: listing.skippedMissingUrl,
+      processed: 0,
+      resumed: 0,
+      skipped_missing_chat_url: 0,
+      skipped_not_found: 0,
+      skipped_already_completed: 0,
+      failed: 0
+    }),
+    rows: [],
+    activeRunId: '',
+    error: ''
+  };
+  await setUnfinishedResumeBatchState(initialState);
+  reportAdminActionEvent('resume_unfinished_batch_started', {
+    level: 'info',
+    status: 'started',
+    reason: 'batch_started',
+    origin,
+    details: {
+      jobId,
+      total: listing.total,
+      runnable: listing.runnable,
+      skippedMissingUrl: listing.skippedMissingUrl
+    }
+  });
+  void runResumeUnfinishedProcessesBatch(jobId, {
+    origin,
+    candidates: Array.isArray(listing?.items) ? listing.items : []
+  });
+  return {
+    success: true,
+    started: true,
+    jobId,
+    alreadyRunning: false,
+    state: await getUnfinishedResumeBatchState(jobId)
+  };
+}
+
 function trimProblemLogText(value, maxLength = PROBLEM_LOG_MAX_TEXT_LENGTH) {
   const safeValue = typeof value === 'string' ? value.trim() : '';
   if (!safeValue) return '';
@@ -1179,6 +2099,11 @@ function buildProblemLogMessage(entry) {
   const error = typeof entry.error === 'string' ? entry.error.trim() : '';
   const statusText = typeof entry.statusText === 'string' ? entry.statusText.trim() : '';
   const stageName = typeof entry.stageName === 'string' ? entry.stageName.trim() : '';
+  const chatUrl = normalizeChatConversationUrl(
+    typeof entry.chatUrl === 'string'
+      ? entry.chatUrl
+      : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
+  );
 
   if (status) parts.push(`status=${status}`);
   if (reason) parts.push(`reason=${reason}`);
@@ -1192,6 +2117,9 @@ function buildProblemLogMessage(entry) {
   }
   if (stageName) {
     parts.push(`stage=${stageName}`);
+  }
+  if (chatUrl) {
+    parts.push(`chatUrl=${chatUrl}`);
   }
 
   const content = parts.join(' | ');
@@ -1232,6 +2160,11 @@ function sanitizeProblemLogEntry(rawEntry) {
     }),
     80
   );
+  const chatUrl = normalizeChatConversationUrl(
+    typeof rawEntry.chatUrl === 'string'
+      ? rawEntry.chatUrl
+      : (typeof rawEntry.conversationUrl === 'string' ? rawEntry.conversationUrl : '')
+  );
   const message = trimProblemLogText(rawEntry.message || buildProblemLogMessage(rawEntry));
   const signature = trimProblemLogText(rawEntry.signature || '', 380);
   const entryId = typeof rawEntry.id === 'string' && rawEntry.id.trim()
@@ -1259,7 +2192,9 @@ function sanitizeProblemLogEntry(rawEntry) {
     stageIndex: Number.isInteger(rawEntry.stageIndex) ? rawEntry.stageIndex : null,
     stageName,
     tabId: Number.isInteger(rawEntry.tabId) ? rawEntry.tabId : null,
-    windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null
+    windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null,
+    chatUrl: chatUrl || '',
+    conversationUrl: chatUrl || ''
   };
 }
 
@@ -1315,6 +2250,8 @@ async function clearProblemLogs() {
   await ensureProblemLogReady();
   problemLogEntries = [];
   problemLogLastSignatureByRunId.clear();
+  processLogLastEmitTsByRunId.clear();
+  processStaleWarnLastEmitTsByRunId.clear();
   await persistProblemLogEntries();
   try {
     await chrome.runtime.sendMessage({
@@ -1359,20 +2296,87 @@ async function appendProblemLog(rawEntry) {
     // Ignore when no listeners are attached.
   }
 
-  void enqueueProblemLogDispatch(normalized)
-    .then((dispatchResult) => {
-      if (dispatchResult?.queued) {
-        flushWatchlistDispatchOutbox('problem_log_append').catch(() => {});
-      }
-    })
-    .catch((error) => {
-      console.warn('[problem-log] remote dispatch queue failed:', error?.message || String(error));
-    });
+  if (shouldDispatchProblemLogRemotely(normalized)) {
+    void enqueueProblemLogDispatch(normalized)
+      .then((dispatchResult) => {
+        if (dispatchResult?.queued) {
+          flushWatchlistDispatchOutbox('problem_log_append').catch(() => {});
+        }
+      })
+      .catch((error) => {
+        console.warn('[problem-log] remote dispatch queue failed:', error?.message || String(error));
+      });
+  }
 
   return normalized;
 }
 
-function shouldRecordProblemForProcess(process) {
+function problemLogSourceMatches(sourceText, token) {
+  const source = typeof sourceText === 'string' ? sourceText.trim().toLowerCase() : '';
+  const normalizedToken = typeof token === 'string' ? token.trim().toLowerCase() : '';
+  if (!source || !normalizedToken) return false;
+  if (source === normalizedToken) return true;
+  if (source.includes(`origin:${normalizedToken}`)) return true;
+  return false;
+}
+
+function isLowSignalProblemLogEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const level = normalizeProblemLogLevel(entry.level);
+  const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
+  const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
+  const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  const error = typeof entry.error === 'string' ? entry.error.trim().toLowerCase() : '';
+  const message = typeof entry.message === 'string' ? entry.message.trim().toLowerCase() : '';
+  const noiseBlob = `${reason} ${error} ${message}`;
+
+  if (reason === 'remote_connection_configured') return true;
+  if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
+  if (problemLogSourceMatches(source, 'process-monitor-heartbeat')) return true;
+  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') return true;
+  if (
+    problemLogSourceMatches(source, 'youtube-content-window')
+    && noiseBlob.includes('resizeobserver loop completed with undelivered notifications')
+  ) {
+    return true;
+  }
+  if (level === 'info' && problemLogSourceMatches(source, 'youtube-content-window')) return true;
+  return false;
+}
+
+function isLowSignalProblemLogPayload(payload) {
+  if (!payload || typeof payload !== 'object') return false;
+  const schema = typeof payload.schema === 'string' ? payload.schema.trim().toLowerCase() : '';
+  const analysisType = typeof payload.analysisType === 'string' ? payload.analysisType.trim().toLowerCase() : '';
+  if (schema !== PROBLEM_LOG_REMOTE_SCHEMA && !analysisType.startsWith('problem_log:')) return false;
+  const stage = payload.stage && typeof payload.stage === 'object' ? payload.stage : {};
+  const levelFromAnalysisType = analysisType.startsWith('problem_log:')
+    ? analysisType.slice('problem_log:'.length)
+    : '';
+  return isLowSignalProblemLogEntry({
+    level: stage.level || levelFromAnalysisType || 'info',
+    source: stage.source || payload.source || '',
+    reason: stage.reason || '',
+    category: stage.category || '',
+    error: stage.error || '',
+    message: payload.text || ''
+  });
+}
+
+function shouldDispatchProblemLogRemotely(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  if (entry.forceRemoteDispatch === true) return true;
+  if (isLowSignalProblemLogEntry(entry)) return false;
+
+  const level = normalizeProblemLogLevel(entry.level);
+  if (level === 'error' || level === 'warn') return true;
+
+  const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  if (category === 'process_state' || category === 'data_gap' || category === 'recovery') return true;
+  return false;
+}
+
+function shouldRecordIssueForProcess(process) {
   if (!process || typeof process !== 'object') return false;
   const status = normalizeProcessStatus(process.status);
   if (isFailedProcessStatus(status)) return true;
@@ -1382,6 +2386,56 @@ function shouldRecordProblemForProcess(process) {
   const statusText = typeof process.statusText === 'string' ? process.statusText.toLowerCase() : '';
   const markers = ['error', 'fail', 'timeout', 'invalid', 'not_ready', 'needs_action', 'critical'];
   return markers.some((marker) => reason.includes(marker) || error.includes(marker) || statusText.includes(marker));
+}
+
+function shouldRecordSuccessForProcess(process, status, stage) {
+  if (!process || typeof process !== 'object') return false;
+  if (shouldRecordIssueForProcess(process)) return false;
+  if (isClosedProcessStatus(status) && status !== 'completed') return false;
+
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
+  const hasPromptProgress = currentPrompt !== null && currentPrompt > 0;
+  if (status === 'completed') return true;
+  if (status === 'starting' || status === 'started' || status === 'queued') return true;
+  return hasPromptProgress;
+}
+
+function buildProcessSuccessReason(status, stage) {
+  if (status === 'completed') return 'ok_completed';
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
+  if (currentPrompt !== null && currentPrompt > 0) return 'ok_progress';
+  return 'ok_started';
+}
+
+function buildProcessSuccessStatusText(reason, stage) {
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
+  const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : null;
+  const promptText = (currentPrompt !== null || totalPrompts !== null)
+    ? `${currentPrompt !== null ? currentPrompt : '?'}/${totalPrompts !== null ? totalPrompts : '?'}`
+    : '';
+  if (reason === 'ok_completed') return promptText ? `completed ${promptText}` : 'completed';
+  if (reason === 'ok_progress') return promptText ? `progress ${promptText}` : 'progress';
+  return 'started';
+}
+
+function buildProcessStateReason(status, stage) {
+  const normalizedStatus = normalizeProcessStatus(status);
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
+  if (normalizedStatus === 'running' && currentPrompt !== null && currentPrompt > 0) {
+    return 'state_progress';
+  }
+  if (normalizedStatus === 'running') return 'state_running';
+  return `state_${normalizedStatus || 'running'}`;
+}
+
+function buildProcessStateStatusText(status, stage) {
+  const normalizedStatus = normalizeProcessStatus(status);
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
+  const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : null;
+  if (currentPrompt !== null || totalPrompts !== null) {
+    return `${normalizedStatus} ${currentPrompt !== null ? currentPrompt : '?'}/${totalPrompts !== null ? totalPrompts : '?'}`;
+  }
+  return normalizedStatus || 'running';
 }
 
 function resolveProcessStageSnapshot(process) {
@@ -1422,33 +2476,59 @@ function resolveProcessStageSnapshot(process) {
 
 function buildProcessProblemLogEntry(runId, process) {
   if (!runId || !process || typeof process !== 'object') return null;
-  if (!shouldRecordProblemForProcess(process)) return null;
 
   const status = normalizeProcessStatus(process.status);
-  const reason = typeof process.reason === 'string' ? process.reason.trim() : '';
-  const error = typeof process.error === 'string' ? process.error.trim() : '';
-  const statusText = typeof process.statusText === 'string' ? process.statusText.trim() : '';
   const stage = resolveProcessStageSnapshot(process);
+  const processChatUrl = extractProcessChatUrl(process);
+  const chatUrlSignature = trimProblemLogText(processChatUrl || '', 180);
+  const issueDetected = shouldRecordIssueForProcess(process);
+  const successDetected = shouldRecordSuccessForProcess(process, status, stage);
+  const stateDetected = !issueDetected && !successDetected;
+
+  const reasonRaw = typeof process.reason === 'string' ? process.reason.trim() : '';
+  const errorRaw = typeof process.error === 'string' ? process.error.trim() : '';
+  const statusTextRaw = typeof process.statusText === 'string' ? process.statusText.trim() : '';
+  const reason = issueDetected
+    ? (reasonRaw || (isFailedProcessStatus(status) ? 'failed_status' : (process.needsAction ? 'needs_action' : 'process_issue')))
+    : successDetected
+      ? buildProcessSuccessReason(status, stage)
+      : (reasonRaw || buildProcessStateReason(status, stage));
+  const error = issueDetected ? errorRaw : '';
+  const statusText = issueDetected
+    ? (statusTextRaw || '')
+    : successDetected
+      ? buildProcessSuccessStatusText(reason, stage)
+      : (statusTextRaw || buildProcessStateStatusText(status, stage));
+  const message = issueDetected
+    ? trimProblemLogText(statusTextRaw || reasonRaw || errorRaw || status || 'process_issue', 260)
+    : successDetected
+      ? trimProblemLogText(statusText || reason, 260)
+      : trimProblemLogText(statusTextRaw || statusText || reason || status || 'process_state', 260);
+  const signatureStatusText = trimProblemLogText(statusText || '', 120);
+
   const signature = [
     runId,
-    status,
-    process.needsAction ? 'needs_action' : 'no_action',
+    issueDetected ? 'issue' : (successDetected ? 'ok' : 'state'),
     reason,
+    status,
     error,
     Number.isInteger(stage.currentPrompt) ? stage.currentPrompt : '',
     Number.isInteger(stage.totalPrompts) ? stage.totalPrompts : '',
     Number.isInteger(stage.stageIndex) ? stage.stageIndex : '',
-    stage.stageName || ''
+    stage.stageName || '',
+    signatureStatusText,
+    chatUrlSignature
   ].join('|');
 
-  const level = isFailedProcessStatus(status)
-    ? 'error'
-    : (process.needsAction ? 'warn' : 'warn');
+  const level = issueDetected
+    ? (isFailedProcessStatus(status) ? 'error' : 'warn')
+    : (stateDetected && process.needsAction ? 'warn' : 'info');
 
   return {
     timestamp: Number.isInteger(process.timestamp) ? process.timestamp : Date.now(),
     level,
     source: 'process-monitor',
+    category: isClosedProcessStatus(status) ? 'process_state' : 'process_stream',
     runId,
     title: process.title || '',
     analysisType: process.analysisType || '',
@@ -1456,14 +2536,27 @@ function buildProcessProblemLogEntry(runId, process) {
     reason,
     error,
     statusText,
+    message,
     currentPrompt: Number.isInteger(stage.currentPrompt) ? stage.currentPrompt : null,
     totalPrompts: Number.isInteger(stage.totalPrompts) ? stage.totalPrompts : null,
     stageIndex: Number.isInteger(stage.stageIndex) ? stage.stageIndex : null,
     stageName: stage.stageName || '',
     tabId: Number.isInteger(process.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+    chatUrl: processChatUrl || '',
+    conversationUrl: processChatUrl || '',
     signature
   };
+}
+
+function shouldEmitProcessProblemHeartbeat(runId, process) {
+  if (!runId || !process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process.status);
+  if (isClosedProcessStatus(status)) return false;
+  const now = Date.now();
+  const previous = processLogLastEmitTsByRunId.get(runId);
+  const lastEmitTs = Number.isInteger(previous) ? previous : 0;
+  return (now - lastEmitTs) >= PROCESS_STREAM_HEARTBEAT_MS;
 }
 
 function summarizeProblemErrorValue(rawValue) {
@@ -1629,6 +2722,65 @@ function reportRuntimeProblemEvent(rawEntry = {}) {
   });
 }
 
+function summarizeAdminActionDetails(rawDetails) {
+  if (rawDetails == null) return '';
+  if (typeof rawDetails === 'string') return trimProblemLogText(rawDetails, 240);
+  try {
+    return trimProblemLogText(JSON.stringify(rawDetails), 240);
+  } catch {
+    return '';
+  }
+}
+
+function reportAdminActionEvent(actionName, options = {}) {
+  const action = trimProblemLogText(actionName || '', 80) || 'admin_action';
+  const level = normalizeProblemLogLevel(options?.level || 'info');
+  const status = trimProblemLogText(options?.status || '', 40)
+    || (level === 'error' ? 'failed' : 'ok');
+  const reason = trimProblemLogText(options?.reason || '', 140)
+    || (level === 'error' ? `${action}_failed` : action);
+  const origin = trimProblemLogText(options?.origin || '', 80);
+  const details = summarizeAdminActionDetails(options?.details);
+  const errorText = trimProblemLogText(options?.error || '', 200);
+  const statusText = [origin ? `origin=${origin}` : '', details]
+    .filter(Boolean)
+    .join(' | ');
+  const message = trimProblemLogText(
+    options?.message
+      || [action, status, statusText].filter(Boolean).join(' | '),
+    260
+  ) || 'admin_action';
+  const signature = trimProblemLogText(
+    [
+      'admin-action',
+      action,
+      status,
+      reason,
+      origin,
+      Date.now(),
+      Math.random().toString(36).slice(2, 8)
+    ].join('|'),
+    380
+  );
+
+  void appendProblemLog({
+    timestamp: Date.now(),
+    level,
+    source: 'admin-action',
+    title: trimProblemLogText(options?.title || `Admin action: ${action}`, 160),
+    category: 'admin',
+    analysisType: 'admin',
+    status,
+    reason,
+    error: errorText,
+    statusText,
+    message,
+    signature
+  }).catch((error) => {
+    console.warn('[problem-log] admin action append failed:', error?.message || String(error));
+  });
+}
+
 installBackgroundConsoleProblemCapture();
 
 async function upsertProcess(runId, patch = {}) {
@@ -1678,19 +2830,43 @@ async function upsertProcess(runId, patch = {}) {
   });
 
   if (!next) return null;
+  mergeProcessConversationUrls(existing, next);
   const problemEntry = buildProcessProblemLogEntry(runId, next);
   const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
-  if (problemEntry?.signature && problemEntry.signature !== knownSignature) {
-    await appendProblemLog(problemEntry);
+  const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
+  const heartbeatDue = !!(problemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
+  if (problemEntry?.signature && (signatureChanged || heartbeatDue)) {
+    const emittedEntry = await appendProblemLog(problemEntry);
+    if (emittedEntry) {
+      processLogLastEmitTsByRunId.set(runId, Date.now());
+    }
     problemLogLastSignatureByRunId.set(runId, problemEntry.signature);
   } else if (!problemEntry) {
     problemLogLastSignatureByRunId.delete(runId);
+    processLogLastEmitTsByRunId.delete(runId);
+    processStaleWarnLastEmitTsByRunId.delete(runId);
+  } else if (isClosedProcessStatus(next.status)) {
+    processLogLastEmitTsByRunId.delete(runId);
+    processStaleWarnLastEmitTsByRunId.delete(runId);
   }
   processRegistry.set(runId, next);
   logProcessTransition(runId, next, patchData);
   await persistProcessRegistry();
   await broadcastProcessUpdate();
   return next;
+}
+
+function resolveProcessConversationUrlFromMessage(message, sender) {
+  const candidates = [
+    typeof message?.chatUrl === 'string' ? message.chatUrl : '',
+    typeof message?.conversationUrl === 'string' ? message.conversationUrl : '',
+    getTabEffectiveUrl(sender?.tab)
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeChatConversationUrl(candidate);
+    if (normalized) return normalized;
+  }
+  return '';
 }
 
 async function findProcessIdByTabId(tabId) {
@@ -3010,7 +4186,8 @@ async function handleProcessProgressMessage(message, sender) {
   if (typeof message?.reason === 'string') patch.reason = message.reason;
   if (Number.isInteger(message?.stageIndex)) patch.stageIndex = message.stageIndex;
   if (typeof message?.stageName === 'string') patch.stageName = message.stageName;
-  if (typeof message?.chatUrl === 'string') patch.chatUrl = message.chatUrl;
+  const conversationUrl = resolveProcessConversationUrlFromMessage(message, sender);
+  if (conversationUrl) patch.chatUrl = conversationUrl;
   if (typeof message?.sourceUrl === 'string') patch.sourceUrl = message.sourceUrl;
   if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
   if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
@@ -3038,6 +4215,8 @@ async function handleProcessNeedsActionMessage(message, sender) {
   if (typeof message?.stageName === 'string') patch.stageName = message.stageName;
   if (typeof message?.statusText === 'string') patch.statusText = message.statusText;
   if (typeof message?.reason === 'string') patch.reason = message.reason;
+  const conversationUrl = resolveProcessConversationUrlFromMessage(message, sender);
+  if (conversationUrl) patch.chatUrl = conversationUrl;
   if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
   if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
   if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
@@ -3064,6 +4243,8 @@ async function handleProcessActionResolvedMessage(message, sender) {
     statusText: getDecisionResolvedStatusText(decision),
     timestamp: Date.now()
   };
+  const conversationUrl = resolveProcessConversationUrlFromMessage(message, sender);
+  if (conversationUrl) patch.chatUrl = conversationUrl;
   if (typeof message?.analysisType === 'string' && message.analysisType.trim()) patch.analysisType = message.analysisType.trim();
   if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
   if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
@@ -9416,6 +10597,12 @@ function buildProblemLogDispatchText(entry, installationId = '') {
     const totalPrompts = Number.isInteger(entry?.totalPrompts) ? entry.totalPrompts : '?';
     parts.push(`prompt=${currentPrompt}/${totalPrompts}`);
   }
+  const chatUrl = normalizeChatConversationUrl(
+    typeof entry?.chatUrl === 'string'
+      ? entry.chatUrl
+      : (typeof entry?.conversationUrl === 'string' ? entry.conversationUrl : '')
+  );
+  if (chatUrl) parts.push(`chat_url=${chatUrl}`);
   if (Number.isInteger(entry?.tabId)) parts.push(`tab=${entry.tabId}`);
   if (Number.isInteger(entry?.windowId)) parts.push(`window=${entry.windowId}`);
   const core = parts.join(' | ');
@@ -9449,6 +10636,11 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
     currentPrompt: Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : null,
     totalPrompts: Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : null,
     stageIndex: Number.isInteger(normalizedEntry.stageIndex) ? normalizedEntry.stageIndex : null,
+    chatUrl: normalizeChatConversationUrl(
+      typeof normalizedEntry.chatUrl === 'string'
+        ? normalizedEntry.chatUrl
+        : (typeof normalizedEntry.conversationUrl === 'string' ? normalizedEntry.conversationUrl : '')
+    ),
     tabId: Number.isInteger(normalizedEntry.tabId) ? normalizedEntry.tabId : null,
     windowId: Number.isInteger(normalizedEntry.windowId) ? normalizedEntry.windowId : null
   };
@@ -9493,6 +10685,7 @@ function sanitizeWatchlistOutbox(rawItems) {
     if (!item || typeof item !== 'object') continue;
     const payload = item.payload && typeof item.payload === 'object' ? item.payload : null;
     if (!payload) continue;
+    if (isLowSignalProblemLogPayload(payload)) continue;
     const key = getWatchlistOutboxDedupKey(item);
     if (!key) continue;
     deduped.set(key, {
@@ -10003,6 +11196,23 @@ function normalizeRemoteProblemLogEntries(rawItems) {
     const title = inferProblemLogTitle(stage.title || item.title || '', reason, message);
     const stageName = inferProblemLogStageName(stage.stageName || '', reason, title);
     const stageSource = trimProblemLogText(stage.source || rawSource || '', 140);
+    const chatUrl = normalizeChatConversationUrl(
+      typeof stage.chatUrl === 'string'
+        ? stage.chatUrl
+        : (
+          typeof stage.conversationUrl === 'string'
+            ? stage.conversationUrl
+            : (
+              typeof stage.chat_url === 'string'
+                ? stage.chat_url
+                : (
+                  typeof item.chat_url === 'string'
+                    ? item.chat_url
+                    : (typeof item.conversation_url === 'string' ? item.conversation_url : '')
+                )
+            )
+        )
+    );
     const category = classifyProblemLogCategory({
       analysisType,
       level,
@@ -10032,6 +11242,7 @@ function normalizeRemoteProblemLogEntries(rawItems) {
       stageName,
       tabId: Number.isInteger(stage.tabId) ? stage.tabId : null,
       windowId: Number.isInteger(stage.windowId) ? stage.windowId : null,
+      chatUrl: chatUrl || '',
       signature: [
         'remote-problem-log',
         String(item.event_id || ''),
@@ -10491,6 +11702,109 @@ async function logWatchlistDispatchStatusSnapshot(context, forceReload = false, 
       error: error?.message || String(error),
       ...extra
     });
+  }
+}
+
+function buildWatchlistConnectionLogSignature(context, status, phase = 'status') {
+  const safeStatus = status && typeof status === 'object' ? status : {};
+  return trimProblemLogText([
+    'remote-connection',
+    trimProblemLogText(context || '', 80),
+    trimProblemLogText(phase || '', 30),
+    safeStatus.configured === true ? 'configured' : 'missing',
+    trimProblemLogText(safeStatus.reason || '', 80),
+    trimProblemLogText(safeStatus.intakeUrlSource || '', 40),
+    trimProblemLogText(safeStatus.keyIdSource || '', 40),
+    trimProblemLogText(safeStatus.tokenSource || '', 40)
+  ].join('|'), 360);
+}
+
+async function logWatchlistRemoteConnectionState(context, forceReload = false, extra = {}) {
+  const contextText = trimProblemLogText(context || 'remote_connection_check', 80) || 'remote_connection_check';
+  try {
+    const status = await getWatchlistDispatchStatus(forceReload);
+    const signature = buildWatchlistConnectionLogSignature(contextText, status, 'status');
+    const nowTs = Date.now();
+    if (
+      signature
+      && signature === watchlistConnectionLogLastSignature
+      && (nowTs - watchlistConnectionLogLastTs) < WATCHLIST_CONNECTION_LOG_DEDUPE_MS
+    ) {
+      return null;
+    }
+
+    const configured = status?.configured === true;
+    const level = configured ? 'info' : 'warn';
+    const reason = configured
+      ? 'remote_connection_configured'
+      : `remote_connection_${trimProblemLogText(status?.reason || 'missing_configuration', 80)}`;
+    const statusText = [
+      `context=${contextText}`,
+      `configured=${configured ? 'yes' : 'no'}`,
+      `intakeUrlSource=${status?.intakeUrlSource || 'missing'}`,
+      `keyIdSource=${status?.keyIdSource || 'missing'}`,
+      `tokenSource=${status?.tokenSource || 'missing'}`,
+      `queueSize=${Number.isInteger(status?.queueSize) ? status.queueSize : 0}`,
+      typeof extra?.statusText === 'string' && extra.statusText.trim()
+        ? trimProblemLogText(extra.statusText, 120)
+        : ''
+    ].filter(Boolean).join(' | ');
+
+    const entry = await appendProblemLog({
+      timestamp: nowTs,
+      level,
+      source: 'dispatch-connection',
+      category: 'dispatch',
+      analysisType: 'admin',
+      status: configured ? 'configured' : 'missing_config',
+      reason,
+      title: 'Remote dispatch connection status',
+      statusText,
+      message: configured
+        ? 'Remote dispatch connection is configured'
+        : `Remote dispatch connection missing (${status?.reason || 'missing_configuration'})`,
+      signature
+    });
+    if (entry) {
+      watchlistConnectionLogLastSignature = signature;
+      watchlistConnectionLogLastTs = nowTs;
+    }
+    return entry;
+  } catch (error) {
+    const nowTs = Date.now();
+    const errorText = trimProblemLogText(error?.message || String(error), 220) || 'remote_connection_status_failed';
+    const signature = trimProblemLogText([
+      'remote-connection',
+      contextText,
+      'error',
+      errorText
+    ].join('|'), 360);
+    if (
+      signature
+      && signature === watchlistConnectionLogLastSignature
+      && (nowTs - watchlistConnectionLogLastTs) < WATCHLIST_CONNECTION_LOG_DEDUPE_MS
+    ) {
+      return null;
+    }
+    const entry = await appendProblemLog({
+      timestamp: nowTs,
+      level: 'error',
+      source: 'dispatch-connection',
+      category: 'dispatch',
+      analysisType: 'admin',
+      status: 'error',
+      reason: 'remote_connection_status_failed',
+      error: errorText,
+      title: 'Remote dispatch connection status',
+      statusText: `context=${contextText}`,
+      message: 'Remote dispatch connection check failed',
+      signature
+    }).catch(() => null);
+    if (entry) {
+      watchlistConnectionLogLastSignature = signature;
+      watchlistConnectionLogLastTs = nowTs;
+    }
+    return entry;
   }
 }
 
@@ -11949,11 +13263,17 @@ loadPrompts();
 ensureProcessRegistryReady().catch((error) => {
   console.warn('[monitor] Initial process registry load failed:', error);
 });
+markRunningUnfinishedResumeBatchInterruptedOnBoot().catch((error) => {
+  console.warn('[unfinished-resume] initial state recovery failed:', error?.message || String(error));
+});
 ensureWatchlistDispatchAlarm();
+ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
 });
 logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
+logWatchlistRemoteConnectionState('service_worker_boot', false).catch(() => {});
+runProcessMonitorHeartbeatSweep('service_worker_boot').catch(() => {});
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
 });
@@ -11993,10 +13313,12 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
+  ensureProcessMonitorHeartbeatAlarm();
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onInstalled failed:', error);
   });
   logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
+  logWatchlistRemoteConnectionState('on_installed', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
   });
@@ -12004,10 +13326,12 @@ chrome.runtime.onInstalled.addListener(() => {
 
 chrome.runtime.onStartup.addListener(() => {
   ensureWatchlistDispatchAlarm();
+  ensureProcessMonitorHeartbeatAlarm();
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onStartup failed:', error);
   });
   logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
+  logWatchlistRemoteConnectionState('on_startup', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
   });
@@ -12100,6 +13424,13 @@ if (chrome?.alarms?.onAlarm) {
       logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
       flushWatchlistDispatchOutbox('alarm').catch((error) => {
         console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
+      });
+      return;
+    }
+
+    if (alarm.name === PROCESS_MONITOR_HEARTBEAT.alarmName) {
+      runProcessMonitorHeartbeatSweep('alarm').catch((error) => {
+        console.warn('[monitor] process heartbeat alarm failed:', error);
       });
       return;
     }
@@ -12540,11 +13871,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'RUN_ANALYSIS') {
     (async () => {
+      const actionOrigin = typeof message?.origin === 'string' && message.origin.trim()
+        ? message.origin.trim()
+        : 'runtime-message';
       const invocationWindowId = Number.isInteger(message?.windowId)
         ? message.windowId
         : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
       const promptsReady = await ensureCompanyPromptsReady();
       if (!promptsReady) {
+        reportAdminActionEvent('run_analysis', {
+          level: 'warn',
+          status: 'rejected',
+          reason: 'prompts_not_loaded',
+          origin: actionOrigin,
+          details: { windowId: invocationWindowId }
+        });
         sendResponse({ success: false, error: 'prompts_not_loaded' });
         return;
       }
@@ -12554,9 +13895,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         stopExistingInWindow: true
       }).catch((error) => {
         console.error('[run] RUN_ANALYSIS failed:', error);
+        reportAdminActionEvent('run_analysis', {
+          level: 'error',
+          status: 'failed',
+          reason: 'run_analysis_failed',
+          origin: actionOrigin,
+          error: error?.message || String(error),
+          details: { windowId: invocationWindowId }
+        });
+      });
+      reportAdminActionEvent('run_analysis', {
+        level: 'info',
+        status: 'started',
+        reason: 'run_analysis_started',
+        origin: actionOrigin,
+        details: { windowId: invocationWindowId }
       });
       sendResponse({ success: true, started: true });
     })().catch((error) => {
+      reportAdminActionEvent('run_analysis', {
+        level: 'error',
+        status: 'failed',
+        reason: 'run_analysis_start_failed',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        error: error?.message || String(error)
+      });
       sendResponse({ success: false, error: error?.message || 'run_analysis_start_failed' });
     });
     return true;
@@ -12648,10 +14011,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'STOP_PROCESS') {
     (async () => {
+      const actionOrigin = typeof message?.origin === 'string' && message.origin.trim()
+        ? message.origin.trim()
+        : 'runtime-message';
       const targetWindowId = Number.isInteger(message?.windowId)
         ? message.windowId
         : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
       if (!Number.isInteger(targetWindowId)) {
+        reportAdminActionEvent('stop_process', {
+          level: 'warn',
+          status: 'rejected',
+          reason: 'window_id_missing',
+          origin: actionOrigin
+        });
         sendResponse({
           success: false,
           matched: 0,
@@ -12663,7 +14035,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         windowId: targetWindowId,
         reason: 'manual_stop',
         statusText: 'Przerwano z popup',
-        origin: message?.origin || 'popup-stop'
+        origin: actionOrigin
+      });
+      reportAdminActionEvent('stop_process', {
+        level: 'info',
+        status: 'completed',
+        reason: 'stop_process_completed',
+        origin: actionOrigin,
+        details: {
+          matched: result.matched,
+          stopped: result.stopped,
+          windowId: result.windowId
+        }
       });
       sendResponse({
         success: true,
@@ -12673,6 +14056,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     })().catch((error) => {
       console.warn('[monitor] STOP_PROCESS failed:', error);
+      reportAdminActionEvent('stop_process', {
+        level: 'error',
+        status: 'failed',
+        reason: 'stop_process_failed',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        error: error?.message || String(error)
+      });
       sendResponse({
         success: false,
         matched: 0,
@@ -12770,6 +14160,60 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })().catch((error) => {
       console.warn('[monitor] GET_PROCESSES failed:', error);
       sendResponse({ processes: [] });
+    });
+    return true;
+  } else if (message.type === 'GET_UNFINISHED_PROCESSES') {
+    (async () => {
+      const includeNonCompleted = message?.includeNonCompleted !== false;
+      const result = await listUnfinishedProcessesForResume({ includeNonCompleted });
+      sendResponse(result);
+    })().catch((error) => {
+      console.warn('[unfinished-resume] GET_UNFINISHED_PROCESSES failed:', error);
+      sendResponse({
+        success: false,
+        generatedAt: Date.now(),
+        total: 0,
+        runnable: 0,
+        skippedMissingUrl: 0,
+        items: [],
+        error: error?.message || String(error)
+      });
+    });
+    return true;
+  } else if (message.type === 'RESUME_UNFINISHED_PROCESSES') {
+    (async () => {
+      const result = await startResumeUnfinishedProcessesBatch({
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        forceRestartIfRunning: message?.forceRestartIfRunning === true
+      });
+      sendResponse(result);
+    })().catch((error) => {
+      console.warn('[unfinished-resume] RESUME_UNFINISHED_PROCESSES failed:', error);
+      sendResponse({
+        success: false,
+        started: false,
+        alreadyRunning: false,
+        jobId: '',
+        state: null,
+        error: error?.message || String(error)
+      });
+    });
+    return true;
+  } else if (message.type === 'GET_UNFINISHED_RESUME_BATCH_STATE') {
+    (async () => {
+      const jobId = typeof message?.jobId === 'string' ? message.jobId.trim() : '';
+      const state = await getUnfinishedResumeBatchState(jobId);
+      sendResponse({
+        success: true,
+        state: state || null
+      });
+    })().catch((error) => {
+      console.warn('[unfinished-resume] GET_UNFINISHED_RESUME_BATCH_STATE failed:', error);
+      sendResponse({
+        success: false,
+        state: null,
+        error: error?.message || String(error)
+      });
     });
     return true;
   } else if (message.type === 'GET_PROBLEM_LOGS') {
@@ -12987,9 +14431,31 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'SET_AUTO_RESTORE_WINDOWS_ENABLED') {
     setAutoRestoreWindowsEnabled(Boolean(message?.enabled))
-      .then((status) => sendResponse(status))
+      .then((status) => {
+        reportAdminActionEvent('set_auto_restore_windows_enabled', {
+          level: status?.success === true ? 'info' : 'warn',
+          status: status?.success === true ? 'completed' : 'failed',
+          reason: status?.success === true ? 'auto_restore_toggle_completed' : 'auto_restore_toggle_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          details: {
+            enabled: status?.enabled === true
+          },
+          error: status?.success === true ? '' : (status?.error || '')
+        });
+        sendResponse(status);
+      })
       .catch((error) => {
         console.warn('[auto-restore] set enabled failed:', error);
+        reportAdminActionEvent('set_auto_restore_windows_enabled', {
+          level: 'error',
+          status: 'failed',
+          reason: 'auto_restore_toggle_exception',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error),
+          details: {
+            enabled: Boolean(message?.enabled)
+          }
+        });
         sendResponse({ success: false, error: error?.message || 'auto_restore_set_failed' });
       });
     return true;
@@ -13000,9 +14466,36 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const flushResult = await flushWatchlistDispatchOutbox(reason);
       const status = await getWatchlistDispatchStatus(Boolean(message?.forceReload));
       await logWatchlistDispatchStatusSnapshot('manual_flush', false, { reason, flushResult });
+      reportAdminActionEvent('flush_watchlist_dispatch', {
+        level: flushResult?.success === true
+          ? 'info'
+          : (flushResult?.skipped ? 'warn' : 'error'),
+        status: flushResult?.success === true
+          ? 'completed'
+          : (flushResult?.skipped ? 'skipped' : 'failed'),
+        reason: flushResult?.success === true
+          ? 'dispatch_flush_completed'
+          : (flushResult?.reason || 'dispatch_flush_failed'),
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        details: {
+          reason,
+          sent: Number.isInteger(flushResult?.sent) ? flushResult.sent : 0,
+          failed: Number.isInteger(flushResult?.failed) ? flushResult.failed : 0,
+          deferred: Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0,
+          remaining: Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0
+        },
+        error: typeof flushResult?.error === 'string' ? flushResult.error : ''
+      });
       sendResponse({ success: true, flushResult, status });
     })().catch((error) => {
       console.warn('[copy-flow] [dispatch:manual-flush-failed]', error);
+      reportAdminActionEvent('flush_watchlist_dispatch', {
+        level: 'error',
+        status: 'failed',
+        reason: 'manual_flush_failed',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        error: error?.message || String(error)
+      });
       sendResponse({ success: false, error: error?.message || 'manual_flush_failed' });
     });
     return true;
@@ -13017,6 +14510,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     setWatchlistDispatchToken(credentials)
       .then(async (result) => {
         if (!result?.success) {
+          reportAdminActionEvent('set_watchlist_dispatch_token', {
+            level: 'warn',
+            status: 'failed',
+            reason: result?.reason || 'token_update_failed',
+            origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+          });
           sendResponse({ success: false, reason: result?.reason || 'token_update_failed' });
           return;
         }
@@ -13029,10 +14528,34 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           }))
         ]);
         await logWatchlistDispatchStatusSnapshot('credentials_updated', false, { flushResult });
+        await logWatchlistRemoteConnectionState('set_watchlist_dispatch_token', true, {
+          statusText: `flushSuccess=${flushResult?.success === true ? 'yes' : 'no'}`
+        });
+        reportAdminActionEvent('set_watchlist_dispatch_token', {
+          level: 'info',
+          status: 'completed',
+          reason: 'token_update_completed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          details: {
+            flushSuccess: flushResult?.success === true,
+            flushSkipped: flushResult?.skipped === true,
+            queueSize: Number.isInteger(status?.queueSize) ? status.queueSize : null
+          }
+        });
         sendResponse({ success: true, status, flushResult });
       })
       .catch((error) => {
         console.warn('[copy-flow] [dispatch:set-token-failed]', error);
+        void logWatchlistRemoteConnectionState('set_watchlist_dispatch_token_failed', false, {
+          statusText: trimProblemLogText(error?.message || String(error), 120)
+        }).catch(() => {});
+        reportAdminActionEvent('set_watchlist_dispatch_token', {
+          level: 'error',
+          status: 'failed',
+          reason: 'set_token_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error)
+        });
         sendResponse({ success: false, error: error?.message || 'set_token_failed' });
       });
     return true;
@@ -13041,10 +14564,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .then(async () => {
         const status = await getWatchlistDispatchStatus(true);
         await logWatchlistDispatchStatusSnapshot('credentials_cleared', false);
+        await logWatchlistRemoteConnectionState('clear_watchlist_dispatch_token', true);
+        reportAdminActionEvent('clear_watchlist_dispatch_token', {
+          level: 'info',
+          status: 'completed',
+          reason: 'token_cleared',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          details: {
+            queueSize: Number.isInteger(status?.queueSize) ? status.queueSize : null
+          }
+        });
         sendResponse({ success: true, status });
       })
       .catch((error) => {
         console.warn('[copy-flow] [dispatch:clear-token-failed]', error);
+        void logWatchlistRemoteConnectionState('clear_watchlist_dispatch_token_failed', false, {
+          statusText: trimProblemLogText(error?.message || String(error), 120)
+        }).catch(() => {});
+        reportAdminActionEvent('clear_watchlist_dispatch_token', {
+          level: 'error',
+          status: 'failed',
+          reason: 'clear_token_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error)
+        });
         sendResponse({ success: false, error: error?.message || 'clear_token_failed' });
       });
     return true;
@@ -13082,13 +14625,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'PROCESS_DECISION_ALL') {
     handleProcessDecisionAllMessage(message)
-      .then((result) => sendResponse({
-        success: (result?.delivered || 0) > 0,
-        matched: result?.matched || 0,
-        delivered: result?.delivered || 0
-      }))
+      .then((result) => {
+        const matched = result?.matched || 0;
+        const delivered = result?.delivered || 0;
+        const success = delivered > 0;
+        reportAdminActionEvent('process_decision_all', {
+          level: success ? 'info' : 'warn',
+          status: success ? 'completed' : 'no_effect',
+          reason: success ? 'process_decision_all_completed' : 'process_decision_all_no_effect',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          details: {
+            decision: typeof message?.decision === 'string' ? message.decision : '',
+            matched,
+            delivered
+          }
+        });
+        sendResponse({
+          success,
+          matched,
+          delivered
+        });
+      })
       .catch((error) => {
         console.warn('[monitor] PROCESS_DECISION_ALL failed:', error);
+        reportAdminActionEvent('process_decision_all', {
+          level: 'error',
+          status: 'failed',
+          reason: 'process_decision_all_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error),
+          details: {
+            decision: typeof message?.decision === 'string' ? message.decision : ''
+          }
+        });
         sendResponse({ success: false, matched: 0, delivered: 0 });
       });
     return true;
@@ -13118,9 +14687,40 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         monitorSessionId
       });
     })()
-      .then((result) => sendResponse(result))
+      .then((result) => {
+        const success = result?.success === true;
+        reportAdminActionEvent('reload_resume_all', {
+          level: success ? 'info' : 'warn',
+          status: success ? 'completed' : 'failed',
+          reason: success ? 'reload_resume_all_completed' : 'reload_resume_all_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: success ? '' : (result?.error || ''),
+          details: {
+            scope: resumeScope,
+            scannedTabs: Number.isInteger(result?.scannedTabs) ? result.scannedTabs : 0,
+            matchedTabs: Number.isInteger(result?.matchedTabs) ? result.matchedTabs : 0,
+            startedTabs: Number.isInteger(result?.startedTabs) ? result.startedTabs : 0,
+            resumedTabs: Number.isInteger(result?.resumedTabs) ? result.resumedTabs : 0,
+            detectFailed: Number.isInteger(result?.summary?.detect_failed) ? result.summary.detect_failed : 0,
+            reloadFailed: Number.isInteger(result?.summary?.reload_failed) ? result.summary.reload_failed : 0,
+            startFailed: Number.isInteger(result?.summary?.start_failed) ? result.summary.start_failed : 0,
+            dataGapsDetected: Number.isInteger(result?.summary?.data_gaps_detected) ? result.summary.data_gaps_detected : 0
+          }
+        });
+        sendResponse(result);
+      })
       .catch((error) => {
         console.warn('[monitor] DETECT_LAST_COMPANY_PROMPT_AND_RESUME failed:', error);
+        reportAdminActionEvent('reload_resume_all', {
+          level: 'error',
+          status: 'failed',
+          reason: 'reload_resume_all_exception',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error),
+          details: {
+            scope: resumeScope
+          }
+        });
         void updateReloadResumeMonitorSession(monitorSessionId, {
           status: 'failed',
           phase: 'failed',
@@ -13175,9 +14775,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     restoreProcessWindows({
       origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
     })
-      .then((result) => sendResponse(result))
+      .then((result) => {
+        const failed = Number.isInteger(result?.failed) ? result.failed : 0;
+        reportAdminActionEvent('restore_process_windows', {
+          level: result?.success === true
+            ? (failed > 0 ? 'warn' : 'info')
+            : 'warn',
+          status: result?.success === true
+            ? (failed > 0 ? 'completed_with_issues' : 'completed')
+            : 'failed',
+          reason: result?.success === true
+            ? 'restore_process_windows_completed'
+            : 'restore_process_windows_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: result?.success === true ? '' : (result?.error || ''),
+          details: {
+            requested: Number.isInteger(result?.requested) ? result.requested : 0,
+            restored: Number.isInteger(result?.restored) ? result.restored : 0,
+            opened: Number.isInteger(result?.opened) ? result.opened : 0,
+            failed
+          }
+        });
+        sendResponse(result);
+      })
       .catch((error) => {
         console.warn('[monitor] RESTORE_PROCESS_WINDOWS failed:', error);
+        reportAdminActionEvent('restore_process_windows', {
+          level: 'error',
+          status: 'failed',
+          reason: 'restore_process_windows_exception',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error)
+        });
         sendResponse({
           success: false,
           requested: 0,
@@ -13303,9 +14932,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       targetWindowId
     });
     resumeFromStage(message.startIndex, resumeOptions)
-      .then((result) => sendResponse(result || { success: false, error: 'resume_result_missing' }))
+      .then((result) => {
+        const normalizedResult = result || { success: false, error: 'resume_result_missing' };
+        reportAdminActionEvent('resume_stage_start', {
+          level: normalizedResult?.success === true ? 'info' : 'warn',
+          status: normalizedResult?.success === true ? 'completed' : 'failed',
+          reason: normalizedResult?.success === true ? 'resume_stage_completed' : 'resume_stage_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: normalizedResult?.success === true ? '' : (normalizedResult?.error || ''),
+          details: {
+            startIndex: Number.isInteger(message?.startIndex) ? message.startIndex : null,
+            reloadBeforeResume,
+            targetTabId,
+            targetWindowId
+          }
+        });
+        sendResponse(normalizedResult);
+      })
       .catch((error) => {
         console.warn('[resume] RESUME_STAGE_START failed:', error);
+        reportAdminActionEvent('resume_stage_start', {
+          level: 'error',
+          status: 'failed',
+          reason: 'resume_stage_exception',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error),
+          details: {
+            startIndex: Number.isInteger(message?.startIndex) ? message.startIndex : null,
+            reloadBeforeResume,
+            targetTabId,
+            targetWindowId
+          }
+        });
         sendResponse({ success: false, error: error?.message || 'resume_exception' });
       });
     return true;
@@ -14137,6 +15795,18 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
 
       // Czekaj na załadowanie strony
       await waitForTabComplete(chatTabId);
+      try {
+        const loadedChatTab = await chrome.tabs.get(chatTabId);
+        const loadedChatUrl = normalizeChatConversationUrl(getTabEffectiveUrl(loadedChatTab));
+        if (loadedChatUrl) {
+          await upsertProcess(processId, {
+            chatUrl: loadedChatUrl,
+            timestamp: Date.now()
+          });
+        }
+      } catch (error) {
+        // Ignore URL capture errors; process can continue without a conversation link.
+      }
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
       let results;
@@ -14598,6 +16268,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         autoRecovery: null,
         ...(injectMetrics ? { injectMetrics } : {}),
         ...(persistencePatch ? persistencePatch : {}),
+        ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
           : {}),
@@ -17594,13 +19265,23 @@ async function injectToChat(
     function notifyProcess(type, payload = {}) {
       if (!runId || !chrome?.runtime?.sendMessage) return;
       try {
-        chrome.runtime.sendMessage({
+        const outboundPayload = {
           type,
           runId,
           analysisType,
           title: articleTitle || '',
           ...payload
-        }).catch(() => {});
+        };
+        const currentConversationUrl = typeof location?.href === 'string' ? location.href : '';
+        if (currentConversationUrl) {
+          if (!(typeof outboundPayload.chatUrl === 'string' && outboundPayload.chatUrl.trim())) {
+            outboundPayload.chatUrl = currentConversationUrl;
+          }
+          if (!(typeof outboundPayload.conversationUrl === 'string' && outboundPayload.conversationUrl.trim())) {
+            outboundPayload.conversationUrl = currentConversationUrl;
+          }
+        }
+        chrome.runtime.sendMessage(outboundPayload).catch(() => {});
       } catch (error) {
         // Ignore messaging errors in injected context.
       }

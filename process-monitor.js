@@ -6,6 +6,7 @@ const detailsContainer = document.getElementById('process-details');
 const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
 const resumeAllBtn = document.getElementById('resume-all-btn');
+const unfinishedProcessesBtn = document.getElementById('unfinished-processes-btn');
 const processSummary = document.getElementById('process-summary');
 const viewFilterSelect = document.getElementById('view-filter');
 const viewQueryInput = document.getElementById('view-query');
@@ -80,6 +81,12 @@ if (historyToggle && historyList) {
 if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void resumeAllProcesses();
+  });
+}
+
+if (unfinishedProcessesBtn) {
+  unfinishedProcessesBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('unfinished-processes.html') });
   });
 }
 
@@ -1442,6 +1449,11 @@ function isChatUrl(url) {
 function resolveChatUrl(process) {
   const chatUrl = normalizeUrl(process?.chatUrl);
   if (chatUrl) return chatUrl;
+  const links = Array.isArray(process?.conversationUrls) ? process.conversationUrls : [];
+  for (let index = links.length - 1; index >= 0; index -= 1) {
+    const candidate = normalizeUrl(links[index]);
+    if (candidate) return candidate;
+  }
   const sourceUrl = normalizeUrl(process?.sourceUrl);
   if (sourceUrl && isChatUrl(sourceUrl)) return sourceUrl;
   return '';

@@ -178,7 +178,7 @@ function renderMeta(entries, total) {
   meta.textContent = [
     `Support ID: ${currentSupportId || '-'}`,
     `Widok: ${modeLabel}, ${safeEntries.length} wpisow (bufor: ${safeTotal})`,
-    `Level: error=${errorCount}, warn=${warnCount}, info=${infoCount}`,
+    `Licznik: ok(info)=${infoCount}, warn=${warnCount}, error=${errorCount}`,
     `Kategoria: ${categorySummary || '-'}`,
     `Najnowszy: ${newest ? formatDateTime(newest.timestamp) : '-'}`,
     `Najstarszy w widoku: ${oldest ? formatDateTime(oldest.timestamp) : '-'}`

@@ -149,6 +149,7 @@ const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
+const unfinishedProcessesBtn = document.getElementById('unfinishedProcessesBtn');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
 
@@ -1641,6 +1642,13 @@ const decisionPanelBtn = document.getElementById('decisionPanelBtn');
 if (decisionPanelBtn) {
   decisionPanelBtn.addEventListener('click', () => {
     chrome.tabs.create({ url: chrome.runtime.getURL('process-monitor.html') });
+    window.close();
+  });
+}
+
+if (unfinishedProcessesBtn) {
+  unfinishedProcessesBtn.addEventListener('click', () => {
+    chrome.tabs.create({ url: chrome.runtime.getURL('unfinished-processes.html') });
     window.close();
   });
 }

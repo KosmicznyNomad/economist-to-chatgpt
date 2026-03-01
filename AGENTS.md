@@ -38,6 +38,9 @@ Problem diagnostics flow:
 Auto-restore flow:
 `chrome.alarms(auto-restore-process-windows) -> runAutoRestoreWindowsCycle -> restoreProcessWindows -> health check -> optional scan/resume`
 
+Process heartbeat flow (near-live Watchlist state):
+`chrome.alarms(process-monitor-heartbeat) -> runProcessMonitorHeartbeatSweep -> appendProblemLog(process-monitor/process-monitor-heartbeat) -> enqueueProblemLogDispatch -> Watchlist intake`
+
 Detailed analysis steps:
 1. Worker scans supported tabs.
 2. Text is extracted (`extractText` for web, `GET_TRANSCRIPT` for YouTube).
@@ -132,6 +135,27 @@ Response fields in use:
 - There is no separate DB ingest/upload path in extension runtime.
 - External handoff is dispatch-only; downstream processing happens in Watchlist intake + worker.
 
+## Recent update (Watchlist near-live process state)
+- Added process heartbeat alarm in worker:
+  - alarm name: `process-monitor-heartbeat`
+  - period: every 1 minute
+  - setup points: boot/onInstalled/onStartup
+- Added sweep routine `runProcessMonitorHeartbeatSweep(origin)`:
+  - scans active (non-closed) entries from `processRegistry`
+  - touches `timestamp` for active runs when no fresh update arrived in `PROCESS_STREAM_HEARTBEAT_MS` (30s)
+  - emits stale warning when no process update arrives for `staleTtlMs` (90s)
+- Added stale warning event in problem log:
+  - source: `process-monitor-heartbeat`
+  - reason: `heartbeat_stale`
+  - category: `process_state`
+  - cooldown dedupe per run: `staleWarnCooldownMs` (60s)
+- Updated process stream categorization:
+  - non-closed progress remains `process_stream`
+  - closed/final process entries are now emitted as `process_state`
+- Practical effect:
+  - remote Watchlist problem logs can be used as "near-live last known state" of running/stale processes,
+  - without adding any new backend endpoint.
+
 ## Keyboard shortcuts
 
 Popup numeric shortcuts:
@@ -172,6 +196,10 @@ Global commands (`manifest.json`):
 - Problem log behavior:
   - message handlers in `background.js` (`GET_PROBLEM_LOGS`, `CLEAR_PROBLEM_LOGS`)
   - UI render/refresh logic in `problem-log.js`
+- Heartbeat/state monitoring behavior:
+  - `ensureProcessMonitorHeartbeatAlarm()`
+  - `runProcessMonitorHeartbeatSweep()`
+  - `appendProcessHeartbeatStaleWarning()`
 
 ## Manual sanity checklist
 - Run company flow and verify final response in `responses.html`.

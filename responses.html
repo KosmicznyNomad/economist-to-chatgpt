@@ -122,6 +122,25 @@
       color: #333;
       margin-bottom: 4px;
     }
+
+    .response-source-tag {
+      display: inline-block;
+      font-size: 11px;
+      font-weight: 600;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #1f2937;
+      background: #e5e7eb;
+      border-radius: 999px;
+      padding: 2px 8px;
+      margin-bottom: 4px;
+    }
+
+    .response-source-detail {
+      font-size: 12px;
+      color: #4b5563;
+      margin-bottom: 4px;
+    }
     
     .response-time {
       font-size: 13px;
@@ -218,6 +237,169 @@
       color: #666;
     }
 
+    .market-table th.sortable {
+      cursor: pointer;
+      user-select: none;
+      position: relative;
+      padding-right: 22px;
+    }
+
+    .market-table th.sortable::after {
+      content: '↕';
+      position: absolute;
+      right: 8px;
+      color: #9ca3af;
+      font-size: 11px;
+    }
+
+    .market-table th.sortable.sorted-asc::after {
+      content: '↑';
+      color: #1f2937;
+    }
+
+    .market-table th.sortable.sorted-desc::after {
+      content: '↓';
+      color: #1f2937;
+    }
+
+    .market-toolbar {
+      margin-top: 10px;
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+    }
+
+    .market-toolbar[hidden] {
+      display: none;
+    }
+
+    .market-filter-row {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+      align-items: center;
+    }
+
+    .market-filter-row.tight {
+      justify-content: flex-start;
+    }
+
+    .market-filter-btn {
+      border: 1px solid #d1d5db;
+      background: #ffffff;
+      color: #1f2937;
+      border-radius: 999px;
+      padding: 5px 10px;
+      font-size: 12px;
+      cursor: pointer;
+    }
+
+    .market-filter-btn:hover {
+      background: #f9fafb;
+    }
+
+    .market-filter-btn.active {
+      background: #111827;
+      border-color: #111827;
+      color: #ffffff;
+    }
+
+    .market-filter-label {
+      font-size: 12px;
+      color: #4b5563;
+    }
+
+    .market-search-wrap {
+      position: relative;
+      min-width: 280px;
+      max-width: 420px;
+      width: 100%;
+    }
+
+    .market-search-input {
+      width: 100%;
+      padding: 9px 11px;
+      border-radius: 8px;
+      border: 1px solid #d1d5db;
+      font-size: 13px;
+      color: #111827;
+      background: #fff;
+    }
+
+    .market-search-input:focus {
+      border-color: #4f46e5;
+      outline: none;
+      box-shadow: 0 0 0 3px rgba(79, 70, 229, 0.14);
+    }
+
+    .market-search-suggestions {
+      position: absolute;
+      top: calc(100% + 6px);
+      left: 0;
+      right: 0;
+      background: #fff;
+      border: 1px solid #d1d5db;
+      border-radius: 8px;
+      box-shadow: 0 8px 18px rgba(15, 23, 42, 0.12);
+      max-height: 260px;
+      overflow-y: auto;
+      list-style: none;
+      padding: 4px;
+      z-index: 10;
+      display: none;
+    }
+
+    .market-search-suggestions.show {
+      display: block;
+    }
+
+    .market-search-suggestion {
+      display: flex;
+      justify-content: space-between;
+      gap: 10px;
+      width: 100%;
+      border: none;
+      background: transparent;
+      border-radius: 6px;
+      padding: 7px 8px;
+      text-align: left;
+      font-size: 12px;
+      color: #111827;
+      cursor: pointer;
+    }
+
+    .market-search-suggestion:hover,
+    .market-search-suggestion.active {
+      background: #eef2ff;
+    }
+
+    .market-search-meta {
+      color: #6b7280;
+      font-size: 11px;
+      white-space: nowrap;
+    }
+
+    .market-chip {
+      border: 1px solid #d1d5db;
+      background: #f8fafc;
+      color: #1f2937;
+      border-radius: 999px;
+      padding: 3px 8px;
+      font-size: 11px;
+      cursor: pointer;
+      line-height: 1.3;
+    }
+
+    .market-chip:hover {
+      background: #eef2f7;
+    }
+
+    .market-chip.active {
+      background: #111827;
+      color: #ffffff;
+      border-color: #111827;
+    }
+
     .market-change.positive {
       color: #1b7f3a;
       font-weight: 600;
@@ -273,11 +455,23 @@
       display: flex;
       gap: 12px;
       align-items: center;
+      justify-content: flex-end;
+      flex-wrap: wrap;
     }
     
     .section-count {
       font-size: 14px;
       color: #666;
+    }
+
+    .section-select {
+      padding: 8px 10px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      background: #fff;
+      color: #111827;
+      font-size: 13px;
+      min-width: 180px;
     }
   </style>
 </head>
@@ -294,23 +488,43 @@
     </div>
 
     <div class="section-header">
-      <h2 class="section-title">Zmiany dzienne spĂłĹ‚ek</h2>
+      <h2 class="section-title">Ranking spolek</h2>
       <div class="section-actions">
-        <span class="section-count" id="marketCount">0 spĂłĹ‚ek</span>
+        <div class="market-search-wrap">
+          <input
+            id="marketCompanySearch"
+            class="market-search-input"
+            type="text"
+            autocomplete="off"
+            placeholder="Szukaj spolki (nazwa/ticker, tolerancja literowek)"
+            aria-label="Szukaj spolki"
+          />
+          <div id="marketSearchSuggestions" class="market-search-suggestions" role="listbox"></div>
+        </div>
+        <span class="section-count" id="marketCount">0 spolek</span>
       </div>
     </div>
     <div class="responses-list">
       <div class="response-item">
-        <div class="response-text" id="marketStatus">Brak danych rynkowych.</div>
+        <div class="response-text" id="marketStatus">Brak danych rankingowych.</div>
+        <div class="market-toolbar" id="marketToolbar" hidden>
+          <div class="market-filter-row tight">
+            <span class="market-filter-label" id="marketFilterLabel">Filtry: brak</span>
+          </div>
+          <div class="market-filter-row" id="marketSectorFilters"></div>
+        </div>
         <table class="market-table" id="marketTable" style="display: none;">
           <thead>
             <tr>
-              <th>Symbol</th>
-              <th>SpĂłĹ‚ka</th>
-              <th>Kurs</th>
-              <th>Zmiana</th>
-              <th>%</th>
-              <th>Status</th>
+              <th class="sortable" data-sort-key="rank">#</th>
+              <th class="sortable" data-sort-key="company">Spolka</th>
+              <th class="sortable" data-sort-key="ticker">Ticker</th>
+              <th class="sortable" data-sort-key="sector">Sektor</th>
+              <th class="sortable" data-sort-key="decisionStatus">Decyzja</th>
+              <th class="sortable" data-sort-key="asymmetry">Asymetria</th>
+              <th class="sortable" data-sort-key="region">Region</th>
+              <th class="sortable" data-sort-key="currency">Waluta</th>
+              <th class="sortable" data-sort-key="decisionTs">Data</th>
             </tr>
           </thead>
           <tbody></tbody>
@@ -322,6 +536,11 @@
     <div class="section-header">
       <h2 class="section-title">Analiza spĂłĹ‚ki</h2>
       <div class="section-actions">
+        <select id="companySortSelect" class="section-select" aria-label="Sortowanie odpowiedzi">
+          <option value="latest">Sort: Najnowsze</option>
+          <option value="source_asc">Sort: Zrodlo A-Z</option>
+          <option value="source_desc">Sort: Zrodlo Z-A</option>
+        </select>
         <span class="section-count" id="companyCount">0 odpowiedzi</span>
         <button class="copy-all-btn" id="copyAllCompanyBtn">Kopiuj wszystkie</button>
         <button class="copy-all-btn" id="copyAllCompanyWithLinkBtn">Kopiuj z linkiem</button>

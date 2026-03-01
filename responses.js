@@ -8,12 +8,37 @@ const marketCount = document.getElementById('marketCount');
 const marketStatus = document.getElementById('marketStatus');
 const marketTable = document.getElementById('marketTable');
 const marketTableBody = marketTable ? marketTable.querySelector('tbody') : null;
+const marketToolbar = document.getElementById('marketToolbar');
+const marketFilterLabel = document.getElementById('marketFilterLabel');
+const marketSectorFilters = document.getElementById('marketSectorFilters');
+const marketCompanySearch = document.getElementById('marketCompanySearch');
+const marketSearchSuggestions = document.getElementById('marketSearchSuggestions');
+const marketSortableHeaders = marketTable
+  ? Array.from(marketTable.querySelectorAll('th.sortable[data-sort-key]'))
+  : [];
 const clearBtn = document.getElementById('clearBtn');
 const copyAllCompanyBtn = document.getElementById('copyAllCompanyBtn');
 const copyAllCompanyWithLinkBtn = document.getElementById('copyAllCompanyWithLinkBtn');
+const companySortSelect = document.getElementById('companySortSelect');
 
 const RESPONSE_STORAGE_KEY = 'responses';
 let responseStorageReady = null;
+let marketRows = [];
+let marketSortState = {
+  key: 'rank',
+  direction: 'asc'
+};
+let marketFilters = {
+  companyQuery: '',
+  sector: '',
+  decisionStatus: '',
+  region: '',
+  currency: ''
+};
+let marketSuggestionItems = [];
+let marketSuggestionActiveIndex = -1;
+let companySortMode = 'latest';
+let lastLoadedResponses = [];
 
 // Clipboard copy counters (in-memory per tab open).
 const clipboardCounters = {
@@ -98,6 +123,215 @@ function formatStageLine(response) {
   return parts.join(' | ');
 }
 
+const ECONOMIST_PODCAST_NAMES = [
+  'The Intelligence',
+  'Checks and Balance',
+  'Drum Tower',
+  'Money Talks',
+  'Babbage',
+  'The Weekend Intelligence',
+  'Boss Class',
+  'Gamechangers'
+];
+
+function normalizeSourceText(value, fallback = '') {
+  const text = typeof value === 'string'
+    ? value.replace(/\s+/g, ' ').trim()
+    : '';
+  return text || fallback;
+}
+
+function foldSourceSortText(value) {
+  const text = normalizeSourceText(value).toLowerCase();
+  if (!text) return '';
+  return text
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .trim();
+}
+
+function escapeRegExpLiteral(value) {
+  return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function stripEconomistBrandSuffix(sourceText) {
+  return normalizeSourceText(sourceText)
+    .replace(/\s*\|\s*the economist podcasts?\s*$/i, '')
+    .replace(/\s*[-–—]\s*the economist podcasts?\s*$/i, '')
+    .replace(/\s*\|\s*the economist\s*$/i, '')
+    .replace(/\s*[-–—]\s*the economist\s*$/i, '')
+    .replace(/\s*\|\s*economist podcasts?\s*$/i, '')
+    .replace(/\s*[-–—]\s*economist podcasts?\s*$/i, '')
+    .trim();
+}
+
+function detectEconomistPodcastName(sourceText) {
+  const raw = normalizeSourceText(sourceText);
+  if (!raw) return '';
+
+  const lowered = raw.toLowerCase();
+  const hasEconomist = lowered.includes('economist');
+  const hasPodcastToken = lowered.includes('podcast');
+  if (!hasEconomist && !hasPodcastToken) return '';
+
+  const cleaned = stripEconomistBrandSuffix(raw);
+  for (const podcastName of ECONOMIST_PODCAST_NAMES) {
+    const pattern = new RegExp(`\\b${escapeRegExpLiteral(podcastName)}\\b`, 'i');
+    if (pattern.test(cleaned)) return podcastName;
+  }
+
+  const genericMatch = cleaned.match(/^(.+?)\s+podcast\b/i);
+  if (genericMatch?.[1]) {
+    const candidate = normalizeSourceText(genericMatch[1]);
+    if (candidate) return candidate;
+  }
+
+  return hasEconomist && hasPodcastToken ? 'Unknown' : '';
+}
+
+function extractEconomistPodcastEpisode(sourceText, podcastName) {
+  const base = stripEconomistBrandSuffix(sourceText);
+  const safeName = normalizeSourceText(podcastName);
+  if (!base || !safeName) return '';
+
+  const fullPattern = new RegExp(`^${escapeRegExpLiteral(safeName)}(?:\\s+podcast)?\\s*[:\\-]\\s*(.+)$`, 'i');
+  const fullMatch = base.match(fullPattern);
+  if (fullMatch?.[1]) {
+    return normalizeSourceText(fullMatch[1]);
+  }
+
+  const tailPattern = new RegExp(`^(.+)\\s*[|\\-]\\s*${escapeRegExpLiteral(safeName)}(?:\\s+podcast)?$`, 'i');
+  const tailMatch = base.match(tailPattern);
+  if (tailMatch?.[1]) {
+    return normalizeSourceText(tailMatch[1]);
+  }
+
+  return '';
+}
+
+function describeResponseSource(response) {
+  const raw = normalizeSourceText(response?.source, 'Artykul');
+  const lowered = raw.toLowerCase();
+
+  const podcastName = detectEconomistPodcastName(raw);
+  if (podcastName) {
+    const episode = extractEconomistPodcastEpisode(raw, podcastName);
+    return {
+      raw,
+      display: podcastName === 'Unknown'
+        ? 'The Economist Podcast'
+        : `The Economist Podcast: ${podcastName}`,
+      detail: episode || '',
+      tag: 'Economist Podcast',
+      sortKey: [
+        'economist podcast',
+        foldSourceSortText(podcastName === 'Unknown' ? '' : podcastName),
+        foldSourceSortText(episode)
+      ].filter(Boolean).join(' ')
+    };
+  }
+
+  if (lowered.includes('youtube')) {
+    return {
+      raw,
+      display: raw,
+      detail: '',
+      tag: 'YouTube',
+      sortKey: `youtube ${foldSourceSortText(raw)}`
+    };
+  }
+
+  if (lowered.includes('spotify')) {
+    return {
+      raw,
+      display: raw,
+      detail: '',
+      tag: 'Spotify',
+      sortKey: `spotify ${foldSourceSortText(raw)}`
+    };
+  }
+
+  if (lowered.includes('manual source') || lowered.includes('manual pdf') || lowered.includes('recznie wklej')) {
+    return {
+      raw,
+      display: raw,
+      detail: '',
+      tag: 'Manual',
+      sortKey: `manual ${foldSourceSortText(raw)}`
+    };
+  }
+
+  if (lowered.includes('economist')) {
+    return {
+      raw,
+      display: raw,
+      detail: '',
+      tag: 'The Economist',
+      sortKey: `economist ${foldSourceSortText(raw)}`
+    };
+  }
+
+  return {
+    raw,
+    display: raw,
+    detail: '',
+    tag: '',
+    sortKey: foldSourceSortText(raw)
+  };
+}
+
+function compareTextForSort(left, right) {
+  return String(left || '').localeCompare(String(right || ''), 'pl', { sensitivity: 'base' });
+}
+
+function compareByTimestampDesc(left, right) {
+  const leftTs = Number.isInteger(left?.timestamp) ? left.timestamp : 0;
+  const rightTs = Number.isInteger(right?.timestamp) ? right.timestamp : 0;
+  return rightTs - leftTs;
+}
+
+function normalizeCompanySortMode(value) {
+  const normalized = normalizeSourceText(value).toLowerCase();
+  if (normalized === 'source_asc') return 'source_asc';
+  if (normalized === 'source_desc') return 'source_desc';
+  return 'latest';
+}
+
+function sortCompanyResponses(responses) {
+  const safe = Array.isArray(responses) ? responses.slice() : [];
+  const mode = normalizeCompanySortMode(companySortMode);
+
+  safe.sort((left, right) => {
+    if (mode === 'source_asc' || mode === 'source_desc') {
+      const leftSource = describeResponseSource(left);
+      const rightSource = describeResponseSource(right);
+      const sourceDiff = compareTextForSort(leftSource.sortKey, rightSource.sortKey);
+      if (sourceDiff !== 0) {
+        return mode === 'source_desc' ? -sourceDiff : sourceDiff;
+      }
+    }
+
+    const tsDiff = compareByTimestampDesc(left, right);
+    if (tsDiff !== 0) return tsDiff;
+
+    const leftSourceRaw = describeResponseSource(left).raw;
+    const rightSourceRaw = describeResponseSource(right).raw;
+    return compareTextForSort(leftSourceRaw, rightSourceRaw);
+  });
+
+  return safe;
+}
+
+function getSortedResponsesForAnalysis(responses, analysisType) {
+  const safe = Array.isArray(responses) ? responses.slice() : [];
+  const normalizedType = normalizeSourceText(analysisType, 'company').toLowerCase();
+  if (normalizedType === 'company') {
+    return sortCompanyResponses(safe);
+  }
+  return safe.sort(compareByTimestampDesc);
+}
+
 function parseDecisionRecordParts(raw) {
   if (!raw || typeof raw !== 'string') return null;
   const parts = raw
@@ -106,6 +340,67 @@ function parseDecisionRecordParts(raw) {
     .filter((item, index, all) => !(index === all.length - 1 && item === ''));
   if (parts.length !== 12 && parts.length !== 13) return null;
   return parts;
+}
+
+function parseDecisionRecordLine(rawLine) {
+  const parts = parseDecisionRecordParts(rawLine);
+  if (!parts) return null;
+
+  if (parts.length === 13) {
+    return {
+      decisionDate: parts[0],
+      decisionStatus: parts[1],
+      company: parts[2],
+      sourceMaterial: parts[3],
+      thesis: parts[4],
+      asymmetry: parts[5],
+      bear: parts[6],
+      base: parts[7],
+      bull: parts[8],
+      voi: parts[9],
+      sector: parts[10],
+      region: parts[11],
+      currency: parts[12],
+      recordFormat: 'transitional_13'
+    };
+  }
+
+  const thesisText = typeof parts[4] === 'string' ? parts[4] : '';
+  const asymmetryMatch = thesisText.match(/(?:Asymetria|Asymmetry)\s*:\s*[^,;]+/i);
+  return {
+    decisionDate: parts[0],
+    decisionStatus: parts[1],
+    company: parts[2],
+    sourceMaterial: parts[3],
+    thesis: parts[4],
+    asymmetry: asymmetryMatch ? asymmetryMatch[0].trim() : '',
+    bear: parts[5],
+    base: parts[6],
+    bull: parts[7],
+    voi: parts[8],
+    sector: parts[9],
+    region: parts[10],
+    currency: parts[11],
+    recordFormat: 'current_12'
+  };
+}
+
+function extractDecisionRecordFromText(text) {
+  const source = typeof text === 'string' ? text : '';
+  if (!source.trim()) return null;
+  const lines = source
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    const parsed = parseDecisionRecordLine(lines[i]);
+    if (parsed) return parsed;
+  }
+
+  if (!source.includes(';')) return null;
+  const flattened = source.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+  return parseDecisionRecordLine(flattened);
 }
 
 function formatDecisionRecordTable(text) {
@@ -215,6 +510,8 @@ async function readResponsesFromStorage() {
 }
 
 // Wczytaj i wyĹ›wietl odpowiedzi przy starcie
+setupCompanyInteractions();
+setupMarketInteractions();
 loadResponses();
 
 // ObsĹ‚uga przycisku "WyczyĹ›Ä‡ wszystkie"
@@ -273,8 +570,8 @@ async function copyAllByType(analysisType, button) {
       return;
     }
     
-    // Sortuj od najnowszej do najstarszej (jak na ekranie)
-    const sortedResponses = [...filteredResponses].sort((a, b) => b.timestamp - a.timestamp);
+    // Sort order mirrors current UI for company responses.
+    const sortedResponses = getSortedResponsesForAnalysis(filteredResponses, analysisType);
     
     // PoĹ‚Ä…cz teksty z \n jako separator - kaĹĽda odpowiedĹş w nowym wierszu Google Sheets
     const allText = sortedResponses.map(r => r.text).join('\n');
@@ -335,7 +632,7 @@ async function copyAllByTypeWithLink(analysisType, button) {
       return;
     }
 
-    const sortedResponses = [...filteredResponses].sort((a, b) => b.timestamp - a.timestamp);
+    const sortedResponses = getSortedResponsesForAnalysis(filteredResponses, analysisType);
     const allText = sortedResponses
       .map((response) => {
         const text = typeof response?.text === 'string' ? response.text.replace(/\t/g, ' ') : '';
@@ -391,14 +688,16 @@ async function loadResponses() {
     console.log(`đź“Ą [loadResponses] WczytujÄ™ odpowiedzi z storage...`);
     await ensureResponseStorageReady();
     const responses = await readResponsesFromStorage();
+    lastLoadedResponses = Array.isArray(responses) ? responses.slice() : [];
     
     console.log(`đź“¦ [loadResponses] Wczytano ${responses.length} odpowiedzi:`, responses);
     
     renderResponses(responses);
-    loadMarketData();
+    loadMarketData(responses);
   } catch (error) {
     console.error('âťŚ [loadResponses] BĹ‚Ä…d wczytywania odpowiedzi:', error);
     console.error('Stack trace:', error.stack);
+    lastLoadedResponses = [];
     showEmptyStates();
   }
 }
@@ -449,8 +748,7 @@ function updateSectionCount(element, count) {
 
 // Funkcja renderujÄ…ca odpowiedzi w danej sekcji
 function renderResponsesInSection(listElement, responses) {
-  // Sortuj od najnowszej do najstarszej
-  const sortedResponses = [...responses].sort((a, b) => b.timestamp - a.timestamp);
+  const sortedResponses = sortCompanyResponses(responses);
   
   // WyczyĹ›Ä‡ listÄ™
   listElement.innerHTML = '';
@@ -472,16 +770,33 @@ function createResponseItem(response) {
   
   const meta = document.createElement('div');
   meta.className = 'response-meta';
-  
+
+  const sourceInfo = describeResponseSource(response);
+
+  if (sourceInfo.tag) {
+    const sourceTag = document.createElement('div');
+    sourceTag.className = 'response-source-tag';
+    sourceTag.textContent = sourceInfo.tag;
+    meta.appendChild(sourceTag);
+  }
+
   const source = document.createElement('div');
   source.className = 'response-source';
-  source.textContent = response.source || 'ArtykuĹ‚';
-  
+  source.textContent = sourceInfo.display;
+
+  meta.appendChild(source);
+
+  if (sourceInfo.detail) {
+    const sourceDetail = document.createElement('div');
+    sourceDetail.className = 'response-source-detail';
+    sourceDetail.textContent = sourceInfo.detail;
+    meta.appendChild(sourceDetail);
+  }
+
   const time = document.createElement('div');
   time.className = 'response-time';
   time.textContent = formatTimestamp(response.timestamp);
-  
-  meta.appendChild(source);
+
   meta.appendChild(time);
 
   const stageLineText = formatStageLine(response);
@@ -633,11 +948,396 @@ function showEmptyStates() {
   hideResponsesList(companyResponsesList);
 }
 
-// NasĹ‚uchuj zmian w storage (gdy nowe odpowiedzi sÄ… dodawane)
-function formatChangeCell(value, isPercent = false) {
-  if (!Number.isFinite(value)) return 'â€”';
-  const formatted = isPercent ? `${value.toFixed(2)}%` : value.toFixed(2);
-  return value > 0 ? `+${formatted}` : formatted;
+function setCompanySortMode(value) {
+  companySortMode = normalizeCompanySortMode(value);
+  if (companySortSelect && companySortSelect.value !== companySortMode) {
+    companySortSelect.value = companySortMode;
+  }
+}
+
+function setupCompanyInteractions() {
+  if (!companySortSelect) return;
+  setCompanySortMode(companySortSelect.value);
+  companySortSelect.addEventListener('change', () => {
+    setCompanySortMode(companySortSelect.value);
+    renderResponses(lastLoadedResponses);
+  });
+}
+
+function normalizeMarketText(value, fallback = '') {
+  const text = typeof value === 'string' ? value.trim() : '';
+  return text || fallback;
+}
+
+function normalizeMarketToken(value) {
+  return normalizeMarketText(value).toLowerCase();
+}
+
+function normalizeFuzzyText(value) {
+  const source = normalizeMarketText(value).toLowerCase();
+  if (!source) return '';
+  return source
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^a-z0-9]+/g, ' ')
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function tokenizeFuzzyText(value) {
+  const normalized = normalizeFuzzyText(value);
+  if (!normalized) return [];
+  return normalized.split(' ').filter(Boolean);
+}
+
+function levenshteinDistanceWithLimit(left, right, maxDistance = 3) {
+  const a = typeof left === 'string' ? left : '';
+  const b = typeof right === 'string' ? right : '';
+  if (!a) return b.length;
+  if (!b) return a.length;
+  if (Math.abs(a.length - b.length) > maxDistance) return Number.POSITIVE_INFINITY;
+
+  const cols = b.length + 1;
+  const prev = new Array(cols);
+  const curr = new Array(cols);
+
+  for (let j = 0; j < cols; j += 1) prev[j] = j;
+  for (let i = 1; i <= a.length; i += 1) {
+    curr[0] = i;
+    let rowMin = curr[0];
+    for (let j = 1; j < cols; j += 1) {
+      const cost = a[i - 1] === b[j - 1] ? 0 : 1;
+      const insert = curr[j - 1] + 1;
+      const remove = prev[j] + 1;
+      const substitute = prev[j - 1] + cost;
+      const value = Math.min(insert, remove, substitute);
+      curr[j] = value;
+      if (value < rowMin) rowMin = value;
+    }
+    if (rowMin > maxDistance) return Number.POSITIVE_INFINITY;
+    for (let j = 0; j < cols; j += 1) prev[j] = curr[j];
+  }
+  return prev[b.length];
+}
+
+function scoreTokenSimilarity(query, token) {
+  if (!query || !token) return Number.NEGATIVE_INFINITY;
+  if (token === query) return 250;
+  if (token.startsWith(query)) return 220 - Math.min(20, token.length - query.length);
+  if (token.includes(query)) return 190 - Math.min(30, token.length - query.length);
+
+  const maxLen = Math.max(query.length, token.length);
+  const limit = Math.max(1, Math.floor(maxLen * 0.45));
+  const distance = levenshteinDistanceWithLimit(query, token, limit);
+  if (!Number.isFinite(distance)) return Number.NEGATIVE_INFINITY;
+  const similarity = 1 - (distance / maxLen);
+  if (similarity < 0.55) return Number.NEGATIVE_INFINITY;
+  return Math.round(130 + similarity * 90);
+}
+
+function scoreCompanyQueryAgainstRow(query, row) {
+  const normalizedQuery = normalizeFuzzyText(query);
+  if (!normalizedQuery) {
+    return {
+      matched: true,
+      score: 0
+    };
+  }
+
+  const company = typeof row?.companyFuzzy === 'string' ? row.companyFuzzy : '';
+  const ticker = typeof row?.tickerFuzzy === 'string' ? row.tickerFuzzy : '';
+  const haystack = typeof row?.searchHaystack === 'string' ? row.searchHaystack : '';
+  const rowTokens = Array.isArray(row?.searchTokens) ? row.searchTokens : [];
+  const queryTokens = tokenizeFuzzyText(normalizedQuery);
+  let bestScore = Number.NEGATIVE_INFINITY;
+
+  if (company && company.startsWith(normalizedQuery)) {
+    bestScore = Math.max(bestScore, 240 - Math.min(35, company.length - normalizedQuery.length));
+  }
+  if (ticker && ticker.startsWith(normalizedQuery)) {
+    bestScore = Math.max(bestScore, 230);
+  }
+  if (haystack && haystack.includes(normalizedQuery)) {
+    bestScore = Math.max(bestScore, 195);
+  }
+
+  const evaluateSingle = (token) => {
+    let localBest = Number.NEGATIVE_INFINITY;
+    rowTokens.forEach((rowToken) => {
+      const score = scoreTokenSimilarity(token, rowToken);
+      if (score > localBest) localBest = score;
+    });
+    if (ticker) {
+      const tickerScore = scoreTokenSimilarity(token, ticker);
+      if (tickerScore > localBest) localBest = tickerScore;
+    }
+    return localBest;
+  };
+
+  const singleScore = evaluateSingle(normalizedQuery);
+  if (singleScore > bestScore) bestScore = singleScore;
+
+  if (queryTokens.length > 1) {
+    const tokenScores = queryTokens.map((token) => evaluateSingle(token));
+    if (tokenScores.every((score) => Number.isFinite(score) && score > 120)) {
+      const avgScore = tokenScores.reduce((sum, score) => sum + score, 0) / tokenScores.length;
+      bestScore = Math.max(bestScore, Math.round(avgScore));
+    }
+  }
+
+  return {
+    matched: Number.isFinite(bestScore) && bestScore >= 128,
+    score: Number.isFinite(bestScore) ? bestScore : 0
+  };
+}
+
+function safeLocaleCompare(left, right) {
+  return String(left || '').localeCompare(String(right || ''), 'pl', { sensitivity: 'base' });
+}
+
+function extractTickerFromCompany(companyLabel) {
+  const source = normalizeMarketText(companyLabel);
+  if (!source) return '';
+
+  const blocked = new Set(['SA', 'SPA', 'AG', 'NV', 'PLC', 'INC', 'CORP', 'LTD', 'LLC', 'SE']);
+  const fromParen = source.match(/\(([A-Z0-9.\-]{1,10})\)/);
+  if (fromParen && !blocked.has(fromParen[1])) return fromParen[1];
+
+  const fromExchange = source.match(/\b(?:NYSE|NASDAQ|LSE|XETRA|GPW|ASX|TSX)\s*[:\-]\s*([A-Z0-9.\-]{1,10})\b/i);
+  if (fromExchange) return fromExchange[1].toUpperCase();
+
+  const fromSuffix = source.match(/\b([A-Z0-9.\-]{1,10})\s*$/);
+  if (fromSuffix && !blocked.has(fromSuffix[1])) {
+    return fromSuffix[1].toUpperCase();
+  }
+
+  return '';
+}
+
+function parseDecisionDateToTimestamp(decisionDate, fallbackTimestamp = 0) {
+  const source = normalizeMarketText(decisionDate);
+  if (source) {
+    const direct = Date.parse(source);
+    if (Number.isFinite(direct)) return direct;
+
+    const matched = source.match(/^(\d{1,2})[.\-/](\d{1,2})[.\-/](\d{4})(?:\s+(\d{1,2}):(\d{2}))?$/);
+    if (matched) {
+      const day = Number.parseInt(matched[1], 10);
+      const month = Number.parseInt(matched[2], 10) - 1;
+      const year = Number.parseInt(matched[3], 10);
+      const hour = Number.parseInt(matched[4] || '0', 10);
+      const minute = Number.parseInt(matched[5] || '0', 10);
+      const parsed = new Date(year, month, day, hour, minute).getTime();
+      if (Number.isFinite(parsed)) return parsed;
+    }
+  }
+
+  return Number.isInteger(fallbackTimestamp) && fallbackTimestamp > 0
+    ? fallbackTimestamp
+    : 0;
+}
+
+function parseAsymmetryValue(rawAsymmetry, thesisText = '') {
+  const sources = [normalizeMarketText(rawAsymmetry), normalizeMarketText(thesisText)].filter(Boolean);
+  if (sources.length === 0) return Number.NaN;
+  const merged = sources.join(' | ').replace(/,/g, '.');
+
+  const ratioMatch = merged.match(/(-?\d+(?:\.\d+)?)\s*:\s*1/i);
+  if (ratioMatch) return Number.parseFloat(ratioMatch[1]);
+
+  const xMatch = merged.match(/(-?\d+(?:\.\d+)?)\s*x\b/i);
+  if (xMatch) return Number.parseFloat(xMatch[1]);
+
+  const pctMatch = merged.match(/(-?\d+(?:\.\d+)?)\s*%/);
+  if (pctMatch) return Number.parseFloat(pctMatch[1]) / 100;
+
+  const plainMatch = merged.match(/-?\d+(?:\.\d+)?/);
+  if (plainMatch) return Number.parseFloat(plainMatch[0]);
+
+  return Number.NaN;
+}
+
+function formatMarketDate(timestamp, fallbackDate = '') {
+  if (Number.isFinite(timestamp) && timestamp > 0) {
+    const date = new Date(timestamp);
+    return date.toLocaleString('pl-PL', {
+      year: 'numeric',
+      month: '2-digit',
+      day: '2-digit',
+      hour: '2-digit',
+      minute: '2-digit'
+    });
+  }
+  return normalizeMarketText(fallbackDate, '-');
+}
+
+function buildMarketRowsFromResponses(responses) {
+  const byCompanyKey = new Map();
+  const sourceRows = Array.isArray(responses) ? responses : [];
+
+  sourceRows.forEach((response) => {
+    if ((response?.analysisType || 'company') !== 'company') return;
+    const decisionRecord = extractDecisionRecordFromText(response?.text || '');
+    if (!decisionRecord) return;
+
+    const company = normalizeMarketText(decisionRecord.company || response?.source || '', 'brak');
+    const ticker = extractTickerFromCompany(company);
+    const sector = normalizeMarketText(decisionRecord.sector, '-');
+    const decisionStatus = normalizeMarketText(decisionRecord.decisionStatus, '-');
+    const region = normalizeMarketText(decisionRecord.region, '-');
+    const currency = normalizeMarketText(decisionRecord.currency, '-');
+    const asymmetryText = normalizeMarketText(decisionRecord.asymmetry, '-');
+    const asymmetryValue = parseAsymmetryValue(decisionRecord.asymmetry, decisionRecord.thesis || '');
+    const responseTs = Number.isInteger(response?.timestamp) ? response.timestamp : 0;
+    const decisionTs = parseDecisionDateToTimestamp(decisionRecord.decisionDate, responseTs);
+
+    const row = {
+      key: `${normalizeMarketToken(company)}|${normalizeMarketToken(ticker || '-')}`,
+      company,
+      ticker: ticker || '-',
+      companyFuzzy: normalizeFuzzyText(company),
+      tickerFuzzy: normalizeFuzzyText(ticker || '-'),
+      searchHaystack: normalizeFuzzyText([company, ticker, sector, decisionStatus, region, currency].join(' ')),
+      searchTokens: tokenizeFuzzyText([company, ticker, sector, decisionStatus, region, currency].join(' ')),
+      sector,
+      decisionStatus,
+      asymmetryText,
+      asymmetryValue,
+      region,
+      currency,
+      decisionDateRaw: normalizeMarketText(decisionRecord.decisionDate, ''),
+      decisionTs,
+      responseTs
+    };
+
+    const existing = byCompanyKey.get(row.key);
+    if (!existing) {
+      byCompanyKey.set(row.key, row);
+      return;
+    }
+
+    const existingTs = Number.isFinite(existing.decisionTs) ? existing.decisionTs : existing.responseTs;
+    const nextTs = Number.isFinite(row.decisionTs) ? row.decisionTs : row.responseTs;
+    if (nextTs >= existingTs) {
+      byCompanyKey.set(row.key, row);
+    }
+  });
+
+  const rows = Array.from(byCompanyKey.values());
+  rows.sort((left, right) => {
+    const leftAsymmetry = Number.isFinite(left.asymmetryValue) ? left.asymmetryValue : Number.NEGATIVE_INFINITY;
+    const rightAsymmetry = Number.isFinite(right.asymmetryValue) ? right.asymmetryValue : Number.NEGATIVE_INFINITY;
+    if (rightAsymmetry !== leftAsymmetry) return rightAsymmetry - leftAsymmetry;
+    return safeLocaleCompare(left.company, right.company);
+  });
+  rows.forEach((row, index) => {
+    row.baseRank = index + 1;
+  });
+
+  return rows;
+}
+
+function getMarketDefaultSortDirection(key) {
+  if (key === 'asymmetry' || key === 'decisionTs') return 'desc';
+  return 'asc';
+}
+
+function getMarketSortValue(row, sortKey) {
+  switch (sortKey) {
+    case 'rank':
+      return Number.isInteger(row?.baseRank) ? row.baseRank : Number.MAX_SAFE_INTEGER;
+    case 'company':
+      return normalizeMarketToken(row?.company);
+    case 'ticker':
+      return normalizeMarketToken(row?.ticker);
+    case 'sector':
+      return normalizeMarketToken(row?.sector);
+    case 'decisionStatus':
+      return normalizeMarketToken(row?.decisionStatus);
+    case 'asymmetry':
+      return Number.isFinite(row?.asymmetryValue) ? row.asymmetryValue : Number.NEGATIVE_INFINITY;
+    case 'region':
+      return normalizeMarketToken(row?.region);
+    case 'currency':
+      return normalizeMarketToken(row?.currency);
+    case 'decisionTs':
+      return Number.isFinite(row?.decisionTs) ? row.decisionTs : 0;
+    default:
+      return '';
+  }
+}
+
+function sortMarketRows(rows) {
+  const source = Array.isArray(rows) ? rows.slice() : [];
+  const sortKey = normalizeMarketText(marketSortState?.key, 'rank');
+  const direction = marketSortState?.direction === 'desc' ? 'desc' : 'asc';
+
+  source.sort((left, right) => {
+    const leftValue = getMarketSortValue(left, sortKey);
+    const rightValue = getMarketSortValue(right, sortKey);
+    let diff = 0;
+
+    if (typeof leftValue === 'number' || typeof rightValue === 'number') {
+      const safeLeft = Number.isFinite(leftValue) ? leftValue : Number.NEGATIVE_INFINITY;
+      const safeRight = Number.isFinite(rightValue) ? rightValue : Number.NEGATIVE_INFINITY;
+      diff = safeLeft === safeRight ? 0 : (safeLeft < safeRight ? -1 : 1);
+    } else {
+      diff = safeLocaleCompare(leftValue, rightValue);
+    }
+
+    if (diff === 0) {
+      diff = safeLocaleCompare(left?.company, right?.company);
+    }
+    if (diff === 0) {
+      diff = (left?.baseRank || 0) - (right?.baseRank || 0);
+    }
+    return direction === 'desc' ? -diff : diff;
+  });
+
+  return source;
+}
+
+function hasActiveMarketFilters() {
+  return Object.values(marketFilters).some((value) => normalizeMarketText(value).length > 0);
+}
+
+function getNormalizedFilterValue(value) {
+  const normalized = normalizeMarketText(value);
+  if (!normalized || normalized === '-') return '';
+  return normalized;
+}
+
+function getActiveMarketFilterLabels() {
+  const entries = [];
+  if (marketFilters.companyQuery) entries.push(`Spolka: ${marketFilters.companyQuery}`);
+  if (marketFilters.sector) entries.push(`Sektor: ${marketFilters.sector}`);
+  if (marketFilters.decisionStatus) entries.push(`Decyzja: ${marketFilters.decisionStatus}`);
+  if (marketFilters.region) entries.push(`Region: ${marketFilters.region}`);
+  if (marketFilters.currency) entries.push(`Waluta: ${marketFilters.currency}`);
+  return entries;
+}
+
+function applyMarketFilters(rows) {
+  const source = Array.isArray(rows) ? rows : [];
+  return source.filter((row) => {
+    if (marketFilters.companyQuery) {
+      const match = scoreCompanyQueryAgainstRow(marketFilters.companyQuery, row);
+      if (!match.matched) return false;
+    }
+    if (marketFilters.sector && normalizeMarketToken(row?.sector) !== normalizeMarketToken(marketFilters.sector)) {
+      return false;
+    }
+    if (marketFilters.decisionStatus && normalizeMarketToken(row?.decisionStatus) !== normalizeMarketToken(marketFilters.decisionStatus)) {
+      return false;
+    }
+    if (marketFilters.region && normalizeMarketToken(row?.region) !== normalizeMarketToken(marketFilters.region)) {
+      return false;
+    }
+    if (marketFilters.currency && normalizeMarketToken(row?.currency) !== normalizeMarketToken(marketFilters.currency)) {
+      return false;
+    }
+    return true;
+  });
 }
 
 function updateMarketStatus(message) {
@@ -645,14 +1345,436 @@ function updateMarketStatus(message) {
   marketStatus.textContent = message;
 }
 
-async function loadMarketData() {
-  if (!marketStatus || !marketTable || !marketTableBody) return;
-  marketTableBody.innerHTML = '';
-  marketTable.style.display = 'none';
-  if (marketCount) {
+function updateMarketCountLabel(filteredCount, totalCount) {
+  if (!marketCount) return;
+  if (totalCount <= 0) {
     marketCount.textContent = '0 spolek';
+    return;
   }
-  updateMarketStatus('Backend usuniety: dane rynkowe niedostepne.');
+  marketCount.textContent = filteredCount === totalCount
+    ? `${totalCount} spolek`
+    : `${filteredCount}/${totalCount} spolek`;
+}
+
+function updateMarketFilterLabel(filteredCount, totalCount) {
+  if (!marketFilterLabel) return;
+  const labels = getActiveMarketFilterLabels();
+  if (labels.length === 0) {
+    marketFilterLabel.textContent = `Filtry: brak | Widoczne ${filteredCount}/${totalCount}`;
+    return;
+  }
+  marketFilterLabel.textContent = `Filtry: ${labels.join(', ')} | Widoczne ${filteredCount}/${totalCount}`;
+}
+
+function updateMarketSortHeaders() {
+  marketSortableHeaders.forEach((header) => {
+    const key = normalizeMarketText(header?.dataset?.sortKey);
+    header.classList.remove('sorted-asc', 'sorted-desc');
+    if (!key || key !== marketSortState.key) return;
+    header.classList.add(marketSortState.direction === 'desc' ? 'sorted-desc' : 'sorted-asc');
+  });
+}
+
+function createMarketFilterChip(columnKey, rawValue, emptyFallback = '-') {
+  const value = getNormalizedFilterValue(rawValue);
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.className = 'market-chip';
+  button.textContent = value || emptyFallback;
+
+  if (!value) {
+    button.disabled = true;
+    return button;
+  }
+
+  if (normalizeMarketToken(marketFilters[columnKey]) === normalizeMarketToken(value)) {
+    button.classList.add('active');
+  }
+
+  button.addEventListener('click', () => {
+    toggleMarketFilter(columnKey, value);
+  });
+  return button;
+}
+
+function renderMarketSectorButtons() {
+  if (!marketSectorFilters) return;
+  marketSectorFilters.innerHTML = '';
+
+  if (marketRows.length === 0) return;
+
+  const allButton = document.createElement('button');
+  allButton.type = 'button';
+  allButton.className = 'market-filter-btn';
+  allButton.textContent = `Wszystkie sektory (${marketRows.length})`;
+  if (!marketFilters.sector) allButton.classList.add('active');
+  allButton.addEventListener('click', () => {
+    if (!marketFilters.sector) return;
+    marketFilters.sector = '';
+    renderMarketTable();
+  });
+  marketSectorFilters.appendChild(allButton);
+
+  const counters = new Map();
+  marketRows.forEach((row) => {
+    const sector = getNormalizedFilterValue(row?.sector);
+    if (!sector) return;
+    counters.set(sector, (counters.get(sector) || 0) + 1);
+  });
+
+  const sectors = Array.from(counters.entries()).sort((left, right) => {
+    const countDiff = right[1] - left[1];
+    if (countDiff !== 0) return countDiff;
+    return safeLocaleCompare(left[0], right[0]);
+  });
+
+  sectors.forEach(([sector, count]) => {
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'market-filter-btn';
+    button.textContent = `${sector} (${count})`;
+    if (normalizeMarketToken(marketFilters.sector) === normalizeMarketToken(sector)) {
+      button.classList.add('active');
+    }
+    button.addEventListener('click', () => {
+      toggleMarketFilter('sector', sector);
+    });
+    marketSectorFilters.appendChild(button);
+  });
+}
+
+function renderMarketRows(rows) {
+  if (!marketTableBody) return;
+  marketTableBody.innerHTML = '';
+
+  rows.forEach((row) => {
+    const tr = document.createElement('tr');
+
+    const rank = document.createElement('td');
+    rank.textContent = String(row.baseRank || '-');
+
+    const company = document.createElement('td');
+    company.textContent = row.company || '-';
+
+    const ticker = document.createElement('td');
+    ticker.textContent = row.ticker || '-';
+
+    const sector = document.createElement('td');
+    sector.appendChild(createMarketFilterChip('sector', row.sector));
+
+    const decisionStatus = document.createElement('td');
+    decisionStatus.appendChild(createMarketFilterChip('decisionStatus', row.decisionStatus));
+
+    const asymmetry = document.createElement('td');
+    asymmetry.textContent = row.asymmetryText || '-';
+
+    const region = document.createElement('td');
+    region.appendChild(createMarketFilterChip('region', row.region));
+
+    const currency = document.createElement('td');
+    currency.appendChild(createMarketFilterChip('currency', row.currency));
+
+    const date = document.createElement('td');
+    date.textContent = formatMarketDate(row.decisionTs, row.decisionDateRaw);
+
+    tr.appendChild(rank);
+    tr.appendChild(company);
+    tr.appendChild(ticker);
+    tr.appendChild(sector);
+    tr.appendChild(decisionStatus);
+    tr.appendChild(asymmetry);
+    tr.appendChild(region);
+    tr.appendChild(currency);
+    tr.appendChild(date);
+    marketTableBody.appendChild(tr);
+  });
+}
+
+function hideMarketSuggestions() {
+  if (!marketSearchSuggestions) return;
+  marketSearchSuggestions.classList.remove('show');
+  marketSearchSuggestions.innerHTML = '';
+  marketSuggestionItems = [];
+  marketSuggestionActiveIndex = -1;
+}
+
+function buildMarketCompanySuggestions(query, limit = 8) {
+  const normalizedQuery = normalizeMarketText(query);
+  if (!normalizedQuery) return [];
+  const byKey = new Map();
+  marketRows.forEach((row) => {
+    const match = scoreCompanyQueryAgainstRow(normalizedQuery, row);
+    if (!match.matched) return;
+    const existing = byKey.get(row.key);
+    const candidate = {
+      key: row.key,
+      company: row.company || '-',
+      ticker: row.ticker || '-',
+      sector: row.sector || '-',
+      score: match.score
+    };
+    if (!existing || candidate.score > existing.score) {
+      byKey.set(row.key, candidate);
+    }
+  });
+  return Array.from(byKey.values())
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      return safeLocaleCompare(left.company, right.company);
+    })
+    .slice(0, limit);
+}
+
+function renderMarketSuggestions(items) {
+  if (!marketSearchSuggestions) return;
+  const suggestions = Array.isArray(items) ? items : [];
+  marketSearchSuggestions.innerHTML = '';
+  marketSuggestionItems = suggestions;
+  marketSuggestionActiveIndex = -1;
+
+  if (suggestions.length === 0) {
+    marketSearchSuggestions.classList.remove('show');
+    return;
+  }
+
+  suggestions.forEach((item, index) => {
+    const wrapper = document.createElement('div');
+    wrapper.setAttribute('role', 'option');
+
+    const button = document.createElement('button');
+    button.type = 'button';
+    button.className = 'market-search-suggestion';
+    button.dataset.index = String(index);
+
+    const left = document.createElement('span');
+    left.textContent = item.company || '-';
+    const right = document.createElement('span');
+    right.className = 'market-search-meta';
+    right.textContent = `${item.ticker || '-'} | ${item.sector || '-'}`;
+
+    button.appendChild(left);
+    button.appendChild(right);
+    button.addEventListener('click', () => {
+      applyMarketCompanySuggestion(index);
+    });
+
+    wrapper.appendChild(button);
+    marketSearchSuggestions.appendChild(wrapper);
+  });
+
+  marketSearchSuggestions.classList.add('show');
+}
+
+function updateMarketSuggestionActiveState() {
+  if (!marketSearchSuggestions) return;
+  const buttons = Array.from(marketSearchSuggestions.querySelectorAll('.market-search-suggestion'));
+  buttons.forEach((button, index) => {
+    button.classList.toggle('active', index === marketSuggestionActiveIndex);
+  });
+}
+
+function applyMarketCompanySuggestion(index) {
+  const numericIndex = Number.isInteger(index) ? index : Number.parseInt(index, 10);
+  if (!Number.isInteger(numericIndex) || numericIndex < 0 || numericIndex >= marketSuggestionItems.length) {
+    return;
+  }
+  const picked = marketSuggestionItems[numericIndex];
+  const value = normalizeMarketText(picked?.company);
+  if (!value) return;
+
+  if (marketCompanySearch) {
+    marketCompanySearch.value = value;
+  }
+  marketFilters.companyQuery = value;
+  hideMarketSuggestions();
+  renderMarketTable();
+}
+
+function renderMarketTable() {
+  if (!marketStatus || !marketTable || !marketTableBody) return;
+
+  if (marketRows.length === 0) {
+    marketTableBody.innerHTML = '';
+    marketTable.style.display = 'none';
+    if (marketToolbar) marketToolbar.hidden = true;
+    hideMarketSuggestions();
+    updateMarketCountLabel(0, 0);
+    updateMarketStatus('Brak finalnych rekordow spolek (linia 12/13-polowa).');
+    updateMarketSortHeaders();
+    return;
+  }
+
+  const filtered = applyMarketFilters(marketRows);
+  const sorted = sortMarketRows(filtered);
+  renderMarketRows(sorted);
+
+  renderMarketSectorButtons();
+  updateMarketSortHeaders();
+
+  if (marketToolbar) marketToolbar.hidden = false;
+  updateMarketCountLabel(filtered.length, marketRows.length);
+  updateMarketFilterLabel(filtered.length, marketRows.length);
+
+  if (sorted.length === 0) {
+    marketTable.style.display = 'none';
+    updateMarketStatus('Brak spolek dla wybranego filtra.');
+    return;
+  }
+
+  marketTable.style.display = 'table';
+  if (hasActiveMarketFilters()) {
+    updateMarketStatus('Filtrowanie aktywne: wpisz nazwe/ticker spolki lub kliknij chip, aby zawezic/odfiltrowac.');
+    return;
+  }
+  updateMarketStatus('Kliknij naglowek kolumny, aby sortowac. Po prawej wyszukasz spolke z tolerancja literowek.');
+}
+
+function toggleMarketSort(sortKey) {
+  const key = normalizeMarketText(sortKey);
+  if (!key) return;
+
+  if (marketSortState.key === key) {
+    marketSortState.direction = marketSortState.direction === 'asc' ? 'desc' : 'asc';
+  } else {
+    marketSortState.key = key;
+    marketSortState.direction = getMarketDefaultSortDirection(key);
+  }
+
+  renderMarketTable();
+}
+
+function toggleMarketFilter(columnKey, value) {
+  if (!marketFilters || !(columnKey in marketFilters)) return;
+  const normalized = getNormalizedFilterValue(value);
+  if (!normalized) return;
+
+  if (normalizeMarketToken(marketFilters[columnKey]) === normalizeMarketToken(normalized)) {
+    marketFilters[columnKey] = '';
+  } else {
+    marketFilters[columnKey] = normalized;
+  }
+
+  renderMarketTable();
+}
+
+function resetMarketFilters() {
+  marketFilters = {
+    companyQuery: '',
+    sector: '',
+    decisionStatus: '',
+    region: '',
+    currency: ''
+  };
+  if (marketCompanySearch) {
+    marketCompanySearch.value = '';
+  }
+  hideMarketSuggestions();
+  renderMarketTable();
+}
+
+function handleMarketCompanySearchInput() {
+  if (!marketCompanySearch) return;
+  const rawQuery = normalizeMarketText(marketCompanySearch.value);
+  marketFilters.companyQuery = rawQuery;
+  renderMarketTable();
+
+  if (!rawQuery) {
+    hideMarketSuggestions();
+    return;
+  }
+  const suggestions = buildMarketCompanySuggestions(rawQuery);
+  renderMarketSuggestions(suggestions);
+}
+
+function handleMarketCompanySearchKeydown(event) {
+  if (!marketCompanySearch) return;
+  if (!marketSearchSuggestions?.classList.contains('show') || marketSuggestionItems.length === 0) {
+    if (event.key === 'Enter') {
+      marketFilters.companyQuery = normalizeMarketText(marketCompanySearch.value);
+      renderMarketTable();
+    }
+    return;
+  }
+
+  if (event.key === 'ArrowDown') {
+    event.preventDefault();
+    marketSuggestionActiveIndex = (marketSuggestionActiveIndex + 1) % marketSuggestionItems.length;
+    updateMarketSuggestionActiveState();
+    return;
+  }
+  if (event.key === 'ArrowUp') {
+    event.preventDefault();
+    marketSuggestionActiveIndex = marketSuggestionActiveIndex <= 0
+      ? (marketSuggestionItems.length - 1)
+      : (marketSuggestionActiveIndex - 1);
+    updateMarketSuggestionActiveState();
+    return;
+  }
+  if (event.key === 'Enter') {
+    event.preventDefault();
+    if (marketSuggestionActiveIndex >= 0 && marketSuggestionActiveIndex < marketSuggestionItems.length) {
+      applyMarketCompanySuggestion(marketSuggestionActiveIndex);
+      return;
+    }
+    marketFilters.companyQuery = normalizeMarketText(marketCompanySearch.value);
+    renderMarketTable();
+    hideMarketSuggestions();
+    return;
+  }
+  if (event.key === 'Escape') {
+    event.preventDefault();
+    hideMarketSuggestions();
+  }
+}
+
+function setupMarketInteractions() {
+  if (marketCompanySearch) {
+    marketCompanySearch.addEventListener('input', () => {
+      handleMarketCompanySearchInput();
+    });
+    marketCompanySearch.addEventListener('focus', () => {
+      const query = normalizeMarketText(marketCompanySearch.value);
+      if (!query) return;
+      renderMarketSuggestions(buildMarketCompanySuggestions(query));
+    });
+    marketCompanySearch.addEventListener('keydown', (event) => {
+      handleMarketCompanySearchKeydown(event);
+    });
+  }
+
+  marketSortableHeaders.forEach((header) => {
+    header.addEventListener('click', () => {
+      const sortKey = normalizeMarketText(header?.dataset?.sortKey);
+      if (!sortKey) return;
+      toggleMarketSort(sortKey);
+    });
+  });
+
+  document.addEventListener('click', (event) => {
+    if (!marketSearchSuggestions || !marketCompanySearch) return;
+    const target = event.target;
+    if (!(target instanceof Node)) {
+      hideMarketSuggestions();
+      return;
+    }
+    if (marketSearchSuggestions.contains(target) || marketCompanySearch.contains(target)) return;
+    hideMarketSuggestions();
+  });
+
+  updateMarketSortHeaders();
+}
+
+async function loadMarketData(responsesOverride = null) {
+  if (!marketStatus || !marketTable || !marketTableBody) return;
+
+  let responses = Array.isArray(responsesOverride) ? responsesOverride : null;
+  if (!responses) {
+    await ensureResponseStorageReady();
+    responses = await readResponsesFromStorage();
+  }
+
+  marketRows = buildMarketRowsFromResponses(responses);
+  renderMarketTable();
 }
 
 chrome.storage.onChanged.addListener((changes, namespace) => {

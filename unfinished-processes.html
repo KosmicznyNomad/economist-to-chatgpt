@@ -1,0 +1,287 @@
+<!DOCTYPE html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <title>Recovery Niedokonczonych Procesow</title>
+  <style>
+    :root {
+      --bg: #f3f5f8;
+      --panel: #ffffff;
+      --border: #d8dee6;
+      --text: #17212b;
+      --muted: #5b6876;
+      --ok: #0f766e;
+      --warn: #b45309;
+      --err: #b91c1c;
+      --run: #1d4ed8;
+      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+    }
+    * {
+      box-sizing: border-box;
+    }
+    body {
+      margin: 0;
+      padding: 16px;
+      background: linear-gradient(160deg, #eef2f7 0%, #f8fafc 100%);
+      color: var(--text);
+      font-family: "Segoe UI", Tahoma, sans-serif;
+      min-height: 100vh;
+    }
+    .header {
+      display: flex;
+      flex-wrap: wrap;
+      justify-content: space-between;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    h1 {
+      margin: 0;
+      font-size: 22px;
+      letter-spacing: 0.01em;
+    }
+    .actions {
+      display: flex;
+      gap: 8px;
+      flex-wrap: wrap;
+    }
+    .btn {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 8px 12px;
+      font-size: 12px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .btn:hover:not(:disabled) {
+      transform: translateY(-1px);
+      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.12);
+    }
+    .btn:disabled {
+      opacity: 0.7;
+      cursor: wait;
+    }
+    .btn-primary {
+      background: #0f172a;
+      color: #fff;
+      border-color: #0f172a;
+    }
+    .status {
+      border: 1px solid var(--border);
+      background: #fff;
+      border-radius: 10px;
+      padding: 8px 10px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: #334155;
+      white-space: pre-wrap;
+    }
+    .status.error {
+      border-color: #fecaca;
+      background: #fef2f2;
+      color: var(--err);
+    }
+    .metrics {
+      display: grid;
+      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+      gap: 10px;
+      margin-bottom: 12px;
+    }
+    .metric {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      padding: 10px 12px;
+      box-shadow: var(--shadow);
+      min-height: 68px;
+    }
+    .metric-title {
+      margin: 0 0 6px;
+      font-size: 11px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+    .metric-value {
+      font-size: 15px;
+      font-weight: 700;
+    }
+    .layout {
+      display: grid;
+      gap: 12px;
+    }
+    .panel {
+      background: var(--panel);
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      box-shadow: var(--shadow);
+      padding: 12px;
+      min-width: 0;
+    }
+    .panel h2 {
+      margin: 0 0 8px;
+      font-size: 14px;
+    }
+    .table-wrap {
+      overflow: auto;
+      border: 1px solid #e6ebf1;
+      border-radius: 10px;
+      background: #fff;
+    }
+    table {
+      width: 100%;
+      border-collapse: collapse;
+      min-width: 1040px;
+    }
+    th, td {
+      border-bottom: 1px solid #edf1f5;
+      text-align: left;
+      padding: 8px 9px;
+      font-size: 12px;
+      vertical-align: top;
+    }
+    th {
+      position: sticky;
+      top: 0;
+      background: #f8fafc;
+      z-index: 1;
+      color: var(--muted);
+      text-transform: uppercase;
+      font-size: 11px;
+      letter-spacing: 0.04em;
+    }
+    .placeholder {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 10px;
+    }
+    .badge {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 700;
+      padding: 2px 8px;
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+      color: #fff;
+    }
+    .badge-running { background: var(--run); }
+    .badge-completed { background: var(--ok); }
+    .badge-completed_with_errors { background: var(--warn); }
+    .badge-interrupted { background: #64748b; }
+    .badge-idle { background: #64748b; }
+    .outcome-resumed { color: var(--ok); font-weight: 700; }
+    .outcome-skipped_missing_chat_url,
+    .outcome-skipped_not_found,
+    .outcome-skipped_already_completed { color: var(--warn); font-weight: 700; }
+    .outcome-failed { color: var(--err); font-weight: 700; }
+    .link-btn {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      border-radius: 8px;
+      padding: 4px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+    .mono {
+      font-family: Consolas, "Courier New", monospace;
+    }
+    @media (max-width: 980px) {
+      body {
+        padding: 12px;
+      }
+    }
+  </style>
+</head>
+<body>
+  <div class="header">
+    <h1>Recovery niedokonczonych procesow</h1>
+    <div class="actions">
+      <button class="btn" id="refresh-btn">Odswiez liste</button>
+      <button class="btn btn-primary" id="run-btn">Uruchom wszystkie</button>
+      <button class="btn" id="open-panel-btn">Panel decyzyjny</button>
+    </div>
+  </div>
+
+  <div id="status" class="status">Ladowanie danych...</div>
+
+  <div class="metrics">
+    <div class="metric">
+      <p class="metric-title">Total</p>
+      <div id="metric-total" class="metric-value">-</div>
+    </div>
+    <div class="metric">
+      <p class="metric-title">Runnable</p>
+      <div id="metric-runnable" class="metric-value">-</div>
+    </div>
+    <div class="metric">
+      <p class="metric-title">Missing chatUrl</p>
+      <div id="metric-missing" class="metric-value">-</div>
+    </div>
+    <div class="metric">
+      <p class="metric-title">Batch status</p>
+      <div id="metric-batch-status" class="metric-value">-</div>
+    </div>
+    <div class="metric">
+      <p class="metric-title">Batch progress</p>
+      <div id="metric-progress" class="metric-value">-</div>
+    </div>
+  </div>
+
+  <div class="layout">
+    <section class="panel">
+      <h2>Lista procesow (status != completed)</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>runId</th>
+              <th>status</th>
+              <th>stage</th>
+              <th>updated</th>
+              <th>chatUrl</th>
+              <th>runnable</th>
+              <th>akcje</th>
+            </tr>
+          </thead>
+          <tbody id="process-body">
+            <tr><td colspan="8" class="placeholder">Brak danych.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+
+    <section class="panel">
+      <h2>Batch report</h2>
+      <div class="table-wrap">
+        <table>
+          <thead>
+            <tr>
+              <th>#</th>
+              <th>runId</th>
+              <th>title</th>
+              <th>outcome</th>
+              <th>detected/start</th>
+              <th>method</th>
+              <th>reason</th>
+              <th>error</th>
+              <th>chat</th>
+            </tr>
+          </thead>
+          <tbody id="batch-body">
+            <tr><td colspan="9" class="placeholder">Czekam na uruchomienie batch.</td></tr>
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </div>
+
+  <script src="unfinished-processes.js"></script>
+</body>
+</html>

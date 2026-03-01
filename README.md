@@ -107,6 +107,7 @@ Keep these in sync when adding/removing domains:
 - Keep `STAGE_NAMES_COMPANY` aligned with company prompt order/count.
 - `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
 - Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
+- Process monitor uses periodic heartbeat sweep (`chrome.alarms`) with stale TTL warnings to improve near-live remote state visibility.
 - YouTube transcript support is best-effort and depends on caption availability for a given video.
 - On restart/restore flows, ChatGPT tabs are automatically ungrouped from Chrome tab groups to keep workflow tabs independent.
 

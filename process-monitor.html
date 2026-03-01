@@ -78,6 +78,7 @@
     }
     .bulk-actions {
       display: flex;
+      flex-direction: column;
       gap: 8px;
     }
     .view-controls {
@@ -548,6 +549,7 @@
     <div class="sidebar">
       <div class="bulk-actions">
         <button id="resume-all-btn" class="bulk-btn" disabled>Nastepny etap we wszystkich</button>
+        <button id="unfinished-processes-btn" class="bulk-btn">Recovery niedokonczonych</button>
       </div>
       <div class="view-controls">
         <select id="view-filter" class="view-filter">
