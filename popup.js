@@ -25,6 +25,79 @@ function sendRuntimeMessage(payload) {
   });
 }
 
+function summarizeClientErrorValue(rawValue) {
+  if (rawValue == null) return '';
+  if (typeof rawValue === 'string') return rawValue.trim();
+  if (rawValue instanceof Error) return (rawValue.stack || rawValue.message || rawValue.name || '').trim();
+  try {
+    return JSON.stringify(rawValue);
+  } catch {
+    return String(rawValue);
+  }
+}
+
+function reportProblemLogFromUi(rawEntry = {}) {
+  const source = typeof rawEntry?.source === 'string' && rawEntry.source.trim()
+    ? rawEntry.source.trim()
+    : 'popup-ui';
+  const message = typeof rawEntry?.message === 'string' && rawEntry.message.trim()
+    ? rawEntry.message.trim()
+    : 'popup_problem';
+  const error = typeof rawEntry?.error === 'string' ? rawEntry.error.trim() : '';
+  const reason = typeof rawEntry?.reason === 'string' ? rawEntry.reason.trim() : '';
+  const signature = typeof rawEntry?.signature === 'string' && rawEntry.signature.trim()
+    ? rawEntry.signature.trim()
+    : ['popup-ui', source, rawEntry?.title || '', reason, error, message].join('|');
+  try {
+    chrome.runtime.sendMessage({
+      type: 'REPORT_PROBLEM_LOG',
+      entry: {
+        level: rawEntry?.level === 'warn' ? 'warn' : 'error',
+        source,
+        title: typeof rawEntry?.title === 'string' ? rawEntry.title : '',
+        reason,
+        error,
+        message,
+        signature
+      }
+    }, () => {});
+  } catch {
+    // Ignore runtime bridge errors in popup.
+  }
+}
+
+function installPopupRuntimeProblemLogging() {
+  window.addEventListener('error', (event) => {
+    const fileName = typeof event?.filename === 'string' ? event.filename.trim() : '';
+    const lineNo = Number.isInteger(event?.lineno) ? event.lineno : null;
+    const colNo = Number.isInteger(event?.colno) ? event.colno : null;
+    const location = fileName
+      ? `${fileName}${lineNo !== null ? `:${lineNo}` : ''}${colNo !== null ? `:${colNo}` : ''}`
+      : '';
+    const errorText = summarizeClientErrorValue(event?.error || event?.message || '');
+    reportProblemLogFromUi({
+      source: 'popup-window',
+      title: 'Popup runtime error',
+      reason: location || 'popup_error',
+      error: errorText,
+      message: typeof event?.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : (errorText || 'popup_runtime_error')
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    const reasonText = summarizeClientErrorValue(event?.reason);
+    reportProblemLogFromUi({
+      source: 'popup-window',
+      title: 'Popup unhandled rejection',
+      reason: 'unhandledrejection',
+      error: reasonText,
+      message: reasonText || 'popup_unhandled_rejection'
+    });
+  });
+}
+
 function createReloadResumeMonitorSessionId(origin = 'popup') {
   const normalizedOrigin = typeof origin === 'string' && origin.trim()
     ? origin.trim().toLowerCase().replace(/[^a-z0-9_-]+/g, '-').replace(/-+/g, '-')
@@ -433,6 +506,9 @@ function formatDispatchStatus(status) {
     ? ` Ostatni blad: ${formatDispatchErrorText(status.latestOutboxError)}${status.latestOutboxErrorTrace ? ` (${status.latestOutboxErrorTrace})` : ''}.`
     : '';
   const latestProcessLogText = formatLatestDispatchProcessLog(status.recentProcessLogs);
+  const supportIdText = typeof status.supportId === 'string' && status.supportId.trim()
+    ? ` Support ID: ${status.supportId.trim()}.`
+    : '';
   const flushInProgressAgeMs = Number.isInteger(status.flushInProgressAgeMs)
     ? Math.max(0, status.flushInProgressAgeMs)
     : 0;
@@ -445,7 +521,7 @@ function formatDispatchStatus(status) {
   const flushInProgressText = status.flushInProgress
     ? ` Flush aktywny: tak${flushInProgressAgeMs > 0 ? `, wiek=${Math.round(flushInProgressAgeMs / 1000)}s` : ''}${flushInProgressReason ? `, reason=${flushInProgressReason}` : ''}${flushInProgressSinceText ? `, start=${flushInProgressSinceText}` : ''}.`
     : '';
-  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${flushInProgressText}${retryText}${errorText}${latestProcessLogText}`;
+  const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${flushInProgressText}${retryText}${errorText}${latestProcessLogText}${supportIdText}`;
 
   if (status.configured) {
     if (status.tokenSource === 'inline_config') {
@@ -1848,6 +1924,8 @@ if (chrome?.runtime?.onMessage?.addListener) {
     void refreshAutoRestoreStatus(false);
   });
 }
+
+installPopupRuntimeProblemLogging();
 
 void Promise.all([
   refreshDispatchStatus(true),

@@ -7,13 +7,19 @@ const historyToggle = document.getElementById('history-toggle');
 const historyList = document.getElementById('history-list');
 const resumeAllBtn = document.getElementById('resume-all-btn');
 const processSummary = document.getElementById('process-summary');
+const viewFilterSelect = document.getElementById('view-filter');
+const viewQueryInput = document.getElementById('view-query');
+const viewHint = document.getElementById('view-hint');
 
 let selectedProcessId = null;
 let currentProcesses = [];
+let activeProcessesCache = [];
 let allProcessesCache = [];
 let lastSignature = '';
 let lastHistorySignature = '';
 let historyOpen = false;
+let viewFilterMode = 'all';
+let viewQueryValue = '';
 const processCardMap = new Map();
 const processSeenAt = new Map();
 let stageNamesCompany = [];
@@ -62,6 +68,7 @@ chrome.runtime.onMessage.addListener((message) => {
 
 // Odswiezaj co 6s jako backup
 setInterval(refreshProcesses, 3000);
+installProcessMonitorRuntimeProblemLogging();
 
 if (historyToggle && historyList) {
   historyToggle.addEventListener('click', () => {
@@ -73,6 +80,27 @@ if (historyToggle && historyList) {
 if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void resumeAllProcesses();
+  });
+}
+
+if (viewFilterSelect) {
+  viewFilterSelect.addEventListener('change', () => {
+    const nextValue = typeof viewFilterSelect.value === 'string' ? viewFilterSelect.value : 'all';
+    viewFilterMode = nextValue || 'all';
+    lastSignature = '';
+    updateUI(activeProcessesCache.length > 0 ? activeProcessesCache : currentProcesses, { force: true });
+  });
+}
+
+if (viewQueryInput) {
+  let queryTimer = null;
+  viewQueryInput.addEventListener('input', () => {
+    if (queryTimer) clearTimeout(queryTimer);
+    queryTimer = setTimeout(() => {
+      viewQueryValue = typeof viewQueryInput.value === 'string' ? viewQueryInput.value.trim().toLowerCase() : '';
+      lastSignature = '';
+      updateUI(activeProcessesCache.length > 0 ? activeProcessesCache : currentProcesses, { force: true });
+    }, 120);
   });
 }
 
@@ -128,6 +156,79 @@ function sendRuntimeMessage(payload) {
         return;
       }
       resolve(response && typeof response === 'object' ? response : {});
+    });
+  });
+}
+
+function summarizeClientErrorValue(rawValue) {
+  if (rawValue == null) return '';
+  if (typeof rawValue === 'string') return rawValue.trim();
+  if (rawValue instanceof Error) return (rawValue.stack || rawValue.message || rawValue.name || '').trim();
+  try {
+    return JSON.stringify(rawValue);
+  } catch {
+    return String(rawValue);
+  }
+}
+
+function reportProblemLogFromUi(rawEntry = {}) {
+  const source = typeof rawEntry?.source === 'string' && rawEntry.source.trim()
+    ? rawEntry.source.trim()
+    : 'process-monitor-ui';
+  const message = typeof rawEntry?.message === 'string' && rawEntry.message.trim()
+    ? rawEntry.message.trim()
+    : 'process_monitor_problem';
+  const error = typeof rawEntry?.error === 'string' ? rawEntry.error.trim() : '';
+  const reason = typeof rawEntry?.reason === 'string' ? rawEntry.reason.trim() : '';
+  const signature = typeof rawEntry?.signature === 'string' && rawEntry.signature.trim()
+    ? rawEntry.signature.trim()
+    : ['process-monitor-ui', source, rawEntry?.title || '', reason, error, message].join('|');
+  try {
+    chrome.runtime.sendMessage({
+      type: 'REPORT_PROBLEM_LOG',
+      entry: {
+        level: rawEntry?.level === 'warn' ? 'warn' : 'error',
+        source,
+        title: typeof rawEntry?.title === 'string' ? rawEntry.title : '',
+        reason,
+        error,
+        message,
+        signature
+      }
+    }, () => {});
+  } catch {
+    // Ignore runtime bridge errors in UI page.
+  }
+}
+
+function installProcessMonitorRuntimeProblemLogging() {
+  window.addEventListener('error', (event) => {
+    const fileName = typeof event?.filename === 'string' ? event.filename.trim() : '';
+    const lineNo = Number.isInteger(event?.lineno) ? event.lineno : null;
+    const colNo = Number.isInteger(event?.colno) ? event.colno : null;
+    const location = fileName
+      ? `${fileName}${lineNo !== null ? `:${lineNo}` : ''}${colNo !== null ? `:${colNo}` : ''}`
+      : '';
+    const errorText = summarizeClientErrorValue(event?.error || event?.message || '');
+    reportProblemLogFromUi({
+      source: 'process-monitor-window',
+      title: 'Process monitor runtime error',
+      reason: location || 'process_monitor_error',
+      error: errorText,
+      message: typeof event?.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : (errorText || 'process_monitor_runtime_error')
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    const reasonText = summarizeClientErrorValue(event?.reason);
+    reportProblemLogFromUi({
+      source: 'process-monitor-window',
+      title: 'Process monitor unhandled rejection',
+      reason: 'unhandledrejection',
+      error: reasonText,
+      message: reasonText || 'process_monitor_unhandled_rejection'
     });
   });
 }
@@ -513,7 +614,7 @@ function isDataGapProcess(process) {
     typeof process?.statusText === 'string' ? process.statusText : '',
     typeof process?.error === 'string' ? process.error : ''
   ].join(' ');
-  return /\bdata[_\s-]?gaps?\b/i.test(marker);
+  return /\bdata[_\s-]?gaps?(?:\b|[_-])/i.test(marker);
 }
 
 function isMissingReplyProcess(process) {
@@ -537,6 +638,215 @@ function isFailedStatus(status) {
 
 function isCompletedStatus(status) {
   return status === 'completed';
+}
+
+const priorityReasonWeights = Object.freeze({
+  data_gap_unresolved: 42,
+  missing_assistant_reply: 34,
+  timeout: 28,
+  send_failed: 26,
+  invalid_response: 20,
+  save_failed: 24,
+  save_response_failed: 24,
+  inject_failed: 18,
+  execute_script_failed: 18,
+  textarea_not_found: 16,
+  auto_resume_failed: 15,
+  auto_resume_execute_script_failed: 15,
+  auto_resume_unhandled_exception: 15,
+  data_gap_rewind_applied: 12
+});
+
+function resolveReasonPriorityWeight(reasonCode) {
+  const normalized = normalizeCodeToken(reasonCode);
+  if (!normalized) return 0;
+  if (priorityReasonWeights[normalized]) return priorityReasonWeights[normalized];
+  if (normalized.startsWith('auto_recovery_')) return 10;
+  return 0;
+}
+
+function getProcessPriorityModel(process) {
+  if (!process || typeof process !== 'object') {
+    return {
+      code: 'P4',
+      label: 'Niski',
+      score: 0,
+      className: 'priority-p4',
+      drivers: ['brak_danych'],
+      summary: 'brak danych'
+    };
+  }
+
+  const status = getNormalizedStatus(process);
+  if (isCompletedStatus(status)) {
+    return {
+      code: 'P4',
+      label: 'Niski',
+      score: 0,
+      className: 'priority-p4',
+      drivers: ['completed'],
+      summary: 'zakonczony'
+    };
+  }
+
+  let score = 0;
+  const drivers = [];
+
+  if (process.needsAction) {
+    score += 40;
+    drivers.push('needs_action');
+  }
+  if (isFailedStatus(status)) {
+    score += 30;
+    drivers.push('failed_status');
+  }
+  if (isDataGapProcess(process)) {
+    score += 35;
+    drivers.push('data_gap');
+  }
+  if (isMissingReplyProcess(process)) {
+    score += 28;
+    drivers.push('missing_reply');
+  }
+
+  const reasonCode = normalizeCodeToken(process?.reason || '');
+  const reasonWeight = resolveReasonPriorityWeight(reasonCode);
+  if (reasonWeight > 0) {
+    score += reasonWeight;
+    drivers.push(`reason:${reasonCode}`);
+  }
+
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  if (persistenceStatus?.saveOk === false) {
+    score += 20;
+    drivers.push('save_failed');
+  } else if (normalizeCodeToken(persistenceStatus?.bridgeError || '')) {
+    score += 8;
+    drivers.push('bridge_fallback');
+  }
+
+  const updatedAt = Number.isInteger(process.timestamp) ? process.timestamp : process.startedAt;
+  if (Number.isInteger(updatedAt) && updatedAt > 0) {
+    const ageMinutes = Math.max(0, (Date.now() - updatedAt) / 60_000);
+    if (ageMinutes >= 10) {
+      const ageScore = Math.min(20, Math.floor((ageMinutes - 10) / 5) * 3 + 3);
+      score += ageScore;
+      drivers.push(`stale_${Math.round(ageMinutes)}m`);
+    }
+  }
+
+  const progress = getProgressPercent(process?.currentPrompt, process?.totalPrompts);
+  if (process.needsAction && progress >= 80) {
+    score += 8;
+    drivers.push('late_stage_block');
+  }
+
+  score = Math.max(0, Math.min(100, Math.round(score)));
+
+  if (score >= 70) {
+    return {
+      code: 'P1',
+      label: 'Krytyczny',
+      score,
+      className: 'priority-p1',
+      drivers,
+      summary: drivers.join(', ')
+    };
+  }
+  if (score >= 50) {
+    return {
+      code: 'P2',
+      label: 'Wysoki',
+      score,
+      className: 'priority-p2',
+      drivers,
+      summary: drivers.join(', ')
+    };
+  }
+  if (score >= 30) {
+    return {
+      code: 'P3',
+      label: 'Sredni',
+      score,
+      className: 'priority-p3',
+      drivers,
+      summary: drivers.join(', ')
+    };
+  }
+  return {
+    code: 'P4',
+    label: 'Niski',
+    score,
+    className: 'priority-p4',
+    drivers,
+    summary: drivers.join(', ') || 'niski sygnal'
+  };
+}
+
+function isDefaultViewScope() {
+  return viewFilterMode === 'all' && !viewQueryValue;
+}
+
+function getViewScopeLabel() {
+  switch (viewFilterMode) {
+    case 'needs_action':
+      return 'wymaga akcji';
+    case 'p1p2':
+      return 'priorytet P1/P2';
+    case 'failed':
+      return 'status blad';
+    case 'data_gap':
+      return 'DATA_GAPS';
+    default:
+      return 'wszystkie aktywne';
+  }
+}
+
+function matchesViewFilter(process) {
+  if (!process || typeof process !== 'object') return false;
+
+  switch (viewFilterMode) {
+    case 'needs_action':
+      return !!process.needsAction;
+    case 'p1p2': {
+      const code = getProcessPriorityModel(process).code;
+      return code === 'P1' || code === 'P2';
+    }
+    case 'failed':
+      return isFailedStatus(getNormalizedStatus(process));
+    case 'data_gap':
+      return isDataGapProcess(process);
+    case 'all':
+    default:
+      return true;
+  }
+}
+
+function matchesViewQuery(process) {
+  if (!viewQueryValue) return true;
+  const haystack = [
+    process?.title || '',
+    process?.id || '',
+    process?.reason || '',
+    process?.statusText || '',
+    process?.error || ''
+  ].join(' ').toLowerCase();
+  return haystack.includes(viewQueryValue);
+}
+
+function applyViewFilters(processes) {
+  const items = Array.isArray(processes) ? processes : [];
+  return items.filter((process) => matchesViewFilter(process) && matchesViewQuery(process));
+}
+
+function updateViewHint(visibleCount, totalCount) {
+  if (!viewHint) return;
+  const safeVisible = Number.isInteger(visibleCount) ? visibleCount : 0;
+  const safeTotal = Number.isInteger(totalCount) ? totalCount : 0;
+  const queryPart = viewQueryValue ? `, query="${viewQueryValue}"` : '';
+  viewHint.textContent = `Widok: ${getViewScopeLabel()}${queryPart} | pokazane ${safeVisible}/${safeTotal}`;
 }
 
 function getProgressPercent(currentPrompt, totalPrompts) {
@@ -652,6 +962,13 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const avgProgress = activeProgress.length > 0
     ? Math.round(activeProgress.reduce((sum, value) => sum + value, 0) / activeProgress.length)
     : 0;
+  const priorityCounts = { P1: 0, P2: 0, P3: 0, P4: 0 };
+  activeItems.forEach((process) => {
+    const code = getProcessPriorityModel(process).code;
+    if (priorityCounts[code] !== undefined) {
+      priorityCounts[code] += 1;
+    }
+  });
   const oldestActiveTs = activeItems.reduce((oldest, process) => {
     const ts = Number.isInteger(process?.startedAt)
       ? process.startedAt
@@ -663,12 +980,17 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const stageInfo = stageNamesLoaded ? `Etapy: ${stageNamesCompany.length}` : 'Etapy: ladowanie...';
 
   if (processSummary) {
-    let summary = `Aktywne: ${activeCount} | Wymaga akcji: ${needsActionCount} | Zakonczone: ${completedCount} | Blad: ${failedCount} | DATA_GAPS: ${dataGapCount} | Braki odp.: ${missingReplyCount} | Wszystkie: ${totalCount}`;
-    summary += ` | Sredni postep aktywnych: ${avgProgress}%`;
-    summary += ` | Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`;
-    summary += ` | ${stageInfo}`;
+    const summary = `Aktywne ${activeCount} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
+    const details = [
+      `DATA_GAPS: ${dataGapCount}`,
+      `Braki odpowiedzi: ${missingReplyCount}`,
+      `Sredni postep aktywnych: ${avgProgress}%`,
+      `Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`,
+      `Priorytety aktywnych: P1=${priorityCounts.P1}, P2=${priorityCounts.P2}, P3=${priorityCounts.P3}, P4=${priorityCounts.P4}`,
+      stageInfo
+    ];
     if (consistencyIssues.length > 0) {
-      summary += ` | Korekta: ${consistencyIssues.join(',')}`;
+      details.push(`Korekta licznikow: ${consistencyIssues.join(',')}`);
       console.warn('[panel] Wykryto niespojnosc licznikow procesow', {
         issues: consistencyIssues,
         statusCounts: buildStatusCounts(allItems),
@@ -678,6 +1000,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
       });
     }
     processSummary.textContent = summary;
+    processSummary.title = details.join(' | ');
   }
 }
 
@@ -692,10 +1015,12 @@ function makeResponseKey(response) {
   if (!response || typeof response !== 'object') return '';
   const timestamp = Number.isInteger(response.timestamp) ? response.timestamp : 0;
   const runId = typeof response.runId === 'string' ? response.runId : '';
+  const responseId = typeof response.responseId === 'string' ? response.responseId : '';
   const analysisType = response.analysisType || '';
   const source = response.source || '';
   const text = response.text || '';
-  return `${timestamp}|${runId}|${analysisType}|${source}|${text.length}`;
+  const head = typeof text === 'string' ? text.slice(0, 64) : '';
+  return `${timestamp}|${runId}|${responseId}|${analysisType}|${source}|${text.length}|${head}`;
 }
 
 function mergeResponses(primary, secondary) {
@@ -752,26 +1077,7 @@ function parseDecisionRecordLine(text) {
     .map((item) => item.trim())
     .filter((item, index, all) => !(index === all.length - 1 && item === ''));
   const fieldCount = parts.length;
-  if (fieldCount !== 12 && fieldCount !== 13 && fieldCount !== 15) return null;
-
-  if (fieldCount === 15) {
-    return {
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      company: parts[2],
-      sourceMaterial: parts[4],
-      thesis: parts[5],
-      asymmetry: parts[8],
-      bear: '',
-      base: '',
-      bull: '',
-      voi: parts[9],
-      sector: parts[10],
-      region: parts[11],
-      currency: parts[12],
-      recordFormat: 'legacy_15'
-    };
-  }
+  if (fieldCount !== 12 && fieldCount !== 13) return null;
 
   if (fieldCount === 13) {
     return {
@@ -1160,11 +1466,19 @@ function buildProcessCard() {
   const title = document.createElement('div');
   title.className = 'process-title';
 
+  const tags = document.createElement('div');
+  tags.className = 'process-tags';
+
   const type = document.createElement('div');
   type.className = 'process-type';
 
+  const priority = document.createElement('div');
+  priority.className = 'process-priority priority-p4';
+
+  tags.appendChild(type);
+  tags.appendChild(priority);
   header.appendChild(title);
-  header.appendChild(type);
+  header.appendChild(tags);
 
   const status = document.createElement('div');
   status.className = 'process-status';
@@ -1243,6 +1557,7 @@ function buildProcessCard() {
     refs: {
       title,
       type,
+      priority,
       statusLine,
       statusBadge,
       dbDelivery,
@@ -1309,6 +1624,10 @@ function updateProcessCard(entry, process, isSelected) {
 
   refs.title.textContent = process.title || 'Bez tytulu';
   refs.type.textContent = 'company';
+  const priorityModel = getProcessPriorityModel(process);
+  refs.priority.textContent = `${priorityModel.code} ${priorityModel.label}`;
+  refs.priority.className = `process-priority ${priorityModel.className}`;
+  refs.priority.title = `score=${priorityModel.score} | ${priorityModel.summary}`;
 
   const currentPrompt = Number.isInteger(process.currentPrompt) ? process.currentPrompt : 0;
   const totalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : 0;
@@ -1318,7 +1637,7 @@ function updateProcessCard(entry, process, isSelected) {
   const tabLabel = Number.isInteger(process.tabId) ? String(process.tabId) : '-';
   const windowLabel = Number.isInteger(process.windowId) ? String(process.windowId) : '-';
 
-  refs.statusLine.textContent = `Prompt ${currentPrompt} / ${totalPrompts} (${progress}%)`;
+  refs.statusLine.textContent = `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`;
 
   const status = getNormalizedStatus(process);
   let statusBadgeText = 'W trakcie';
@@ -1353,27 +1672,23 @@ function updateProcessCard(entry, process, isSelected) {
   const stageLabel = resolveStageLabel(process);
   refs.stageMeta.textContent = `Etap: ${stageLabel}`;
 
-  const statusLine = process.statusText ? String(process.statusText) : '';
-  const persistenceLines = getPersistenceLogLines(process, 2);
-  if (statusLine || updatedAt || persistenceLines.length > 0) {
-    const statusChunk = statusLine ? statusLine : 'brak statusText';
-    const persistenceChunk = persistenceLines.length > 0
-      ? ` | ${persistenceLines.join(' | ')}`
-      : '';
-    refs.statusMeta.textContent = `Status: ${statusChunk}${persistenceChunk} | Aktualizacja: ${formatRelativeTime(updatedAt)}`;
+  const statusLine = process.statusText ? shortenText(String(process.statusText), 96) : '';
+  if (statusLine || updatedAt) {
+    const statusChunk = statusLine || 'brak statusu';
+    refs.statusMeta.textContent = `${statusChunk} | ${formatRelativeTime(updatedAt)}`;
     refs.statusMeta.style.display = 'block';
   } else {
     refs.statusMeta.textContent = '';
     refs.statusMeta.style.display = 'none';
   }
 
-  refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni update: ${formatClock(updatedAt)} (${formatRelativeTime(updatedAt)})`;
-  refs.locationMeta.textContent = `Tab: ${tabLabel} | Okno: ${windowLabel} | ID: ${process.id || '-'}`;
+  refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni: ${formatClock(updatedAt)}`;
+  refs.locationMeta.textContent = `Tab ${tabLabel} | Okno ${windowLabel}`;
 
   const reasonText = buildProcessReasonLine(process);
 
   if (reasonText) {
-    refs.reason.textContent = `Powod: ${reasonText}`;
+    refs.reason.textContent = `Uwaga: ${reasonText}`;
     refs.reason.style.display = 'block';
   } else {
     refs.reason.textContent = '';
@@ -1387,9 +1702,13 @@ function updateProcessCard(entry, process, isSelected) {
     refs.skipBtn.disabled = false;
   }
 
-  refs.hint.textContent = needsAction
-    ? 'Wybierz akcje ponizej (Kontynuuj = nastepny prompt) lub kliknij aby przejsc do okna'
-    : 'Kliknij aby zobaczyc okno';
+  if (needsAction) {
+    refs.hint.textContent = 'Wybierz akcje lub otworz okno ChatGPT.';
+    refs.hint.style.display = 'block';
+  } else {
+    refs.hint.textContent = '';
+    refs.hint.style.display = 'none';
+  }
 }
 
 function openChatTab(process) {
@@ -1560,6 +1879,7 @@ async function applyProcessesUpdate(processes, options = {}) {
   try {
     const active = await filterActiveProcesses(items);
     if (requestId !== updateSequence) return;
+    activeProcessesCache = active.slice();
     const activeIds = new Set(active.map((process) => process.id));
     const history = items.filter((process) => !activeIds.has(process.id));
     updateSummaryPanels(items, active, history);
@@ -1568,6 +1888,7 @@ async function applyProcessesUpdate(processes, options = {}) {
   } catch (error) {
     console.warn('[panel] Nie udalo sie odswiezyc procesow:', error);
     if (requestId !== updateSequence) return;
+    activeProcessesCache = items.slice();
     updateSummaryPanels(items, items, []);
     updateUI(items, options);
     updateHistory([]);
@@ -1944,10 +2265,11 @@ function scheduleDecisionButtonRecovery(processId, waitBtn, skipBtn, delayMs = 1
 }
 
 function updateUI(processes, options = {}) {
-  const items = Array.isArray(processes) ? processes.slice() : [];
-  if (items.length === 0) {
+  const sourceItems = Array.isArray(processes) ? processes.slice() : [];
+  if (sourceItems.length === 0) {
     processList.innerHTML = '';
     emptyState.style.display = 'block';
+    emptyState.textContent = 'Brak aktywnych procesow.';
     selectedProcessId = null;
     currentProcesses = [];
     lastSignature = '';
@@ -1957,20 +2279,43 @@ function updateUI(processes, options = {}) {
     processConversationAuditInFlight.clear();
     processCompanySnapshotCache.clear();
     processCompanySnapshotInFlight.clear();
+    updateViewHint(0, 0);
     renderDetails();
     updateResumeAllButtonState();
     return;
   }
-  
+
+  const filteredItems = applyViewFilters(sourceItems);
+  if (filteredItems.length === 0) {
+    processList.innerHTML = '';
+    emptyState.style.display = 'block';
+    emptyState.textContent = 'Brak procesow dla wybranego filtra.';
+    selectedProcessId = null;
+    currentProcesses = [];
+    lastSignature = '';
+    for (const [processId, entry] of processCardMap.entries()) {
+      entry.card.remove();
+      processCardMap.delete(processId);
+    }
+    updateViewHint(0, sourceItems.length);
+    renderDetails();
+    updateResumeAllButtonState();
+    return;
+  }
+
   emptyState.style.display = 'none';
-  
-  const itemsWithKey = items.map((process) => ({
+  emptyState.textContent = 'Brak aktywnych procesow.';
+
+  const itemsWithKey = filteredItems.map((process) => ({
     process,
-    sortKey: getProcessSortKey(process)
+    sortKey: getProcessSortKey(process),
+    priority: getProcessPriorityModel(process)
   }));
 
-  // Sortuj: needs-action najpierw, potem stabilnie po starcie
+  // Sortowanie triage: najwyzszy priorytet -> needs-action -> najnowsze.
   itemsWithKey.sort((a, b) => {
+    const byPriority = (b.priority?.score || 0) - (a.priority?.score || 0);
+    if (byPriority !== 0) return byPriority;
     const aNeeds = !!a.process.needsAction;
     const bNeeds = !!b.process.needsAction;
     if (aNeeds && !bNeeds) return -1;
@@ -1983,8 +2328,7 @@ function updateUI(processes, options = {}) {
   const orderedItems = itemsWithKey.map((entry) => entry.process);
 
   if (!selectedProcessId) {
-    const needsAction = orderedItems.find((process) => process.needsAction);
-    selectedProcessId = needsAction ? needsAction.id : orderedItems[0].id;
+    selectedProcessId = orderedItems[0].id;
   } else if (!orderedItems.some((process) => process.id === selectedProcessId)) {
     selectedProcessId = orderedItems[0].id;
   }
@@ -2057,6 +2401,7 @@ function updateUI(processes, options = {}) {
   }
 
   currentProcesses = orderedItems.slice();
+  updateViewHint(currentProcesses.length, sourceItems.length);
   renderDetails();
   updateResumeAllButtonState();
 }
@@ -2072,8 +2417,8 @@ function updateHistory(processes) {
   if (signature === lastHistorySignature) {
     if (historyToggle) {
       historyToggle.textContent = items.length > 0
-        ? `Poprzednie procesy (${items.length})`
-        : 'Poprzednie procesy';
+        ? `Historia (${items.length})`
+        : 'Historia';
     }
     updateResumeAllButtonState();
     return;
@@ -2083,8 +2428,8 @@ function updateHistory(processes) {
 
   if (historyToggle) {
     historyToggle.textContent = items.length > 0
-      ? `Poprzednie procesy (${items.length})`
-      : 'Poprzednie procesy';
+      ? `Historia (${items.length})`
+      : 'Historia';
   }
 
   if (!historyList) return;
@@ -2193,12 +2538,12 @@ function updateResumeAllButtonState() {
   const needsActionCount = getNeedsActionProcesses().length;
   if (needsActionCount > 0) {
     resumeAllBtn.disabled = false;
-    resumeAllBtn.textContent = `Wyslij nastepny prompt we wszystkich (${needsActionCount})`;
+    resumeAllBtn.textContent = `Nastepny etap we wszystkich (${needsActionCount})`;
     return;
   }
 
   resumeAllBtn.disabled = true;
-  resumeAllBtn.textContent = 'Wyslij nastepny prompt we wszystkich';
+  resumeAllBtn.textContent = 'Nastepny etap we wszystkich';
 }
 
 async function resumeAllProcesses() {
@@ -2433,7 +2778,7 @@ function renderDetails() {
       : selected.needsAction
         ? 'Wymaga akcji'
         : 'W trakcie';
-  subtitle.textContent = statusLabel;
+    subtitle.textContent = `Status: ${statusLabel}`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
 
@@ -2441,7 +2786,7 @@ function renderDetails() {
   if (reasonSummary) {
     const reasonMeta = document.createElement('div');
     reasonMeta.className = 'details-subtitle';
-    reasonMeta.textContent = `Powod: ${reasonSummary}`;
+    reasonMeta.textContent = `Uwaga: ${reasonSummary}`;
     titleWrap.appendChild(reasonMeta);
   }
 
@@ -2450,46 +2795,16 @@ function renderDetails() {
   const detailsProgress = getProgressPercent(selected.currentPrompt, selected.totalPrompts);
   const detailsStage = resolveStageLabel(selected);
   const detailsUpdatedAt = Number.isInteger(selected.timestamp) ? selected.timestamp : selected.startedAt;
-  metaWrap.textContent = `Etap: ${detailsStage} | Prompt ${selected.currentPrompt || 0} / ${selected.totalPrompts || 0} (${detailsProgress}%) | Aktualizacja: ${formatRelativeTime(detailsUpdatedAt)}`;
+  metaWrap.textContent = `Etap ${detailsStage} | Prompt ${selected.currentPrompt || 0}/${selected.totalPrompts || 0} (${detailsProgress}%) | ${formatRelativeTime(detailsUpdatedAt)}`;
+  const priorityMeta = document.createElement('div');
+  priorityMeta.className = 'details-subtitle';
+  const priorityModel = getProcessPriorityModel(selected);
+  priorityMeta.textContent = `Priorytet: ${priorityModel.code} ${priorityModel.label} (score=${priorityModel.score})`;
 
   header.appendChild(titleWrap);
   header.appendChild(metaWrap);
+  header.appendChild(priorityMeta);
 
-  const injectMetrics = selected?.injectMetrics && typeof selected.injectMetrics === 'object'
-    ? selected.injectMetrics
-    : null;
-  if (injectMetrics) {
-    const metricsLine = document.createElement('div');
-    metricsLine.className = 'details-subtitle';
-    const sendVerified = Number.isInteger(injectMetrics.sendOkVerified) ? injectMetrics.sendOkVerified : 0;
-    const sendInferred = Number.isInteger(injectMetrics.sendOkInferred) ? injectMetrics.sendOkInferred : 0;
-    const sendAttempts = Number.isInteger(injectMetrics.sendAttempts) ? injectMetrics.sendAttempts : 0;
-    const captureOk = Number.isInteger(injectMetrics.captureOk) ? injectMetrics.captureOk : 0;
-    const captureEmpty = Number.isInteger(injectMetrics.captureEmpty) ? injectMetrics.captureEmpty : 0;
-    const sendOk = sendVerified + sendInferred;
-    metricsLine.textContent = `IO: sent_ok=${sendOk} (verified=${sendVerified}, inferred=${sendInferred}) attempts=${sendAttempts} | captured_ok=${captureOk} empty=${captureEmpty}`;
-    header.appendChild(metricsLine);
-  }
-
-  const autoRecovery = selected?.autoRecovery && typeof selected.autoRecovery === 'object'
-    ? selected.autoRecovery
-    : null;
-  if (autoRecovery) {
-    const autoAttempt = Number.isInteger(autoRecovery.attempt) ? autoRecovery.attempt : 0;
-    const autoMaxAttempts = Number.isInteger(autoRecovery.maxAttempts) ? autoRecovery.maxAttempts : 0;
-    const autoDelaySec = Number.isInteger(autoRecovery.delayMs) ? Math.round(autoRecovery.delayMs / 1000) : 0;
-    const autoReason = typeof autoRecovery.reason === 'string' && autoRecovery.reason.trim()
-      ? autoRecovery.reason
-      : 'unknown';
-    const autoReasonLabel = getReasonLabel(`auto_recovery_${autoReason}`) || humanizeToken(autoReason);
-    const autoCurrentPrompt = Number.isInteger(autoRecovery.currentPrompt) ? autoRecovery.currentPrompt : null;
-    const autoLine = document.createElement('div');
-    autoLine.className = 'details-subtitle';
-    autoLine.textContent = `Auto-recovery: ${autoAttempt}/${autoMaxAttempts}, reason=${autoReasonLabel || autoReason}, delay=${autoDelaySec}s${autoCurrentPrompt !== null ? `, prompt=${autoCurrentPrompt}` : ''}`;
-    header.appendChild(autoLine);
-  }
-
-  const persistenceLines = getPersistenceLogLines(selected, 6);
   const dbBadgeModel = getDatabaseBadgeModel(selected);
   if (dbBadgeModel.visible && dbBadgeModel.detailText) {
     const databaseLine = document.createElement('div');
@@ -2497,12 +2812,7 @@ function renderDetails() {
     databaseLine.textContent = dbBadgeModel.detailText;
     header.appendChild(databaseLine);
   }
-  if (persistenceLines.length > 0) {
-    const persistenceLine = document.createElement('div');
-    persistenceLine.className = 'details-subtitle';
-    persistenceLine.textContent = `Log zapisu: ${persistenceLines.join(' | ')}`;
-    header.appendChild(persistenceLine);
-  }
+  // Keep storage log available in source data but hide raw log noise from the main panel.
 
   const actions = document.createElement('div');
   actions.className = 'details-actions';
@@ -2543,7 +2853,7 @@ function renderDetails() {
   if (canResumeNextFromDetails) {
     const resumeNextBtn = document.createElement('button');
     resumeNextBtn.className = 'details-open details-resume-next';
-    resumeNextBtn.textContent = 'Resume next stage';
+    resumeNextBtn.textContent = 'Wznow nastepny etap';
     resumeNextBtn.addEventListener('click', () => {
       void resumeNextStageFromPanel(selected, resumeNextBtn);
     });
@@ -2552,7 +2862,7 @@ function renderDetails() {
 
   const copyCompletedBtn = document.createElement('button');
   copyCompletedBtn.className = 'details-copy';
-  copyCompletedBtn.textContent = 'Skopiuj skonczona odpowiedz';
+  copyCompletedBtn.textContent = 'Kopiuj final';
   copyCompletedBtn.disabled = !isProcessCompleted(selected);
   copyCompletedBtn.addEventListener('click', () => {
     if (copyCompletedBtn.disabled) return;
@@ -2565,8 +2875,8 @@ function renderDetails() {
   }
   detailsContainer.appendChild(header);
 
-  const companySnapshotCard = buildDetailsAuditCard('Snapshot spolki (z finalnej odpowiedzi)');
-  const companyAuditCard = buildDetailsAuditCard('Audit etapow + DATA_GAPS (liczenie backend)');
+  const companySnapshotCard = buildDetailsAuditCard('Snapshot decyzji');
+  const companyAuditCard = buildDetailsAuditCard('Audit etapow');
   detailsContainer.appendChild(companySnapshotCard.card);
   detailsContainer.appendChild(companyAuditCard.card);
   void hydrateDetailsCards(selected, companySnapshotCard.body, companyAuditCard.body);
@@ -2591,12 +2901,12 @@ function renderDetails() {
       const summary = document.createElement('summary');
       const summaryLabel = document.createElement('span');
       summaryLabel.className = 'message-summary';
-      const roleLabel = message.role === 'user' ? 'User' : 'Bot';
+      const roleLabel = message.role === 'user' ? 'Uzytkownik' : 'Asystent';
       const stageLabel = message.stageName
         ? message.stageName
         : (Number.isInteger(message.stageIndex) ? `Prompt ${message.stageIndex + 1}` : 'Wiadomosc');
       const truncatedLabel = message.truncated ? ' - skrocone' : '';
-      summaryLabel.textContent = `${roleLabel} - ${stageLabel}${truncatedLabel}`;
+      summaryLabel.textContent = `${roleLabel} | ${stageLabel}${truncatedLabel}`;
 
       const preview = document.createElement('span');
       preview.className = 'message-preview';

@@ -98,31 +98,64 @@ function formatStageLine(response) {
   return parts.join(' | ');
 }
 
-function formatFourGateTable(text) {
-  if (!text || typeof text !== 'string') return null;
-  const parts = text.split(';').map((part) => part.trim());
-  if (parts.length === 16 && parts[15] === '') {
-    parts.pop();
-  }
-  if (parts.length !== 15) return null;
+function parseDecisionRecordParts(raw) {
+  if (!raw || typeof raw !== 'string') return null;
+  const parts = raw
+    .split(';')
+    .map((part) => part.trim())
+    .filter((item, index, all) => !(index === all.length - 1 && item === ''));
+  if (parts.length !== 12 && parts.length !== 13) return null;
+  return parts;
+}
 
-  const labels = [
+function formatDecisionRecordTable(text) {
+  if (!text || typeof text !== 'string') return null;
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+
+  let parts = null;
+  for (let i = lines.length - 1; i >= 0; i -= 1) {
+    parts = parseDecisionRecordParts(lines[i]);
+    if (parts) break;
+  }
+  if (!parts) {
+    const flattened = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
+    parts = parseDecisionRecordParts(flattened);
+  }
+  if (!parts) return null;
+
+  const labels12 = [
     'Data decyzji',
     'Status decyzji',
     'Spolka',
-    'Krotkie streszczenie tezy',
     'Material zrodlowy',
     'Teza inwestycyjna',
-    'Watpliwosci/ryzyka',
-    'Gate rating',
-    'Asymetria/Divergence',
-    'VOI/Falsifiers',
+    'Bear scenario (TOTAL)',
+    'Base scenario (TOTAL)',
+    'Bull scenario (TOTAL)',
+    'VOI/Falsifiers/Primary risk',
     'Sektor',
     'Region',
-    'Waluta',
-    'WHY BUY',
-    'WHY AVOID'
+    'Waluta'
   ];
+  const labels13 = [
+    'Data decyzji',
+    'Status decyzji',
+    'Spolka',
+    'Material zrodlowy',
+    'Teza inwestycyjna',
+    'Asymetria/Divergence',
+    'Bear scenario (TOTAL)',
+    'Base scenario (TOTAL)',
+    'Bull scenario (TOTAL)',
+    'VOI/Falsifiers/Primary risk',
+    'Sektor',
+    'Region',
+    'Waluta'
+  ];
+  const labels = parts.length === 13 ? labels13 : labels12;
 
   return labels
     .map((label, index) => `${index + 1} - ${label} - ${parts[index] || ''}`)
@@ -462,7 +495,7 @@ function createResponseItem(response) {
   const copyBtn = document.createElement('button');
   copyBtn.className = 'copy-btn';
   copyBtn.textContent = 'Kopiuj';
-  const formattedText = response.formattedText || response.formatted_text || formatFourGateTable(response.text);
+  const formattedText = response.formattedText || response.formatted_text || formatDecisionRecordTable(response.text);
   const displayText = formattedText || response.text;
   copyBtn.addEventListener('click', () => copyToClipboard(displayText, copyBtn));
   

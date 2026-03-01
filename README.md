@@ -84,6 +84,7 @@ Manual PDF mode behavior:
 - Open from popup (`Problem log` button).
 - Review runtime/process issues with stage/status/reason context.
 - Use refresh and clear controls to validate recovery after fixes.
+- Use `Zdalne` to fetch remote problem logs from Watchlist intake API (HMAC auth, optional `Support ID` filter).
 
 ### Watchlist intake setup
 1. Open popup -> `Watchlist intake`.

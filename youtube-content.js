@@ -16,6 +16,81 @@ window.__iskraYtTranscriptScriptReady = true;
 
 console.log('[yt-transcript] content script initialized');
 
+function summarizeContentErrorValue(rawValue) {
+  if (rawValue == null) return '';
+  if (typeof rawValue === 'string') return rawValue.trim();
+  if (rawValue instanceof Error) return (rawValue.stack || rawValue.message || rawValue.name || '').trim();
+  try {
+    return JSON.stringify(rawValue);
+  } catch {
+    return String(rawValue);
+  }
+}
+
+function reportProblemLogFromContent(rawEntry = {}) {
+  const source = typeof rawEntry?.source === 'string' && rawEntry.source.trim()
+    ? rawEntry.source.trim()
+    : 'youtube-content';
+  const message = typeof rawEntry?.message === 'string' && rawEntry.message.trim()
+    ? rawEntry.message.trim()
+    : 'youtube_content_problem';
+  const error = typeof rawEntry?.error === 'string' ? rawEntry.error.trim() : '';
+  const reason = typeof rawEntry?.reason === 'string' ? rawEntry.reason.trim() : '';
+  const signature = typeof rawEntry?.signature === 'string' && rawEntry.signature.trim()
+    ? rawEntry.signature.trim()
+    : ['youtube-content', source, rawEntry?.title || '', reason, error, message].join('|');
+  try {
+    chrome.runtime.sendMessage({
+      type: 'REPORT_PROBLEM_LOG',
+      entry: {
+        level: rawEntry?.level === 'warn' ? 'warn' : 'error',
+        source,
+        title: typeof rawEntry?.title === 'string' ? rawEntry.title : '',
+        reason,
+        error,
+        message,
+        signature
+      }
+    }, () => {});
+  } catch {
+    // Ignore runtime bridge errors in content script.
+  }
+}
+
+function installYoutubeContentRuntimeProblemLogging() {
+  window.addEventListener('error', (event) => {
+    const fileName = typeof event?.filename === 'string' ? event.filename.trim() : '';
+    const lineNo = Number.isInteger(event?.lineno) ? event.lineno : null;
+    const colNo = Number.isInteger(event?.colno) ? event.colno : null;
+    const location = fileName
+      ? `${fileName}${lineNo !== null ? `:${lineNo}` : ''}${colNo !== null ? `:${colNo}` : ''}`
+      : '';
+    const errorText = summarizeContentErrorValue(event?.error || event?.message || '');
+    reportProblemLogFromContent({
+      source: 'youtube-content-window',
+      title: 'YouTube content runtime error',
+      reason: location || 'youtube_content_error',
+      error: errorText,
+      message: typeof event?.message === 'string' && event.message.trim()
+        ? event.message.trim()
+        : (errorText || 'youtube_content_runtime_error')
+    });
+  });
+
+  window.addEventListener('unhandledrejection', (event) => {
+    const reasonText = summarizeContentErrorValue(event?.reason);
+    reportProblemLogFromContent({
+      source: 'youtube-content-window',
+      title: 'YouTube content unhandled rejection',
+      reason: 'unhandledrejection',
+      error: reasonText,
+      message: reasonText || 'youtube_content_unhandled_rejection'
+    });
+  });
+}
+
+installYoutubeContentRuntimeProblemLogging();
+
 function sleep(ms) {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
