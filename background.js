@@ -3723,6 +3723,7 @@ async function stopSingleProcess(process, options = {}) {
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
   const replayOnRestart = options?.replayLatestResponse === true
     || reason === 'restarted_in_same_window';
+  const forceReplayLatestResponse = options?.forceReplayLatestResponse === true;
   let replayResult = null;
 
   if (reason === 'restarted_in_same_window' && processTabId !== null) {
@@ -3741,7 +3742,7 @@ async function stopSingleProcess(process, options = {}) {
 
   if (replayOnRestart) {
     replayResult = await replayCompletedResponseForProcess(process, {
-      force: options?.forceReplayLatestResponse === true || reason === 'restarted_in_same_window',
+      force: forceReplayLatestResponse,
       tabId: processTabId,
       tabReadTimeoutMs: 1800
     });
@@ -15608,6 +15609,84 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+function clampWindowMetric(value, minValue, maxValue) {
+  const safeMin = Number.isFinite(minValue) ? minValue : value;
+  const safeMax = Number.isFinite(maxValue) ? maxValue : value;
+  const lower = Math.min(safeMin, safeMax);
+  const upper = Math.max(safeMin, safeMax);
+  return Math.min(Math.max(value, lower), upper);
+}
+
+async function resolveReferenceWindowForChatCreation(preferredWindowId = null) {
+  if (Number.isInteger(preferredWindowId)) {
+    try {
+      return await chrome.windows.get(preferredWindowId);
+    } catch (_) {
+      // Fallback to last focused window.
+    }
+  }
+  try {
+    return await chrome.windows.getLastFocused();
+  } catch (_) {
+    return null;
+  }
+}
+
+function buildPhoneLikeChatWindowCreateOptions(chatUrl, referenceWindow = null) {
+  const aspectRatio = 9 / 16;
+  const fillRatio = 0.94;
+  const defaultBudgetWidth = 720;
+  const defaultBudgetHeight = 1080;
+  const edgeMarginPx = 24;
+
+  const refWidth = Number.isInteger(referenceWindow?.width) && referenceWindow.width > 0
+    ? referenceWindow.width
+    : null;
+  const refHeight = Number.isInteger(referenceWindow?.height) && referenceWindow.height > 0
+    ? referenceWindow.height
+    : null;
+
+  const widthBudget = refWidth
+    ? Math.max(240, Math.round(refWidth * fillRatio))
+    : defaultBudgetWidth;
+  const heightBudget = refHeight
+    ? Math.max(420, Math.round(refHeight * fillRatio))
+    : defaultBudgetHeight;
+
+  let width = Math.round(Math.min(widthBudget, heightBudget * aspectRatio));
+  let height = Math.round(width / aspectRatio);
+  if (height > heightBudget) {
+    height = heightBudget;
+    width = Math.round(height * aspectRatio);
+  }
+
+  const minWidth = Math.min(360, widthBudget);
+  const minHeight = Math.min(640, heightBudget);
+  width = clampWindowMetric(width, minWidth, widthBudget);
+  height = clampWindowMetric(height, minHeight, heightBudget);
+
+  const createOptions = {
+    url: chatUrl,
+    type: "normal",
+    focused: true,
+    width,
+    height
+  };
+
+  const hasReferencePosition = Number.isInteger(referenceWindow?.left)
+    && Number.isInteger(referenceWindow?.top)
+    && Number.isInteger(refWidth)
+    && Number.isInteger(refHeight);
+  if (hasReferencePosition) {
+    const rightAlignedOffset = Math.max(0, refWidth - width - edgeMarginPx);
+    const centeredTopOffset = Math.max(0, Math.round((refHeight - height) / 2));
+    createOptions.left = referenceWindow.left + rightAlignedOffset;
+    createOptions.top = referenceWindow.top + centeredTopOffset;
+  }
+
+  return createOptions;
+}
+
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
@@ -15761,12 +15840,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         messages: []
       });
 
+      const referenceWindow = await resolveReferenceWindowForChatCreation(
+        sourceWindowId !== null ? sourceWindowId : invocationWindowId
+      );
+
       // Otwórz nowe okno ChatGPT
-      const window = await chrome.windows.create({
-        url: chatUrl,
-        type: "normal",
-        focused: true  // POPRAWKA: Aktywuj okno od razu
-      });
+      const window = await chrome.windows.create(
+        buildPhoneLikeChatWindowCreateOptions(chatUrl, referenceWindow)
+      );
 
       const chatTabId = window.tabs[0].id;
 
