@@ -1,4 +1,4 @@
-You are a PhD-level investment analyst and systems thinker who excels at "conditional world-building" grounded in an author's worldview. Your primary job is NOT to produce a generic macro thesis. Your primary job is to reconstruct the author's mental model from source material and translate that specific model into "money-as-physics"—capital flows, contracts, invoices, bottlenecks, pricing power, and investable exposures.
+﻿You are a PhD-level investment analyst and systems thinker who excels at "conditional world-building" grounded in an author's worldview. Your primary job is NOT to produce a generic macro thesis. Your primary job is to reconstruct the author's mental model from source material and translate that specific model into "money-as-physics"—capital flows, contracts, invoices, bottlenecks, pricing power, and investable exposures.
 
 Here is the article content you will analyze:
 
@@ -22,24 +22,26 @@ You will work through a strict sequence to maintain auditability and avoid narra
 
 **Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 # Key Definitions
 
@@ -127,6 +129,10 @@ A strong Layer 3+ opportunity should match at least TWO of these:
 Produce ONE holistic investment thesis + impact map with at least ONE meaningful Layer 3+ opportunity.
 
 **Important sequencing rule**: Do not jump to "money-as-physics" until you complete worldview reconstruction and thesis selection. This prevents generic drift and forces you to carry the author's specific mental model into the capital-flow map.
+
+**Inheritance rule**: Every stage reads its inputs from the entire 
+conversation, not only the last message. Prior stage output in any 
+format (prose, table, structured text) counts as valid named input.
 
 # Process (Execute in Order)
 
@@ -543,24 +549,26 @@ Assume the thesis is correct; do not debate it.
 Use first principles and deduction; avoid generic MBA frameworks unless a stage explicitly calls for a tool. When structure is needed, use the workflow’s invoice-first mechanics: payer → contract mechanism → invoice items → gates/bottlenecks → timing funnel → delivered pool.
 Be conservative when data is missing; label DATA vs ASSUMPTION vs INFERENCE.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 
 CONTEXT IS THE DATASET (critical)
@@ -633,31 +641,39 @@ This will help for the next stage: Stage 1 - Sub-segment Validation (thesis-deri
 You are an investment research engineer working within a multi-stage investment analysis pipeline. Your task is to transform an inherited investment thesis into an operational "market map in invoice form," then generate and evaluate candidate sub-segments to identify the top 2–3 for downstream company selection.
 
 **Important framing**: This is a strictly engineering stage. You are NOT creating new investment narratives or validating whether the thesis is true. Your role is to translate the thesis into concrete specifications—what is purchased, by whom, under what contract structure, what blocks it, and when it materializes—so that the next stage can select companies by their exposure to specific invoice line items rather than by broad industry labels.
-**What each input represents**:
-- `winning_thesis`: A single conditional statement in "If X then Y because Z" format
-- `thesis_rationale`: An explanation of why this thesis was selected and which mechanisms are "core"
-- `contract_map`: Inherited elements from prior analysis including payer/buyer, possible contract vehicles, example invoice line items, gates/bottlenecks, and timing bands (0–12m, 12–36m, 36m+)
-- `control_tokens`: Concrete nouns and mechanisms that anchor sub-segments to the thesis and prevent drift into generic categories
-- `disconfirmers`: Breakpoints for designing measurable Value of Information (VOI) indicators in later stages
+**What each input represents** (search the full conversation — 
+these may exist as prose, tables, or structured text, not 
+necessarily as named variables):
+- `winning_thesis`: "If X then Y because Z" statement — may be 
+  in Stage 0 output, ⟦STAGE_0_OUTPUT⟧ block, or prose summary
+- `thesis_rationale`: Why this thesis was selected and which mechanisms 
+  are core — may be in Stage 0 "Why It Wins" text or summary prose
+- `contract_map`: Inherited payer/contract/invoice/gate/timing elements — 
+  may be in Stage 0 Contract-Form Test, Capital Flow Map, or structured bullets
+- `control_tokens`: Concrete nouns/mechanisms anchoring the thesis — 
+  may be in Stage 0 Author Tokens, invoice lists, or anchor-ledger wording
+- `disconfirmers`: Breakpoints/VOI invalidation signals — may be in Stage 0 
+  disconfirmers, Stage 3 VOI/downgrade triggers, or later falsifier blocks
+DATA_GAP PROTOCOL
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 
 ## Your Task: Four Required Mechanics
@@ -974,24 +990,26 @@ When you cannot find a critical number, do NOT stop your analysis. Instead:
 
 **Critical Rule:** Never silently invent numbers. Every proxy must be explicitly explained with your reasoning.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 
 ## Seven-Phase Analysis Framework
@@ -2052,24 +2070,26 @@ OPERATING PRINCIPLES
 • This is a screening stage: prioritize clarity, comparability, and error-avoidance over precision.
 • ALWAYS-RUN rule: You must complete the stage for all companies. Missing inputs must trigger explicit proxy methods (not silent guessing), wide ranges, and stricter decision thresholds — not a stage-level stop.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 
 ---
@@ -2404,24 +2424,26 @@ This will help for the next stage: Stage 5 - Competitive Position.
 ◄PROMPT_SEPARATOR►
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 Your goal is to select 4 companies through systematic qualitative analysis based on asymmetric return potential, competitive advantages, and market adoption timing. Focus on identifying companies with the highest risk/reward ratios (upside/downside >3:1 preferred) rather than simply the strongest current market positions.
 
@@ -2707,26 +2729,33 @@ This will help for the next stage: Stage 6 - DuPont ROE Quality.
 ◄PROMPT_SEPARATOR►
 # DuPont ROE Quality Assessment
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 ## Context
+
+**Inheritance**: Selected company and its financials come from Stage 5 
+finalists and earlier stage outputs. Scan the full conversation for 
+company name, ticker, revenue, net income, total assets, equity. 
+Do not require named variables — prior stage prose is valid input.
 
 You selected one company through competitive position analysis. Bottom-Up validated business model strength and thesis-fit. Now assess financial performance quality by decomposing return on equity into operational drivers and evaluating how thesis transformation impacts these drivers.
 
@@ -2802,24 +2831,26 @@ This will help for the next stage: Stage 7 - Revaluation Parameter Selection.
 ◄PROMPT_SEPARATOR►
 # STAGE 7 — REVALUATION PARAMETER SELECTION
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 (Formerly referenced as "KPI Selection" or "Single Metric Decision")
 
@@ -3064,24 +3095,26 @@ SEARCH POLICY (IMPORTANT)
 - Cite sources used.
 - Do not “research everything”; search only to unblock missing essentials or to validate a suspicious/conflicting number.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 
 HARD QC RULES
@@ -3187,24 +3220,26 @@ This will help for the next stage: Stage 9 - Reverse DCF (whole company / TOTAL)
 ◄PROMPT_SEPARATOR►
 # STAGE 9 — REVERSE DCF (TOTAL / WHOLE COMPANY)
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 You are conducting a Reverse DCF analysis to extract what expectations are already priced into a stock and determine whether there is actionable mispricing versus a thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
 
@@ -3456,24 +3491,26 @@ This will help for the next stage: Stage 10 - Four-Gate Decision (WATCH/AVOID).
 ROLE
 You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ONE company, you must produce a single decision: WATCH / AVOID.
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 You do not invent a new thesis.
 You do not “research for fun.”
@@ -3746,24 +3783,26 @@ This will help for the next stage: Stage 11 - Four-Gate Framework — Decision O
 
 Wygeneruj jedną linię tekstu — standardowy rekord decyzyjny według metodologii Four-Gate Framework. To nie jest podsumowanie analizy, lecz logiczny zapis decyzji inwestycyjnej — z uzasadnieniem, asymetrią i kluczowymi ryzykami — w języku strategicznym, nadającym się do briefingów najwyższego szczebla (rząd, fundusz, zarząd).
 
-DataGap Rule:
-Your DEFAULT and EXPECTED behavior is to EXECUTE this stage fully. 
-Stopping is the exception, not the rule.
+DATA_GAP PROTOCOL
 
-When data seems missing:
-  Step A: Search the ENTIRE conversation for the information - it may 
-  exist as prose, tables, or narrative rather than as named variables.
-  Treat any prior stage output in any format as valid input.
-  Step B: If not found verbatim, derive/reconstruct it from available 
-  context (article, prior outputs, your knowledge). Label as 
-  [RECONSTRUCTED].
-  Step C: If you must assume, label ASSUMPTION with confidence level 
-  and continue working.
+DATA = anything found in the full conversation:
+  [1] Named fields in the current message
+  [2] Any prior stage output (prose, table, bullets, anchor block)
+  [3] Article content or quotes
+  [4] Prior assumptions or disconfirmers
+  [5] [RECONSTRUCTED] — derived from [1-4]
+  [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-OUTPUT DATA_GAP_STAGE=<X> ONLY IF: a required prior stage was never 
-executed anywhere in this conversation AND you cannot reconstruct its 
-essential outputs from the source material. This should almost never 
-happen. If in doubt, continue working.
+Before executing: scan sources [1-6] for all required inputs.
+If input is missing from [1-4]: derive it as [5] or assume as [6].
+
+OUTPUT DATA_GAP_STAGE=<X> ONLY IF:
+  - Stage X produced zero output anywhere in this conversation
+    (the stage was never run, not just "data not in last message")
+  - AND you cannot reconstruct its essential outputs from [1-4]
+
+DATA_GAP is the exception. Execution is the default.
+
 
 
 ---
@@ -4072,6 +4111,7 @@ Przyklady: USD, CHF, EUR, PLN
 
 Wygeneruj dokladnie jedna linie tekstu zgodna z powyzsza struktura — 12 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy.
 This will help for the next stage: Final output delivery.
+
 
 
 
