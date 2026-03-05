@@ -1227,12 +1227,24 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
   const failureIntakeUrl = typeof finalStagePersistence?.failureIntakeUrl === 'string'
     ? finalStagePersistence.failureIntakeUrl.trim()
     : '';
+  const conversationLogCount = Number.isInteger(finalStagePersistence?.conversationLogCount)
+    ? Math.max(0, finalStagePersistence.conversationLogCount)
+    : null;
+  const hasConversationUrl = finalStagePersistence?.hasConversationUrl === true;
+  const conversationSnapshotRefreshed = finalStagePersistence?.conversationSnapshotRefreshed === true;
+  const conversationSnapshotSource = typeof finalStagePersistence?.conversationSnapshotSource === 'string'
+    ? finalStagePersistence.conversationSnapshotSource.trim()
+    : '';
   const diagnosticParts = [];
   if (failureStage) diagnosticParts.push(`etap=${failureStage}`);
   if (failureReasonLabel) diagnosticParts.push(`powod=${failureReasonLabel}`);
   if (failureStatus !== null) diagnosticParts.push(`http=${failureStatus}`);
   if (failureRequestId) diagnosticParts.push(`request_id=${safePreview(failureRequestId, failureRequestId)}`);
   if (failureIntakeUrl) diagnosticParts.push(`url=${safePreview(failureIntakeUrl, failureIntakeUrl)}`);
+  if (conversationLogCount !== null) diagnosticParts.push(`conv_logs=${conversationLogCount}`);
+  if (hasConversationUrl) diagnosticParts.push('conv_url=1');
+  if (conversationSnapshotRefreshed) diagnosticParts.push('conv_refresh=1');
+  if (conversationSnapshotSource) diagnosticParts.push(`conv_source=${safePreview(conversationSnapshotSource, conversationSnapshotSource)}`);
   const diagnosticSuffix = diagnosticParts.length > 0
     ? ` Diagnostyka: ${diagnosticParts.join(', ')}.`
     : '';

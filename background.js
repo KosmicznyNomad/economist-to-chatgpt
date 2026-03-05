@@ -39,6 +39,9 @@ const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
+const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
+const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
+const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
 
 // Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
 const WATCHLIST_DISPATCH = {
@@ -111,6 +114,8 @@ const WATCHLIST_CONNECTION_LOG_DEDUPE_MS = 15 * 60 * 1000;
 const EXTENSION_INSTALLATION_ID_STORAGE_KEY = 'extension_installation_id';
 const WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY = 'watchlist_dispatch_process_log';
 const WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS = 800;
+const RESPONSE_CONVERSATION_LOG_MAX_ITEMS = 40;
+const RESPONSE_CONVERSATION_LOG_MESSAGE_MAX_LENGTH = 420;
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
@@ -2311,6 +2316,186 @@ async function appendProblemLog(rawEntry) {
   return normalized;
 }
 
+function normalizeConversationLogSnapshotEntry(rawEntry) {
+  if (!rawEntry || typeof rawEntry !== 'object') return null;
+  const normalized = sanitizeProblemLogEntry(rawEntry);
+  if (!normalized) return null;
+
+  const chatUrl = normalizeChatConversationUrl(
+    typeof normalized.chatUrl === 'string'
+      ? normalized.chatUrl
+      : (typeof normalized.conversationUrl === 'string' ? normalized.conversationUrl : '')
+  );
+
+  return {
+    id: typeof normalized.id === 'string' ? normalized.id : '',
+    timestamp: Number.isInteger(normalized.timestamp) ? normalized.timestamp : Date.now(),
+    level: normalizeProblemLogLevel(normalized.level),
+    source: trimProblemLogText(normalized.source || '', 80),
+    title: trimProblemLogText(normalized.title || '', 120),
+    category: trimProblemLogText(normalized.category || '', 80),
+    status: trimProblemLogText(normalized.status || '', 40),
+    reason: trimProblemLogText(normalized.reason || '', 140),
+    stageName: trimProblemLogText(normalized.stageName || '', 120),
+    message: trimProblemLogText(normalized.message || '', RESPONSE_CONVERSATION_LOG_MESSAGE_MAX_LENGTH),
+    runId: trimProblemLogText(normalized.runId || '', 120),
+    currentPrompt: Number.isInteger(normalized.currentPrompt) ? normalized.currentPrompt : null,
+    totalPrompts: Number.isInteger(normalized.totalPrompts) ? normalized.totalPrompts : null,
+    chatUrl: chatUrl || ''
+  };
+}
+
+function normalizeConversationLogSnapshot(rawLogs, limit = RESPONSE_CONVERSATION_LOG_MAX_ITEMS) {
+  const safeLimit = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, RESPONSE_CONVERSATION_LOG_MAX_ITEMS)
+    : RESPONSE_CONVERSATION_LOG_MAX_ITEMS;
+  const normalized = (Array.isArray(rawLogs) ? rawLogs : [])
+    .map(normalizeConversationLogSnapshotEntry)
+    .filter(Boolean);
+  if (normalized.length <= safeLimit) return normalized;
+  return normalized.slice(normalized.length - safeLimit);
+}
+
+async function buildConversationLogSnapshotForResponse({ runId = '', conversationUrl = '', limit = RESPONSE_CONVERSATION_LOG_MAX_ITEMS } = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  const normalizedConversationUrl = normalizeChatConversationUrl(
+    typeof conversationUrl === 'string' ? conversationUrl : ''
+  );
+  if (!normalizedRunId && !normalizedConversationUrl) return [];
+
+  await ensureProblemLogReady();
+  const sourceEntries = Array.isArray(problemLogEntries) ? problemLogEntries : [];
+  const matched = sourceEntries.filter((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+
+    const entryRunId = typeof entry.runId === 'string' ? entry.runId.trim() : '';
+    if (normalizedRunId && entryRunId === normalizedRunId) {
+      return true;
+    }
+
+    if (!normalizedConversationUrl) return false;
+    const entryChatUrl = normalizeChatConversationUrl(
+      typeof entry.chatUrl === 'string'
+        ? entry.chatUrl
+        : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
+    );
+    return !!entryChatUrl && entryChatUrl === normalizedConversationUrl;
+  });
+
+  return normalizeConversationLogSnapshot(matched, limit);
+}
+
+async function enrichWatchlistDispatchPayloadConversationSnapshot(payload, copyTrace = 'no-run/no-response') {
+  const basePayload = payload && typeof payload === 'object' ? payload : null;
+  const baseConversationLogCount = Number.isInteger(basePayload?.conversationLogCount) && basePayload.conversationLogCount >= 0
+    ? basePayload.conversationLogCount
+    : null;
+  const baseHasConversationUrl = !!normalizeChatConversationUrl(
+    typeof basePayload?.conversationUrl === 'string' ? basePayload.conversationUrl : ''
+  );
+  if (!basePayload) {
+    return {
+      payload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'invalid_payload'
+      }
+    };
+  }
+
+  const schema = typeof basePayload.schema === 'string' ? basePayload.schema.trim().toLowerCase() : '';
+  if (schema !== 'economist.response.v1') {
+    return {
+      payload: basePayload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'schema_skip'
+      }
+    };
+  }
+
+  const runId = typeof basePayload.runId === 'string' ? basePayload.runId.trim() : '';
+  const responseId = typeof basePayload.responseId === 'string' ? basePayload.responseId.trim() : '';
+  const conversationUrl = normalizeChatConversationUrl(
+    typeof basePayload.conversationUrl === 'string' ? basePayload.conversationUrl : ''
+  );
+  if (!runId && !conversationUrl) {
+    return {
+      payload: basePayload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'missing_scope'
+      }
+    };
+  }
+
+  try {
+    const conversationLogs = await buildConversationLogSnapshotForResponse({
+      runId,
+      conversationUrl,
+      limit: RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+    });
+    if (conversationLogs.length === 0) {
+      return {
+        payload: basePayload,
+        analysis: {
+          conversationLogCount: baseConversationLogCount,
+          hasConversationUrl: !!conversationUrl || baseHasConversationUrl,
+          snapshotRefreshed: false,
+          snapshotSource: 'no_matches'
+        }
+      };
+    }
+
+    const nextPayload = {
+      ...basePayload,
+      conversationLogs,
+      conversationLogCount: conversationLogs.length
+    };
+    if (conversationUrl) {
+      nextPayload.conversationUrl = conversationUrl;
+    }
+
+    console.log('[copy-flow] [dispatch:conversation-snapshot-refreshed]', {
+      trace: copyTrace,
+      runId,
+      responseId,
+      conversationLogCount: conversationLogs.length
+    });
+    return {
+      payload: nextPayload,
+      analysis: {
+        conversationLogCount: conversationLogs.length,
+        hasConversationUrl: !!conversationUrl || baseHasConversationUrl,
+        snapshotRefreshed: true,
+        snapshotSource: 'problem_log_snapshot'
+      }
+    };
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:conversation-snapshot-refresh-failed]', {
+      trace: copyTrace,
+      runId,
+      responseId,
+      error: error?.message || String(error)
+    });
+    return {
+      payload: basePayload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: !!conversationUrl || baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'refresh_failed'
+      }
+    };
+  }
+}
+
 function problemLogSourceMatches(sourceText, token) {
   const source = typeof sourceText === 'string' ? sourceText.trim().toLowerCase() : '';
   const normalizedToken = typeof token === 'string' ? token.trim().toLowerCase() : '';
@@ -3568,6 +3753,9 @@ async function replayCompletedResponseForProcess(process, options = {}) {
       ? saveResult.dispatch
       : null,
     dispatchProcessLog: Array.isArray(saveResult.dispatchProcessLog) ? saveResult.dispatchProcessLog.slice(-16) : [],
+    conversationAnalysis: saveResult.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+      ? saveResult.conversationAnalysis
+      : null,
     dispatchSummary
   };
 }
@@ -3594,6 +3782,21 @@ function summarizeFinalStagePersistence(result) {
   const failureIntakeUrl = typeof dispatch?.failureIntakeUrl === 'string' && dispatch.failureIntakeUrl.trim()
     ? dispatch.failureIntakeUrl.trim()
     : '';
+  const conversationAnalysis = result?.conversationAnalysis && typeof result.conversationAnalysis === 'object'
+    ? result.conversationAnalysis
+    : null;
+  const conversationLogCountRaw = Number.isInteger(dispatch?.conversationLogCount)
+    ? dispatch.conversationLogCount
+    : (Number.isInteger(conversationAnalysis?.conversationLogCount) ? conversationAnalysis.conversationLogCount : null);
+  const conversationLogCount = Number.isInteger(conversationLogCountRaw)
+    ? Math.max(0, conversationLogCountRaw)
+    : null;
+  const hasConversationUrl = dispatch?.hasConversationUrl === true || conversationAnalysis?.hasConversationUrl === true;
+  const conversationSnapshotRefreshed = dispatch?.conversationSnapshotRefreshed === true
+    || conversationAnalysis?.snapshotRefreshedBeforeSend === true;
+  const conversationSnapshotSource = (typeof dispatch?.conversationSnapshotSource === 'string' && dispatch.conversationSnapshotSource.trim())
+    ? dispatch.conversationSnapshotSource.trim()
+    : (typeof conversationAnalysis?.snapshotSource === 'string' ? conversationAnalysis.snapshotSource.trim() : '');
   const state = typeof dispatch?.state === 'string' && dispatch.state.trim()
     ? dispatch.state.trim()
     : '';
@@ -3620,6 +3823,10 @@ function summarizeFinalStagePersistence(result) {
     failureStatus,
     failureRequestId,
     failureIntakeUrl,
+    conversationLogCount,
+    hasConversationUrl,
+    conversationSnapshotRefreshed,
+    conversationSnapshotSource,
     state
   };
 }
@@ -5196,37 +5403,50 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     let autoRecoveryAttempt = 0;
 
     while (true) {
+      const executionArgs = [
+        executionPayload,
+        executionPromptChain,
+        WAIT_FOR_TEXTAREA_MS,
+        WAIT_FOR_RESPONSE_MS,
+        RETRY_INTERVAL_MS,
+        processTitle,
+        'company',
+        processId,
+        {
+          promptOffset: executionPromptOffset,
+          totalPromptsOverride: PROMPTS_COMPANY.length,
+          composerThinkingEffort
+        },
+        {
+          enabled: true,
+          attempt: autoRecoveryAttempt,
+          maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+          delayMs: AUTO_RECOVERY_DELAY_MS,
+          reasons: [...AUTO_RECOVERY_REASONS]
+        },
+        {
+          persistFinalResponseViaMessage: true,
+          mode: 'runtime_message',
+          saveTimeoutMs: 18000
+        }
+      ];
+
       try {
-        results = await chrome.scripting.executeScript({
-          target: { tabId },
-          function: injectToChat,
-          args: [
-            executionPayload,
-            executionPromptChain,
-            WAIT_FOR_TEXTAREA_MS,
-            WAIT_FOR_RESPONSE_MS,
-            RETRY_INTERVAL_MS,
-            processTitle,
-            'company',
-            processId,
-            {
-              promptOffset: executionPromptOffset,
-              totalPromptsOverride: PROMPTS_COMPANY.length,
-              composerThinkingEffort
-            },
-            {
-              enabled: true,
-              attempt: autoRecoveryAttempt,
-              maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-              delayMs: AUTO_RECOVERY_DELAY_MS,
-              reasons: [...AUTO_RECOVERY_REASONS]
-            },
-            {
-              persistFinalResponseViaMessage: true,
-              mode: 'runtime_message',
-              saveTimeoutMs: 18000
-            }
-          ]
+        results = await executeScriptWithTransientRetry({
+          tabId,
+          scriptFunction: injectToChat,
+          args: executionArgs,
+          contextLabel: 'auto-resume:inject',
+          onRetry: async ({ attempt, maxAttempts, errorText }) => {
+            await upsertProcess(processId, {
+              status: 'running',
+              needsAction: false,
+              statusText: `Auto-resume: retry executeScript ${attempt}/${maxAttempts}`,
+              reason: 'auto_resume_execute_script_retry',
+              error: errorText || '',
+              timestamp: Date.now()
+            });
+          }
         });
       } catch (error) {
         await upsertProcess(processId, {
@@ -7638,6 +7858,99 @@ function waitForTabCompleteWithTimeout(tabId, timeoutMs = 12000) {
   });
 }
 
+function normalizeExecuteScriptErrorMessage(error) {
+  if (typeof error?.message === 'string' && error.message.trim()) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim();
+  }
+  return String(error || '').trim();
+}
+
+function isRetryableExecuteScriptTransientError(error) {
+  const normalized = normalizeExecuteScriptErrorMessage(error).toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes('frame with id') && normalized.includes('removed')) return true;
+  if (normalized.includes('no frame with id')) return true;
+  if (normalized.includes('the frame was removed')) return true;
+  if (normalized.includes('cannot access contents of url')) return true;
+  return false;
+}
+
+async function executeScriptWithTransientRetry({
+  tabId,
+  scriptFunction,
+  args = [],
+  contextLabel = 'executeScript',
+  maxAttempts = EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS,
+  retryDelayMs = EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS,
+  waitTimeoutMs = EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS,
+  onRetry = null
+}) {
+  const safeAttempts = Math.max(
+    1,
+    Number.isInteger(maxAttempts) ? maxAttempts : EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS
+  );
+  const safeRetryDelayMs = Math.max(
+    150,
+    Number.isInteger(retryDelayMs) ? retryDelayMs : EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS
+  );
+  const safeWaitTimeoutMs = Math.max(
+    1000,
+    Number.isInteger(waitTimeoutMs) ? waitTimeoutMs : EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS
+  );
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= safeAttempts; attempt += 1) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        function: scriptFunction,
+        args
+      });
+      return results;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableExecuteScriptTransientError(error);
+      if (!retryable || attempt >= safeAttempts) {
+        throw error;
+      }
+
+      const errorText = normalizeExecuteScriptErrorMessage(error);
+      const normalizedContextLabel = typeof contextLabel === 'string' && contextLabel.trim()
+        ? contextLabel.trim()
+        : 'executeScript';
+
+      console.warn(
+        `[${normalizedContextLabel}] transient executeScript error (${attempt}/${safeAttempts}) tab=${tabId}: ${truncateDispatchLogText(errorText, 220)}`
+      );
+
+      if (typeof onRetry === 'function') {
+        try {
+          await onRetry({
+            attempt,
+            maxAttempts: safeAttempts,
+            tabId,
+            error,
+            errorText
+          });
+        } catch (retryHookError) {
+          console.warn(
+            `[${normalizedContextLabel}] onRetry hook failed:`,
+            retryHookError?.message || retryHookError
+          );
+        }
+      }
+
+      await waitForTabCompleteWithTimeout(tabId, safeWaitTimeoutMs);
+      await sleep(Math.min(3000, safeRetryDelayMs * attempt));
+    }
+  }
+
+  throw lastError || new Error('executeScript failed');
+}
+
 function requestTabReload(tabId, reloadProperties = {}) {
   return new Promise((resolve) => {
     if (!Number.isInteger(tabId)) {
@@ -9945,11 +10258,19 @@ function formatDispatchUiSummary(dispatchOutcome) {
   const failureRequestId = typeof dispatch.failureRequestId === 'string' && dispatch.failureRequestId.trim()
     ? dispatch.failureRequestId.trim()
     : '';
+  const conversationLogCount = Number.isInteger(dispatch.conversationLogCount)
+    ? Math.max(0, dispatch.conversationLogCount)
+    : null;
+  const hasConversationUrl = dispatch.hasConversationUrl === true;
+  const conversationSnapshotRefreshed = dispatch.conversationSnapshotRefreshed === true;
   const diagnosticParts = [];
   if (failureStage) diagnosticParts.push(`stage=${failureStage}`);
   if (failureReason) diagnosticParts.push(`reason=${failureReason}`);
   if (failureStatus !== null) diagnosticParts.push(`http=${failureStatus}`);
   if (failureRequestId) diagnosticParts.push(`requestId=${failureRequestId}`);
+  if (conversationLogCount !== null) diagnosticParts.push(`convLogs=${conversationLogCount}`);
+  if (hasConversationUrl) diagnosticParts.push('convUrl=1');
+  if (conversationSnapshotRefreshed) diagnosticParts.push('convRefresh=1');
   const diagnosticSuffix = diagnosticParts.length > 0
     ? `, diag=[${diagnosticParts.join(', ')}]`
     : '';
@@ -10046,6 +10367,36 @@ function buildDispatchProcessLogUiLines(rawLog) {
     .filter((line) => line);
 }
 
+function buildConversationAnalysisUiLine(saveResult, dispatch) {
+  const conversationAnalysis = saveResult?.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+    ? saveResult.conversationAnalysis
+    : null;
+  const conversationLogCountRaw = Number.isInteger(conversationAnalysis?.conversationLogCount)
+    ? conversationAnalysis.conversationLogCount
+    : (Number.isInteger(dispatch?.conversationLogCount) ? dispatch.conversationLogCount : null);
+  const conversationLogCount = Number.isInteger(conversationLogCountRaw)
+    ? Math.max(0, conversationLogCountRaw)
+    : null;
+  const hasConversationUrl = conversationAnalysis?.hasConversationUrl === true || dispatch?.hasConversationUrl === true;
+  const snapshotRefreshed = conversationAnalysis?.snapshotRefreshedBeforeSend === true
+    || dispatch?.conversationSnapshotRefreshed === true;
+  const snapshotSource = (typeof conversationAnalysis?.snapshotSource === 'string' && conversationAnalysis.snapshotSource.trim())
+    ? conversationAnalysis.snapshotSource.trim()
+    : (typeof dispatch?.conversationSnapshotSource === 'string' ? dispatch.conversationSnapshotSource.trim() : '');
+
+  if (conversationLogCount === null && !hasConversationUrl && !snapshotRefreshed && !snapshotSource) {
+    return '';
+  }
+
+  const parts = [
+    `url=${hasConversationUrl ? 'yes' : 'no'}`,
+    `logs=${conversationLogCount !== null ? conversationLogCount : 'n/a'}`
+  ];
+  if (snapshotRefreshed) parts.push('refresh=yes');
+  if (snapshotSource) parts.push(`source=${snapshotSource}`);
+  return `Konwersacja: ${parts.join(', ')}`;
+}
+
 function buildPersistenceUiSummary(options = {}) {
   const hasResponse = options?.hasResponse !== false;
   const saveResult = options?.saveResult && typeof options.saveResult === 'object'
@@ -10068,6 +10419,7 @@ function buildPersistenceUiSummary(options = {}) {
   );
   const dispatchFlowUiLines = buildDispatchProcessLogUiLines(dispatchProcessLog);
   const dispatchSummary = formatDispatchUiSummary(dispatch);
+  const conversationSummaryLine = buildConversationAnalysisUiLine(saveResult, dispatch);
 
   if (!hasResponse) {
     const logLines = [
@@ -10098,6 +10450,7 @@ function buildPersistenceUiSummary(options = {}) {
       storageSummary,
       ...(bridgeSummary ? [bridgeSummary] : []),
       dispatchSummary,
+      ...(conversationSummaryLine ? [conversationSummaryLine] : []),
       ...dispatchFlowUiLines
     ];
     const bridgeStatusChunk = bridgeSummary ? ` | ${bridgeSummary}` : '';
@@ -10128,6 +10481,7 @@ function buildPersistenceUiSummary(options = {}) {
     storageSummary,
     ...(bridgeSummary ? [bridgeSummary] : []),
     dispatchSummary,
+    ...(conversationSummaryLine ? [conversationSummaryLine] : []),
     ...dispatchFlowUiLines
   ];
   if (copyTrace) {
@@ -10413,6 +10767,10 @@ function summarizeWatchlistDispatchPayload(payload) {
   const decisionRecord = payload.decisionRecord && typeof payload.decisionRecord === 'object'
     ? payload.decisionRecord
     : null;
+  const conversationLogs = Array.isArray(payload.conversationLogs) ? payload.conversationLogs : [];
+  const conversationLogCount = Number.isInteger(payload.conversationLogCount) && payload.conversationLogCount >= 0
+    ? payload.conversationLogCount
+    : (conversationLogs.length > 0 ? conversationLogs.length : null);
   return {
     schema: typeof payload.schema === 'string' ? payload.schema : '',
     responseId: typeof payload.responseId === 'string' ? payload.responseId : '',
@@ -10423,6 +10781,7 @@ function summarizeWatchlistDispatchPayload(payload) {
     textLength: text.length,
     textFingerprint: textFingerprint(text),
     hasConversationUrl: !!(typeof payload.conversationUrl === 'string' && payload.conversationUrl.trim()),
+    conversationLogCount,
     hasDecisionRecord: !!decisionRecord,
     decisionRecordFormat: typeof decisionRecord?.recordFormat === 'string' ? decisionRecord.recordFormat : ''
   };
@@ -10538,6 +10897,16 @@ function normalizeWatchlistDispatchPayload(response) {
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
+  const conversationLogs = normalizeConversationLogSnapshot(
+    response.conversationLogs,
+    RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+  );
+  if (conversationLogs.length > 0) {
+    payload.conversationLogs = conversationLogs;
+    payload.conversationLogCount = conversationLogs.length;
+  } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
+    payload.conversationLogCount = response.conversationLogCount;
+  }
   return payload;
 }
 
@@ -10569,6 +10938,16 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
+  }
+  const conversationLogs = normalizeConversationLogSnapshot(
+    rawPayload.conversationLogs,
+    RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+  );
+  if (conversationLogs.length > 0) {
+    payload.conversationLogs = conversationLogs;
+    payload.conversationLogCount = conversationLogs.length;
+  } else if (Number.isInteger(rawPayload.conversationLogCount) && rawPayload.conversationLogCount > 0) {
+    payload.conversationLogCount = rawPayload.conversationLogCount;
   }
   if (rawPayload.stage && typeof rawPayload.stage === 'object' && !Array.isArray(rawPayload.stage)) {
     payload.stage = rawPayload.stage;
@@ -11996,17 +12375,30 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
       stage: 'send_config'
     };
   }
-  const body = JSON.stringify(payload);
+  const enrichResult = await enrichWatchlistDispatchPayloadConversationSnapshot(payload, copyTrace);
+  const payloadForSend = enrichResult?.payload && typeof enrichResult.payload === 'object'
+    ? enrichResult.payload
+    : (payload && typeof payload === 'object' ? payload : {});
+  const conversationLogCount = Number.isInteger(enrichResult?.analysis?.conversationLogCount)
+    ? Math.max(0, enrichResult.analysis.conversationLogCount)
+    : null;
+  const hasConversationUrl = enrichResult?.analysis?.hasConversationUrl === true
+    || !!normalizeChatConversationUrl(typeof payloadForSend?.conversationUrl === 'string' ? payloadForSend.conversationUrl : '');
+  const conversationSnapshotRefreshed = enrichResult?.analysis?.snapshotRefreshed === true;
+  const conversationSnapshotSource = typeof enrichResult?.analysis?.snapshotSource === 'string'
+    ? enrichResult.analysis.snapshotSource.trim()
+    : '';
+  const body = JSON.stringify(payloadForSend);
   const normalizedTrace = typeof copyTrace === 'string' ? copyTrace.trim() : '';
   const traceSeparator = normalizedTrace.indexOf('/');
   const traceRunIdFromTrace = traceSeparator > 0
     ? normalizedTrace.slice(0, traceSeparator).trim()
     : '';
-  const traceRunId = typeof payload?.runId === 'string' && payload.runId.trim()
-    ? payload.runId.trim()
+  const traceRunId = typeof payloadForSend?.runId === 'string' && payloadForSend.runId.trim()
+    ? payloadForSend.runId.trim()
     : traceRunIdFromTrace;
-  const traceResponseId = typeof payload?.responseId === 'string' && payload.responseId.trim()
-    ? payload.responseId.trim()
+  const traceResponseId = typeof payloadForSend?.responseId === 'string' && payloadForSend.responseId.trim()
+    ? payloadForSend.responseId.trim()
     : (
       extractResponseIdFromCopyTrace(normalizedTrace, traceRunId)
       || extractResponseIdFromCopyTrace(normalizedTrace)
@@ -12027,7 +12419,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
     stage: 'send_http',
     status: null,
     requestId: '',
-    intakeUrl: ''
+    intakeUrl: '',
+    conversationLogCount,
+    hasConversationUrl,
+    conversationSnapshotRefreshed,
+    conversationSnapshotSource
   };
   let lastAttemptedIntakeUrl = '';
 
@@ -12051,7 +12447,13 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
         intakeUrl: dispatchConfig.intakeUrlSource || 'unknown',
         keyId: dispatchConfig.keyIdSource || 'unknown'
       },
-      payload: summarizeWatchlistDispatchPayload(payload)
+      conversation: {
+        logCount: conversationLogCount,
+        hasConversationUrl,
+        snapshotRefreshed: conversationSnapshotRefreshed,
+        snapshotSource: conversationSnapshotSource || ''
+      },
+      payload: summarizeWatchlistDispatchPayload(payloadForSend)
     });
     emitWatchlistDispatchProcessLog('info', 'send_start', 'Starting HTTP dispatch to intake endpoint', {
       trace: copyTrace,
@@ -12060,7 +12462,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
       urlCandidateIndex: candidateIndex + 1,
       urlCandidatesCount: urlCandidates.length,
       maxAttempts,
-      timeoutMs
+      timeoutMs,
+      conversationLogCount,
+      hasConversationUrl,
+      conversationSnapshotRefreshed,
+      conversationSnapshotSource
     });
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -12196,7 +12602,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           eventId: responseJson?.event_id || null,
           requestId,
           intakeUrl: url,
-          stage: 'send_http'
+          stage: 'send_http',
+          conversationLogCount,
+          hasConversationUrl,
+          conversationSnapshotRefreshed,
+          conversationSnapshotSource
         };
       } catch (error) {
         if (timeoutId) {
@@ -12269,7 +12679,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           stage: 'send_http',
           status: dispatchMeta.status || null,
           requestId: dispatchMeta.requestId || '',
-          intakeUrl: url
+          intakeUrl: url,
+          conversationLogCount,
+          hasConversationUrl,
+          conversationSnapshotRefreshed,
+          conversationSnapshotSource
         };
 
         const failedLogMethod = hasAnotherUrlCandidate ? 'warn' : 'error';
@@ -12452,7 +12866,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         firstFailureReason: '',
         firstFailureStatus: null,
         firstFailureRequestId: '',
-        firstFailureIntakeUrl: ''
+        firstFailureIntakeUrl: '',
+        conversationLogCount: null,
+        hasConversationUrl: false,
+        conversationSnapshotRefreshed: false,
+        conversationSnapshotSource: ''
       };
     }
 
@@ -12466,6 +12884,10 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     let firstFailureStatus = null;
     let firstFailureRequestId = '';
     let firstFailureIntakeUrl = '';
+    let conversationLogCount = null;
+    let hasConversationUrl = false;
+    let conversationSnapshotRefreshed = false;
+    let conversationSnapshotSource = '';
     let budgetStopReason = '';
     const flushStartedAt = watchlistDispatchFlushStartedAt || Date.now();
     const flushMaxItemsPerRun = Number.isInteger(WATCHLIST_DISPATCH.flushMaxItemsPerRun) && WATCHLIST_DISPATCH.flushMaxItemsPerRun > 0
@@ -12551,6 +12973,19 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         maxAttempts: 1,
         timeoutMs: sendTimeoutMs
       });
+      if (Number.isInteger(dispatchResult?.conversationLogCount)) {
+        const normalizedLogCount = Math.max(0, dispatchResult.conversationLogCount);
+        conversationLogCount = normalizedLogCount;
+      }
+      if (dispatchResult?.hasConversationUrl === true) {
+        hasConversationUrl = true;
+      }
+      if (dispatchResult?.conversationSnapshotRefreshed === true) {
+        conversationSnapshotRefreshed = true;
+      }
+      if (typeof dispatchResult?.conversationSnapshotSource === 'string' && dispatchResult.conversationSnapshotSource.trim()) {
+        conversationSnapshotSource = dispatchResult.conversationSnapshotSource.trim();
+      }
       if (dispatchResult.success) {
         sent += 1;
         continue;
@@ -12658,7 +13093,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       firstFailureReason: firstFailureReason || '',
       firstFailureStatus: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null,
       firstFailureRequestId: firstFailureRequestId || '',
-      firstFailureIntakeUrl: firstFailureIntakeUrl || ''
+      firstFailureIntakeUrl: firstFailureIntakeUrl || '',
+      conversationLogCount,
+      hasConversationUrl,
+      conversationSnapshotRefreshed,
+      conversationSnapshotSource: conversationSnapshotSource || ''
     });
     appendWatchlistDispatchHistory({
       ts,
@@ -12687,7 +13126,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       firstFailureReason: firstFailureReason || '',
       firstFailureStatus: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null,
       firstFailureRequestId: firstFailureRequestId || '',
-      firstFailureIntakeUrl: firstFailureIntakeUrl || ''
+      firstFailureIntakeUrl: firstFailureIntakeUrl || '',
+      conversationLogCount,
+      hasConversationUrl,
+      conversationSnapshotRefreshed,
+      conversationSnapshotSource: conversationSnapshotSource || ''
     };
   } catch (error) {
     emitWatchlistDispatchProcessLog('error', 'flush_exception', 'Flush crashed with unexpected error', {
@@ -13485,13 +13928,26 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       : generateResponseId(normalizedRunId);
     const copyTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
     const copyFingerprint = textFingerprint(responseText);
+    const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
+    const conversationLogs = await buildConversationLogSnapshotForResponse({
+      runId: normalizedRunId,
+      conversationUrl: normalizedConversationUrl,
+      limit: RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+    });
+    const conversationAnalysis = {
+      hasConversationUrl: !!normalizedConversationUrl,
+      conversationLogCount: conversationLogs.length,
+      snapshotRefreshedBeforeSend: false,
+      snapshotSource: conversationLogs.length > 0 ? 'save_snapshot' : 'no_snapshot'
+    };
     console.log(`[copy-flow] [save:start] trace=${copyTrace} len=${responseText.length} fp=${copyFingerprint} analysis=${analysisType}`);
     console.log('[copy-flow] [save:meta]', {
       trace: copyTrace,
       runId: normalizedRunId || '',
       responseId: normalizedResponseId,
       hasStage: !!(stage && typeof stage === 'object' && !Array.isArray(stage)),
-      hasConversationUrl: !!(typeof conversationUrl === 'string' && conversationUrl.trim())
+      hasConversationUrl: !!normalizedConversationUrl,
+      conversationLogCount: conversationLogs.length
     });
 
     const newResponse = {
@@ -13510,9 +13966,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     if (normalizedStage) {
       newResponse.stage = normalizedStage;
     }
-    const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
     if (normalizedConversationUrl) {
       newResponse.conversationUrl = normalizedConversationUrl;
+    }
+    if (conversationLogs.length > 0) {
+      newResponse.conversationLogs = conversationLogs;
+      newResponse.conversationLogCount = conversationLogs.length;
     }
     
     const saveMaxAttempts = 4;
@@ -13617,6 +14076,10 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       failureStatus: null,
       failureRequestId: '',
       failureIntakeUrl: '',
+      conversationLogCount: conversationAnalysis.conversationLogCount,
+      hasConversationUrl: conversationAnalysis.hasConversationUrl,
+      conversationSnapshotRefreshed: conversationAnalysis.snapshotRefreshedBeforeSend,
+      conversationSnapshotSource: conversationAnalysis.snapshotSource,
       state: '',
       processLog: []
     };
@@ -13633,6 +14096,11 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       dispatchOutcome.processLog = dispatchProcessLog.slice(-16);
       console.log(`[copy-flow] [dispatch:flow] trace=${copyTrace} step=${entry}`);
     };
+    appendDispatchProcessLog(
+      'conversation_analysis',
+      'captured',
+      `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, source=${conversationAnalysis.snapshotSource}`
+    );
 
     try {
       appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
@@ -13685,10 +14153,31 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.failureIntakeUrl = typeof flushResult?.firstFailureIntakeUrl === 'string'
             ? flushResult.firstFailureIntakeUrl.trim()
             : '';
+          if (Number.isInteger(flushResult?.conversationLogCount)) {
+            conversationAnalysis.conversationLogCount = Math.max(0, flushResult.conversationLogCount);
+          }
+          if (flushResult?.hasConversationUrl === true) {
+            conversationAnalysis.hasConversationUrl = true;
+          }
+          if (flushResult?.conversationSnapshotRefreshed === true) {
+            conversationAnalysis.snapshotRefreshedBeforeSend = true;
+          }
+          if (typeof flushResult?.conversationSnapshotSource === 'string' && flushResult.conversationSnapshotSource.trim()) {
+            conversationAnalysis.snapshotSource = flushResult.conversationSnapshotSource.trim();
+          }
+          dispatchOutcome.conversationLogCount = conversationAnalysis.conversationLogCount;
+          dispatchOutcome.hasConversationUrl = conversationAnalysis.hasConversationUrl;
+          dispatchOutcome.conversationSnapshotRefreshed = conversationAnalysis.snapshotRefreshedBeforeSend;
+          dispatchOutcome.conversationSnapshotSource = conversationAnalysis.snapshotSource;
           appendDispatchProcessLog(
             'flush_result',
             dispatchOutcome.failed > 0 ? 'partial' : 'ok',
             `sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
+          );
+          appendDispatchProcessLog(
+            'conversation_analysis',
+            'used_for_report',
+            `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, refreshed=${conversationAnalysis.snapshotRefreshedBeforeSend ? 'yes' : 'no'}, source=${conversationAnalysis.snapshotSource || 'n/a'}`
           );
           console.log(
             `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
@@ -13714,7 +14203,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       appendDispatchProcessLog(
         'dispatch_final',
         dispatchOutcome.failed > 0 ? 'warn' : 'ok',
-        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
+        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, convLogs=${dispatchOutcome.conversationLogCount ?? 'n/a'}, convUrl=${dispatchOutcome.hasConversationUrl ? 'yes' : 'no'}, convRefresh=${dispatchOutcome.conversationSnapshotRefreshed ? 'yes' : 'no'}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
       );
     } catch (dispatchError) {
       appendDispatchProcessLog('dispatch_exception', 'error', dispatchError?.message || String(dispatchError));
@@ -13809,7 +14298,8 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       copyTrace,
       verifiedCount: verifiedResponses.length,
       dispatch: dispatchOutcome,
-      dispatchProcessLog: dispatchProcessLog.slice(-16)
+      dispatchProcessLog: dispatchProcessLog.slice(-16),
+      conversationAnalysis
     };
   } catch (error) {
     console.error(`\n${'!'.repeat(80)}`);
@@ -13855,7 +14345,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   ? saveResult.dispatchProcessLog
                       .filter((entry) => typeof entry === 'string' && entry.trim())
                       .slice(-16)
-                  : []
+                  : [],
+                conversationAnalysis: saveResult.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+                  ? {
+                    hasConversationUrl: saveResult.conversationAnalysis.hasConversationUrl === true,
+                    conversationLogCount: Number.isInteger(saveResult.conversationAnalysis.conversationLogCount)
+                      ? Math.max(0, saveResult.conversationAnalysis.conversationLogCount)
+                      : null,
+                    snapshotRefreshedBeforeSend: saveResult.conversationAnalysis.snapshotRefreshedBeforeSend === true,
+                    snapshotSource: typeof saveResult.conversationAnalysis.snapshotSource === 'string'
+                      ? saveResult.conversationAnalysis.snapshotSource
+                      : ''
+                  }
+                  : null
               }
               : null
           });
@@ -15898,59 +16400,74 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       let autoRecoveryAttempt = 0;
       const autoRecoveryReasonsList = [...AUTO_RECOVERY_REASONS];
       while (true) {
-        try {
-        console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
-        results = await chrome.scripting.executeScript({
-          target: { tabId: chatTabId },
-          function: injectToChat,
-          args: [
-            executionPayload,
-            executionPromptChain,
-            WAIT_FOR_TEXTAREA_MS,
-            WAIT_FOR_RESPONSE_MS,
-            RETRY_INTERVAL_MS,
-            title,
-            analysisType,
-            processId,
-            {
-              promptOffset: executionPromptOffset,
-              totalPromptsOverride: processTotalPrompts
-            },
-            {
-              enabled: true,
-              attempt: autoRecoveryAttempt,
-              maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-              delayMs: AUTO_RECOVERY_DELAY_MS,
-              reasons: autoRecoveryReasonsList
-            },
-            {
-              persistFinalResponseViaMessage: true,
-              mode: 'runtime_message',
-              saveTimeoutMs: 15000
-            },
-            manualPdfAttachmentContext
-          ]
-        });
-        console.log(`✅ executeScript zakończony pomyślnie`);
-      } catch (executeError) {
-        console.error(`\n${'='.repeat(80)}`);
-        console.error(`❌ executeScript FAILED`);
-        console.error(`  Tab ID: ${chatTabId}`);
-        console.error(`  Error: ${executeError.message}`);
-        console.error(`  Stack: ${executeError.stack}`);
-        console.error(`${'='.repeat(80)}\n`);
-        await upsertProcess(processId, {
-          title: processTitle,
+        const executionArgs = [
+          executionPayload,
+          executionPromptChain,
+          WAIT_FOR_TEXTAREA_MS,
+          WAIT_FOR_RESPONSE_MS,
+          RETRY_INTERVAL_MS,
+          title,
           analysisType,
-          status: 'failed',
-          needsAction: false,
-          statusText: 'Blad executeScript',
-          reason: 'execute_script_failed',
-          error: executeError.message || 'executeScript failed',
-          autoRecovery: null,
-          finishedAt: Date.now(),
-          timestamp: Date.now()
-        });
+          processId,
+          {
+            promptOffset: executionPromptOffset,
+            totalPromptsOverride: processTotalPrompts
+          },
+          {
+            enabled: true,
+            attempt: autoRecoveryAttempt,
+            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+            delayMs: AUTO_RECOVERY_DELAY_MS,
+            reasons: autoRecoveryReasonsList
+          },
+          {
+            persistFinalResponseViaMessage: true,
+            mode: 'runtime_message',
+            saveTimeoutMs: 15000
+          },
+          manualPdfAttachmentContext
+        ];
+
+        try {
+          console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
+          results = await executeScriptWithTransientRetry({
+            tabId: chatTabId,
+            scriptFunction: injectToChat,
+            args: executionArgs,
+            contextLabel: `${analysisType}:inject`,
+            onRetry: async ({ attempt, maxAttempts, errorText }) => {
+              await upsertProcess(processId, {
+                title: processTitle,
+                analysisType,
+                status: 'running',
+                needsAction: false,
+                statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
+                reason: 'execute_script_retry',
+                error: errorText || '',
+                timestamp: Date.now()
+              });
+            }
+          });
+          console.log(`✅ executeScript zakończony pomyślnie`);
+        } catch (executeError) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`❌ executeScript FAILED`);
+          console.error(`  Tab ID: ${chatTabId}`);
+          console.error(`  Error: ${executeError.message}`);
+          console.error(`  Stack: ${executeError.stack}`);
+          console.error(`${'='.repeat(80)}\n`);
+          await upsertProcess(processId, {
+            title: processTitle,
+            analysisType,
+            status: 'failed',
+            needsAction: false,
+            statusText: 'Blad executeScript',
+            reason: 'execute_script_failed',
+            error: executeError.message || 'executeScript failed',
+            autoRecovery: null,
+            finishedAt: Date.now(),
+            timestamp: Date.now()
+          });
           return { success: false, title, error: `executeScript error: ${executeError.message}` };
         }
 
