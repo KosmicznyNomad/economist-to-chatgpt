@@ -39,6 +39,9 @@ const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
+const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
+const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
+const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
 
 // Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
 const WATCHLIST_DISPATCH = {
@@ -111,6 +114,8 @@ const WATCHLIST_CONNECTION_LOG_DEDUPE_MS = 15 * 60 * 1000;
 const EXTENSION_INSTALLATION_ID_STORAGE_KEY = 'extension_installation_id';
 const WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY = 'watchlist_dispatch_process_log';
 const WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS = 800;
+const RESPONSE_CONVERSATION_LOG_MAX_ITEMS = 40;
+const RESPONSE_CONVERSATION_LOG_MESSAGE_MAX_LENGTH = 420;
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
@@ -554,6 +559,31 @@ function pruneProcessRecords(records) {
   return active.concat(closed.slice(0, PROCESS_HISTORY_LIMIT));
 }
 
+function rehydrateProcessProblemLogState(records = []) {
+  problemLogLastSignatureByRunId.clear();
+  processLogLastEmitTsByRunId.clear();
+  processStaleWarnLastEmitTsByRunId.clear();
+
+  const sourceRecords = Array.isArray(records) ? records : [];
+  const nowTs = Date.now();
+  for (const record of sourceRecords) {
+    if (!record || typeof record !== 'object') continue;
+    const runId = typeof record.id === 'string' ? record.id.trim() : '';
+    if (!runId) continue;
+    if (isClosedProcessStatus(record.status)) continue;
+
+    const entry = buildProcessProblemLogEntry(runId, record);
+    const signature = typeof entry?.signature === 'string' ? entry.signature.trim() : '';
+    if (!signature) continue;
+
+    problemLogLastSignatureByRunId.set(runId, signature);
+    const ts = Number.isInteger(record.timestamp) && record.timestamp > 0
+      ? record.timestamp
+      : nowTs;
+    processLogLastEmitTsByRunId.set(runId, ts);
+  }
+}
+
 async function ensureProcessRegistryReady() {
   if (!processRegistryReady) {
     processRegistryReady = (async () => {
@@ -564,9 +594,13 @@ async function ensureProcessRegistryReady() {
         records.forEach((record) => {
           processRegistry.set(record.id, record);
         });
+        rehydrateProcessProblemLogState(records);
       } catch (error) {
         console.warn('[monitor] Failed to read process monitor state:', error);
         processRegistry.clear();
+        problemLogLastSignatureByRunId.clear();
+        processLogLastEmitTsByRunId.clear();
+        processStaleWarnLastEmitTsByRunId.clear();
       }
     })();
   }
@@ -2099,12 +2133,19 @@ function buildProblemLogMessage(entry) {
   const error = typeof entry.error === 'string' ? entry.error.trim() : '';
   const statusText = typeof entry.statusText === 'string' ? entry.statusText.trim() : '';
   const stageName = typeof entry.stageName === 'string' ? entry.stageName.trim() : '';
+  const title = trimProblemLogText(typeof entry.title === 'string' ? entry.title.trim() : '', 120);
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    typeof entry.sourceUrl === 'string'
+      ? entry.sourceUrl
+      : (typeof entry.source_url === 'string' ? entry.source_url : '')
+  );
   const chatUrl = normalizeChatConversationUrl(
     typeof entry.chatUrl === 'string'
       ? entry.chatUrl
       : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
   );
 
+  if (title) parts.push(`title=${title}`);
   if (status) parts.push(`status=${status}`);
   if (reason) parts.push(`reason=${reason}`);
   if (error) parts.push(`error=${error}`);
@@ -2118,12 +2159,26 @@ function buildProblemLogMessage(entry) {
   if (stageName) {
     parts.push(`stage=${stageName}`);
   }
+  if (sourceUrl) {
+    parts.push(`sourceUrl=${sourceUrl}`);
+  }
   if (chatUrl) {
     parts.push(`chatUrl=${chatUrl}`);
   }
 
   const content = parts.join(' | ');
   return trimProblemLogText(content || 'problem_detected');
+}
+
+function normalizeProblemLogSourceUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!value) return '';
+  if (/^manual:\/\//i.test(value)) return trimProblemLogText(value, 320);
+  try {
+    return new URL(value).toString();
+  } catch {
+    return trimProblemLogText(value, 320);
+  }
 }
 
 function sanitizeProblemLogEntry(rawEntry) {
@@ -2165,6 +2220,12 @@ function sanitizeProblemLogEntry(rawEntry) {
       ? rawEntry.chatUrl
       : (typeof rawEntry.conversationUrl === 'string' ? rawEntry.conversationUrl : '')
   );
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    typeof rawEntry.sourceUrl === 'string'
+      ? rawEntry.sourceUrl
+      : (typeof rawEntry.source_url === 'string' ? rawEntry.source_url : '')
+  );
+  const heartbeat = rawEntry.heartbeat === true;
   const message = trimProblemLogText(rawEntry.message || buildProblemLogMessage(rawEntry));
   const signature = trimProblemLogText(rawEntry.signature || '', 380);
   const entryId = typeof rawEntry.id === 'string' && rawEntry.id.trim()
@@ -2193,8 +2254,10 @@ function sanitizeProblemLogEntry(rawEntry) {
     stageName,
     tabId: Number.isInteger(rawEntry.tabId) ? rawEntry.tabId : null,
     windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null,
+    sourceUrl: sourceUrl || '',
     chatUrl: chatUrl || '',
-    conversationUrl: chatUrl || ''
+    conversationUrl: chatUrl || '',
+    heartbeat
   };
 }
 
@@ -2311,6 +2374,186 @@ async function appendProblemLog(rawEntry) {
   return normalized;
 }
 
+function normalizeConversationLogSnapshotEntry(rawEntry) {
+  if (!rawEntry || typeof rawEntry !== 'object') return null;
+  const normalized = sanitizeProblemLogEntry(rawEntry);
+  if (!normalized) return null;
+
+  const chatUrl = normalizeChatConversationUrl(
+    typeof normalized.chatUrl === 'string'
+      ? normalized.chatUrl
+      : (typeof normalized.conversationUrl === 'string' ? normalized.conversationUrl : '')
+  );
+
+  return {
+    id: typeof normalized.id === 'string' ? normalized.id : '',
+    timestamp: Number.isInteger(normalized.timestamp) ? normalized.timestamp : Date.now(),
+    level: normalizeProblemLogLevel(normalized.level),
+    source: trimProblemLogText(normalized.source || '', 80),
+    title: trimProblemLogText(normalized.title || '', 120),
+    category: trimProblemLogText(normalized.category || '', 80),
+    status: trimProblemLogText(normalized.status || '', 40),
+    reason: trimProblemLogText(normalized.reason || '', 140),
+    stageName: trimProblemLogText(normalized.stageName || '', 120),
+    message: trimProblemLogText(normalized.message || '', RESPONSE_CONVERSATION_LOG_MESSAGE_MAX_LENGTH),
+    runId: trimProblemLogText(normalized.runId || '', 120),
+    currentPrompt: Number.isInteger(normalized.currentPrompt) ? normalized.currentPrompt : null,
+    totalPrompts: Number.isInteger(normalized.totalPrompts) ? normalized.totalPrompts : null,
+    chatUrl: chatUrl || ''
+  };
+}
+
+function normalizeConversationLogSnapshot(rawLogs, limit = RESPONSE_CONVERSATION_LOG_MAX_ITEMS) {
+  const safeLimit = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, RESPONSE_CONVERSATION_LOG_MAX_ITEMS)
+    : RESPONSE_CONVERSATION_LOG_MAX_ITEMS;
+  const normalized = (Array.isArray(rawLogs) ? rawLogs : [])
+    .map(normalizeConversationLogSnapshotEntry)
+    .filter(Boolean);
+  if (normalized.length <= safeLimit) return normalized;
+  return normalized.slice(normalized.length - safeLimit);
+}
+
+async function buildConversationLogSnapshotForResponse({ runId = '', conversationUrl = '', limit = RESPONSE_CONVERSATION_LOG_MAX_ITEMS } = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  const normalizedConversationUrl = normalizeChatConversationUrl(
+    typeof conversationUrl === 'string' ? conversationUrl : ''
+  );
+  if (!normalizedRunId && !normalizedConversationUrl) return [];
+
+  await ensureProblemLogReady();
+  const sourceEntries = Array.isArray(problemLogEntries) ? problemLogEntries : [];
+  const matched = sourceEntries.filter((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+
+    const entryRunId = typeof entry.runId === 'string' ? entry.runId.trim() : '';
+    if (normalizedRunId && entryRunId === normalizedRunId) {
+      return true;
+    }
+
+    if (!normalizedConversationUrl) return false;
+    const entryChatUrl = normalizeChatConversationUrl(
+      typeof entry.chatUrl === 'string'
+        ? entry.chatUrl
+        : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
+    );
+    return !!entryChatUrl && entryChatUrl === normalizedConversationUrl;
+  });
+
+  return normalizeConversationLogSnapshot(matched, limit);
+}
+
+async function enrichWatchlistDispatchPayloadConversationSnapshot(payload, copyTrace = 'no-run/no-response') {
+  const basePayload = payload && typeof payload === 'object' ? payload : null;
+  const baseConversationLogCount = Number.isInteger(basePayload?.conversationLogCount) && basePayload.conversationLogCount >= 0
+    ? basePayload.conversationLogCount
+    : null;
+  const baseHasConversationUrl = !!normalizeChatConversationUrl(
+    typeof basePayload?.conversationUrl === 'string' ? basePayload.conversationUrl : ''
+  );
+  if (!basePayload) {
+    return {
+      payload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'invalid_payload'
+      }
+    };
+  }
+
+  const schema = typeof basePayload.schema === 'string' ? basePayload.schema.trim().toLowerCase() : '';
+  if (schema !== 'economist.response.v1') {
+    return {
+      payload: basePayload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'schema_skip'
+      }
+    };
+  }
+
+  const runId = typeof basePayload.runId === 'string' ? basePayload.runId.trim() : '';
+  const responseId = typeof basePayload.responseId === 'string' ? basePayload.responseId.trim() : '';
+  const conversationUrl = normalizeChatConversationUrl(
+    typeof basePayload.conversationUrl === 'string' ? basePayload.conversationUrl : ''
+  );
+  if (!runId && !conversationUrl) {
+    return {
+      payload: basePayload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'missing_scope'
+      }
+    };
+  }
+
+  try {
+    const conversationLogs = await buildConversationLogSnapshotForResponse({
+      runId,
+      conversationUrl,
+      limit: RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+    });
+    if (conversationLogs.length === 0) {
+      return {
+        payload: basePayload,
+        analysis: {
+          conversationLogCount: baseConversationLogCount,
+          hasConversationUrl: !!conversationUrl || baseHasConversationUrl,
+          snapshotRefreshed: false,
+          snapshotSource: 'no_matches'
+        }
+      };
+    }
+
+    const nextPayload = {
+      ...basePayload,
+      conversationLogs,
+      conversationLogCount: conversationLogs.length
+    };
+    if (conversationUrl) {
+      nextPayload.conversationUrl = conversationUrl;
+    }
+
+    console.log('[copy-flow] [dispatch:conversation-snapshot-refreshed]', {
+      trace: copyTrace,
+      runId,
+      responseId,
+      conversationLogCount: conversationLogs.length
+    });
+    return {
+      payload: nextPayload,
+      analysis: {
+        conversationLogCount: conversationLogs.length,
+        hasConversationUrl: !!conversationUrl || baseHasConversationUrl,
+        snapshotRefreshed: true,
+        snapshotSource: 'problem_log_snapshot'
+      }
+    };
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:conversation-snapshot-refresh-failed]', {
+      trace: copyTrace,
+      runId,
+      responseId,
+      error: error?.message || String(error)
+    });
+    return {
+      payload: basePayload,
+      analysis: {
+        conversationLogCount: baseConversationLogCount,
+        hasConversationUrl: !!conversationUrl || baseHasConversationUrl,
+        snapshotRefreshed: false,
+        snapshotSource: 'refresh_failed'
+      }
+    };
+  }
+}
+
 function problemLogSourceMatches(sourceText, token) {
   const source = typeof sourceText === 'string' ? sourceText.trim().toLowerCase() : '';
   const normalizedToken = typeof token === 'string' ? token.trim().toLowerCase() : '';
@@ -2333,7 +2576,9 @@ function isLowSignalProblemLogEntry(entry) {
   if (reason === 'remote_connection_configured') return true;
   if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
   if (problemLogSourceMatches(source, 'process-monitor-heartbeat')) return true;
-  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') return true;
+  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
+    return entry.heartbeat === true;
+  }
   if (
     problemLogSourceMatches(source, 'youtube-content-window')
     && noiseBlob.includes('resizeobserver loop completed with undelivered notifications')
@@ -2371,7 +2616,11 @@ function shouldDispatchProblemLogRemotely(entry) {
   const level = normalizeProblemLogLevel(entry.level);
   if (level === 'error' || level === 'warn') return true;
 
+  const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
+    return entry.heartbeat !== true;
+  }
   if (category === 'process_state' || category === 'data_gap' || category === 'recovery') return true;
   return false;
 }
@@ -2474,13 +2723,17 @@ function resolveProcessStageSnapshot(process) {
   };
 }
 
-function buildProcessProblemLogEntry(runId, process) {
+function buildProcessProblemLogEntry(runId, process, options = {}) {
   if (!runId || !process || typeof process !== 'object') return null;
 
   const status = normalizeProcessStatus(process.status);
   const stage = resolveProcessStageSnapshot(process);
   const processChatUrl = extractProcessChatUrl(process);
+  const processSourceUrl = normalizeProblemLogSourceUrl(
+    typeof process.sourceUrl === 'string' ? process.sourceUrl : ''
+  );
   const chatUrlSignature = trimProblemLogText(processChatUrl || '', 180);
+  const sourceUrlSignature = trimProblemLogText(processSourceUrl || '', 180);
   const issueDetected = shouldRecordIssueForProcess(process);
   const successDetected = shouldRecordSuccessForProcess(process, status, stage);
   const stateDetected = !issueDetected && !successDetected;
@@ -2517,7 +2770,8 @@ function buildProcessProblemLogEntry(runId, process) {
     Number.isInteger(stage.stageIndex) ? stage.stageIndex : '',
     stage.stageName || '',
     signatureStatusText,
-    chatUrlSignature
+    chatUrlSignature,
+    sourceUrlSignature
   ].join('|');
 
   const level = issueDetected
@@ -2543,8 +2797,10 @@ function buildProcessProblemLogEntry(runId, process) {
     stageName: stage.stageName || '',
     tabId: Number.isInteger(process.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+    sourceUrl: processSourceUrl || '',
     chatUrl: processChatUrl || '',
     conversationUrl: processChatUrl || '',
+    heartbeat: options?.heartbeat === true,
     signature
   };
 }
@@ -2835,6 +3091,9 @@ async function upsertProcess(runId, patch = {}) {
   const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
   const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
   const heartbeatDue = !!(problemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
+  if (problemEntry && heartbeatDue && !signatureChanged) {
+    problemEntry.heartbeat = true;
+  }
   if (problemEntry?.signature && (signatureChanged || heartbeatDue)) {
     const emittedEntry = await appendProblemLog(problemEntry);
     if (emittedEntry) {
@@ -3568,6 +3827,9 @@ async function replayCompletedResponseForProcess(process, options = {}) {
       ? saveResult.dispatch
       : null,
     dispatchProcessLog: Array.isArray(saveResult.dispatchProcessLog) ? saveResult.dispatchProcessLog.slice(-16) : [],
+    conversationAnalysis: saveResult.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+      ? saveResult.conversationAnalysis
+      : null,
     dispatchSummary
   };
 }
@@ -3594,6 +3856,21 @@ function summarizeFinalStagePersistence(result) {
   const failureIntakeUrl = typeof dispatch?.failureIntakeUrl === 'string' && dispatch.failureIntakeUrl.trim()
     ? dispatch.failureIntakeUrl.trim()
     : '';
+  const conversationAnalysis = result?.conversationAnalysis && typeof result.conversationAnalysis === 'object'
+    ? result.conversationAnalysis
+    : null;
+  const conversationLogCountRaw = Number.isInteger(dispatch?.conversationLogCount)
+    ? dispatch.conversationLogCount
+    : (Number.isInteger(conversationAnalysis?.conversationLogCount) ? conversationAnalysis.conversationLogCount : null);
+  const conversationLogCount = Number.isInteger(conversationLogCountRaw)
+    ? Math.max(0, conversationLogCountRaw)
+    : null;
+  const hasConversationUrl = dispatch?.hasConversationUrl === true || conversationAnalysis?.hasConversationUrl === true;
+  const conversationSnapshotRefreshed = dispatch?.conversationSnapshotRefreshed === true
+    || conversationAnalysis?.snapshotRefreshedBeforeSend === true;
+  const conversationSnapshotSource = (typeof dispatch?.conversationSnapshotSource === 'string' && dispatch.conversationSnapshotSource.trim())
+    ? dispatch.conversationSnapshotSource.trim()
+    : (typeof conversationAnalysis?.snapshotSource === 'string' ? conversationAnalysis.snapshotSource.trim() : '');
   const state = typeof dispatch?.state === 'string' && dispatch.state.trim()
     ? dispatch.state.trim()
     : '';
@@ -3620,6 +3897,10 @@ function summarizeFinalStagePersistence(result) {
     failureStatus,
     failureRequestId,
     failureIntakeUrl,
+    conversationLogCount,
+    hasConversationUrl,
+    conversationSnapshotRefreshed,
+    conversationSnapshotSource,
     state
   };
 }
@@ -3723,6 +4004,7 @@ async function stopSingleProcess(process, options = {}) {
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
   const replayOnRestart = options?.replayLatestResponse === true
     || reason === 'restarted_in_same_window';
+  const forceReplayLatestResponse = options?.forceReplayLatestResponse === true;
   let replayResult = null;
 
   if (reason === 'restarted_in_same_window' && processTabId !== null) {
@@ -3741,7 +4023,7 @@ async function stopSingleProcess(process, options = {}) {
 
   if (replayOnRestart) {
     replayResult = await replayCompletedResponseForProcess(process, {
-      force: options?.forceReplayLatestResponse === true || reason === 'restarted_in_same_window',
+      force: forceReplayLatestResponse,
       tabId: processTabId,
       tabReadTimeoutMs: 1800
     });
@@ -4419,15 +4701,15 @@ const STAGE_METADATA_COMPANY = [
     promptIndex: 11,
     promptNumber: 12,
     stageId: '10',
-    stageName: "Stage 10: Four-Gate Decision",
-    description: "Integrity/Quality/Value/Proof/Execution gates with WATCH-AVOID output."
+    stageName: "Stage 10: Four-Gate Decision + Stage 11 Composite Rank",
+    description: "Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection."
   },
   {
     promptIndex: 12,
     promptNumber: 13,
-    stageId: '11',
-    stageName: "Stage 11: Four-Gate Output Record",
-    description: "Single-line decision record for downstream ingestion."
+    stageId: '12',
+    stageName: "Stage 12: Four-Gate Output Record",
+    description: "Two-line decision records (PRIMARY and SECONDARY) for downstream ingestion."
   }
 ];
 
@@ -4449,7 +4731,9 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['8', 9],
   ['9', 10],
   ['10', 11],
-  ['11', 12],
+  ['11', 11], // Stage 11 exists as a section inside the Stage 10 prompt
+  ['12', 12],
+  ['10.5', 11], // legacy alias: old chain used Stage 10.5 for composite rank
   ['2.5', 5], // legacy alias: old chain used 2.5 for Reverse DCF Lite
   ['3.2', 5], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
   ['3.5', 7], // legacy alias: old chain treated DuPont as 3.5
@@ -5195,37 +5479,50 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     let autoRecoveryAttempt = 0;
 
     while (true) {
+      const executionArgs = [
+        executionPayload,
+        executionPromptChain,
+        WAIT_FOR_TEXTAREA_MS,
+        WAIT_FOR_RESPONSE_MS,
+        RETRY_INTERVAL_MS,
+        processTitle,
+        'company',
+        processId,
+        {
+          promptOffset: executionPromptOffset,
+          totalPromptsOverride: PROMPTS_COMPANY.length,
+          composerThinkingEffort
+        },
+        {
+          enabled: true,
+          attempt: autoRecoveryAttempt,
+          maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+          delayMs: AUTO_RECOVERY_DELAY_MS,
+          reasons: [...AUTO_RECOVERY_REASONS]
+        },
+        {
+          persistFinalResponseViaMessage: true,
+          mode: 'runtime_message',
+          saveTimeoutMs: 18000
+        }
+      ];
+
       try {
-        results = await chrome.scripting.executeScript({
-          target: { tabId },
-          function: injectToChat,
-          args: [
-            executionPayload,
-            executionPromptChain,
-            WAIT_FOR_TEXTAREA_MS,
-            WAIT_FOR_RESPONSE_MS,
-            RETRY_INTERVAL_MS,
-            processTitle,
-            'company',
-            processId,
-            {
-              promptOffset: executionPromptOffset,
-              totalPromptsOverride: PROMPTS_COMPANY.length,
-              composerThinkingEffort
-            },
-            {
-              enabled: true,
-              attempt: autoRecoveryAttempt,
-              maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-              delayMs: AUTO_RECOVERY_DELAY_MS,
-              reasons: [...AUTO_RECOVERY_REASONS]
-            },
-            {
-              persistFinalResponseViaMessage: true,
-              mode: 'runtime_message',
-              saveTimeoutMs: 18000
-            }
-          ]
+        results = await executeScriptWithTransientRetry({
+          tabId,
+          scriptFunction: injectToChat,
+          args: executionArgs,
+          contextLabel: 'auto-resume:inject',
+          onRetry: async ({ attempt, maxAttempts, errorText }) => {
+            await upsertProcess(processId, {
+              status: 'running',
+              needsAction: false,
+              statusText: `Auto-resume: retry executeScript ${attempt}/${maxAttempts}`,
+              reason: 'auto_resume_execute_script_retry',
+              error: errorText || '',
+              timestamp: Date.now()
+            });
+          }
         });
       } catch (error) {
         await upsertProcess(processId, {
@@ -7637,6 +7934,99 @@ function waitForTabCompleteWithTimeout(tabId, timeoutMs = 12000) {
   });
 }
 
+function normalizeExecuteScriptErrorMessage(error) {
+  if (typeof error?.message === 'string' && error.message.trim()) {
+    return error.message.trim();
+  }
+  if (typeof error === 'string' && error.trim()) {
+    return error.trim();
+  }
+  return String(error || '').trim();
+}
+
+function isRetryableExecuteScriptTransientError(error) {
+  const normalized = normalizeExecuteScriptErrorMessage(error).toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes('frame with id') && normalized.includes('removed')) return true;
+  if (normalized.includes('no frame with id')) return true;
+  if (normalized.includes('the frame was removed')) return true;
+  if (normalized.includes('cannot access contents of url')) return true;
+  return false;
+}
+
+async function executeScriptWithTransientRetry({
+  tabId,
+  scriptFunction,
+  args = [],
+  contextLabel = 'executeScript',
+  maxAttempts = EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS,
+  retryDelayMs = EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS,
+  waitTimeoutMs = EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS,
+  onRetry = null
+}) {
+  const safeAttempts = Math.max(
+    1,
+    Number.isInteger(maxAttempts) ? maxAttempts : EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS
+  );
+  const safeRetryDelayMs = Math.max(
+    150,
+    Number.isInteger(retryDelayMs) ? retryDelayMs : EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS
+  );
+  const safeWaitTimeoutMs = Math.max(
+    1000,
+    Number.isInteger(waitTimeoutMs) ? waitTimeoutMs : EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS
+  );
+
+  let lastError = null;
+  for (let attempt = 1; attempt <= safeAttempts; attempt += 1) {
+    try {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId },
+        function: scriptFunction,
+        args
+      });
+      return results;
+    } catch (error) {
+      lastError = error;
+      const retryable = isRetryableExecuteScriptTransientError(error);
+      if (!retryable || attempt >= safeAttempts) {
+        throw error;
+      }
+
+      const errorText = normalizeExecuteScriptErrorMessage(error);
+      const normalizedContextLabel = typeof contextLabel === 'string' && contextLabel.trim()
+        ? contextLabel.trim()
+        : 'executeScript';
+
+      console.warn(
+        `[${normalizedContextLabel}] transient executeScript error (${attempt}/${safeAttempts}) tab=${tabId}: ${truncateDispatchLogText(errorText, 220)}`
+      );
+
+      if (typeof onRetry === 'function') {
+        try {
+          await onRetry({
+            attempt,
+            maxAttempts: safeAttempts,
+            tabId,
+            error,
+            errorText
+          });
+        } catch (retryHookError) {
+          console.warn(
+            `[${normalizedContextLabel}] onRetry hook failed:`,
+            retryHookError?.message || retryHookError
+          );
+        }
+      }
+
+      await waitForTabCompleteWithTimeout(tabId, safeWaitTimeoutMs);
+      await sleep(Math.min(3000, safeRetryDelayMs * attempt));
+    }
+  }
+
+  throw lastError || new Error('executeScript failed');
+}
+
 function requestTabReload(tabId, reloadProperties = {}) {
   return new Promise((resolve) => {
     if (!Number.isInteger(tabId)) {
@@ -9944,11 +10334,19 @@ function formatDispatchUiSummary(dispatchOutcome) {
   const failureRequestId = typeof dispatch.failureRequestId === 'string' && dispatch.failureRequestId.trim()
     ? dispatch.failureRequestId.trim()
     : '';
+  const conversationLogCount = Number.isInteger(dispatch.conversationLogCount)
+    ? Math.max(0, dispatch.conversationLogCount)
+    : null;
+  const hasConversationUrl = dispatch.hasConversationUrl === true;
+  const conversationSnapshotRefreshed = dispatch.conversationSnapshotRefreshed === true;
   const diagnosticParts = [];
   if (failureStage) diagnosticParts.push(`stage=${failureStage}`);
   if (failureReason) diagnosticParts.push(`reason=${failureReason}`);
   if (failureStatus !== null) diagnosticParts.push(`http=${failureStatus}`);
   if (failureRequestId) diagnosticParts.push(`requestId=${failureRequestId}`);
+  if (conversationLogCount !== null) diagnosticParts.push(`convLogs=${conversationLogCount}`);
+  if (hasConversationUrl) diagnosticParts.push('convUrl=1');
+  if (conversationSnapshotRefreshed) diagnosticParts.push('convRefresh=1');
   const diagnosticSuffix = diagnosticParts.length > 0
     ? `, diag=[${diagnosticParts.join(', ')}]`
     : '';
@@ -10045,6 +10443,36 @@ function buildDispatchProcessLogUiLines(rawLog) {
     .filter((line) => line);
 }
 
+function buildConversationAnalysisUiLine(saveResult, dispatch) {
+  const conversationAnalysis = saveResult?.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+    ? saveResult.conversationAnalysis
+    : null;
+  const conversationLogCountRaw = Number.isInteger(conversationAnalysis?.conversationLogCount)
+    ? conversationAnalysis.conversationLogCount
+    : (Number.isInteger(dispatch?.conversationLogCount) ? dispatch.conversationLogCount : null);
+  const conversationLogCount = Number.isInteger(conversationLogCountRaw)
+    ? Math.max(0, conversationLogCountRaw)
+    : null;
+  const hasConversationUrl = conversationAnalysis?.hasConversationUrl === true || dispatch?.hasConversationUrl === true;
+  const snapshotRefreshed = conversationAnalysis?.snapshotRefreshedBeforeSend === true
+    || dispatch?.conversationSnapshotRefreshed === true;
+  const snapshotSource = (typeof conversationAnalysis?.snapshotSource === 'string' && conversationAnalysis.snapshotSource.trim())
+    ? conversationAnalysis.snapshotSource.trim()
+    : (typeof dispatch?.conversationSnapshotSource === 'string' ? dispatch.conversationSnapshotSource.trim() : '');
+
+  if (conversationLogCount === null && !hasConversationUrl && !snapshotRefreshed && !snapshotSource) {
+    return '';
+  }
+
+  const parts = [
+    `url=${hasConversationUrl ? 'yes' : 'no'}`,
+    `logs=${conversationLogCount !== null ? conversationLogCount : 'n/a'}`
+  ];
+  if (snapshotRefreshed) parts.push('refresh=yes');
+  if (snapshotSource) parts.push(`source=${snapshotSource}`);
+  return `Konwersacja: ${parts.join(', ')}`;
+}
+
 function buildPersistenceUiSummary(options = {}) {
   const hasResponse = options?.hasResponse !== false;
   const saveResult = options?.saveResult && typeof options.saveResult === 'object'
@@ -10067,6 +10495,7 @@ function buildPersistenceUiSummary(options = {}) {
   );
   const dispatchFlowUiLines = buildDispatchProcessLogUiLines(dispatchProcessLog);
   const dispatchSummary = formatDispatchUiSummary(dispatch);
+  const conversationSummaryLine = buildConversationAnalysisUiLine(saveResult, dispatch);
 
   if (!hasResponse) {
     const logLines = [
@@ -10097,6 +10526,7 @@ function buildPersistenceUiSummary(options = {}) {
       storageSummary,
       ...(bridgeSummary ? [bridgeSummary] : []),
       dispatchSummary,
+      ...(conversationSummaryLine ? [conversationSummaryLine] : []),
       ...dispatchFlowUiLines
     ];
     const bridgeStatusChunk = bridgeSummary ? ` | ${bridgeSummary}` : '';
@@ -10127,6 +10557,7 @@ function buildPersistenceUiSummary(options = {}) {
     storageSummary,
     ...(bridgeSummary ? [bridgeSummary] : []),
     dispatchSummary,
+    ...(conversationSummaryLine ? [conversationSummaryLine] : []),
     ...dispatchFlowUiLines
   ];
   if (copyTrace) {
@@ -10412,6 +10843,10 @@ function summarizeWatchlistDispatchPayload(payload) {
   const decisionRecord = payload.decisionRecord && typeof payload.decisionRecord === 'object'
     ? payload.decisionRecord
     : null;
+  const conversationLogs = Array.isArray(payload.conversationLogs) ? payload.conversationLogs : [];
+  const conversationLogCount = Number.isInteger(payload.conversationLogCount) && payload.conversationLogCount >= 0
+    ? payload.conversationLogCount
+    : (conversationLogs.length > 0 ? conversationLogs.length : null);
   return {
     schema: typeof payload.schema === 'string' ? payload.schema : '',
     responseId: typeof payload.responseId === 'string' ? payload.responseId : '',
@@ -10422,6 +10857,7 @@ function summarizeWatchlistDispatchPayload(payload) {
     textLength: text.length,
     textFingerprint: textFingerprint(text),
     hasConversationUrl: !!(typeof payload.conversationUrl === 'string' && payload.conversationUrl.trim()),
+    conversationLogCount,
     hasDecisionRecord: !!decisionRecord,
     decisionRecordFormat: typeof decisionRecord?.recordFormat === 'string' ? decisionRecord.recordFormat : ''
   };
@@ -10439,11 +10875,34 @@ function parseDecisionRecordLine(rawLine) {
   if (count !== 12 && count !== 13) return null;
 
   if (count === 13) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        canonicalLine: parts.join('; '),
+        recordFormat: 'current_13_role',
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        region: parts[11],
+        currency: parts[12]
+      };
+    }
     return {
       canonicalLine: parts.join('; '),
       recordFormat: 'transitional_13',
       decisionDate: parts[0],
       decisionStatus: parts[1],
+      decisionRole: '',
       company: parts[2],
       sourceMaterial: parts[3],
       thesis: parts[4],
@@ -10465,6 +10924,7 @@ function parseDecisionRecordLine(rawLine) {
     recordFormat: 'current_12',
     decisionDate: parts[0],
     decisionStatus: parts[1],
+    decisionRole: '',
     company: parts[2],
     sourceMaterial: parts[3],
     thesis: parts[4],
@@ -10479,21 +10939,31 @@ function parseDecisionRecordLine(rawLine) {
   };
 }
 
-function extractDecisionRecordFromText(rawText) {
+function extractDecisionRecordsFromText(rawText) {
   const text = typeof rawText === 'string' ? rawText : '';
-  if (!text.trim()) return null;
+  if (!text.trim()) return [];
 
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
+  const parsedRecords = [];
+  for (let i = 0; i < lines.length; i += 1) {
     const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) return parsed;
+    if (parsed) parsedRecords.push(parsed);
   }
+  if (parsedRecords.length > 0) return parsedRecords;
 
   const flattened = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-  return parseDecisionRecordLine(flattened);
+  const parsedWhole = parseDecisionRecordLine(flattened);
+  return parsedWhole ? [parsedWhole] : [];
+}
+
+function extractDecisionRecordFromText(rawText) {
+  const decisionRecords = extractDecisionRecordsFromText(rawText);
+  if (decisionRecords.length === 0) return null;
+  return decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
+    || decisionRecords[decisionRecords.length - 1];
 }
 
 function normalizeWatchlistDispatchPayload(response) {
@@ -10503,8 +10973,13 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
-  const decisionRecord = extractDecisionRecordFromText(text);
-  const dispatchText = decisionRecord?.canonicalLine || text;
+  const decisionRecords = extractDecisionRecordsFromText(text);
+  const decisionRecord = decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
+    || decisionRecords[decisionRecords.length - 1]
+    || null;
+  const dispatchText = decisionRecords.length > 0
+    ? decisionRecords.map((record) => record.canonicalLine).join('\n')
+    : text;
 
   const payload = {
     schema: "economist.response.v1",
@@ -10520,6 +10995,7 @@ function normalizeWatchlistDispatchPayload(response) {
       recordFormat: decisionRecord.recordFormat,
       decisionDate: decisionRecord.decisionDate,
       decisionStatus: decisionRecord.decisionStatus,
+      decisionRole: decisionRecord.decisionRole || '',
       company: decisionRecord.company,
       sourceMaterial: decisionRecord.sourceMaterial,
       thesis: decisionRecord.thesis,
@@ -10532,10 +11008,40 @@ function normalizeWatchlistDispatchPayload(response) {
       region: decisionRecord.region,
       currency: decisionRecord.currency
     };
+    payload.decisionRecordCount = decisionRecords.length;
+    if (decisionRecords.length > 1) {
+      payload.decisionRecords = decisionRecords.map((record) => ({
+        recordFormat: record.recordFormat,
+        decisionDate: record.decisionDate,
+        decisionStatus: record.decisionStatus,
+        decisionRole: record.decisionRole || '',
+        company: record.company,
+        sourceMaterial: record.sourceMaterial,
+        thesis: record.thesis,
+        asymmetry: record.asymmetry,
+        bear: record.bear,
+        base: record.base,
+        bull: record.bull,
+        voi: record.voi,
+        sector: record.sector,
+        region: record.region,
+        currency: record.currency
+      }));
+    }
   }
   const conversationUrl = normalizeChatConversationUrl(response.conversationUrl);
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
+  }
+  const conversationLogs = normalizeConversationLogSnapshot(
+    response.conversationLogs,
+    RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+  );
+  if (conversationLogs.length > 0) {
+    payload.conversationLogs = conversationLogs;
+    payload.conversationLogCount = conversationLogs.length;
+  } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
+    payload.conversationLogCount = response.conversationLogCount;
   }
   return payload;
 }
@@ -10569,6 +11075,16 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
+  const conversationLogs = normalizeConversationLogSnapshot(
+    rawPayload.conversationLogs,
+    RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+  );
+  if (conversationLogs.length > 0) {
+    payload.conversationLogs = conversationLogs;
+    payload.conversationLogCount = conversationLogs.length;
+  } else if (Number.isInteger(rawPayload.conversationLogCount) && rawPayload.conversationLogCount > 0) {
+    payload.conversationLogCount = rawPayload.conversationLogCount;
+  }
   if (rawPayload.stage && typeof rawPayload.stage === 'object' && !Array.isArray(rawPayload.stage)) {
     payload.stage = rawPayload.stage;
   }
@@ -10588,6 +11104,7 @@ function buildProblemLogDispatchText(entry, installationId = '') {
   if (entry?.level) parts.push(`level=${entry.level}`);
   if (entry?.source) parts.push(`source=${entry.source}`);
   if (entry?.runId) parts.push(`run_id=${entry.runId}`);
+  if (entry?.title) parts.push(`title=${trimProblemLogText(entry.title, 160)}`);
   if (entry?.status) parts.push(`status=${entry.status}`);
   if (entry?.reason) parts.push(`reason=${entry.reason}`);
   if (entry?.error) parts.push(`error=${entry.error}`);
@@ -10602,6 +11119,12 @@ function buildProblemLogDispatchText(entry, installationId = '') {
       ? entry.chatUrl
       : (typeof entry?.conversationUrl === 'string' ? entry.conversationUrl : '')
   );
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    typeof entry?.sourceUrl === 'string'
+      ? entry.sourceUrl
+      : (typeof entry?.source_url === 'string' ? entry.source_url : '')
+  );
+  if (sourceUrl) parts.push(`source_url=${sourceUrl}`);
   if (chatUrl) parts.push(`chat_url=${chatUrl}`);
   if (Number.isInteger(entry?.tabId)) parts.push(`tab=${entry.tabId}`);
   if (Number.isInteger(entry?.windowId)) parts.push(`window=${entry.windowId}`);
@@ -10613,10 +11136,72 @@ function buildProblemLogDispatchText(entry, installationId = '') {
   );
 }
 
+function sanitizeProblemLogResponseIdToken(rawToken, fallback = '') {
+  const value = typeof rawToken === 'string' ? rawToken.trim() : '';
+  const normalized = value
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  return normalized || fallback;
+}
+
+function buildProcessProblemLogDispatchResponseId(entry) {
+  const normalizedEntry = entry && typeof entry === 'object' ? entry : null;
+  if (!normalizedEntry) return '';
+  const source = typeof normalizedEntry.source === 'string' ? normalizedEntry.source.trim().toLowerCase() : '';
+  const category = typeof normalizedEntry.category === 'string' ? normalizedEntry.category.trim().toLowerCase() : '';
+  if (!problemLogSourceMatches(source, 'process-monitor')) return '';
+  if (category !== 'process_stream' && category !== 'process_state') return '';
+
+  const runId = typeof normalizedEntry.runId === 'string' ? normalizedEntry.runId.trim() : '';
+  if (!runId) return '';
+
+  const signatureSeed = trimProblemLogText(
+    typeof normalizedEntry.signature === 'string' && normalizedEntry.signature.trim()
+      ? normalizedEntry.signature.trim()
+      : [
+        category,
+        normalizeProcessStatus(normalizedEntry.status || 'running'),
+        trimProblemLogText(normalizedEntry.reason || '', 140),
+        trimProblemLogText(normalizedEntry.stageName || '', 120),
+        Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : '',
+        Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : '',
+        normalizeChatConversationUrl(
+          typeof normalizedEntry.chatUrl === 'string'
+            ? normalizedEntry.chatUrl
+            : (typeof normalizedEntry.conversationUrl === 'string' ? normalizedEntry.conversationUrl : '')
+        ),
+        normalizeProblemLogSourceUrl(normalizedEntry.sourceUrl || ''),
+      ].join('|'),
+    340
+  );
+  if (!signatureSeed) return '';
+
+  const runToken = sanitizeProblemLogResponseIdToken(runId, 'run');
+  const signatureHash = textFingerprint(`process_log|${signatureSeed}`);
+  return trimProblemLogText(`plogproc-${runToken}-${signatureHash}`, 180);
+}
+
+function resolveProblemLogDispatchResponseId(entry) {
+  const normalizedEntry = entry && typeof entry === 'object' ? entry : null;
+  if (!normalizedEntry) return `plog-${generateResponseId('')}`;
+  const explicitResponseId = typeof normalizedEntry.responseId === 'string'
+    ? normalizedEntry.responseId.trim()
+    : '';
+  if (explicitResponseId) return explicitResponseId;
+
+  const processResponseId = buildProcessProblemLogDispatchResponseId(normalizedEntry);
+  if (processResponseId) return processResponseId;
+
+  const entryId = typeof normalizedEntry.id === 'string' ? normalizedEntry.id.trim() : '';
+  if (entryId) return entryId;
+  return `plog-${generateResponseId(typeof normalizedEntry.runId === 'string' ? normalizedEntry.runId : '')}`;
+}
+
 function buildProblemLogDispatchPayload(entry, installationId = '') {
   const normalizedEntry = sanitizeProblemLogEntry(entry);
   if (!normalizedEntry) return null;
-  const entryId = typeof normalizedEntry.id === 'string' ? normalizedEntry.id.trim() : '';
+  const responseId = resolveProblemLogDispatchResponseId(normalizedEntry);
   const sourceParts = [PROBLEM_LOG_REMOTE_SOURCE];
   const supportId = typeof installationId === 'string' ? installationId.trim() : '';
   if (supportId) sourceParts.push(`support:${supportId}`);
@@ -10636,11 +11221,15 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
     currentPrompt: Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : null,
     totalPrompts: Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : null,
     stageIndex: Number.isInteger(normalizedEntry.stageIndex) ? normalizedEntry.stageIndex : null,
+    sourceUrl: normalizeProblemLogSourceUrl(
+      typeof normalizedEntry.sourceUrl === 'string' ? normalizedEntry.sourceUrl : ''
+    ),
     chatUrl: normalizeChatConversationUrl(
       typeof normalizedEntry.chatUrl === 'string'
         ? normalizedEntry.chatUrl
         : (typeof normalizedEntry.conversationUrl === 'string' ? normalizedEntry.conversationUrl : '')
     ),
+    heartbeat: normalizedEntry.heartbeat === true ? true : null,
     tabId: Number.isInteger(normalizedEntry.tabId) ? normalizedEntry.tabId : null,
     windowId: Number.isInteger(normalizedEntry.windowId) ? normalizedEntry.windowId : null
   };
@@ -10650,7 +11239,7 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
 
   return normalizeOutboundWatchlistDispatchPayload({
     schema: PROBLEM_LOG_REMOTE_SCHEMA,
-    responseId: entryId || `plog-${generateResponseId(normalizedEntry.runId || '')}`,
+    responseId,
     runId: normalizedEntry.runId || null,
     supportId: supportId || null,
     text: buildProblemLogDispatchText(normalizedEntry, supportId),
@@ -11995,17 +12584,30 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
       stage: 'send_config'
     };
   }
-  const body = JSON.stringify(payload);
+  const enrichResult = await enrichWatchlistDispatchPayloadConversationSnapshot(payload, copyTrace);
+  const payloadForSend = enrichResult?.payload && typeof enrichResult.payload === 'object'
+    ? enrichResult.payload
+    : (payload && typeof payload === 'object' ? payload : {});
+  const conversationLogCount = Number.isInteger(enrichResult?.analysis?.conversationLogCount)
+    ? Math.max(0, enrichResult.analysis.conversationLogCount)
+    : null;
+  const hasConversationUrl = enrichResult?.analysis?.hasConversationUrl === true
+    || !!normalizeChatConversationUrl(typeof payloadForSend?.conversationUrl === 'string' ? payloadForSend.conversationUrl : '');
+  const conversationSnapshotRefreshed = enrichResult?.analysis?.snapshotRefreshed === true;
+  const conversationSnapshotSource = typeof enrichResult?.analysis?.snapshotSource === 'string'
+    ? enrichResult.analysis.snapshotSource.trim()
+    : '';
+  const body = JSON.stringify(payloadForSend);
   const normalizedTrace = typeof copyTrace === 'string' ? copyTrace.trim() : '';
   const traceSeparator = normalizedTrace.indexOf('/');
   const traceRunIdFromTrace = traceSeparator > 0
     ? normalizedTrace.slice(0, traceSeparator).trim()
     : '';
-  const traceRunId = typeof payload?.runId === 'string' && payload.runId.trim()
-    ? payload.runId.trim()
+  const traceRunId = typeof payloadForSend?.runId === 'string' && payloadForSend.runId.trim()
+    ? payloadForSend.runId.trim()
     : traceRunIdFromTrace;
-  const traceResponseId = typeof payload?.responseId === 'string' && payload.responseId.trim()
-    ? payload.responseId.trim()
+  const traceResponseId = typeof payloadForSend?.responseId === 'string' && payloadForSend.responseId.trim()
+    ? payloadForSend.responseId.trim()
     : (
       extractResponseIdFromCopyTrace(normalizedTrace, traceRunId)
       || extractResponseIdFromCopyTrace(normalizedTrace)
@@ -12026,7 +12628,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
     stage: 'send_http',
     status: null,
     requestId: '',
-    intakeUrl: ''
+    intakeUrl: '',
+    conversationLogCount,
+    hasConversationUrl,
+    conversationSnapshotRefreshed,
+    conversationSnapshotSource
   };
   let lastAttemptedIntakeUrl = '';
 
@@ -12050,7 +12656,13 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
         intakeUrl: dispatchConfig.intakeUrlSource || 'unknown',
         keyId: dispatchConfig.keyIdSource || 'unknown'
       },
-      payload: summarizeWatchlistDispatchPayload(payload)
+      conversation: {
+        logCount: conversationLogCount,
+        hasConversationUrl,
+        snapshotRefreshed: conversationSnapshotRefreshed,
+        snapshotSource: conversationSnapshotSource || ''
+      },
+      payload: summarizeWatchlistDispatchPayload(payloadForSend)
     });
     emitWatchlistDispatchProcessLog('info', 'send_start', 'Starting HTTP dispatch to intake endpoint', {
       trace: copyTrace,
@@ -12059,7 +12671,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
       urlCandidateIndex: candidateIndex + 1,
       urlCandidatesCount: urlCandidates.length,
       maxAttempts,
-      timeoutMs
+      timeoutMs,
+      conversationLogCount,
+      hasConversationUrl,
+      conversationSnapshotRefreshed,
+      conversationSnapshotSource
     });
 
     for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
@@ -12195,7 +12811,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           eventId: responseJson?.event_id || null,
           requestId,
           intakeUrl: url,
-          stage: 'send_http'
+          stage: 'send_http',
+          conversationLogCount,
+          hasConversationUrl,
+          conversationSnapshotRefreshed,
+          conversationSnapshotSource
         };
       } catch (error) {
         if (timeoutId) {
@@ -12268,7 +12888,11 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           stage: 'send_http',
           status: dispatchMeta.status || null,
           requestId: dispatchMeta.requestId || '',
-          intakeUrl: url
+          intakeUrl: url,
+          conversationLogCount,
+          hasConversationUrl,
+          conversationSnapshotRefreshed,
+          conversationSnapshotSource
         };
 
         const failedLogMethod = hasAnotherUrlCandidate ? 'warn' : 'error';
@@ -12451,7 +13075,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         firstFailureReason: '',
         firstFailureStatus: null,
         firstFailureRequestId: '',
-        firstFailureIntakeUrl: ''
+        firstFailureIntakeUrl: '',
+        conversationLogCount: null,
+        hasConversationUrl: false,
+        conversationSnapshotRefreshed: false,
+        conversationSnapshotSource: ''
       };
     }
 
@@ -12465,6 +13093,10 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     let firstFailureStatus = null;
     let firstFailureRequestId = '';
     let firstFailureIntakeUrl = '';
+    let conversationLogCount = null;
+    let hasConversationUrl = false;
+    let conversationSnapshotRefreshed = false;
+    let conversationSnapshotSource = '';
     let budgetStopReason = '';
     const flushStartedAt = watchlistDispatchFlushStartedAt || Date.now();
     const flushMaxItemsPerRun = Number.isInteger(WATCHLIST_DISPATCH.flushMaxItemsPerRun) && WATCHLIST_DISPATCH.flushMaxItemsPerRun > 0
@@ -12550,6 +13182,19 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         maxAttempts: 1,
         timeoutMs: sendTimeoutMs
       });
+      if (Number.isInteger(dispatchResult?.conversationLogCount)) {
+        const normalizedLogCount = Math.max(0, dispatchResult.conversationLogCount);
+        conversationLogCount = normalizedLogCount;
+      }
+      if (dispatchResult?.hasConversationUrl === true) {
+        hasConversationUrl = true;
+      }
+      if (dispatchResult?.conversationSnapshotRefreshed === true) {
+        conversationSnapshotRefreshed = true;
+      }
+      if (typeof dispatchResult?.conversationSnapshotSource === 'string' && dispatchResult.conversationSnapshotSource.trim()) {
+        conversationSnapshotSource = dispatchResult.conversationSnapshotSource.trim();
+      }
       if (dispatchResult.success) {
         sent += 1;
         continue;
@@ -12657,7 +13302,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       firstFailureReason: firstFailureReason || '',
       firstFailureStatus: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null,
       firstFailureRequestId: firstFailureRequestId || '',
-      firstFailureIntakeUrl: firstFailureIntakeUrl || ''
+      firstFailureIntakeUrl: firstFailureIntakeUrl || '',
+      conversationLogCount,
+      hasConversationUrl,
+      conversationSnapshotRefreshed,
+      conversationSnapshotSource: conversationSnapshotSource || ''
     });
     appendWatchlistDispatchHistory({
       ts,
@@ -12686,7 +13335,11 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       firstFailureReason: firstFailureReason || '',
       firstFailureStatus: Number.isInteger(firstFailureStatus) ? firstFailureStatus : null,
       firstFailureRequestId: firstFailureRequestId || '',
-      firstFailureIntakeUrl: firstFailureIntakeUrl || ''
+      firstFailureIntakeUrl: firstFailureIntakeUrl || '',
+      conversationLogCount,
+      hasConversationUrl,
+      conversationSnapshotRefreshed,
+      conversationSnapshotSource: conversationSnapshotSource || ''
     };
   } catch (error) {
     emitWatchlistDispatchProcessLog('error', 'flush_exception', 'Flush crashed with unexpected error', {
@@ -13484,13 +14137,26 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       : generateResponseId(normalizedRunId);
     const copyTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
     const copyFingerprint = textFingerprint(responseText);
+    const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
+    const conversationLogs = await buildConversationLogSnapshotForResponse({
+      runId: normalizedRunId,
+      conversationUrl: normalizedConversationUrl,
+      limit: RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+    });
+    const conversationAnalysis = {
+      hasConversationUrl: !!normalizedConversationUrl,
+      conversationLogCount: conversationLogs.length,
+      snapshotRefreshedBeforeSend: false,
+      snapshotSource: conversationLogs.length > 0 ? 'save_snapshot' : 'no_snapshot'
+    };
     console.log(`[copy-flow] [save:start] trace=${copyTrace} len=${responseText.length} fp=${copyFingerprint} analysis=${analysisType}`);
     console.log('[copy-flow] [save:meta]', {
       trace: copyTrace,
       runId: normalizedRunId || '',
       responseId: normalizedResponseId,
       hasStage: !!(stage && typeof stage === 'object' && !Array.isArray(stage)),
-      hasConversationUrl: !!(typeof conversationUrl === 'string' && conversationUrl.trim())
+      hasConversationUrl: !!normalizedConversationUrl,
+      conversationLogCount: conversationLogs.length
     });
 
     const newResponse = {
@@ -13509,9 +14175,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     if (normalizedStage) {
       newResponse.stage = normalizedStage;
     }
-    const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
     if (normalizedConversationUrl) {
       newResponse.conversationUrl = normalizedConversationUrl;
+    }
+    if (conversationLogs.length > 0) {
+      newResponse.conversationLogs = conversationLogs;
+      newResponse.conversationLogCount = conversationLogs.length;
     }
     
     const saveMaxAttempts = 4;
@@ -13616,6 +14285,10 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       failureStatus: null,
       failureRequestId: '',
       failureIntakeUrl: '',
+      conversationLogCount: conversationAnalysis.conversationLogCount,
+      hasConversationUrl: conversationAnalysis.hasConversationUrl,
+      conversationSnapshotRefreshed: conversationAnalysis.snapshotRefreshedBeforeSend,
+      conversationSnapshotSource: conversationAnalysis.snapshotSource,
       state: '',
       processLog: []
     };
@@ -13632,6 +14305,11 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       dispatchOutcome.processLog = dispatchProcessLog.slice(-16);
       console.log(`[copy-flow] [dispatch:flow] trace=${copyTrace} step=${entry}`);
     };
+    appendDispatchProcessLog(
+      'conversation_analysis',
+      'captured',
+      `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, source=${conversationAnalysis.snapshotSource}`
+    );
 
     try {
       appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
@@ -13684,10 +14362,31 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.failureIntakeUrl = typeof flushResult?.firstFailureIntakeUrl === 'string'
             ? flushResult.firstFailureIntakeUrl.trim()
             : '';
+          if (Number.isInteger(flushResult?.conversationLogCount)) {
+            conversationAnalysis.conversationLogCount = Math.max(0, flushResult.conversationLogCount);
+          }
+          if (flushResult?.hasConversationUrl === true) {
+            conversationAnalysis.hasConversationUrl = true;
+          }
+          if (flushResult?.conversationSnapshotRefreshed === true) {
+            conversationAnalysis.snapshotRefreshedBeforeSend = true;
+          }
+          if (typeof flushResult?.conversationSnapshotSource === 'string' && flushResult.conversationSnapshotSource.trim()) {
+            conversationAnalysis.snapshotSource = flushResult.conversationSnapshotSource.trim();
+          }
+          dispatchOutcome.conversationLogCount = conversationAnalysis.conversationLogCount;
+          dispatchOutcome.hasConversationUrl = conversationAnalysis.hasConversationUrl;
+          dispatchOutcome.conversationSnapshotRefreshed = conversationAnalysis.snapshotRefreshedBeforeSend;
+          dispatchOutcome.conversationSnapshotSource = conversationAnalysis.snapshotSource;
           appendDispatchProcessLog(
             'flush_result',
             dispatchOutcome.failed > 0 ? 'partial' : 'ok',
             `sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
+          );
+          appendDispatchProcessLog(
+            'conversation_analysis',
+            'used_for_report',
+            `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, refreshed=${conversationAnalysis.snapshotRefreshedBeforeSend ? 'yes' : 'no'}, source=${conversationAnalysis.snapshotSource || 'n/a'}`
           );
           console.log(
             `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
@@ -13713,7 +14412,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       appendDispatchProcessLog(
         'dispatch_final',
         dispatchOutcome.failed > 0 ? 'warn' : 'ok',
-        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
+        `queued=${dispatchOutcome.queued}, skipped=${dispatchOutcome.queueSkipped}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, convLogs=${dispatchOutcome.conversationLogCount ?? 'n/a'}, convUrl=${dispatchOutcome.hasConversationUrl ? 'yes' : 'no'}, convRefresh=${dispatchOutcome.conversationSnapshotRefreshed ? 'yes' : 'no'}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
       );
     } catch (dispatchError) {
       appendDispatchProcessLog('dispatch_exception', 'error', dispatchError?.message || String(dispatchError));
@@ -13808,7 +14507,8 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       copyTrace,
       verifiedCount: verifiedResponses.length,
       dispatch: dispatchOutcome,
-      dispatchProcessLog: dispatchProcessLog.slice(-16)
+      dispatchProcessLog: dispatchProcessLog.slice(-16),
+      conversationAnalysis
     };
   } catch (error) {
     console.error(`\n${'!'.repeat(80)}`);
@@ -13854,7 +14554,19 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
                   ? saveResult.dispatchProcessLog
                       .filter((entry) => typeof entry === 'string' && entry.trim())
                       .slice(-16)
-                  : []
+                  : [],
+                conversationAnalysis: saveResult.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+                  ? {
+                    hasConversationUrl: saveResult.conversationAnalysis.hasConversationUrl === true,
+                    conversationLogCount: Number.isInteger(saveResult.conversationAnalysis.conversationLogCount)
+                      ? Math.max(0, saveResult.conversationAnalysis.conversationLogCount)
+                      : null,
+                    snapshotRefreshedBeforeSend: saveResult.conversationAnalysis.snapshotRefreshedBeforeSend === true,
+                    snapshotSource: typeof saveResult.conversationAnalysis.snapshotSource === 'string'
+                      ? saveResult.conversationAnalysis.snapshotSource
+                      : ''
+                  }
+                  : null
               }
               : null
           });
@@ -15608,6 +16320,84 @@ chrome.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+function clampWindowMetric(value, minValue, maxValue) {
+  const safeMin = Number.isFinite(minValue) ? minValue : value;
+  const safeMax = Number.isFinite(maxValue) ? maxValue : value;
+  const lower = Math.min(safeMin, safeMax);
+  const upper = Math.max(safeMin, safeMax);
+  return Math.min(Math.max(value, lower), upper);
+}
+
+async function resolveReferenceWindowForChatCreation(preferredWindowId = null) {
+  if (Number.isInteger(preferredWindowId)) {
+    try {
+      return await chrome.windows.get(preferredWindowId);
+    } catch (_) {
+      // Fallback to last focused window.
+    }
+  }
+  try {
+    return await chrome.windows.getLastFocused();
+  } catch (_) {
+    return null;
+  }
+}
+
+function buildPhoneLikeChatWindowCreateOptions(chatUrl, referenceWindow = null) {
+  const aspectRatio = 9 / 16;
+  const fillRatio = 0.94;
+  const defaultBudgetWidth = 720;
+  const defaultBudgetHeight = 1080;
+  const edgeMarginPx = 24;
+
+  const refWidth = Number.isInteger(referenceWindow?.width) && referenceWindow.width > 0
+    ? referenceWindow.width
+    : null;
+  const refHeight = Number.isInteger(referenceWindow?.height) && referenceWindow.height > 0
+    ? referenceWindow.height
+    : null;
+
+  const widthBudget = refWidth
+    ? Math.max(240, Math.round(refWidth * fillRatio))
+    : defaultBudgetWidth;
+  const heightBudget = refHeight
+    ? Math.max(420, Math.round(refHeight * fillRatio))
+    : defaultBudgetHeight;
+
+  let width = Math.round(Math.min(widthBudget, heightBudget * aspectRatio));
+  let height = Math.round(width / aspectRatio);
+  if (height > heightBudget) {
+    height = heightBudget;
+    width = Math.round(height * aspectRatio);
+  }
+
+  const minWidth = Math.min(360, widthBudget);
+  const minHeight = Math.min(640, heightBudget);
+  width = clampWindowMetric(width, minWidth, widthBudget);
+  height = clampWindowMetric(height, minHeight, heightBudget);
+
+  const createOptions = {
+    url: chatUrl,
+    type: "normal",
+    focused: true,
+    width,
+    height
+  };
+
+  const hasReferencePosition = Number.isInteger(referenceWindow?.left)
+    && Number.isInteger(referenceWindow?.top)
+    && Number.isInteger(refWidth)
+    && Number.isInteger(refHeight);
+  if (hasReferencePosition) {
+    const rightAlignedOffset = Math.max(0, refWidth - width - edgeMarginPx);
+    const centeredTopOffset = Math.max(0, Math.round((refHeight - height) / 2));
+    createOptions.left = referenceWindow.left + rightAlignedOffset;
+    createOptions.top = referenceWindow.top + centeredTopOffset;
+  }
+
+  return createOptions;
+}
+
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
@@ -15761,12 +16551,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         messages: []
       });
 
+      const referenceWindow = await resolveReferenceWindowForChatCreation(
+        sourceWindowId !== null ? sourceWindowId : invocationWindowId
+      );
+
       // Otwórz nowe okno ChatGPT
-      const window = await chrome.windows.create({
-        url: chatUrl,
-        type: "normal",
-        focused: true  // POPRAWKA: Aktywuj okno od razu
-      });
+      const window = await chrome.windows.create(
+        buildPhoneLikeChatWindowCreateOptions(chatUrl, referenceWindow)
+      );
 
       const chatTabId = window.tabs[0].id;
 
@@ -15817,59 +16609,74 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       let autoRecoveryAttempt = 0;
       const autoRecoveryReasonsList = [...AUTO_RECOVERY_REASONS];
       while (true) {
-        try {
-        console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
-        results = await chrome.scripting.executeScript({
-          target: { tabId: chatTabId },
-          function: injectToChat,
-          args: [
-            executionPayload,
-            executionPromptChain,
-            WAIT_FOR_TEXTAREA_MS,
-            WAIT_FOR_RESPONSE_MS,
-            RETRY_INTERVAL_MS,
-            title,
-            analysisType,
-            processId,
-            {
-              promptOffset: executionPromptOffset,
-              totalPromptsOverride: processTotalPrompts
-            },
-            {
-              enabled: true,
-              attempt: autoRecoveryAttempt,
-              maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-              delayMs: AUTO_RECOVERY_DELAY_MS,
-              reasons: autoRecoveryReasonsList
-            },
-            {
-              persistFinalResponseViaMessage: true,
-              mode: 'runtime_message',
-              saveTimeoutMs: 15000
-            },
-            manualPdfAttachmentContext
-          ]
-        });
-        console.log(`✅ executeScript zakończony pomyślnie`);
-      } catch (executeError) {
-        console.error(`\n${'='.repeat(80)}`);
-        console.error(`❌ executeScript FAILED`);
-        console.error(`  Tab ID: ${chatTabId}`);
-        console.error(`  Error: ${executeError.message}`);
-        console.error(`  Stack: ${executeError.stack}`);
-        console.error(`${'='.repeat(80)}\n`);
-        await upsertProcess(processId, {
-          title: processTitle,
+        const executionArgs = [
+          executionPayload,
+          executionPromptChain,
+          WAIT_FOR_TEXTAREA_MS,
+          WAIT_FOR_RESPONSE_MS,
+          RETRY_INTERVAL_MS,
+          title,
           analysisType,
-          status: 'failed',
-          needsAction: false,
-          statusText: 'Blad executeScript',
-          reason: 'execute_script_failed',
-          error: executeError.message || 'executeScript failed',
-          autoRecovery: null,
-          finishedAt: Date.now(),
-          timestamp: Date.now()
-        });
+          processId,
+          {
+            promptOffset: executionPromptOffset,
+            totalPromptsOverride: processTotalPrompts
+          },
+          {
+            enabled: true,
+            attempt: autoRecoveryAttempt,
+            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
+            delayMs: AUTO_RECOVERY_DELAY_MS,
+            reasons: autoRecoveryReasonsList
+          },
+          {
+            persistFinalResponseViaMessage: true,
+            mode: 'runtime_message',
+            saveTimeoutMs: 15000
+          },
+          manualPdfAttachmentContext
+        ];
+
+        try {
+          console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
+          results = await executeScriptWithTransientRetry({
+            tabId: chatTabId,
+            scriptFunction: injectToChat,
+            args: executionArgs,
+            contextLabel: `${analysisType}:inject`,
+            onRetry: async ({ attempt, maxAttempts, errorText }) => {
+              await upsertProcess(processId, {
+                title: processTitle,
+                analysisType,
+                status: 'running',
+                needsAction: false,
+                statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
+                reason: 'execute_script_retry',
+                error: errorText || '',
+                timestamp: Date.now()
+              });
+            }
+          });
+          console.log(`✅ executeScript zakończony pomyślnie`);
+        } catch (executeError) {
+          console.error(`\n${'='.repeat(80)}`);
+          console.error(`❌ executeScript FAILED`);
+          console.error(`  Tab ID: ${chatTabId}`);
+          console.error(`  Error: ${executeError.message}`);
+          console.error(`  Stack: ${executeError.stack}`);
+          console.error(`${'='.repeat(80)}\n`);
+          await upsertProcess(processId, {
+            title: processTitle,
+            analysisType,
+            status: 'failed',
+            needsAction: false,
+            statusText: 'Blad executeScript',
+            reason: 'execute_script_failed',
+            error: executeError.message || 'executeScript failed',
+            autoRecovery: null,
+            finishedAt: Date.now(),
+            timestamp: Date.now()
+          });
           return { success: false, title, error: `executeScript error: ${executeError.message}` };
         }
 

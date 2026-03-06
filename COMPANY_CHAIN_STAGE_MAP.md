@@ -25,15 +25,17 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 | 9 | 8 | 7 | Stage 7: Revaluation Parameter Selection | Single KPI with VOI window and measurable re-rate force. |
 | 10 | 9 | 8 | Stage 8: Thesis Monetization Quantification | Incremental wedge cash flows (Bear/Base/Bull), SoP-compatible NPV block. |
 | 11 | 10 | 9 | Stage 9: Reverse DCF (TOTAL) | Market-implied growth/margin extraction and divergence diagnostics. |
-| 12 | 11 | 10 | Stage 10: Four-Gate Decision | Integrity/Quality/Value/Proof/Execution gates with WATCH-AVOID output. |
-| 13 | 12 | 11 | Stage 11: Four-Gate Output Record | Single-line decision record for downstream ingestion. |
+| 12 | 11 | 10 | Stage 10: Four-Gate Decision + Stage 11 Composite Rank | Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection. |
+| 13 | 12 | 12 | Stage 12: Four-Gate Output Record | Two-line decision records (PRIMARY and SECONDARY) for downstream ingestion. |
 
 ## Legacy Stage Id Aliases
 These aliases are still accepted by `findCompanyPromptIndexByStageIdentifier()`:
+- `11` -> `promptIndex 11` (Stage 11 is implemented as a section inside the Stage 10 prompt)
 - `2.5` -> `promptIndex 5` (legacy Reverse DCF Lite numbering)
 - `3.2` -> `promptIndex 5` (compatibility alias collapsed to Stage 4 prompt)
 - `3.5` -> `promptIndex 7` (legacy midpoint naming for DuPont)
 - `6.5` -> `promptIndex 7` (compatibility midpoint alias for DuPont)
+- `10.5` -> `promptIndex 11` (legacy midpoint naming for composite rank; now Stage 11 section in Stage 10 prompt)
 
 ## Editing Checklist
 1. Update `prompts-company.txt` with `◄PROMPT_SEPARATOR►` boundaries.

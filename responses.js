@@ -347,9 +347,31 @@ function parseDecisionRecordLine(rawLine) {
   if (!parts) return null;
 
   if (parts.length === 13) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        region: parts[11],
+        currency: parts[12],
+        recordFormat: 'current_13_role'
+      };
+    }
     return {
       decisionDate: parts[0],
       decisionStatus: parts[1],
+      decisionRole: '',
       company: parts[2],
       sourceMaterial: parts[3],
       thesis: parts[4],
@@ -370,6 +392,7 @@ function parseDecisionRecordLine(rawLine) {
   return {
     decisionDate: parts[0],
     decisionStatus: parts[1],
+    decisionRole: '',
     company: parts[2],
     sourceMaterial: parts[3],
     thesis: parts[4],
@@ -385,22 +408,31 @@ function parseDecisionRecordLine(rawLine) {
   };
 }
 
-function extractDecisionRecordFromText(text) {
+function extractDecisionRecordsFromText(text) {
   const source = typeof text === 'string' ? text : '';
-  if (!source.trim()) return null;
+  if (!source.trim()) return [];
   const lines = source
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
+  const parsedRecords = [];
+  for (let i = 0; i < lines.length; i += 1) {
     const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) return parsed;
+    if (parsed) parsedRecords.push(parsed);
   }
+  if (parsedRecords.length > 0) return parsedRecords;
 
-  if (!source.includes(';')) return null;
+  if (!source.includes(';')) return [];
   const flattened = source.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-  return parseDecisionRecordLine(flattened);
+  const parsedWhole = parseDecisionRecordLine(flattened);
+  return parsedWhole ? [parsedWhole] : [];
+}
+
+function extractDecisionRecordFromText(text) {
+  const records = extractDecisionRecordsFromText(text);
+  if (records.length === 0) return null;
+  return records.find((record) => record.decisionRole === 'PRIMARY')
+    || records[records.length - 1];
 }
 
 function formatDecisionRecordTable(text) {
@@ -410,15 +442,19 @@ function formatDecisionRecordTable(text) {
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
 
-  let parts = null;
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
-    parts = parseDecisionRecordParts(lines[i]);
-    if (parts) break;
+  const parsedParts = [];
+  for (let i = 0; i < lines.length; i += 1) {
+    const current = parseDecisionRecordParts(lines[i]);
+    if (current) parsedParts.push(current);
   }
-  if (!parts) {
+  if (parsedParts.length === 0) {
     const flattened = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-    parts = parseDecisionRecordParts(flattened);
+    const flattenedParts = parseDecisionRecordParts(flattened);
+    if (flattenedParts) parsedParts.push(flattenedParts);
   }
+  const parts = parsedParts.find(
+    (item) => item.length === 13 && /^(PRIMARY|SECONDARY)$/i.test(item[2] || '') && String(item[2]).toUpperCase() === 'PRIMARY'
+  ) || parsedParts[parsedParts.length - 1];
   if (!parts) return null;
 
   const labels12 = [
@@ -435,7 +471,22 @@ function formatDecisionRecordTable(text) {
     'Region',
     'Waluta'
   ];
-  const labels13 = [
+  const labels13Role = [
+    'Data decyzji',
+    'Status decyzji',
+    'Rola',
+    'Spolka',
+    'Material zrodlowy',
+    'Teza inwestycyjna',
+    'Bear scenario (TOTAL)',
+    'Base scenario (TOTAL)',
+    'Bull scenario (TOTAL)',
+    'VOI/Falsifiers/Primary risk',
+    'Sektor',
+    'Region',
+    'Waluta'
+  ];
+  const labels13Legacy = [
     'Data decyzji',
     'Status decyzji',
     'Spolka',
@@ -450,7 +501,10 @@ function formatDecisionRecordTable(text) {
     'Region',
     'Waluta'
   ];
-  const labels = parts.length === 13 ? labels13 : labels12;
+  const hasExplicitRole = parts.length === 13 && /^(PRIMARY|SECONDARY)$/i.test(parts[2] || '');
+  const labels = parts.length === 13
+    ? (hasExplicitRole ? labels13Role : labels13Legacy)
+    : labels12;
 
   return labels
     .map((label, index) => `${index + 1} - ${label} - ${parts[index] || ''}`)
