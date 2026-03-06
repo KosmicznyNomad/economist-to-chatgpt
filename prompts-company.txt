@@ -22,7 +22,7 @@ You will work through a strict sequence to maintain auditability and avoid narra
 
 **Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
-DATA_GAP PROTOCOL
+# DATA_GAP PROTOCOL — Global Rule (applies to every stage in this conversation)
 
 DATA = anything found in the full conversation:
   [1] Named fields in the current message
@@ -32,21 +32,17 @@ DATA = anything found in the full conversation:
   [5] [RECONSTRUCTED] — derived from [1-4]
   [6] [ASSUMPTION] — stated guess, confidence H/M/L
 
-Before executing: scan sources [1-6] for all required inputs.
+Before executing any stage: scan sources [1-6] for all required inputs.
 If input is missing from [1-4]: derive it as [5] or assume as [6].
 
 OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
+  - Stage X produced zero output OR produced output missing a REQUIRED
     artifact/handoff block (check against that stage's "Required Output" list)
   - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
 
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
 Then STOP.
 
 DATA_GAP is the exception. Execution is the default.
-
 
 # Key Definitions
 
@@ -569,30 +565,6 @@ Assume the thesis is correct; do not debate it.
 Use first principles and deduction; avoid generic MBA frameworks unless a stage explicitly calls for a tool. When structure is needed, use the workflow’s invoice-first mechanics: payer › contract mechanism › invoice items › gates/bottlenecks › timing funnel › delivered pool.
 Be conservative when data is missing; label DATA vs ASSUMPTION vs INFERENCE.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 
@@ -683,30 +655,6 @@ necessarily as named variables):
   may be in Stage 0 Author Tokens, invoice lists, or anchor-ledger wording
 - `disconfirmers`: Breakpoints/VOI invalidation signals — may be in Stage 0 
   disconfirmers, Stage 3 VOI/downgrade triggers, or later falsifier blocks
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 
@@ -1030,30 +978,6 @@ When you cannot find a critical number, do NOT stop your analysis. Instead:
 
 **Critical Rule:** Never silently invent numbers. Every proxy must be explicitly explained with your reasoning.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 
@@ -2116,30 +2040,6 @@ OPERATING PRINCIPLES
 • This is a screening stage: prioritize clarity, comparability, and error-avoidance over precision.
 • ALWAYS-RUN rule: You must complete the stage for all companies. Missing inputs must trigger explicit proxy methods (not silent guessing), wide ranges, and stricter decision thresholds — not a stage-level stop.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 
@@ -2485,30 +2385,6 @@ This will help for the next stage: Stage 5 - Competitive Position.
 ◄PROMPT_SEPARATOR►
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 Your goal is to select 4 companies through systematic qualitative analysis based on asymmetric return potential, competitive advantages, and market adoption timing. Focus on identifying companies with the highest risk/reward ratios (upside/downside >3:1 preferred) rather than simply the strongest current market positions.
@@ -2797,30 +2673,6 @@ This will help for the next stage: Stage 6 - DuPont ROE Quality.
 ◄PROMPT_SEPARATOR►
 # DuPont ROE Quality Assessment
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 ## Context
@@ -2915,30 +2767,6 @@ This will help for the next stage: Stage 7 - Revaluation Parameter Selection.
 ◄PROMPT_SEPARATOR►
 # STAGE 7 — REVALUATION PARAMETER SELECTION
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 (Formerly referenced as "KPI Selection" or "Single Metric Decision")
@@ -3202,30 +3030,6 @@ SEARCH POLICY (IMPORTANT)
 - Cite sources used.
 - Do not “research everything”; search only to unblock missing essentials or to validate a suspicious/conflicting number.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 
@@ -3358,30 +3162,6 @@ This will help for the next stage: Stage 9 - Reverse DCF (whole company / TOTAL)
 ◄PROMPT_SEPARATOR►
 # STAGE 9 — REVERSE DCF (TOTAL / WHOLE COMPANY)
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 You are conducting a Reverse DCF analysis for ALL 4 finalists to extract what expectations are already priced into each stock and determine whether there is actionable mispricing versus the thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
@@ -3655,30 +3435,6 @@ This will help for the next stage: Stage 10 - Four-Gate Decision (WATCH/AVOID).
 ROLE
 You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ALL 4 FINALISTS, you must produce a decision (WATCH / AVOID) per company, then rank WATCH companies using a Composite Score and select the top 2 as PRIMARY and SECONDARY.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 You do not invent a new thesis.
@@ -4071,30 +3827,6 @@ This will help for the next stage: Stage 12 - Four-Gate Framework — Decision O
 
 Wygeneruj dokładnie dwie linie tekstu — dwa standardowe rekordy decyzyjne według metodologii Four-Gate Framework. Pierwszy rekord = PRIMARY, drugi = SECONDARY z Stage 11.
 
-DATA_GAP PROTOCOL
-
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
-
-Before executing: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
-
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED 
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
-
-After emitting DATA_GAP_STAGE=<X>, append:
-  MISSING: [list specific missing artifacts/fields]
-  RECOVERY: User should re-run Stage X or paste its output, then re-invoke current stage.
-Then STOP.
-
-DATA_GAP is the exception. Execution is the default.
 
 
 

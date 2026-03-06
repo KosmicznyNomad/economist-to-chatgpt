@@ -18309,11 +18309,17 @@ async function injectToChat(
         .split(/\r?\n/)
         .map((line) => line.trim())
         .filter((line) => line.length > 0);
-      if (lines.length !== 1) return null;
+      if (lines.length === 0) return null;
       const match = lines[0].match(DATA_GAP_DIRECTIVE_REGEX);
       if (!match) return null;
       const stageId = normalizeDataGapStageId(match[1]);
       if (!stageId) return null;
+      // Accept multi-line format (DATA_GAP_STAGE + optional MISSING/RECOVERY lines)
+      // but only if every additional line is a known DATA_GAP annotation.
+      const ALLOWED_EXTRA_LINE = /^(?:MISSING|RECOVERY)\s*:/i;
+      for (let idx = 1; idx < lines.length; idx += 1) {
+        if (!ALLOWED_EXTRA_LINE.test(lines[idx])) return null;
+      }
       return {
         stageId,
         rawLine: lines[0]
