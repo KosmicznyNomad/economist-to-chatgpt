@@ -1089,9 +1089,31 @@ function parseDecisionRecordLine(text) {
   if (fieldCount !== 12 && fieldCount !== 13) return null;
 
   if (fieldCount === 13) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        region: parts[11],
+        currency: parts[12],
+        recordFormat: 'current_13_role'
+      };
+    }
     return {
       decisionDate: parts[0],
       decisionStatus: parts[1],
+      decisionRole: '',
       company: parts[2],
       sourceMaterial: parts[3],
       thesis: parts[4],
@@ -1112,6 +1134,7 @@ function parseDecisionRecordLine(text) {
   return {
     decisionDate: parts[0],
     decisionStatus: parts[1],
+    decisionRole: '',
     company: parts[2],
     sourceMaterial: parts[3],
     thesis: parts[4],
@@ -1127,22 +1150,30 @@ function parseDecisionRecordLine(text) {
   };
 }
 
-function extractDecisionRecordFromText(text) {
+function extractDecisionRecordsFromText(text) {
   const source = typeof text === 'string' ? text : '';
-  if (!source.trim()) return null;
+  if (!source.trim()) return [];
   const lines = source
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
+  const parsedRecords = [];
+  for (let i = 0; i < lines.length; i += 1) {
     const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) return parsed;
+    if (parsed) parsedRecords.push(parsed);
   }
+  if (parsedRecords.length > 0) return parsedRecords;
 
-  if (!source.includes(';')) return null;
+  if (!source.includes(';')) return [];
   const parsedWhole = parseDecisionRecordLine(source.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim());
-  return parsedWhole || null;
+  return parsedWhole ? [parsedWhole] : [];
+}
+
+function extractDecisionRecordFromText(text) {
+  const parsedRecords = extractDecisionRecordsFromText(text);
+  if (parsedRecords.length === 0) return null;
+  return parsedRecords.find((record) => record.decisionRole === 'PRIMARY')
+    || parsedRecords[parsedRecords.length - 1];
 }
 
 function getProcessCompanySnapshotCacheEntry(process) {

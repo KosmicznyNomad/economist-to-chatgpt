@@ -559,6 +559,31 @@ function pruneProcessRecords(records) {
   return active.concat(closed.slice(0, PROCESS_HISTORY_LIMIT));
 }
 
+function rehydrateProcessProblemLogState(records = []) {
+  problemLogLastSignatureByRunId.clear();
+  processLogLastEmitTsByRunId.clear();
+  processStaleWarnLastEmitTsByRunId.clear();
+
+  const sourceRecords = Array.isArray(records) ? records : [];
+  const nowTs = Date.now();
+  for (const record of sourceRecords) {
+    if (!record || typeof record !== 'object') continue;
+    const runId = typeof record.id === 'string' ? record.id.trim() : '';
+    if (!runId) continue;
+    if (isClosedProcessStatus(record.status)) continue;
+
+    const entry = buildProcessProblemLogEntry(runId, record);
+    const signature = typeof entry?.signature === 'string' ? entry.signature.trim() : '';
+    if (!signature) continue;
+
+    problemLogLastSignatureByRunId.set(runId, signature);
+    const ts = Number.isInteger(record.timestamp) && record.timestamp > 0
+      ? record.timestamp
+      : nowTs;
+    processLogLastEmitTsByRunId.set(runId, ts);
+  }
+}
+
 async function ensureProcessRegistryReady() {
   if (!processRegistryReady) {
     processRegistryReady = (async () => {
@@ -569,9 +594,13 @@ async function ensureProcessRegistryReady() {
         records.forEach((record) => {
           processRegistry.set(record.id, record);
         });
+        rehydrateProcessProblemLogState(records);
       } catch (error) {
         console.warn('[monitor] Failed to read process monitor state:', error);
         processRegistry.clear();
+        problemLogLastSignatureByRunId.clear();
+        processLogLastEmitTsByRunId.clear();
+        processStaleWarnLastEmitTsByRunId.clear();
       }
     })();
   }
@@ -2104,12 +2133,19 @@ function buildProblemLogMessage(entry) {
   const error = typeof entry.error === 'string' ? entry.error.trim() : '';
   const statusText = typeof entry.statusText === 'string' ? entry.statusText.trim() : '';
   const stageName = typeof entry.stageName === 'string' ? entry.stageName.trim() : '';
+  const title = trimProblemLogText(typeof entry.title === 'string' ? entry.title.trim() : '', 120);
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    typeof entry.sourceUrl === 'string'
+      ? entry.sourceUrl
+      : (typeof entry.source_url === 'string' ? entry.source_url : '')
+  );
   const chatUrl = normalizeChatConversationUrl(
     typeof entry.chatUrl === 'string'
       ? entry.chatUrl
       : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
   );
 
+  if (title) parts.push(`title=${title}`);
   if (status) parts.push(`status=${status}`);
   if (reason) parts.push(`reason=${reason}`);
   if (error) parts.push(`error=${error}`);
@@ -2123,12 +2159,26 @@ function buildProblemLogMessage(entry) {
   if (stageName) {
     parts.push(`stage=${stageName}`);
   }
+  if (sourceUrl) {
+    parts.push(`sourceUrl=${sourceUrl}`);
+  }
   if (chatUrl) {
     parts.push(`chatUrl=${chatUrl}`);
   }
 
   const content = parts.join(' | ');
   return trimProblemLogText(content || 'problem_detected');
+}
+
+function normalizeProblemLogSourceUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!value) return '';
+  if (/^manual:\/\//i.test(value)) return trimProblemLogText(value, 320);
+  try {
+    return new URL(value).toString();
+  } catch {
+    return trimProblemLogText(value, 320);
+  }
 }
 
 function sanitizeProblemLogEntry(rawEntry) {
@@ -2170,6 +2220,12 @@ function sanitizeProblemLogEntry(rawEntry) {
       ? rawEntry.chatUrl
       : (typeof rawEntry.conversationUrl === 'string' ? rawEntry.conversationUrl : '')
   );
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    typeof rawEntry.sourceUrl === 'string'
+      ? rawEntry.sourceUrl
+      : (typeof rawEntry.source_url === 'string' ? rawEntry.source_url : '')
+  );
+  const heartbeat = rawEntry.heartbeat === true;
   const message = trimProblemLogText(rawEntry.message || buildProblemLogMessage(rawEntry));
   const signature = trimProblemLogText(rawEntry.signature || '', 380);
   const entryId = typeof rawEntry.id === 'string' && rawEntry.id.trim()
@@ -2198,8 +2254,10 @@ function sanitizeProblemLogEntry(rawEntry) {
     stageName,
     tabId: Number.isInteger(rawEntry.tabId) ? rawEntry.tabId : null,
     windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null,
+    sourceUrl: sourceUrl || '',
     chatUrl: chatUrl || '',
-    conversationUrl: chatUrl || ''
+    conversationUrl: chatUrl || '',
+    heartbeat
   };
 }
 
@@ -2518,7 +2576,9 @@ function isLowSignalProblemLogEntry(entry) {
   if (reason === 'remote_connection_configured') return true;
   if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
   if (problemLogSourceMatches(source, 'process-monitor-heartbeat')) return true;
-  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') return true;
+  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
+    return entry.heartbeat === true;
+  }
   if (
     problemLogSourceMatches(source, 'youtube-content-window')
     && noiseBlob.includes('resizeobserver loop completed with undelivered notifications')
@@ -2556,7 +2616,11 @@ function shouldDispatchProblemLogRemotely(entry) {
   const level = normalizeProblemLogLevel(entry.level);
   if (level === 'error' || level === 'warn') return true;
 
+  const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
+    return entry.heartbeat !== true;
+  }
   if (category === 'process_state' || category === 'data_gap' || category === 'recovery') return true;
   return false;
 }
@@ -2659,13 +2723,17 @@ function resolveProcessStageSnapshot(process) {
   };
 }
 
-function buildProcessProblemLogEntry(runId, process) {
+function buildProcessProblemLogEntry(runId, process, options = {}) {
   if (!runId || !process || typeof process !== 'object') return null;
 
   const status = normalizeProcessStatus(process.status);
   const stage = resolveProcessStageSnapshot(process);
   const processChatUrl = extractProcessChatUrl(process);
+  const processSourceUrl = normalizeProblemLogSourceUrl(
+    typeof process.sourceUrl === 'string' ? process.sourceUrl : ''
+  );
   const chatUrlSignature = trimProblemLogText(processChatUrl || '', 180);
+  const sourceUrlSignature = trimProblemLogText(processSourceUrl || '', 180);
   const issueDetected = shouldRecordIssueForProcess(process);
   const successDetected = shouldRecordSuccessForProcess(process, status, stage);
   const stateDetected = !issueDetected && !successDetected;
@@ -2702,7 +2770,8 @@ function buildProcessProblemLogEntry(runId, process) {
     Number.isInteger(stage.stageIndex) ? stage.stageIndex : '',
     stage.stageName || '',
     signatureStatusText,
-    chatUrlSignature
+    chatUrlSignature,
+    sourceUrlSignature
   ].join('|');
 
   const level = issueDetected
@@ -2728,8 +2797,10 @@ function buildProcessProblemLogEntry(runId, process) {
     stageName: stage.stageName || '',
     tabId: Number.isInteger(process.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+    sourceUrl: processSourceUrl || '',
     chatUrl: processChatUrl || '',
     conversationUrl: processChatUrl || '',
+    heartbeat: options?.heartbeat === true,
     signature
   };
 }
@@ -3020,6 +3091,9 @@ async function upsertProcess(runId, patch = {}) {
   const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
   const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
   const heartbeatDue = !!(problemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
+  if (problemEntry && heartbeatDue && !signatureChanged) {
+    problemEntry.heartbeat = true;
+  }
   if (problemEntry?.signature && (signatureChanged || heartbeatDue)) {
     const emittedEntry = await appendProblemLog(problemEntry);
     if (emittedEntry) {
@@ -4627,15 +4701,15 @@ const STAGE_METADATA_COMPANY = [
     promptIndex: 11,
     promptNumber: 12,
     stageId: '10',
-    stageName: "Stage 10: Four-Gate Decision",
-    description: "Integrity/Quality/Value/Proof/Execution gates with WATCH-AVOID output."
+    stageName: "Stage 10: Four-Gate Decision + Stage 11 Composite Rank",
+    description: "Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection."
   },
   {
     promptIndex: 12,
     promptNumber: 13,
-    stageId: '11',
-    stageName: "Stage 11: Four-Gate Output Record",
-    description: "Single-line decision record for downstream ingestion."
+    stageId: '12',
+    stageName: "Stage 12: Four-Gate Output Record",
+    description: "Two-line decision records (PRIMARY and SECONDARY) for downstream ingestion."
   }
 ];
 
@@ -4657,7 +4731,9 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['8', 9],
   ['9', 10],
   ['10', 11],
-  ['11', 12],
+  ['11', 11], // Stage 11 exists as a section inside the Stage 10 prompt
+  ['12', 12],
+  ['10.5', 11], // legacy alias: old chain used Stage 10.5 for composite rank
   ['2.5', 5], // legacy alias: old chain used 2.5 for Reverse DCF Lite
   ['3.2', 5], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
   ['3.5', 7], // legacy alias: old chain treated DuPont as 3.5
@@ -10799,11 +10875,34 @@ function parseDecisionRecordLine(rawLine) {
   if (count !== 12 && count !== 13) return null;
 
   if (count === 13) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        canonicalLine: parts.join('; '),
+        recordFormat: 'current_13_role',
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        region: parts[11],
+        currency: parts[12]
+      };
+    }
     return {
       canonicalLine: parts.join('; '),
       recordFormat: 'transitional_13',
       decisionDate: parts[0],
       decisionStatus: parts[1],
+      decisionRole: '',
       company: parts[2],
       sourceMaterial: parts[3],
       thesis: parts[4],
@@ -10825,6 +10924,7 @@ function parseDecisionRecordLine(rawLine) {
     recordFormat: 'current_12',
     decisionDate: parts[0],
     decisionStatus: parts[1],
+    decisionRole: '',
     company: parts[2],
     sourceMaterial: parts[3],
     thesis: parts[4],
@@ -10839,21 +10939,31 @@ function parseDecisionRecordLine(rawLine) {
   };
 }
 
-function extractDecisionRecordFromText(rawText) {
+function extractDecisionRecordsFromText(rawText) {
   const text = typeof rawText === 'string' ? rawText : '';
-  if (!text.trim()) return null;
+  if (!text.trim()) return [];
 
   const lines = text
     .split(/\r?\n/)
     .map((line) => line.trim())
     .filter((line) => line.length > 0);
-  for (let i = lines.length - 1; i >= 0; i -= 1) {
+  const parsedRecords = [];
+  for (let i = 0; i < lines.length; i += 1) {
     const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) return parsed;
+    if (parsed) parsedRecords.push(parsed);
   }
+  if (parsedRecords.length > 0) return parsedRecords;
 
   const flattened = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-  return parseDecisionRecordLine(flattened);
+  const parsedWhole = parseDecisionRecordLine(flattened);
+  return parsedWhole ? [parsedWhole] : [];
+}
+
+function extractDecisionRecordFromText(rawText) {
+  const decisionRecords = extractDecisionRecordsFromText(rawText);
+  if (decisionRecords.length === 0) return null;
+  return decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
+    || decisionRecords[decisionRecords.length - 1];
 }
 
 function normalizeWatchlistDispatchPayload(response) {
@@ -10863,8 +10973,13 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
-  const decisionRecord = extractDecisionRecordFromText(text);
-  const dispatchText = decisionRecord?.canonicalLine || text;
+  const decisionRecords = extractDecisionRecordsFromText(text);
+  const decisionRecord = decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
+    || decisionRecords[decisionRecords.length - 1]
+    || null;
+  const dispatchText = decisionRecords.length > 0
+    ? decisionRecords.map((record) => record.canonicalLine).join('\n')
+    : text;
 
   const payload = {
     schema: "economist.response.v1",
@@ -10880,6 +10995,7 @@ function normalizeWatchlistDispatchPayload(response) {
       recordFormat: decisionRecord.recordFormat,
       decisionDate: decisionRecord.decisionDate,
       decisionStatus: decisionRecord.decisionStatus,
+      decisionRole: decisionRecord.decisionRole || '',
       company: decisionRecord.company,
       sourceMaterial: decisionRecord.sourceMaterial,
       thesis: decisionRecord.thesis,
@@ -10892,6 +11008,26 @@ function normalizeWatchlistDispatchPayload(response) {
       region: decisionRecord.region,
       currency: decisionRecord.currency
     };
+    payload.decisionRecordCount = decisionRecords.length;
+    if (decisionRecords.length > 1) {
+      payload.decisionRecords = decisionRecords.map((record) => ({
+        recordFormat: record.recordFormat,
+        decisionDate: record.decisionDate,
+        decisionStatus: record.decisionStatus,
+        decisionRole: record.decisionRole || '',
+        company: record.company,
+        sourceMaterial: record.sourceMaterial,
+        thesis: record.thesis,
+        asymmetry: record.asymmetry,
+        bear: record.bear,
+        base: record.base,
+        bull: record.bull,
+        voi: record.voi,
+        sector: record.sector,
+        region: record.region,
+        currency: record.currency
+      }));
+    }
   }
   const conversationUrl = normalizeChatConversationUrl(response.conversationUrl);
   if (conversationUrl) {
@@ -10968,6 +11104,7 @@ function buildProblemLogDispatchText(entry, installationId = '') {
   if (entry?.level) parts.push(`level=${entry.level}`);
   if (entry?.source) parts.push(`source=${entry.source}`);
   if (entry?.runId) parts.push(`run_id=${entry.runId}`);
+  if (entry?.title) parts.push(`title=${trimProblemLogText(entry.title, 160)}`);
   if (entry?.status) parts.push(`status=${entry.status}`);
   if (entry?.reason) parts.push(`reason=${entry.reason}`);
   if (entry?.error) parts.push(`error=${entry.error}`);
@@ -10982,6 +11119,12 @@ function buildProblemLogDispatchText(entry, installationId = '') {
       ? entry.chatUrl
       : (typeof entry?.conversationUrl === 'string' ? entry.conversationUrl : '')
   );
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    typeof entry?.sourceUrl === 'string'
+      ? entry.sourceUrl
+      : (typeof entry?.source_url === 'string' ? entry.source_url : '')
+  );
+  if (sourceUrl) parts.push(`source_url=${sourceUrl}`);
   if (chatUrl) parts.push(`chat_url=${chatUrl}`);
   if (Number.isInteger(entry?.tabId)) parts.push(`tab=${entry.tabId}`);
   if (Number.isInteger(entry?.windowId)) parts.push(`window=${entry.windowId}`);
@@ -10993,10 +11136,72 @@ function buildProblemLogDispatchText(entry, installationId = '') {
   );
 }
 
+function sanitizeProblemLogResponseIdToken(rawToken, fallback = '') {
+  const value = typeof rawToken === 'string' ? rawToken.trim() : '';
+  const normalized = value
+    .replace(/[^a-zA-Z0-9._-]+/g, '_')
+    .replace(/^_+|_+$/g, '')
+    .slice(0, 80);
+  return normalized || fallback;
+}
+
+function buildProcessProblemLogDispatchResponseId(entry) {
+  const normalizedEntry = entry && typeof entry === 'object' ? entry : null;
+  if (!normalizedEntry) return '';
+  const source = typeof normalizedEntry.source === 'string' ? normalizedEntry.source.trim().toLowerCase() : '';
+  const category = typeof normalizedEntry.category === 'string' ? normalizedEntry.category.trim().toLowerCase() : '';
+  if (!problemLogSourceMatches(source, 'process-monitor')) return '';
+  if (category !== 'process_stream' && category !== 'process_state') return '';
+
+  const runId = typeof normalizedEntry.runId === 'string' ? normalizedEntry.runId.trim() : '';
+  if (!runId) return '';
+
+  const signatureSeed = trimProblemLogText(
+    typeof normalizedEntry.signature === 'string' && normalizedEntry.signature.trim()
+      ? normalizedEntry.signature.trim()
+      : [
+        category,
+        normalizeProcessStatus(normalizedEntry.status || 'running'),
+        trimProblemLogText(normalizedEntry.reason || '', 140),
+        trimProblemLogText(normalizedEntry.stageName || '', 120),
+        Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : '',
+        Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : '',
+        normalizeChatConversationUrl(
+          typeof normalizedEntry.chatUrl === 'string'
+            ? normalizedEntry.chatUrl
+            : (typeof normalizedEntry.conversationUrl === 'string' ? normalizedEntry.conversationUrl : '')
+        ),
+        normalizeProblemLogSourceUrl(normalizedEntry.sourceUrl || ''),
+      ].join('|'),
+    340
+  );
+  if (!signatureSeed) return '';
+
+  const runToken = sanitizeProblemLogResponseIdToken(runId, 'run');
+  const signatureHash = textFingerprint(`process_log|${signatureSeed}`);
+  return trimProblemLogText(`plogproc-${runToken}-${signatureHash}`, 180);
+}
+
+function resolveProblemLogDispatchResponseId(entry) {
+  const normalizedEntry = entry && typeof entry === 'object' ? entry : null;
+  if (!normalizedEntry) return `plog-${generateResponseId('')}`;
+  const explicitResponseId = typeof normalizedEntry.responseId === 'string'
+    ? normalizedEntry.responseId.trim()
+    : '';
+  if (explicitResponseId) return explicitResponseId;
+
+  const processResponseId = buildProcessProblemLogDispatchResponseId(normalizedEntry);
+  if (processResponseId) return processResponseId;
+
+  const entryId = typeof normalizedEntry.id === 'string' ? normalizedEntry.id.trim() : '';
+  if (entryId) return entryId;
+  return `plog-${generateResponseId(typeof normalizedEntry.runId === 'string' ? normalizedEntry.runId : '')}`;
+}
+
 function buildProblemLogDispatchPayload(entry, installationId = '') {
   const normalizedEntry = sanitizeProblemLogEntry(entry);
   if (!normalizedEntry) return null;
-  const entryId = typeof normalizedEntry.id === 'string' ? normalizedEntry.id.trim() : '';
+  const responseId = resolveProblemLogDispatchResponseId(normalizedEntry);
   const sourceParts = [PROBLEM_LOG_REMOTE_SOURCE];
   const supportId = typeof installationId === 'string' ? installationId.trim() : '';
   if (supportId) sourceParts.push(`support:${supportId}`);
@@ -11016,11 +11221,15 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
     currentPrompt: Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : null,
     totalPrompts: Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : null,
     stageIndex: Number.isInteger(normalizedEntry.stageIndex) ? normalizedEntry.stageIndex : null,
+    sourceUrl: normalizeProblemLogSourceUrl(
+      typeof normalizedEntry.sourceUrl === 'string' ? normalizedEntry.sourceUrl : ''
+    ),
     chatUrl: normalizeChatConversationUrl(
       typeof normalizedEntry.chatUrl === 'string'
         ? normalizedEntry.chatUrl
         : (typeof normalizedEntry.conversationUrl === 'string' ? normalizedEntry.conversationUrl : '')
     ),
+    heartbeat: normalizedEntry.heartbeat === true ? true : null,
     tabId: Number.isInteger(normalizedEntry.tabId) ? normalizedEntry.tabId : null,
     windowId: Number.isInteger(normalizedEntry.windowId) ? normalizedEntry.windowId : null
   };
@@ -11030,7 +11239,7 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
 
   return normalizeOutboundWatchlistDispatchPayload({
     schema: PROBLEM_LOG_REMOTE_SCHEMA,
-    responseId: entryId || `plog-${generateResponseId(normalizedEntry.runId || '')}`,
+    responseId,
     runId: normalizedEntry.runId || null,
     supportId: supportId || null,
     text: buildProblemLogDispatchText(normalizedEntry, supportId),

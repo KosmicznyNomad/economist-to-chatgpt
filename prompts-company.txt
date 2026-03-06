@@ -643,7 +643,7 @@ Stage 6 — DuPont ROE Quality
 We care about decomposing ROE to confirm whether returns are operational or leverage-driven and how the thesis changes margin, asset efficiency, and leverage over ~3 years.
 
 Stage 7 — Revaluation Parameter Selection
-We care about selecting ONE measurable Revaluation Parameter with the highest probability-weighted potential to force a near-term market revaluation.
+We care about selecting ONE measurable Revaluation Parameter per finalist, ranking all finalists by revaluation potential, and carrying all forward.
 
 Stage 8 — Thesis Monetization (incremental only, SoP-compatible)
 We care about quantifying only incremental thesis cash flows (Bear/Base/Bull) and converting them into an incremental NPV/share delta with assumptions labeled SOURCE/ASSUMPTION.
@@ -652,10 +652,14 @@ Stage 9 — Reverse DCF (whole company, consistent valuation object)
 We care about solving market-implied growth/margins via root-finding on a whole-company valuation (or consistent SoP) and measuring divergence versus your Base case.
 
 Stage 10 — Four-Gate Decision (final WATCH/AVOID)
-We care about producing a conservative final decision using Quality, Value, Proof, and Execution gates, plus an executable entry/add/reduce/exit plan.
+We care about producing per-company WATCH/AVOID decisions using Quality, Value, Proof, and Execution gates plus executable contingency plans.
+Stage 10 does NOT select finalists - that happens in Stage 11.
 
-Stage 11 — Position State Machine (final)
-We care about managing an open position mechanically (profit protection, spike handling, exits, cooldown, and re-entry) using explicit observable triggers.
+Stage 11 — Composite Rank & Final Selection
+We care about ranking WATCH candidates cross-company using a weighted composite score and selecting PRIMARY + SECONDARY.
+
+Stage 12 — Decision Output Format (record export)
+We care about generating standardized downstream records (PRIMARY first, SECONDARY second) with strict field validation.
 
 START RULE
 Don't execute them. just remember this fact, think about it, and starting from the next stage follow.
@@ -2939,7 +2943,7 @@ DATA_GAP is the exception. Execution is the default.
 
 (Formerly referenced as "KPI Selection" or "Single Metric Decision")
 
-You are a quantitative investment analyst working on the final decision stage of a multi-stage analysis pipeline. Your task is to select exactly ONE company from a shortlist of finalists based on a specific criterion: which company has the highest probability-weighted potential to force a near-term market revaluation.
+You are a quantitative investment analyst working on the final decision stage of a multi-stage analysis pipeline. Your task is to select exactly ONE Revaluation Parameter for EACH of the 4 finalists, rank all 4 by revaluation potential, and pass ALL 4 forward to Stage 8. You do NOT eliminate any company at this stage.
 
 # Context and Inputs
 
@@ -2968,13 +2972,13 @@ Before proceeding, understand these critical terms:
 
 You must adhere to ALL of the following constraints:
 
-1. Analyze ALL companies in the company list
+1. Analyze ALL 4 companies — no eliminations, all 4 proceed to Stage 8
 2. Each company gets exactly ONE Revaluation Parameter (not a list of metrics)
 3. The RP must be measurable from public sources within the VOI window (6-18 months)
 4. The RP must map to a DCF lever that the market cannot ignore
 5. If DominantDriver = WACC and the RP is not cash-flow linked, the company cannot win
-6. Companies with WedgeRealism = FAIL AND PoolConfidence = Medium or High are disqualified
-7. Companies with Asymmetry_TOTAL < 3:1 cannot win
+6. Companies with WedgeRealism = FAIL AND PoolConfidence = Medium or High: FLAG as DISQUALIFIED (Stage 11 enforces elimination, not this stage)
+7. Companies with Asymmetry_TOTAL < 3:1: FLAG as LOW_ASYMMETRY (do not eliminate)
 
 # Analysis Process
 
@@ -3007,9 +3011,9 @@ Using the Stage 4 sensitivity analysis or reverse-DCF outputs, quantify the impa
 
 "If RP beats threshold › TOTAL equity value per share changes by approximately X% (or $X per share) versus current price."
 
-**Failure conditions:**
-- If you cannot quantify the impact even roughly using Stage 4 outputs, mark this RP as "NO REVALUATION FORCE" (company fails)
-- If the stock is already priced for that RP outcome (market-implied already meets or exceeds your threshold), mark as "PRICED-IN" (company fails)
+**Flag conditions (do not eliminate):**
+- If you cannot quantify the impact even roughly using Stage 4 outputs, FLAG: WEAK_REVALUATION_FORCE
+- If the stock is already priced for that RP outcome (market-implied already meets or exceeds your threshold), FLAG: PRICED_IN
 
 ## STEP 3: Deliverability Path Test
 
@@ -3034,20 +3038,22 @@ STAGE 3 INHERITANCE: Stage 3 already identified a VOI Window and Downgrade Trigg
 
 Name the specific VOI event and date/quarter window where the RP will be observable (e.g., "Q3 2024 earnings call", "FDA decision expected Q2 2024", "Annual contract awards announced September 2024").
 
-**Failure condition:**
-- If there is no clear VOI event within 6-18 months, this company fails and cannot be selected
+**Flag condition:**
+- If there is no clear VOI event within 6-18 months, FLAG: VOI_IMMINENCE_FAIL (do not eliminate)
 
-## STEP 5: Apply Disqualifiers
+## STEP 5: Apply Flags (no eliminations)
 
-Check for hard stops:
+Check conditions and FLAG them (Stage 11 enforces elimination):
 
-- WedgeRealism = FAIL AND PoolConfidence = Medium or High › DISQUALIFY (exclude from selection entirely)
-- Asymmetry_TOTAL < 3:1 › Cannot win (note but do not disqualify from table)
-- DominantDriver = WACC AND RP is not cash-flow linked › Cannot win (note but do not disqualify from table)
+- WedgeRealism = FAIL AND PoolConfidence = Medium or High → FLAG: DISQUALIFIED
+- Asymmetry_TOTAL < 3:1 → FLAG: LOW_ASYMMETRY
+- DominantDriver = WACC AND RP is not cash-flow linked → FLAG: WACC_DEPENDENT
+- VOI_IMMINENCE_FAIL from Step 4 → FLAG: NO_VOI
+- PRICED_IN from Step 2 → FLAG: PRICED_IN
 
-# Selection Methodology
+# Ranking Methodology (ALL 4 — no elimination)
 
-For each company that has not been disqualified, compute a ranking score:
+For EACH of the 4 companies, compute:
 
 **RevaluationExpectedImpact = (Valuation Impact %) × (Probability Multiplier)**
 
@@ -3056,7 +3062,7 @@ Use these probability multipliers:
 - Medium = 0.50
 - High = 0.75
 
-Select the company with the highest RevaluationExpectedImpact score, subject to all disqualifiers.
+**Rank all 4 companies** by RevaluationExpectedImpact descending. Include flags in the output but do not eliminate any company. All 4 proceed to Stage 8.
 
 **Tie-breaker (only if scores are equal):**
 1. Earlier VOI window wins
@@ -3095,27 +3101,29 @@ After completing your analysis, provide your final output in two parts:
 
 Create a table with one row per company (including those that failed) and these columns:
 
-| Company | RP (one metric with units) | Upside threshold | VOI window (quarter/month) | Which DCF lever flips | Valuation impact (% vs current price) | Probability (L/M/H) | Priced-in? (Yes/No) | WedgeRealism | Asymmetry_TOTAL | RevaluationExpectedImpact |
+| Company | RP (metric + units) | Upside threshold | VOI window | DCF lever | Valuation impact (%) | Probability (L/M/H) | REI score | Flags | Rank |
 
 **Notes:**
 - For companies that failed any step or were disqualified, indicate the failure reason in the appropriate column
 - Include the calculated RevaluationExpectedImpact score for all valid candidates
 
-## Part 2: Winner Selection
+## Part 2: Ranked Summary (ALL 4, in rank order)
 
-State your selection in this exact format:
+For EACH of the 4 companies (in descending REI rank):
 
-**Selected Company**: [Name]
+**[Rank #] [Company Name]**
 
 **Revaluation Parameter**: [Metric name and upside threshold]
 
-**Why the market must re-rate**: [One sentence explaining the valuation force]
+**Why the market must re-rate**: [One sentence]
 
-**KPI to track**: [Same as RP, with threshold and VOI date]
+**KPI to track**: [RP with threshold and VOI date]
 
-**Falsifier KPI**: [The metric and threshold that would invalidate the thesis, with timeframe]
+**Falsifier KPI**: [Metric + threshold + timeframe]
 
-**Biggest convexity killer risk**: [Single biggest risk in cause › effect format]
+**Biggest convexity killer risk**: [cause → effect]
+
+**Flags**: [List all flags, or "None"]
 
 # Example Output Structure
 
@@ -3129,17 +3137,30 @@ Here is a generic example showing the required format (with placeholder content)
 
 
 
-**Selected Company**: [Company name]
+**#1 [Company A]**
+RP: [Metric] reaching [threshold]. REI: [score]. Flags: [None].
+Why re-rate: [sentence]. Falsifier: [metric] below [threshold] by [date].
 
-**Revaluation Parameter**: [Specific metric name] reaching [threshold number with units]
+**#2 [Company B]**
+RP: [Metric] reaching [threshold]. REI: [score]. Flags: [LOW_ASYMMETRY].
+Why re-rate: [sentence]. Falsifier: [metric] below [threshold] by [date].
 
-**Why the market must re-rate**: [Single sentence connecting RP to valuation lever]
+**#3 [Company C]** ...
+**#4 [Company D]** ...
 
-**KPI to track**: [Metric name] with threshold of [number] observable at [specific event, Q# YYYY]
+## Part 3: Stage 8 Handoff
 
-**Falsifier KPI**: [Metric name] falling below [threshold number] by [timeframe] would invalidate the thesis
-
-**Biggest convexity killer risk**: [Risk factor] › [negative outcome on RP]
+=== STAGE 7 HANDOFF ===
+ALL_4_PROCEED: TRUE
+RANKED_ORDER: [Company1, Company2, Company3, Company4]
+[For each company:]
+  COMPANY: [Name]
+  RP: [metric + units + threshold]
+  REI_SCORE: [number]
+  VOI_EVENT: [event + quarter]
+  FALSIFIER: [metric + threshold + timeframe]
+  FLAGS: [list or "None"]
+=== END HANDOFF ===
 
 
 # Important Guidelines
@@ -3149,7 +3170,7 @@ Here is a generic example showing the required format (with placeholder content)
 - Do not invent metrics, thresholds, or VOI events that are not supported by the Stage 5 outputs
 - Be precise with numbers and dates
 - Keep explanations concise — one sentence where specified
-- If a company fails any test in Steps 1-5, clearly mark why it failed and exclude it from final selection (though include it in the comparison table with failure reason noted)
+- If a company fails any test in Steps 1-5, clearly mark why it failed, assign the relevant flag(s), and keep it in the ranking output (no eliminations at this stage)
 
 
 Begin your analysis now.
@@ -3164,6 +3185,7 @@ PURPOSE IN THE WORKFLOW
 This stage quantifies the THESIS WEDGE only: the incremental (thesis-only) cash flows created by the thesis, converted into an NPV per share in Bear/Base/Bull.
 It does not produce a full-company price target and does not redo the CORE valuation. It produces a wedge “brick” that later stages combine as:
 TOTAL VALUE = CORE VALUE + WEDGE VALUE.
+CRITICAL: This stage runs for ALL 4 finalists from Stage 5/7. Produce 4 independent wedge objects. Do not select one company. Stage 11 will select the final 2.
 
 NON-NEGOTIABLE RULES (SoP COMPATIBILITY)
 1) Do NOT treat thesis-only NPV as the stock’s intrinsic value.
@@ -3226,6 +3248,9 @@ After that line, STOP and do not continue with extra sections.
 
 
 
+EXECUTION STRUCTURE: REPEAT FOR ALL 4 FINALISTS
+For EACH of the 4 finalists from Stage 5/7, execute Steps 1–5 independently. Each company produces its own Context Pack, Wedge Object, and Scenario Set. Do not cross-contaminate assumptions between companies. If DATA_GAP occurs for one company, flag it and continue with remaining companies.
+
 STEP 1 — EXTRACT THE STAGE 4 HANDOFF (FROM CONTEXT)
 Create a “Context Pack” table with:
 - Company, ticker, reporting currency
@@ -3234,6 +3259,7 @@ Create a “Context Pack” table with:
 - CORE value per share (V_core_base at minimum; bear/bull if available)
 - Monetization Path A/B/C and Dominant Driver (from Stage 4)
 - One-line thesis stream definition (what is included)
+- Stage 7 RP, REI score, and flags (from Stage 7 ranked output)
 If any of the following are missing from context: price, diluted shares, and a usable baseline definition, first try DataGap Rule steps 1-2 and run search/proxy to obtain them; only if still unavailable, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
 
 ANCHOR INHERITANCE: Stage 8 must inherit the Anchor Date/Year 0 baseline from Stage 4 (Revenue0, FCF0/margin0, diluted shares, net debt/cash). If Stage 4 does not explicitly provide any of these, estimate them by rebuilding the same Anchor Date baseline from the latest available filings and proceed with clearly labeled assumptions.
@@ -3314,6 +3340,20 @@ Anti-double-count test:
 4. Numeric check: WEDGE Year 0 incremental FCF should be ~= 0 (+/-5% of CORE FCF). 
    If not, the wedge is capturing existing cash flows, not incremental ones.
 
+After completing all 4 companies, produce consolidated handoff:
+
+=== STAGE 8 HANDOFF ===
+[For each of the 4 finalists:]
+  COMPANY: [Name] | TICKER: [Ticker]
+  WEDGE_NPV_PER_SHARE: Bear [X] | Base [Y] | Bull [Z]
+  EXPECTED_WEDGE: [probability-weighted value]
+  WEDGE_TO_PRICE: [ratio]
+  PERSISTENCE: [Wave / Durable / Step-change]
+  MONETIZATION_PATH: [A / B / C]
+  TRACTION_CALIBRATION: [TractionClass + adjustments applied]
+  FLAGS: [any flags or "None"]
+=== END HANDOFF ===
+
 This will help for the next stage: Stage 9 - Reverse DCF (whole company / TOTAL).
 ◄PROMPT_SEPARATOR►
 # STAGE 9 — REVERSE DCF (TOTAL / WHOLE COMPANY)
@@ -3344,7 +3384,7 @@ Then STOP.
 DATA_GAP is the exception. Execution is the default.
 
 
-You are conducting a Reverse DCF analysis to extract what expectations are already priced into a stock and determine whether there is actionable mispricing versus a thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
+You are conducting a Reverse DCF analysis for ALL 4 finalists to extract what expectations are already priced into each stock and determine whether there is actionable mispricing versus the thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
 
 CORE PRINCIPLE — CONSISTENCY OF THE VALUATION OBJECT
 You must never compare a thesis-only incremental valuation to the full stock price. All “priced-in”, “market-implied”, asymmetry, and tier classification metrics must be computed on the SAME valuation object as the market price: whole-company Equity Value (or whole-company Enterprise Value translated to Equity Value).
@@ -3360,6 +3400,8 @@ COMPUTATION + DATA REQUIREMENTS
 PREREQUISITES CHECK ? LAST-RESORT STOP ONLY IF STILL MISSING
 If prerequisites are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
 DATA_GAP_STAGE=<previous_stage_number>
+
+EXECUTION STRUCTURE: FOR EACH OF THE 4 FINALISTS, EXECUTE ALL STEPS (0.1 through 6 + Tier Classification). Each company receives independent analysis. Share the Python DCF function implementation across companies (define once, call with different parameters).
 
 Step 0.1 Identify which inputs you have:
 
@@ -3584,13 +3626,34 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 * Tier classification
 * One-sentence rationale linking mispricing to structural advantage and catalyst timing
 
+6. Cross-Company Comparison Table (MANDATORY — after completing all 4)
+
+| Company | Ticker | Price | Bear_TOTAL | Base_TOTAL | Bull_TOTAL | EV_TOTAL | %PricedIn | Implied_CAGR | Base_CAGR | Divergence_bps | Asymmetry_TOTAL | Tier | Wedge_to_Price |
+
+This table enables Stage 11 Composite Rank by providing directly comparable metrics.
+
+=== STAGE 9 HANDOFF ===
+[For each of the 4 finalists:]
+  COMPANY: [Name] | TICKER: [Ticker]
+  PRICE: [current with date]
+  BEAR_TOTAL: [value/share] | BASE_TOTAL: [value/share] | BULL_TOTAL: [value/share]
+  EXPECTED_VALUE: [probability-weighted]
+  ASYMMETRY_TOTAL: [ratio]
+  PRICED_IN: [%]
+  IMPLIED_CAGR: [%] | BASE_CAGR: [%] | DIVERGENCE_GROWTH: [bps]
+  IMPLIED_MARGIN_Y3: [%] | BASE_MARGIN_Y3: [%] | DIVERGENCE_MARGIN: [bps]
+  TIER: [1/2/3/4]
+  WEDGE_TO_PRICE: [ratio from Stage 8]
+  FLAGS: [MODEL-RISK if horizon unstable, etc.]
+=== END HANDOFF ===
+
 Style: concise, decision-oriented, auditable. No generic filler. No linear interpolation. No object mismatch.
 Focus on actionable conclusions. Show all key calculations and assumptions explicitly, and ensure the object of valuation is consistent throughout.
 
 This will help for the next stage: Stage 10 - Four-Gate Decision (WATCH/AVOID).
 ◄PROMPT_SEPARATOR►
 ROLE
-You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ONE company, you must produce a single decision: WATCH / AVOID.
+You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ALL 4 FINALISTS, you must produce a decision (WATCH / AVOID) per company, then rank WATCH companies using a Composite Score and select the top 2 as PRIMARY and SECONDARY.
 
 DATA_GAP PROTOCOL
 
@@ -3647,8 +3710,9 @@ Hard rules:
    and STOP.
 
 Binary rule:
-- Do not emit BUY.
 - Do not emit BUY. This stage is a screening gate, not a trade trigger.
+- Run Gates 0-4 for ALL 4 finalists independently.
+- After all 4 are scored, proceed to Stage 11 (Composite Rank) to select top 2.
 - WATCH / OK means: "the analysis supports a position, subject to
   the upgrade conditions in Gate 4." The execution plan describes
   HOW to enter IF upgrade conditions are met — it is a conditional plan,
@@ -3850,7 +3914,7 @@ FINAL DECISION LOGIC
 5) Otherwise: WATCH / INSUFFICIENT_PROOF or TIMING (choose the real blocker)
 
 ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
-OUTPUT FORMAT (English, plain and readable, no new claims)
+OUTPUT FORMAT (per company — repeat for all 4 finalists)
 [Company] (Ticker:Exchange)
 DECISION: WATCH / AVOID
 CATEGORY: OK / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
@@ -3885,18 +3949,127 @@ Main risk (one sentence, cause › effect)
 VOI trigger (one line)
 Falsifier (one line)
 
-This will help for the next stage: Stage 11 - Four-Gate Framework — Decision Output Format
+═══════════════════════════════════════════════════════════════════
+STAGE 11 — COMPOSITE RANK & FINAL SELECTION (execute after all 4 companies)
+═══════════════════════════════════════════════════════════════════
+
+After completing Four-Gate analysis for all 4 finalists:
+
+STEP 1 — ELIMINATE AVOID COMPANIES
+Remove any company with AVOID decision. If fewer than 2 remain, flag SHORTFALL and proceed with what you have.
+
+STEP 2 — COMPUTE COMPOSITE SCORE (6 dimensions, 0-5 each)
+
+Dimension 1: Value Asymmetry (weight 25%)
+Source: Stage 9 Asymmetry_TOTAL
+  5: Asymmetry > 5:1
+  4: 4:1–5:1
+  3: 3:1–4:1
+  2: 2:1–3:1
+  1: 1.5:1–2:1
+  0: < 1.5:1
+
+Dimension 2: Traction Quality (weight 20%)
+Source: Stage 3 Floor_Traction = min(TS,TQ)/5 + TractionClass
+  5: HARD_TRACTION + Floor_Traction >= 0.6
+  4: HARD_TRACTION + Floor_Traction < 0.6
+  3: SOFT_TRACTION + CP >= 3
+  2: SOFT_TRACTION + CP < 3
+  1: OPTION_ONLY
+  0: LOW_QUALITY
+
+Dimension 3: Revaluation Imminence (weight 20%)
+Source: Stage 7 REI_SCORE
+  5: REI > 15% AND VOI < 6 months
+  4: REI 10-15% OR VOI 6-9 months
+  3: REI 5-10% AND VOI < 12 months
+  2: REI 5-10% AND VOI 12-18 months
+  1: REI < 5% OR VOI > 18 months
+  0: No measurable RP or priced-in
+
+Dimension 4: Competitive Position (weight 15%)
+Source: Stage 5 moat score + Stage 3 CP gate-weighted
+  5: Moat >= 8/12 + CP >= 4 with A-type gate
+  4: Moat 6-7 + CP >= 4
+  3: Moat 6+ with CP 3, OR Moat 3-5 with CP >= 4
+  2: Moat 3-5 + CP 3
+  1: Moat 3-5 + CP <= 2
+  0: Moat < 3
+
+Dimension 5: ROE Quality (weight 10%)
+Source: Stage 6 DuPont thesis-adjusted
+  5: Thesis-adjusted ROE > 20%, operationally driven (margin + turnover, not leverage)
+  4: ROE 15-20% operational, or ROE > 20% with moderate leverage
+  3: ROE 10-15% operational
+  2: ROE 10-15% leverage-driven
+  1: ROE < 10% or deteriorating under thesis
+  0: ROE negative or quality destruction
+
+Dimension 6: Execution Readiness (weight 10%)
+Source: Stage 10 gate results + Stage 2 overheating score
+  5: All Gates PASS, overheating <= 2
+  4: All Gates PASS, overheating 3-4
+  3: Gate 2 RISK but rest PASS
+  2: Gate 3 LOW/MEDIUM but quality + value OK
+  1: Gate 2 FAIL but quality strong
+  0: Gate 1 FAIL (already AVOID)
+
+Composite Score = SUM(dimension_score × weight)
+Scale 0-5.
+
+STEP 3 — RANK AND SELECT TOP 2
+
+Sort remaining WATCH companies by Composite Score descending.
+
+Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap in invoice items:
+- Replace #2 with #3 if available
+- If no #3 or also overlaps: keep both, flag CONCENTRATION_RISK, cap combined sizing at 6%
+
+STEP 4 — ASSIGN ROLES AND SIZING
+
+#1 = PRIMARY (larger position, earlier entry)
+#2 = SECONDARY (smaller position or conditional on VOI from PRIMARY)
+
+Sizing:
+  Composite 4.0-5.0: PRIMARY 3-5%, SECONDARY 2-3%
+  Composite 3.0-3.9: PRIMARY 2-3%, SECONDARY 1-2%
+  Composite 2.0-2.9: PRIMARY 1-2%, SECONDARY 0.5-1%
+  Composite < 2.0: WATCH only (no sizing)
+
+If CONCENTRATION_RISK: cap combined at 6%.
+
+STEP 5 — OUTPUT
+
+Comparison Table (all 4):
+| Company | Ticker | Decision | Category | D1 (25%) | D2 (20%) | D3 (20%) | D4 (15%) | D5 (10%) | D6 (10%) | Composite | Rank | Role | Sizing |
+
+Selection Summary:
+PRIMARY: [Company] — Composite [X.XX]/5.0 — Sizing [X%]
+  Why Primary: [2 sentences]
+SECONDARY: [Company] — Composite [X.XX]/5.0 — Sizing [X%]
+  Why Secondary: [2 sentences]
+  Conditional on: [if applicable]
+ELIMINATED (AVOID): [list with 1-sentence reason]
+NOT SELECTED (WATCH): [list with score and upgrade condition]
+
+=== STAGE 11 HANDOFF ===
+PRIMARY: [Company] | [Ticker] | Composite: [X.XX] | Sizing: [X%]
+SECONDARY: [Company] | [Ticker] | Composite: [X.XX] | Sizing: [X%]
+CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
+=== END HANDOFF ===
+
+This will help for the next stage: Stage 12 - Four-Gate Framework — Decision Output Format
 
 
 ◄PROMPT_SEPARATOR►
 
-# Four-Gate Framework — Decision Output Format
+# STAGE 12 — Four-Gate Framework — Decision Output Format
 
 ---
 
 ## ?? Cel
 
-Wygeneruj jedną linię tekstu — standardowy rekord decyzyjny według metodologii Four-Gate Framework. To nie jest podsumowanie analizy, lecz logiczny zapis decyzji inwestycyjnej — z uzasadnieniem, asymetrią i kluczowymi ryzykami — w języku strategicznym, nadającym się do briefingów najwyższego szczebla (rząd, fundusz, zarząd).
+Wygeneruj dokładnie dwie linie tekstu — dwa standardowe rekordy decyzyjne według metodologii Four-Gate Framework. Pierwszy rekord = PRIMARY, drugi = SECONDARY z Stage 11.
 
 DATA_GAP PROTOCOL
 
@@ -3946,34 +4119,37 @@ Wewnątrz pola używaj:
 
 ---
 
-## ?? STRUKTURA OUTPUT — 12 pol oddzielonych srednikami
+## ?? STRUKTURA OUTPUT — 13 pol oddzielonych srednikami
 
 | Kolumna | Nazwa pola             | Przyklad                                           |
 |---------|------------------------|----------------------------------------------------|
 | 1       | Data decyzji           | 2025-10-14                                         |
 | 2       | Status decyzji         | WATCH / AVOID                                      |
-| 3       | Spolka                 | Richemont (CFR:SW)                                 |
-| 4       | Material zrodlowy      | Podcast: The Economist Money Talks                 |
-| 5       | Teza inwestycyjna      | (pelny opis, 4-6 zdan)                             |
-| 6       | Bear scenario (TOTAL)  | Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%       |
-| 7       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
-| 8       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
-| 9       | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z              |
-| 10      | Sektor                 | Handel & zachowania konsumenta                     |
-| 11      | Region                 | Szwajcaria                                          |
-| 12      | Waluta                 | CHF                                                |
+| 3       | Rola                   | PRIMARY / SECONDARY                                |
+| 4       | Spolka                 | Richemont (CFR:SW)                                 |
+| 5       | Material zrodlowy      | Podcast: The Economist Money Talks                 |
+| 6       | Teza inwestycyjna      | (pelny opis, 4-6 zdan)                             |
+| 7       | Bear scenario (TOTAL)  | Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%       |
+| 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
+| 9       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
+| 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z              |
+| 11      | Sektor                 | Handel & zachowania konsumenta                     |
+| 12      | Region                 | Szwajcaria                                          |
+| 13      | Waluta                 | CHF                                                |
 
 ---
 
 ## Kontrakt danych (obowiazkowy)
 
-- Ten format ma **dokladnie 12 pol** i sluzy do bezposredniego importu do Watchlist.
+- Ten format ma **dokladnie 13 pol** i sluzy do bezposredniego importu do Watchlist.
+- Generuj zawsze **2 linie**: pierwsza = PRIMARY, druga = SECONDARY.
+- Jesli Stage 11 wyprodukowal tylko 1 spolke (SHORTFALL): generuj 1 linie i dopisz na koncu: # SHORTFALL: only 1 company passed Stage 10 gates
 - Nie dodawaj ani nie usuwaj pol.
 - Nie przesuwaj tresci miedzy polami: kazda kolumna ma stale znaczenie.
-- Pole 4 (`Material zrodlowy`) ma zawierac **tylko zrodlo i kontekst zrodla**, nie analize.
-- Pole 5 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
-- Pola 6-8 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
-- Pole 9 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ...`.
+- Pole 5 (`Material zrodlowy`) ma zawierac **tylko zrodlo i kontekst zrodla**, nie analize.
+- Pole 6 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
+- Pola 7-9 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
+- Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ...`.
 - Nie uzywaj formatu legacy 15-polowego (`watpliwosci`, `gate rating`, `why buy`, `why avoid`) w tym rekordzie.
 
 ---
@@ -3995,7 +4171,16 @@ Wybierz dokladnie jedno:
 
 ---
 
-### 3. Spolka
+### 3. Rola
+
+PRIMARY lub SECONDARY.
+Zrodlo: Stage 11 Composite Rank.
+PRIMARY = wieksza pozycja, agresywniejszy entry.
+SECONDARY = mniejsza pozycja lub warunkowa.
+
+---
+
+### 4. Spolka
 
 Format: Nazwa Spolki (TICKER:GIELDA)
 
@@ -4015,7 +4200,7 @@ Zasady:
 
 ---
 
-### 4. Material zrodlowy / podcast
+### 5. Material zrodlowy / podcast
 
 Zrodlo, z ktorego pochodzi teza lub inspiracja.
 
@@ -4039,7 +4224,7 @@ Przyklady:
 
 ---
 
-### 5. Teza inwestycyjna (dlaczego ta firma)
+### 6. Teza inwestycyjna (dlaczego ta firma)
 
 4-6 zdan, rzeczowo i czytelnie.
 
@@ -4073,7 +4258,7 @@ Przyklady:
 
 ---
 
-### 6. Bear scenario (TOTAL)
+### 7. Bear scenario (TOTAL)
 
 Podaj scenariusz Bear jako osobne pole.
 
@@ -4097,7 +4282,7 @@ Podaj scenariusz Bear jako osobne pole.
 
 ---
 
-### 7. Base scenario (TOTAL)
+### 8. Base scenario (TOTAL)
 
 Podaj scenariusz Base jako osobne pole.
 
@@ -4121,7 +4306,7 @@ Podaj scenariusz Base jako osobne pole.
 
 ---
 
-### 8. Bull scenario (TOTAL)
+### 9. Bull scenario (TOTAL)
 
 Podaj scenariusz Bull jako osobne pole.
 
@@ -4145,21 +4330,23 @@ Podaj scenariusz Bull jako osobne pole.
 
 ---
 
-### 9. VOI / Falsifiers / Primary risk
+### 10. VOI / Falsifiers / Primary risk + Sizing
 
-Zawiera trzy elementy oddzielone przecinkami:
+Zawiera piec elementow oddzielonych przecinkami:
 
 - **VOI** (Value of Information)  co musi sie wydarzyc, zeby zwiekszyc pozycje
 - **Falsifiers**  co uniewazni teze
 - **Primary risk**  glowny czynnik destrukcji wartosci
+- **Composite**  wynik Composite Rank ze Stage 11
+- **Sizing**  sugerowany rozmiar pozycji ze Stage 11
 
 **Przyklad:**
 
-> VOI: udzial high jewelry w przychodach >10% oraz dodatni trend przez 2 kolejne kwartaly, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy jednoczesnym wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow o nizszej marzy i slabszej retencji klienta
+> VOI: udzial high jewelry w przychodach >10% przez 2Q, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow, Composite: 4.1/5.0, Sizing: 3%
 
 ---
 
-### 10. Sektor
+### 11. Sektor
 
 Wybierz **TYLKO** jedna nazwe z ponizszej listy (bez opisow, nawiasow, myslnikow):
 
@@ -4178,7 +4365,7 @@ Wybierz **TYLKO** jedna nazwe z ponizszej listy (bez opisow, nawiasow, myslnikow
 
 ---
 
-### 11. Region
+### 12. Region
 
 Glowny region operacyjny lub ekspozycji.
 
@@ -4186,7 +4373,7 @@ Przyklady: USA, Szwajcaria, Chiny, Europa, Globalny
 
 ---
 
-### 12. Waluta
+### 13. Waluta
 
 Waluta raportowania lub glowna waluta przychodow.
 
@@ -4199,14 +4386,15 @@ Przyklady: USD, CHF, EUR, PLN
 ### Bez numeracji (finalna forma):
 
 ```
-2025-10-14; WATCH; Richemont (CFR:SW); Podcast: The Economist Money Talks  De Beers i diamenty laboratoryjne + Stage 9 Reverse DCF; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy i silnej selekcji klienta. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC, gdzie kontroluje cene i ekspozycje kolekcji. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa, a wartosc capture wynika z projektu, kuracji kamieni, certyfikacji i dystrybucji bez rabatowania hurtowego. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy, a rynek nadal niedoszacowuje trwalosc tego mechanizmu.; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry w przychodach >10% oraz dodatni trend przez 2 kolejne kwartaly, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy jednoczesnym wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow o nizszej marzy i slabszej retencji klienta; Handel & zachowania konsumenta; Szwajcaria; CHF
+2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); Podcast: The Economist Money Talks – De Beers i diamenty laboratoryjne + Stage 9 Reverse DCF; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Handel & zachowania konsumenta; Szwajcaria; CHF
+2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); Podcast: The Economist Money Talks + Stage 9; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Handel & zachowania konsumenta; Szwajcaria; CHF
 ```
 
 ---
 
 ##  Zasady stylistyczne
 
-- Output = dokladnie jedna linia tekstu
+- Output = dokladnie dwie linie tekstu (chyba ze SHORTFALL)
 - Pola oddzielone tylko srednikami (;)
 - Zadnych srednikow wewnatrz pol
 - Bez nazw kolumn i komentarzy
@@ -4217,20 +4405,23 @@ Przyklady: USD, CHF, EUR, PLN
 
 ##  Walidacja przed zwrotem (obowiazkowa)
 
-- Sprawdz liczbe separatorow: rekord ma miec dokladnie **11** srednikow separatora (12 pol).
-- Sprawdz prefiksy pol scenariuszowych:
-- Pole 6 zaczyna sie od `Bear_TOTAL:`
-- Pole 7 zaczyna sie od `Base_TOTAL:`
-- Pole 8 zaczyna sie od `Bull_TOTAL:`
-- Pole 9 zaczyna sie od `VOI:`
-- Jesli brak danych Stage 9 i Stage 4, w polach 6-8 wpisz literalnie: `N/A (brak danych w Stage 9 i Stage 4)`.
+- Sprawdz liczbe separatorow: rekord ma miec dokladnie **12** srednikow separatora (13 pol).
+- Generuj dokladnie 2 linie (chyba ze SHORTFALL).
+- PRIMARY jest zawsze pierwsza linia.
+- Sprawdz prefiksy:
+- Pole 3: PRIMARY lub SECONDARY
+- Pole 7 zaczyna sie od `Bear_TOTAL:`
+- Pole 8 zaczyna sie od `Base_TOTAL:`
+- Pole 9 zaczyna sie od `Bull_TOTAL:`
+- Pole 10 zaczyna sie od `VOI:`
+- Jesli brak danych Stage 9 i Stage 4, w polach 7-9 wpisz literalnie: `N/A (brak danych w Stage 9 i Stage 4)`.
 - Nie zwracaj formatu legacy 15-polowego.
 
 ---
 
 ##  Finalna instrukcja
 
-Wygeneruj dokladnie jedna linie tekstu zgodna z powyzsza struktura — 12 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy.
+Wygeneruj dokladnie dwie linie tekstu zgodne z powyzsza struktura — 13 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy. PRIMARY jako pierwsza linia, SECONDARY jako druga.
 This will help for the next stage: Final output delivery.
 
 
