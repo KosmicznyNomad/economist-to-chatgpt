@@ -6753,15 +6753,30 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   const includeClosedProcesses = options?.includeClosedProcesses === true;
   const includeInvestTabs = options?.includeInvestTabs !== false;
   const includeProcessContextFallback = options?.includeProcessContextFallback !== false;
+  const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses === true;
 
   const processSnapshot = await getProcessSnapshot();
-  const processCandidates = processSnapshot
+  const allProcessCandidates = processSnapshot
     .filter((process) => {
       if (!process || typeof process !== 'object') return false;
       if (!includeClosedProcesses && isClosedProcessStatus(process?.status)) return false;
       return Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
     })
     .sort(compareProcessesForRestore);
+
+  const allProcessByTabId = new Map();
+  const allProcessByWindowId = new Map();
+  allProcessCandidates.forEach((process) => {
+    if (Number.isInteger(process?.tabId) && !allProcessByTabId.has(process.tabId)) {
+      allProcessByTabId.set(process.tabId, process);
+    }
+    if (Number.isInteger(process?.windowId) && !allProcessByWindowId.has(process.windowId)) {
+      allProcessByWindowId.set(process.windowId, process);
+    }
+  });
+
+  const processCandidates = allProcessCandidates
+    .filter((process) => !(excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(process)));
 
   const processByTabId = new Map();
   const processByWindowId = new Map();
@@ -6792,9 +6807,15 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       skipped += 1;
       return;
     }
+
+    const linkedProcess = allProcessByTabId.get(tabId) || allProcessByWindowId.get(windowId) || null;
+    if (excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(linkedProcess)) {
+      skipped += 1;
+      return;
+    }
     handledContextKeys.add(contextKey);
 
-    const process = processByTabId.get(tabId) || processByWindowId.get(windowId) || null;
+    const process = processByTabId.get(tabId) || processByWindowId.get(windowId) || linkedProcess || null;
     targets.push({
       source: 'tab_scan',
       tabId,
@@ -6946,7 +6967,8 @@ async function runResetScanStartAllTabs(options = {}) {
       includeClosedProcesses: options?.includeClosedProcesses === true,
       includeInvestTabs: true,
       // Reload+resume should operate on currently open INVEST tabs only.
-      includeProcessContextFallback: false
+      includeProcessContextFallback: false,
+      excludeRemoteRunnerProcesses: true
     });
     const activeProcesses = contextSnapshot.processCandidates;
     const processContexts = contextSnapshot.targets;
@@ -8686,6 +8708,12 @@ function compareProcessesForRestore(left, right) {
   return String(left?.id || '').localeCompare(String(right?.id || ''));
 }
 
+function isRemoteRunnerManagedProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const remoteJobId = typeof process?.remoteJobId === 'string' ? process.remoteJobId.trim() : '';
+  return remoteJobId.length > 0;
+}
+
 async function restoreProcessWindows(options = {}) {
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
@@ -8693,7 +8721,8 @@ async function restoreProcessWindows(options = {}) {
 
   const contextSnapshot = await collectCompanyInvestContextSnapshot({
     includeClosedProcesses: false,
-    includeInvestTabs: true
+    includeInvestTabs: true,
+    excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true
   });
   const activeProcesses = contextSnapshot.processCandidates;
   const targets = contextSnapshot.targets;
@@ -15735,9 +15764,14 @@ async function collectTabConversationMetricsForAutoRestore(tabId) {
 
 async function collectAutoRestoreProcessHealthSnapshot(options = {}) {
   await ensureProcessRegistryReady();
+  const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses !== false;
   const processSnapshot = await getProcessSnapshot();
   const activeProcesses = processSnapshot
-    .filter((process) => process && !isClosedProcessStatus(process.status))
+    .filter((process) => (
+      process
+      && !isClosedProcessStatus(process.status)
+      && !(excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(process))
+    ))
     .sort(compareProcessesForRestore);
 
   const minAssistantWords = Number.isInteger(options?.minAssistantWords) && options.minAssistantWords > 0
@@ -15945,8 +15979,14 @@ async function runAutoRestoreWindowsCycle(options = {}) {
   autoRestoreWindowsInProgress = true;
   try {
     const cycleStartedAt = Date.now();
-    const restoreResult = await restoreProcessWindows({ origin });
-    const healthCheck = await collectAutoRestoreProcessHealthSnapshot({ origin });
+    const restoreResult = await restoreProcessWindows({
+      origin,
+      excludeRemoteRunnerProcesses: true
+    });
+    const healthCheck = await collectAutoRestoreProcessHealthSnapshot({
+      origin,
+      excludeRemoteRunnerProcesses: true
+    });
 
     let scanResult = null;
     let scanTriggered = false;
