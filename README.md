@@ -24,6 +24,7 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - `youtube-content.js` - transcript extraction for YouTube.
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains.
 - `COMPANY_CHAIN_STAGE_MAP.md` - readable stage contract for `prompts-company.txt` + runtime mapping.
+- `MAINTENANCE_POPUP_RELOAD_RESTART_RESUME.md` - popup maintenance map: restore windows, restart/reload, resume and unfinished recovery.
 
 ## Storage
 - Responses are written in worker to `chrome.storage.session.responses`.
@@ -79,6 +80,14 @@ Manual PDF mode behavior:
 ### Responses view
 - Open from popup or shortcut `Ctrl+Shift+R`.
 - Copy single response or copy all by analysis type.
+
+## Maintenance and recovery
+- `Wznow nastepny etap` acts on the current ChatGPT tab and resumes from the correct next prompt or repeats the same prompt when the previous assistant reply is missing/invalid.
+- `Restart/reload + wznow wszystkie` is the bulk maintenance path for active company INVEST tabs: stop -> reload -> detect stage -> restart from the correct prompt.
+- `Przywroc okna aktywnych procesow` only restores/focuses existing process windows and tabs; it does not restart the prompt chain.
+- `Auto-restore co 5 min` runs the periodic maintenance loop: restore windows, health-check active tabs, then trigger reload+resume only when issues are detected.
+- `Recovery niedokonczonych (batch)` resumes interrupted processes from the dedicated recovery page using saved process/chat context.
+- Detailed behavior and code entry points are documented in `MAINTENANCE_POPUP_RELOAD_RESTART_RESUME.md`.
 
 ### Problem log view
 - Open from popup (`Problem log` button).

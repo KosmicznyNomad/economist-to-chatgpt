@@ -1409,11 +1409,11 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = `Reload + wznawiam${effortSuffix}...`;
+  button.textContent = `Restart + wznawiam${effortSuffix}...`;
   setRunStatus(
     composerThinkingEffort
-      ? `Reload + wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
-      : 'Reload + wznowienie aktywnych procesow company (INVEST)...'
+      ? `Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start, tryb: ${composerThinkingEffort}.`
+      : 'Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start.'
   );
   openReloadResumeMonitorWindow(monitorSessionId, {
     origin,
@@ -1784,7 +1784,7 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
   const originalHtml = button.innerHTML;
   button.disabled = true;
   setShortcutButtonLabel(button, 'Wykrywam etap...', POPUP_SHORTCUTS.resumeStage);
-  setRunStatus('Wykrywam etap i status odpowiedzi...');
+  setRunStatus('Wykrywam etap aktywnej karty i sprawdzam, czy powtorzyc ten sam czy uruchomic kolejny prompt...');
 
   try {
     const response = await sendRuntimeMessage({

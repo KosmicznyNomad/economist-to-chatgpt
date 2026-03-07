@@ -173,6 +173,18 @@
       padding: 7px 9px;
     }
 
+    .hint {
+      margin: 0;
+      font-size: 11px;
+      line-height: 1.4;
+      color: var(--muted);
+      white-space: normal;
+    }
+
+    .hint + .hint {
+      margin-top: 6px;
+    }
+
     .details {
       margin-bottom: 10px;
       background: var(--card);
@@ -238,9 +250,11 @@
       <button class="btn btn-primary" id="runBtn">Uruchom analizy <span class="shortcut">2</span></button>
     </div>
     <div class="row row-2">
-      <button class="btn" id="resumeStageBtn">Wznow (auto) <span class="shortcut">3</span></button>
-      <button class="btn" id="resumeAllBtn">Reload + wznow wszystkie <span class="shortcut">4</span></button>
+      <button class="btn" id="resumeStageBtn" title="Aktywna karta: wykryj ostatni etap i wznow od poprawnego promptu">Wznow nastepny etap <span class="shortcut">3</span></button>
+      <button class="btn" id="resumeAllBtn" title="Aktywne procesy company (INVEST): stop, reload, detekcja etapu i start od poprawnego promptu">Restart/reload + wznow wszystkie <span class="shortcut">4</span></button>
     </div>
+    <p class="hint"><strong>3</strong> dziala dla aktywnej karty ChatGPT i probuje wznowic ten sam albo kolejny prompt, zaleznnie od stanu odpowiedzi.</p>
+    <p class="hint"><strong>4</strong> robi maintenance zbiorczy: stop procesu, reload karty, wykrycie ostatniego poprawnego etapu i restart od wlasciwego punktu.</p>
   </div>
 
   <div class="card">
@@ -250,7 +264,7 @@
       <button class="btn" id="decisionPanelBtn">Panel procesow <span class="shortcut">6</span></button>
     </div>
     <div class="row">
-      <button class="btn" id="unfinishedProcessesBtn">Recovery niedokonczonych</button>
+      <button class="btn" id="unfinishedProcessesBtn">Recovery niedokonczonych (batch)</button>
     </div>
     <div class="row">
       <button class="btn" id="problemLogsBtn">Logi problemow</button>
@@ -339,7 +353,7 @@
   </details>
 
   <details class="details">
-    <summary>Narzedzia</summary>
+    <summary>Maintenance</summary>
     <div class="details-content">
       <div class="row">
         <button class="btn btn-center" id="repeatLastPromptAllBtn">Powtorz ostatni prompt (wszystkie)</button>
@@ -352,11 +366,13 @@
         <button class="btn btn-center" id="resumeAllHeavyBtn">Reload + wznow (heavy)</button>
       </div>
       <div class="row">
-        <button class="btn btn-center" id="restoreProcessWindowsBtn">Przywroc okna procesow <span class="shortcut">9</span></button>
+        <button class="btn btn-center" id="restoreProcessWindowsBtn" title="Przywroc i sfokusuj istniejace okna procesow bez restartu prompt chaina">Przywroc okna aktywnych procesow <span class="shortcut">9</span></button>
       </div>
       <div class="row">
-        <button class="btn btn-center" id="autoRestoreToggleBtn">Auto co 5 min: ON <span class="shortcut">0</span></button>
+        <button class="btn btn-center" id="autoRestoreToggleBtn" title="Co 5 minut: restore okien, health check i opcjonalny reload+resume">Auto-restore co 5 min: ON <span class="shortcut">0</span></button>
       </div>
+      <p class="hint"><strong>9</strong> tylko przywraca/fokusuje istniejace okna i karty procesow. Nie odpala ponownie prompt chaina.</p>
+      <p class="hint"><strong>0</strong> wlacza cykl maintenance co 5 minut: restore okien, health check odpowiedzi i automatyczny reload+resume przy wykrytych problemach.</p>
       <p class="status" id="restoreProcessWindowsStatus" aria-live="polite" hidden></p>
       <p class="status" id="autoRestoreStatus" aria-live="polite" hidden></p>
     </div>
