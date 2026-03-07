@@ -399,6 +399,25 @@ function formatRemoteRunnerStateLabel(status) {
   return normalized || 'offline';
 }
 
+function formatRemoteRunnerError(error) {
+  const normalized = typeof error === 'string' ? error.trim().toLowerCase() : '';
+  if (!normalized) return 'blad remote runnera';
+  if (normalized === 'runner_id_missing') return 'brak wybranego runnera';
+  if (normalized === 'runner_id_matches_current_device') return 'wybrano ten sam komputer';
+  if (normalized === 'no_remote_runner_discovered') return 'brak drugiego komputera z runnerem';
+  if (normalized === 'multiple_remote_runners_detected') return 'wykryto wiele runnerow, wpisz Runner ID recznie';
+  if (normalized === 'runner_not_found') return 'runner nie zostal znaleziony';
+  if (normalized === 'remote_runner_list_failed') return 'blad pobierania listy runnerow';
+  if (normalized === 'remote_runner_status_failed') return 'blad statusu runnera';
+  if (normalized === 'remote_job_create_failed') return 'blad tworzenia zdalnego joba';
+  if (normalized === 'remote_batch_prepare_failed') return 'nie udalo sie przygotowac batcha';
+  if (normalized === 'prompts_not_loaded') return 'prompty company nie sa zaladowane';
+  if (normalized.startsWith('runner_')) {
+    return `runner ${normalized.slice('runner_'.length).replace(/_/g, ' ')}`;
+  }
+  return normalized;
+}
+
 function formatRemoteRunnerSummary(record, fallbackId = '') {
   if (!record || typeof record !== 'object') {
     return fallbackId ? `Runner ${safePreview(fallbackId)}: offline.` : 'Runner: brak danych.';
@@ -463,7 +482,7 @@ function applyRemoteRunnerUi(status) {
 
 function formatRemoteRunnerStatusView(status) {
   if (!status || status.success === false) {
-    return `Remote runner: ${status?.error || 'blad statusu'}.`;
+    return `Remote runner: ${formatRemoteRunnerError(status?.error || 'blad statusu')}.`;
   }
   const lines = [];
   const supportId = typeof status.supportId === 'string' && status.supportId.trim() ? status.supportId.trim() : '';
@@ -476,16 +495,33 @@ function formatRemoteRunnerStatusView(status) {
   const targetRunnerId = typeof status?.settings?.controllerRunnerId === 'string'
     ? status.settings.controllerRunnerId.trim()
     : '';
-  if (targetRunnerId) {
-    if (status.targetRunner) {
-      lines.push(`Cel: ${formatRemoteRunnerSummary(status.targetRunner, targetRunnerId)}`);
-    } else if (status.targetRunnerError) {
-      lines.push(`Cel: ${safePreview(targetRunnerId)} -> ${status.targetRunnerError}.`);
+  const discoveredRunners = Array.isArray(status.discoveredRunners) ? status.discoveredRunners : [];
+  const resolvedTargetSource = typeof status.resolvedTargetSource === 'string'
+    ? status.resolvedTargetSource
+    : '';
+  if (status.targetRunner) {
+    const targetLabel = resolvedTargetSource.startsWith('auto') ? 'Cel auto' : 'Cel';
+    const targetId = typeof status?.targetRunner?.runnerId === 'string' && status.targetRunner.runnerId.trim()
+      ? status.targetRunner.runnerId.trim()
+      : targetRunnerId;
+    lines.push(`${targetLabel}: ${formatRemoteRunnerSummary(status.targetRunner, targetId)}`);
+  } else if (targetRunnerId) {
+    if (status.targetRunnerError) {
+      lines.push(`Cel zapisany: ${safePreview(targetRunnerId)} -> ${formatRemoteRunnerError(status.targetRunnerError)}.`);
     } else {
-      lines.push(`Cel: ${safePreview(targetRunnerId)}.`);
+      lines.push(`Cel zapisany: ${safePreview(targetRunnerId)}.`);
     }
+  } else if (discoveredRunners.length === 1) {
+    lines.push(`Auto-detect: ${formatRemoteRunnerSummary(discoveredRunners[0], discoveredRunners[0].runnerId || '')}`);
+  } else if (discoveredRunners.length > 1) {
+    lines.push(`Auto-detect: wykryto ${discoveredRunners.length} inne runnery.`);
+    discoveredRunners.slice(0, 3).forEach((runner, index) => {
+      lines.push(`Auto ${index + 1}: ${formatRemoteRunnerSummary(runner, runner?.runnerId || '')}`);
+    });
+  } else if (status.discoveredRunnersError) {
+    lines.push(`Auto-detect: ${formatRemoteRunnerError(status.discoveredRunnersError)}.`);
   } else {
-    lines.push('Cel: brak wybranego runnera.');
+    lines.push('Auto-detect: brak drugiego runnera.');
   }
   if (status.promptsLoaded === false) {
     lines.push('Prompty company nie sa zaladowane.');
@@ -1308,29 +1344,24 @@ async function executeCheckRemoteRunnerFromPopup(button) {
   const originalText = button.textContent;
   button.disabled = true;
   button.textContent = 'Sprawdzam...';
-  setRemoteRunnerStatus('Sprawdzam runner...', false);
+  setRemoteRunnerStatus('Sprawdzam runner / auto-detect...', false);
 
   try {
     const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
       ? remoteTargetRunnerIdInput.value.trim()
       : '';
-    if (!runnerId) {
-      setRemoteRunnerStatus('Remote runner: wpisz Runner ID drugiego komputera.', true);
-      return;
-    }
-    const response = await sendRuntimeMessage({
-      type: 'CHECK_REMOTE_RUNNER',
-      runnerId
-    });
+    const response = await sendRuntimeMessage(runnerId
+      ? {
+          type: 'CHECK_REMOTE_RUNNER',
+          runnerId
+        }
+      : {
+          type: 'CHECK_REMOTE_RUNNER'
+        });
     if (response?.success === false) {
-      setRemoteRunnerStatus(`Remote runner: ${response.error || 'blad sprawdzenia runnera'}.`, true);
+      setRemoteRunnerStatus(`Remote runner: ${formatRemoteRunnerError(response.error || 'blad sprawdzenia runnera')}.`, true);
       return;
     }
-    await sendRuntimeMessage({
-      type: 'SET_REMOTE_RUNNER_SETTINGS',
-      controllerRunnerId: runnerId,
-      controllerRunnerNameCached: typeof response?.runner?.runnerName === 'string' ? response.runner.runnerName : ''
-    });
     await refreshRemoteRunnerStatus(true);
   } catch (error) {
     setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
@@ -1351,22 +1382,26 @@ async function executeRunRemoteAnalysisFromPopup(button) {
     const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
       ? remoteTargetRunnerIdInput.value.trim()
       : '';
-    if (!runnerId) {
-      setRunStatus('Remote runner: wpisz Runner ID przed zdalnym startem.', true);
-      return;
-    }
-    const response = await sendRuntimeMessage({
-      type: 'RUN_REMOTE_ANALYSIS',
-      runnerId,
-      origin: 'popup-run-remote-analysis'
-    });
+    const response = await sendRuntimeMessage(runnerId
+      ? {
+          type: 'RUN_REMOTE_ANALYSIS',
+          runnerId,
+          origin: 'popup-run-remote-analysis'
+        }
+      : {
+          type: 'RUN_REMOTE_ANALYSIS',
+          origin: 'popup-run-remote-analysis'
+        });
     if (response?.success === false) {
-      setRunStatus(`Remote runner: ${response.error || 'remote_start_failed'}`, true);
+      setRunStatus(`Remote runner: ${formatRemoteRunnerError(response.error || 'remote_start_failed')}`, true);
       await refreshRemoteRunnerStatus(true);
       return;
     }
+    const runnerLabel = typeof response?.runner?.runnerName === 'string' && response.runner.runnerName.trim()
+      ? response.runner.runnerName.trim()
+      : safePreview(response?.runner?.runnerId || '', 'runner');
     setRunStatus(
-      `Zdalny start wyslany. Job=${safePreview(response?.job?.jobId || '', 'n/a')}, zrodla=${response?.preparedSourceCount || 0}, skipped=${response?.skippedSourceCount || 0}.`,
+      `Zdalny start wyslany do ${runnerLabel}. Job=${safePreview(response?.job?.jobId || '', 'n/a')}, zrodla=${response?.preparedSourceCount || 0}, skipped=${response?.skippedSourceCount || 0}.`,
       false
     );
     await refreshRemoteRunnerStatus(true);

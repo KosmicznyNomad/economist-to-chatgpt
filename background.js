@@ -78,6 +78,7 @@ const WATCHLIST_DISPATCH = {
 const WATCHLIST_PROBLEM_LOGS_PATH = '/api/v1/intake/problem-logs';
 const WATCHLIST_RESPONSE_VERIFY_PATH = '/api/v1/intake/economist-response/verify';
 const WATCHLIST_REMOTE_RUNNER_HEARTBEAT_PATH = '/api/v1/iskra/runner/heartbeat';
+const WATCHLIST_REMOTE_RUNNERS_PATH = '/api/v1/iskra/runners';
 const WATCHLIST_DB_VERIFY_MAX_ATTEMPTS = 3;
 const WATCHLIST_DB_VERIFY_RETRY_DELAY_MS = 700;
 const REMOTE_RUNNER = {
@@ -16447,21 +16448,39 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'CHECK_REMOTE_RUNNER') {
     (async () => {
       const settings = await getRemoteRunnerSettings();
-      const runnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
+      const supportId = await ensureExtensionInstallationId().catch(() => '');
+      const requestedRunnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
         ? message.runnerId.trim()
-        : settings.controllerRunnerId;
-      if (!runnerId) {
-        sendResponse({ success: false, error: 'runner_id_missing' });
+        : '';
+      const resolution = await resolveRemoteRunnerSelection({
+        supportId,
+        settings,
+        requestedRunnerId
+      });
+      if (!resolution?.targetRunner) {
+        sendResponse({
+          success: false,
+          error: resolution?.targetRunnerError || resolution?.discoveredRunnersError || 'runner_id_missing',
+          discoveredRunners: Array.isArray(resolution?.discoveredRunners) ? resolution.discoveredRunners : []
+        });
         return;
       }
-      const result = await fetchRemoteRunnerStatusRecord(runnerId);
-      if (result.success && result.runner?.runnerName) {
-        await saveRemoteRunnerSettings({
-          controllerRunnerId: runnerId,
-          controllerRunnerNameCached: result.runner.runnerName
-        });
+      const settingsPatch = {};
+      if (requestedRunnerId || settings.controllerRunnerId) {
+        settingsPatch.controllerRunnerId = resolution.targetRunner.runnerId;
       }
-      sendResponse(result);
+      if (resolution.targetRunner.runnerName) {
+        settingsPatch.controllerRunnerNameCached = resolution.targetRunner.runnerName;
+      }
+      if (Object.keys(settingsPatch).length > 0) {
+        await saveRemoteRunnerSettings(settingsPatch);
+      }
+      sendResponse({
+        success: true,
+        runner: resolution.targetRunner,
+        targetSource: resolution.targetRunnerSource || '',
+        discoveredRunners: Array.isArray(resolution.discoveredRunners) ? resolution.discoveredRunners : []
+      });
     })().catch((error) => {
       sendResponse({
         success: false,
@@ -18473,6 +18492,100 @@ async function fetchRemoteRunnerStatusRecord(runnerId) {
   };
 }
 
+async function fetchRemoteRunnerListRecords() {
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'GET',
+    endpointPath: WATCHLIST_REMOTE_RUNNERS_PATH
+  });
+  if (!response.success) {
+    return { success: false, error: response.error || 'remote_runner_list_failed', runners: [] };
+  }
+  const runners = Array.isArray(response?.data?.runners)
+    ? response.data.runners
+        .map((item) => normalizeRemoteRunnerStatusRecord(item))
+        .filter((item) => item && item.runnerId)
+    : [];
+  return {
+    success: true,
+    runners
+  };
+}
+
+function isRemoteRunnerAutoCandidate(record) {
+  if (!record || typeof record !== 'object') return false;
+  return record.isOnline === true || ['ready', 'busy', 'stale', 'online'].includes(record.status);
+}
+
+async function resolveRemoteRunnerSelection(options = {}) {
+  const supportId = typeof options?.supportId === 'string' ? options.supportId.trim() : '';
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
+  const requestedRunnerId = typeof options?.requestedRunnerId === 'string'
+    ? options.requestedRunnerId.trim()
+    : '';
+  const preferredRunnerId = requestedRunnerId || (typeof settings?.controllerRunnerId === 'string'
+    ? settings.controllerRunnerId.trim()
+    : '');
+
+  const runnerListResult = await fetchRemoteRunnerListRecords();
+  const discoveredRunners = runnerListResult.success
+    ? runnerListResult.runners.filter((runner) => runner?.runnerId && runner.runnerId !== supportId)
+    : [];
+  const discoveredRunnerMap = new Map(discoveredRunners.map((runner) => [runner.runnerId, runner]));
+
+  let targetRunner = null;
+  let targetRunnerSource = '';
+  let targetRunnerError = '';
+
+  if (preferredRunnerId) {
+    if (supportId && preferredRunnerId === supportId) {
+      targetRunnerError = 'runner_id_matches_current_device';
+    } else if (discoveredRunnerMap.has(preferredRunnerId)) {
+      targetRunner = discoveredRunnerMap.get(preferredRunnerId) || null;
+      targetRunnerSource = requestedRunnerId ? 'manual_request' : 'manual_saved';
+    } else {
+      const manualRunnerResult = await fetchRemoteRunnerStatusRecord(preferredRunnerId);
+      if (manualRunnerResult.success && manualRunnerResult.runner && manualRunnerResult.runner.runnerId !== supportId) {
+        targetRunner = manualRunnerResult.runner;
+        targetRunnerSource = requestedRunnerId ? 'manual_request' : 'manual_saved';
+      } else {
+        targetRunnerError = manualRunnerResult.error || 'runner_not_found';
+      }
+    }
+  }
+
+  if (!targetRunner) {
+    const activeCandidates = discoveredRunners.filter((runner) => isRemoteRunnerAutoCandidate(runner));
+    if (activeCandidates.length === 1) {
+      targetRunner = activeCandidates[0];
+      targetRunnerSource = 'auto_active';
+      targetRunnerError = '';
+    } else if (discoveredRunners.length === 1) {
+      targetRunner = discoveredRunners[0];
+      targetRunnerSource = 'auto_single';
+      targetRunnerError = '';
+    } else if (!preferredRunnerId) {
+      if (!runnerListResult.success) {
+        targetRunnerError = runnerListResult.error || 'remote_runner_list_failed';
+      } else if (discoveredRunners.length === 0) {
+        targetRunnerError = 'no_remote_runner_discovered';
+      } else {
+        targetRunnerError = 'multiple_remote_runners_detected';
+      }
+    }
+  }
+
+  return {
+    success: targetRunner !== null || runnerListResult.success,
+    discoveredRunners,
+    discoveredRunnersError: runnerListResult.success ? '' : (runnerListResult.error || 'remote_runner_list_failed'),
+    targetRunner,
+    targetRunnerSource,
+    targetRunnerError
+  };
+}
+
 async function fetchRemoteJobRecordById(jobId) {
   const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
   if (!safeJobId) return { success: false, error: 'job_id_missing' };
@@ -18893,20 +19006,26 @@ async function getRemoteRunnerPopupStatus(options = {}) {
     }
   }
 
-  let targetRunner = null;
-  let targetRunnerError = '';
-  if (settings.controllerRunnerId) {
-    const targetResult = await fetchRemoteRunnerStatusRecord(settings.controllerRunnerId);
-    if (targetResult.success) {
-      targetRunner = targetResult.runner || null;
-      if (targetRunner?.runnerName && targetRunner.runnerName !== settings.controllerRunnerNameCached) {
-        await saveRemoteRunnerSettings({
-          controllerRunnerNameCached: targetRunner.runnerName
-        });
-      }
-    } else {
-      targetRunnerError = targetResult.error || 'remote_runner_status_failed';
-    }
+  const targetResolution = await resolveRemoteRunnerSelection({ supportId, settings });
+  const discoveredRunners = Array.isArray(targetResolution.discoveredRunners)
+    ? targetResolution.discoveredRunners
+    : [];
+  const discoveredRunnersError = typeof targetResolution.discoveredRunnersError === 'string'
+    ? targetResolution.discoveredRunnersError
+    : '';
+  const resolvedTargetSource = typeof targetResolution.targetRunnerSource === 'string'
+    ? targetResolution.targetRunnerSource
+    : '';
+
+  let targetRunner = targetResolution.targetRunner || null;
+  let targetRunnerError = typeof targetResolution.targetRunnerError === 'string'
+    ? targetResolution.targetRunnerError
+    : '';
+  if (settings.controllerRunnerId && targetRunner?.runnerId === settings.controllerRunnerId && targetRunner?.runnerName
+    && targetRunner.runnerName !== settings.controllerRunnerNameCached) {
+    await saveRemoteRunnerSettings({
+      controllerRunnerNameCached: targetRunner.runnerName
+    });
   }
 
   let controllerJob = null;
@@ -18956,6 +19075,9 @@ async function getRemoteRunnerPopupStatus(options = {}) {
     localRunnerError,
     targetRunner,
     targetRunnerError,
+    discoveredRunners,
+    discoveredRunnersError,
+    resolvedTargetSource,
     controllerJob,
     controllerJobError,
     runnerJob,
@@ -18971,16 +19093,29 @@ async function runRemoteAnalysis(options = {}) {
   }
 
   const settings = await getRemoteRunnerSettings();
-  const runnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
+  const requestedRunnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
     ? options.runnerId.trim()
-    : settings.controllerRunnerId;
-  if (!runnerId) {
-    return { success: false, error: 'runner_id_missing' };
-  }
+    : '';
 
   const controllerId = await ensureExtensionInstallationId().catch(() => '');
   if (!controllerId) {
     return { success: false, error: 'support_id_unavailable' };
+  }
+
+  const targetResolution = await resolveRemoteRunnerSelection({
+    supportId: controllerId,
+    settings,
+    requestedRunnerId
+  });
+  const runnerId = typeof targetResolution?.targetRunner?.runnerId === 'string'
+    ? targetResolution.targetRunner.runnerId.trim()
+    : '';
+  if (!runnerId) {
+    return {
+      success: false,
+      error: targetResolution.targetRunnerError || targetResolution.discoveredRunnersError || 'runner_id_missing',
+      discoveredRunners: Array.isArray(targetResolution.discoveredRunners) ? targetResolution.discoveredRunners : []
+    };
   }
 
   const runnerStatusResult = await fetchRemoteRunnerStatusRecord(runnerId);
@@ -19026,10 +19161,13 @@ async function runRemoteAnalysis(options = {}) {
     };
   }
 
-  await saveRemoteRunnerSettings({
-    controllerRunnerId: runnerId,
+  const settingsPatch = {
     controllerRunnerNameCached: runnerStatusResult.runner.runnerName || settings.controllerRunnerNameCached
-  });
+  };
+  if (requestedRunnerId || settings.controllerRunnerId) {
+    settingsPatch.controllerRunnerId = runnerId;
+  }
+  await saveRemoteRunnerSettings(settingsPatch);
   await setRemoteControllerLastJobState({
     jobId: createResult.job.jobId,
     runnerId,
@@ -19042,6 +19180,7 @@ async function runRemoteAnalysis(options = {}) {
     success: true,
     job: createResult.job,
     runner: runnerStatusResult.runner,
+    targetSource: targetResolution.targetRunnerSource || '',
     preparedSourceCount: preparedBatch.preparedSources.length,
     skippedSourceCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0
   };
