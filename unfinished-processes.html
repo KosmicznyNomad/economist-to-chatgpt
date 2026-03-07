@@ -45,6 +45,24 @@
       gap: 8px;
       flex-wrap: wrap;
     }
+    .filters {
+      display: flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 12px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+    .filter-select {
+      border: 1px solid var(--border);
+      background: #fff;
+      color: var(--text);
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 12px;
+      font-weight: 600;
+      min-width: 220px;
+    }
     .btn {
       border: 1px solid var(--border);
       background: #fff;
@@ -173,6 +191,39 @@
     .badge-completed_with_errors { background: var(--warn); }
     .badge-interrupted { background: #64748b; }
     .badge-idle { background: #64748b; }
+    .status-chip {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 999px;
+      padding: 2px 8px;
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.03em;
+      border: 1px solid #cbd5e1;
+      color: #0f172a;
+      background: #f8fafc;
+    }
+    .status-running { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
+    .status-needs-action { border-color: #fcd34d; color: #92400e; background: #fffbeb; }
+    .status-completed { border-color: #86efac; color: #166534; background: #f0fdf4; }
+    .status-failed { border-color: #fca5a5; color: #991b1b; background: #fef2f2; }
+    .status-other { border-color: #cbd5e1; color: #334155; background: #f8fafc; }
+    .source-chip {
+      display: inline-flex;
+      align-items: center;
+      border-radius: 8px;
+      padding: 2px 8px;
+      border: 1px solid #cbd5e1;
+      background: #f8fafc;
+      color: #334155;
+      font-size: 11px;
+      font-weight: 600;
+      max-width: 180px;
+      overflow: hidden;
+      text-overflow: ellipsis;
+      white-space: nowrap;
+    }
     .outcome-resumed { color: var(--ok); font-weight: 700; }
     .outcome-skipped_missing_chat_url,
     .outcome-skipped_not_found,
@@ -204,8 +255,16 @@
     <div class="actions">
       <button class="btn" id="refresh-btn">Odswiez liste</button>
       <button class="btn btn-primary" id="run-btn">Uruchom wszystkie</button>
+      <button class="btn" id="run-10-btn">Uruchom 10</button>
       <button class="btn" id="open-panel-btn">Panel decyzyjny</button>
     </div>
+  </div>
+
+  <div class="filters">
+    <label for="source-filter">Filtr zrodla:</label>
+    <select id="source-filter" class="filter-select">
+      <option value="all">Wszystkie zrodla</option>
+    </select>
   </div>
 
   <div id="status" class="status">Ladowanie danych...</div>
@@ -235,7 +294,7 @@
 
   <div class="layout">
     <section class="panel">
-      <h2>Lista procesow (status != completed)</h2>
+      <h2>Lista procesow do recovery (zamkniete i niedokonczone)</h2>
       <div class="table-wrap">
         <table>
           <thead>
@@ -243,6 +302,7 @@
               <th>#</th>
               <th>runId</th>
               <th>status</th>
+              <th>source</th>
               <th>stage</th>
               <th>updated</th>
               <th>chatUrl</th>
@@ -251,7 +311,7 @@
             </tr>
           </thead>
           <tbody id="process-body">
-            <tr><td colspan="8" class="placeholder">Brak danych.</td></tr>
+            <tr><td colspan="9" class="placeholder">Brak danych.</td></tr>
           </tbody>
         </table>
       </div>

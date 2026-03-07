@@ -369,6 +369,18 @@ function parseDispatchCountFromSummary(summaryText, key) {
   return Number.isInteger(value) && value >= 0 ? value : null;
 }
 
+function normalizeDbVerification(rawVerification) {
+  if (!rawVerification || typeof rawVerification !== 'object') return null;
+  const state = typeof rawVerification.state === 'string' && rawVerification.state.trim()
+    ? rawVerification.state.trim()
+    : '';
+  return {
+    attempted: rawVerification.attempted === true || rawVerification.success === true || rawVerification.ok === true || !!state,
+    success: rawVerification.success === true || rawVerification.ok === true,
+    state,
+  };
+}
+
 function resolveProcessDatabaseDelivery(process) {
   const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
     ? process.persistenceStatus
@@ -413,6 +425,14 @@ function resolveProcessDatabaseDelivery(process) {
     saveOk = finalStagePersistence.success;
   }
 
+  const dbVerification = normalizeDbVerification(
+    dispatch?.dbVerification && typeof dispatch.dbVerification === 'object'
+      ? dispatch.dbVerification
+      : (finalStagePersistence?.dbVerification && typeof finalStagePersistence.dbVerification === 'object'
+        ? finalStagePersistence.dbVerification
+        : null)
+  );
+
   return {
     saveOk,
     sent: safeSent,
@@ -422,7 +442,10 @@ function resolveProcessDatabaseDelivery(process) {
     pending,
     hasNumericDispatch,
     queueSkipped: dispatch?.queueSkipped === true || finalStagePersistence?.queueSkipped === true,
-    summaryText: typeof summaryText === 'string' ? summaryText.trim() : ''
+    summaryText: typeof summaryText === 'string' ? summaryText.trim() : '',
+    dbVerifyAttempted: dbVerification?.attempted === true,
+    dbVerifyOk: dbVerification?.success === true,
+    dbVerifyState: dbVerification?.state || ''
   };
 }
 
@@ -449,8 +472,18 @@ function getDatabaseBadgeModel(process) {
   }
 
   if (delivery.saveOk === true) {
+    if (delivery.dbVerifyAttempted && !delivery.dbVerifyOk) {
+      const stateText = delivery.dbVerifyState || 'failed';
+      return {
+        visible: true,
+        text: `Baza: verify=${stateText}`,
+        className: 'db-badge db-warning',
+        detailText: `Baza danych: dispatch przyjety, ale verify=${stateText}`
+      };
+    }
     if (delivery.hasNumericDispatch) {
       const parts = [`Baza: ${delivery.sent} OK`];
+      if (delivery.dbVerifyAttempted && delivery.dbVerifyOk) parts.push('verify=OK');
       if (delivery.pending > 0) parts.push(`pending=${delivery.pending}`);
       if (delivery.failed > 0) parts.push(`blad=${delivery.failed}`);
       const severityClass = delivery.failed > 0
@@ -624,6 +657,18 @@ function isDataGapProcess(process) {
     typeof process?.error === 'string' ? process.error : ''
   ].join(' ');
   return /\bdata[_\s-]?gaps?(?:\b|[_-])/i.test(marker);
+}
+
+function getDataGapBadgeTitle(process) {
+  const audit = getCachedProcessAudit(process);
+  if (!audit || audit.dataGapStopDetected !== true) {
+    return 'Wykryto DATA_GAP';
+  }
+  const inputs = Array.isArray(audit.dataGapMissingInputsList) && audit.dataGapMissingInputsList.length > 0
+    ? audit.dataGapMissingInputsList.join(', ')
+    : (typeof audit.dataGapMissingInputsText === 'string' ? audit.dataGapMissingInputsText.trim() : '');
+  if (!inputs) return 'Wykryto DATA_GAP';
+  return `Wykryto DATA_GAP: ${inputs}`;
 }
 
 function isMissingReplyProcess(process) {
@@ -1534,8 +1579,14 @@ function buildProcessCard() {
   const statusBadge = document.createElement('span');
   statusBadge.className = 'status-badge';
 
+  const dataGapBadge = document.createElement('span');
+  dataGapBadge.className = 'status-badge status-data-gap';
+  dataGapBadge.textContent = 'DATA_GAP';
+  dataGapBadge.style.display = 'none';
+
   status.appendChild(statusLine);
   status.appendChild(statusBadge);
+  status.appendChild(dataGapBadge);
 
   const dbDelivery = document.createElement('div');
   dbDelivery.className = 'db-delivery';
@@ -1605,6 +1656,7 @@ function buildProcessCard() {
       priority,
       statusLine,
       statusBadge,
+      dataGapBadge,
       dbDelivery,
       dbBadge,
       progressFill,
@@ -1664,7 +1716,9 @@ function updateProcessCard(entry, process, isSelected) {
   if (!card.classList.contains('process-card')) {
     card.classList.add('process-card');
   }
+  const hasDataGap = isDataGapProcess(process);
   card.classList.toggle('needs-action', !!process.needsAction);
+  card.classList.toggle('data-gap', hasDataGap);
   card.classList.toggle('selected', !!isSelected);
 
   refs.title.textContent = process.title || 'Bez tytulu';
@@ -1700,6 +1754,8 @@ function updateProcessCard(entry, process, isSelected) {
 
   refs.statusBadge.textContent = statusBadgeText;
   refs.statusBadge.className = `status-badge ${statusBadgeClass}`;
+  refs.dataGapBadge.style.display = hasDataGap ? 'inline-block' : 'none';
+  refs.dataGapBadge.title = hasDataGap ? getDataGapBadgeTitle(process) : '';
 
   const dbBadgeModel = getDatabaseBadgeModel(process);
   if (dbBadgeModel.visible) {

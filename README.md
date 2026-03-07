@@ -3,7 +3,7 @@
 Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
 
 ## What it does
-- Extracts text from supported news pages, Spotify transcripts, open Gmail emails, and YouTube transcripts.
+- Extracts text from supported news pages, Spotify transcripts, and YouTube transcripts.
 - Runs two flows:
   - `company` on all supported tabs.
   - `portfolio` on selected tabs.
@@ -45,7 +45,7 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 
 ## Use
 ### Web tab flow
-1. Open supported article/video/email tabs (for Gmail: open the specific email first).
+1. Open supported article/video tabs.
 2. Click extension icon (`Ctrl+Shift+E`).
 3. Choose tabs for portfolio analysis.
 4. Let both flows run.

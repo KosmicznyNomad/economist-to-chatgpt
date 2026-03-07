@@ -1,6 +1,8 @@
 const refreshBtn = document.getElementById('refresh-btn');
 const runBtn = document.getElementById('run-btn');
+const run10Btn = document.getElementById('run-10-btn');
 const openPanelBtn = document.getElementById('open-panel-btn');
+const sourceFilterSelect = document.getElementById('source-filter');
 const statusBox = document.getElementById('status');
 const processBody = document.getElementById('process-body');
 const batchBody = document.getElementById('batch-body');
@@ -10,11 +12,22 @@ const metricMissing = document.getElementById('metric-missing');
 const metricBatchStatus = document.getElementById('metric-batch-status');
 const metricProgress = document.getElementById('metric-progress');
 
+const FAILED_PROCESS_STATUSES = new Set([
+  'failed',
+  'error',
+  'aborted',
+  'cancelled',
+  'canceled',
+  'stopped',
+  'crashed'
+]);
+
 let lastListResult = null;
 let lastBatchState = null;
 let refreshInProgress = false;
 let pendingRefresh = false;
 let pollIntervalId = null;
+let selectedSourceFilter = 'all';
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
@@ -60,6 +73,69 @@ function normalizeBatchStatus(status) {
   return 'idle';
 }
 
+function normalizeSourceFilter(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized || normalized === 'all') return 'all';
+  return normalized;
+}
+
+function normalizeProcessStatusToken(status) {
+  return typeof status === 'string' ? status.trim().toLowerCase() : '';
+}
+
+function formatSelectionStrategy(strategy) {
+  const normalized = typeof strategy === 'string' ? strategy.trim().toLowerCase() : '';
+  if (normalized === 'most_advanced_incomplete_first') {
+    return 'top-progress';
+  }
+  if (normalized === 'latest_update_first') {
+    return 'latest';
+  }
+  return normalized || '-';
+}
+
+function isFailedProcessStatus(status) {
+  return FAILED_PROCESS_STATUSES.has(normalizeProcessStatusToken(status));
+}
+
+function formatStatusText(status) {
+  const normalized = normalizeProcessStatusToken(status);
+  if (!normalized) return '-';
+  return normalized.replace(/_/g, ' ');
+}
+
+function resolveProcessStatusModel(item) {
+  const status = normalizeProcessStatusToken(item?.status);
+  if (item?.isFailedStatus === true || isFailedProcessStatus(status)) {
+    return {
+      text: formatStatusText(status || 'failed'),
+      className: 'status-failed'
+    };
+  }
+  if (status === 'running') {
+    return {
+      text: 'running',
+      className: 'status-running'
+    };
+  }
+  if (status === 'completed') {
+    return {
+      text: 'completed',
+      className: 'status-completed'
+    };
+  }
+  if (status === 'needs_action' || item?.needsAction === true) {
+    return {
+      text: 'needs action',
+      className: 'status-needs-action'
+    };
+  }
+  return {
+    text: formatStatusText(status || 'unknown'),
+    className: 'status-other'
+  };
+}
+
 function createPlaceholderRow(colspan, text) {
   const row = document.createElement('tr');
   const cell = document.createElement('td');
@@ -76,10 +152,59 @@ function openChat(url) {
   chrome.tabs.create({ url: chatUrl });
 }
 
+function rebuildSourceFilterOptions(listResult) {
+  if (!sourceFilterSelect) return;
+  const availableSources = Array.isArray(listResult?.availableSources) ? listResult.availableSources : [];
+  const requestedFilter = normalizeSourceFilter(listResult?.sourceFilter || selectedSourceFilter);
+  selectedSourceFilter = requestedFilter;
+
+  sourceFilterSelect.innerHTML = '';
+
+  const totalAcrossSources = availableSources.reduce((sum, source) => {
+    const total = Number.isInteger(source?.total) ? source.total : 0;
+    return sum + total;
+  }, 0);
+
+  const allOption = document.createElement('option');
+  allOption.value = 'all';
+  allOption.textContent = `Wszystkie zrodla (${totalAcrossSources})`;
+  sourceFilterSelect.appendChild(allOption);
+
+  const knownValues = new Set(['all']);
+  availableSources.forEach((source) => {
+    const key = normalizeSourceFilter(source?.key);
+    if (key === 'all' || knownValues.has(key)) return;
+    const label = typeof source?.label === 'string' && source.label.trim()
+      ? source.label.trim()
+      : key;
+    const total = Number.isInteger(source?.total) ? source.total : 0;
+    const runnable = Number.isInteger(source?.runnable) ? source.runnable : 0;
+    const option = document.createElement('option');
+    option.value = key;
+    option.textContent = `${label} (${total}, run=${runnable})`;
+    sourceFilterSelect.appendChild(option);
+    knownValues.add(key);
+  });
+
+  if (!knownValues.has(selectedSourceFilter) && selectedSourceFilter !== 'all') {
+    const missingOption = document.createElement('option');
+    missingOption.value = selectedSourceFilter;
+    missingOption.textContent = `${selectedSourceFilter} (0)`;
+    sourceFilterSelect.appendChild(missingOption);
+    knownValues.add(selectedSourceFilter);
+  }
+
+  if (!knownValues.has(selectedSourceFilter)) {
+    selectedSourceFilter = 'all';
+  }
+  sourceFilterSelect.value = selectedSourceFilter;
+}
+
 function renderMetrics(listResult, batchState) {
   const list = listResult && typeof listResult === 'object' ? listResult : {};
   const state = batchState && typeof batchState === 'object' ? batchState : {};
   const totals = state?.totals && typeof state.totals === 'object' ? state.totals : {};
+  const selection = state?.selection && typeof state.selection === 'object' ? state.selection : {};
   const status = normalizeBatchStatus(state?.status);
   const processed = Number.isInteger(totals?.processed) ? totals.processed : 0;
   const total = Number.isInteger(totals?.total) ? totals.total : (Number.isInteger(list?.total) ? list.total : 0);
@@ -94,8 +219,20 @@ function renderMetrics(listResult, batchState) {
   badge.textContent = status;
   metricBatchStatus.appendChild(badge);
 
+  const selectionSource = normalizeSourceFilter(selection?.sourceFilter || 'all');
+  const selectionLimitApplied = Number.isInteger(selection?.limitApplied) ? selection.limitApplied : null;
+  const selectionLimitRequested = Number.isInteger(selection?.limitRequested) ? selection.limitRequested : null;
+  const selectionLimit = selectionLimitApplied ?? selectionLimitRequested;
+  const selectionLabel = typeof selection?.sourceLabel === 'string' && selection.sourceLabel.trim()
+    ? selection.sourceLabel.trim()
+    : selectionSource;
+  const selectionStrategy = formatSelectionStrategy(selection?.strategy);
   const details = document.createElement('div');
-  details.textContent = `\njob: ${state?.jobId || '-'} | active: ${state?.activeRunId || '-'}`;
+  details.textContent = [
+    '',
+    `job: ${state?.jobId || '-'} | active: ${state?.activeRunId || '-'}`,
+    `src: ${selectionLabel || 'all'} | limit: ${selectionLimit || 'all'} | mode: ${selectionStrategy}`
+  ].join('\n');
   metricBatchStatus.appendChild(details);
 
   const resumed = Number.isInteger(totals?.resumed) ? totals.resumed : 0;
@@ -113,14 +250,17 @@ function renderProcessRows(listResult) {
   processBody.innerHTML = '';
   const items = Array.isArray(listResult?.items) ? listResult.items : [];
   if (items.length === 0) {
-    processBody.appendChild(createPlaceholderRow(8, 'Brak niedokonczonych procesow.'));
+    processBody.appendChild(createPlaceholderRow(9, 'Brak procesow do recovery.'));
     return;
   }
 
   items.forEach((item, index) => {
     const row = document.createElement('tr');
     const runId = typeof item?.runId === 'string' ? item.runId : '';
-    const status = typeof item?.status === 'string' ? item.status : '';
+    const statusModel = resolveProcessStatusModel(item);
+    const sourceLabel = typeof item?.sourceLabel === 'string' && item.sourceLabel.trim()
+      ? item.sourceLabel.trim()
+      : (typeof item?.sourceKey === 'string' && item.sourceKey.trim() ? item.sourceKey.trim() : 'unknown');
     const stageText = Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
       ? `P${item.currentPrompt}/${Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0} ${item?.stageName || ''}`.trim()
       : (item?.stageName || '-');
@@ -128,18 +268,37 @@ function renderProcessRows(listResult) {
     const hasChatUrl = item?.hasChatUrl === true;
     const runnableText = hasChatUrl ? 'YES' : 'NO';
 
-    [
-      String(index + 1),
-      runId || '-',
-      status || '-',
-      stageText,
-      updated
-    ].forEach((value, cellIndex) => {
-      const cell = document.createElement('td');
-      if (cellIndex === 1) cell.className = 'mono';
-      cell.textContent = value;
-      row.appendChild(cell);
-    });
+    const orderCell = document.createElement('td');
+    orderCell.textContent = String(index + 1);
+    row.appendChild(orderCell);
+
+    const runIdCell = document.createElement('td');
+    runIdCell.className = 'mono';
+    runIdCell.textContent = runId || '-';
+    row.appendChild(runIdCell);
+
+    const statusCell = document.createElement('td');
+    const statusChip = document.createElement('span');
+    statusChip.className = `status-chip ${statusModel.className}`;
+    statusChip.textContent = statusModel.text;
+    statusCell.appendChild(statusChip);
+    row.appendChild(statusCell);
+
+    const sourceCell = document.createElement('td');
+    const sourceChip = document.createElement('span');
+    sourceChip.className = 'source-chip';
+    sourceChip.textContent = sourceLabel;
+    sourceChip.title = sourceLabel;
+    sourceCell.appendChild(sourceChip);
+    row.appendChild(sourceCell);
+
+    const stageCell = document.createElement('td');
+    stageCell.textContent = stageText;
+    row.appendChild(stageCell);
+
+    const updatedCell = document.createElement('td');
+    updatedCell.textContent = updated;
+    row.appendChild(updatedCell);
 
     const chatCell = document.createElement('td');
     chatCell.textContent = hasChatUrl ? shortenText(item.chatUrl, 82) : '-';
@@ -220,13 +379,23 @@ function renderBatchRows(state) {
 function updateRunButtonState(state) {
   const status = normalizeBatchStatus(state?.status);
   const running = status === 'running';
-  runBtn.disabled = running;
-  runBtn.textContent = running ? 'Batch w trakcie...' : 'Uruchom wszystkie';
+  if (runBtn) {
+    runBtn.disabled = running;
+    runBtn.textContent = running ? 'Batch w trakcie...' : 'Uruchom wszystkie';
+  }
+  if (run10Btn) {
+    run10Btn.disabled = running;
+    run10Btn.textContent = running ? 'Batch w trakcie...' : 'Uruchom 10';
+  }
+  if (sourceFilterSelect) {
+    sourceFilterSelect.disabled = running;
+  }
 }
 
 function applyData(listResult, batchState) {
   lastListResult = listResult && typeof listResult === 'object' ? listResult : null;
   lastBatchState = batchState && typeof batchState === 'object' ? batchState : null;
+  rebuildSourceFilterOptions(lastListResult);
   renderMetrics(lastListResult, lastBatchState);
   renderProcessRows(lastListResult);
   renderBatchRows(lastBatchState);
@@ -248,7 +417,9 @@ async function refreshData(options = {}) {
     const [listResult, batchStateResult] = await Promise.all([
       sendRuntimeMessage({
         type: 'GET_UNFINISHED_PROCESSES',
-        includeNonCompleted: true
+        includeNonCompleted: true,
+        recoverOnly: true,
+        sourceFilter: selectedSourceFilter
       }),
       sendRuntimeMessage({
         type: 'GET_UNFINISHED_RESUME_BATCH_STATE'
@@ -265,7 +436,11 @@ async function refreshData(options = {}) {
     applyData(listResult, batchStateResult?.state || null);
     const state = batchStateResult?.state || {};
     const updatedAt = Number.isInteger(state?.updatedAt) ? formatDateTime(state.updatedAt) : '-';
-    setStatus(`Lista odswiezona: ${formatDateTime(listResult.generatedAt)} | batch updated: ${updatedAt}`);
+    const filterMatched = listResult?.sourceFilterMatched !== false;
+    const filterNote = selectedSourceFilter !== 'all'
+      ? ` | source=${selectedSourceFilter}${filterMatched ? '' : ' (0 match)'}`
+      : '';
+    setStatus(`Lista odswiezona: ${formatDateTime(listResult.generatedAt)} | batch updated: ${updatedAt}${filterNote}`);
   } catch (error) {
     setStatus(`Blad odswiezania: ${error?.message || String(error)}`, true);
   } finally {
@@ -277,14 +452,18 @@ async function refreshData(options = {}) {
   }
 }
 
-async function startBatch() {
-  runBtn.disabled = true;
-  setStatus('Uruchamiam batch wznowienia...');
+async function startBatch(limit = null) {
+  updateRunButtonState({ status: 'running' });
+  const limitText = Number.isInteger(limit) && limit > 0 ? `${limit}` : 'all';
+  const modeText = Number.isInteger(limit) && limit > 0 ? 'top-progress' : 'latest';
+  setStatus(`Uruchamiam batch wznowienia (source=${selectedSourceFilter}, limit=${limitText}, mode=${modeText})...`);
   try {
     const response = await sendRuntimeMessage({
       type: 'RESUME_UNFINISHED_PROCESSES',
       origin: 'unfinished-processes-page',
-      forceRestartIfRunning: false
+      forceRestartIfRunning: false,
+      sourceFilter: selectedSourceFilter,
+      limit: Number.isInteger(limit) && limit > 0 ? limit : null
     });
     if (response?.success === false) {
       throw new Error(response?.error || 'resume_unfinished_failed');
@@ -300,7 +479,7 @@ async function startBatch() {
     void refreshData({ silent: true });
   } catch (error) {
     setStatus(`Blad startu batch: ${error?.message || String(error)}`, true);
-    runBtn.disabled = false;
+    updateRunButtonState(lastBatchState);
   }
 }
 
@@ -328,7 +507,20 @@ if (refreshBtn) {
 
 if (runBtn) {
   runBtn.addEventListener('click', () => {
-    void startBatch();
+    void startBatch(null);
+  });
+}
+
+if (run10Btn) {
+  run10Btn.addEventListener('click', () => {
+    void startBatch(10);
+  });
+}
+
+if (sourceFilterSelect) {
+  sourceFilterSelect.addEventListener('change', () => {
+    selectedSourceFilter = normalizeSourceFilter(sourceFilterSelect.value);
+    void refreshData();
   });
 }
 

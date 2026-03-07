@@ -76,6 +76,9 @@ const WATCHLIST_DISPATCH = {
   alarmPeriodMinutes: 2
 };
 const WATCHLIST_PROBLEM_LOGS_PATH = '/api/v1/intake/problem-logs';
+const WATCHLIST_RESPONSE_VERIFY_PATH = '/api/v1/intake/economist-response/verify';
+const WATCHLIST_DB_VERIFY_MAX_ATTEMPTS = 3;
+const WATCHLIST_DB_VERIFY_RETRY_DELAY_MS = 700;
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -139,6 +142,20 @@ const CLOSED_PROCESS_STATUSES = new Set([
   'aborted',
   'stopped',
   'interrupted'
+]);
+const FAILED_PROCESS_STATUSES = new Set([
+  'failed',
+  'error',
+  'aborted',
+  'cancelled',
+  'canceled',
+  'stopped',
+  'crashed'
+]);
+const UNFINISHED_RECOVERY_EXCLUDED_REASONS = new Set([
+  'resumed_from_decision_panel',
+  'bulk_resume_reload',
+  'restarted_in_same_window'
 ]);
 const processRegistry = new Map();
 const ytTranscriptInFlightRequests = new Map();
@@ -1362,6 +1379,21 @@ function normalizeUnfinishedResumeBatchTotals(rawTotals) {
   };
 }
 
+function normalizeUnfinishedResumeBatchSelection(rawSelection) {
+  const source = rawSelection && typeof rawSelection === 'object' ? rawSelection : {};
+  const sourceFilter = normalizeUnfinishedSourceFilter(source.sourceFilter);
+  const limitRequested = normalizeUnfinishedResumeLimit(source.limitRequested);
+  const limitApplied = normalizeUnfinishedResumeLimit(source.limitApplied);
+  return {
+    sourceFilter: sourceFilter || 'all',
+    sourceLabel: typeof source.sourceLabel === 'string' ? source.sourceLabel : '',
+    strategy: typeof source.strategy === 'string' ? source.strategy : '',
+    limitRequested,
+    limitApplied,
+    filteredTotal: toNonNegativeInt(source.filteredTotal, 0)
+  };
+}
+
 function sanitizeUnfinishedResumeBatchState(rawState) {
   const source = rawState && typeof rawState === 'object' ? rawState : {};
   const rows = (Array.isArray(source.rows) ? source.rows : [])
@@ -1376,6 +1408,7 @@ function sanitizeUnfinishedResumeBatchState(rawState) {
     updatedAt: Number.isInteger(source.updatedAt) ? source.updatedAt : Date.now(),
     origin: typeof source.origin === 'string' ? source.origin : '',
     totals: normalizeUnfinishedResumeBatchTotals(source.totals),
+    selection: normalizeUnfinishedResumeBatchSelection(source.selection),
     rows,
     activeRunId: typeof source.activeRunId === 'string' ? source.activeRunId : '',
     error: typeof source.error === 'string' ? source.error : ''
@@ -1514,6 +1547,170 @@ function extractProcessChatUrl(process) {
   return '';
 }
 
+function isFailedProcessStatusForUnfinished(status) {
+  const normalized = normalizeProcessStatus(status || '');
+  return FAILED_PROCESS_STATUSES.has(normalized);
+}
+
+function normalizeUnfinishedSourceFilter(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized || normalized === 'all') return '';
+  return normalized;
+}
+
+function normalizeUnfinishedProcessSource(rawSourceUrl) {
+  const sourceUrl = typeof rawSourceUrl === 'string' ? rawSourceUrl.trim() : '';
+  if (!sourceUrl) {
+    return {
+      sourceKey: 'unknown',
+      sourceLabel: 'Unknown'
+    };
+  }
+
+  const lowered = sourceUrl.toLowerCase();
+  if (lowered.startsWith('manual://')) {
+    return {
+      sourceKey: 'manual',
+      sourceLabel: 'Manual'
+    };
+  }
+  if (lowered.startsWith('file://')) {
+    return {
+      sourceKey: 'file',
+      sourceLabel: 'File'
+    };
+  }
+
+  let hostname = '';
+  try {
+    hostname = new URL(sourceUrl).hostname || '';
+  } catch (error) {
+    try {
+      hostname = new URL(`https://${sourceUrl}`).hostname || '';
+    } catch (innerError) {
+      hostname = '';
+    }
+  }
+
+  const normalizedHost = hostname.trim().toLowerCase().replace(/^www\./, '');
+  if (normalizedHost) {
+    return {
+      sourceKey: normalizedHost,
+      sourceLabel: normalizedHost
+    };
+  }
+
+  return {
+    sourceKey: 'unknown',
+    sourceLabel: 'Unknown'
+  };
+}
+
+function buildUnfinishedSourceCatalog(items) {
+  const map = new Map();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const sourceKey = normalizeUnfinishedSourceFilter(item.sourceKey) || 'unknown';
+    const sourceLabel = typeof item.sourceLabel === 'string' && item.sourceLabel.trim()
+      ? item.sourceLabel.trim()
+      : (sourceKey || 'unknown');
+    const existing = map.get(sourceKey) || {
+      key: sourceKey,
+      label: sourceLabel,
+      total: 0,
+      runnable: 0
+    };
+    existing.total += 1;
+    if (item.hasChatUrl) {
+      existing.runnable += 1;
+    }
+    map.set(sourceKey, existing);
+  });
+  return Array.from(map.values()).sort((left, right) => {
+    const totalDiff = (right.total || 0) - (left.total || 0);
+    if (totalDiff !== 0) return totalDiff;
+    return String(left.label || '').localeCompare(String(right.label || ''), 'en', { sensitivity: 'base' });
+  });
+}
+
+function normalizeUnfinishedResumeLimit(value) {
+  if (value === null || value === undefined) return null;
+  const asNumber = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(asNumber) || asNumber <= 0) return null;
+  return Math.min(asNumber, 10_000);
+}
+
+function hasUnfinishedProcessExecutionEvidence(process) {
+  if (!process || typeof process !== 'object') return false;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const stageIndex = Number.isInteger(process?.stageIndex) ? process.stageIndex : -1;
+  if (currentPrompt > 0 || stageIndex >= 0) return true;
+
+  const messages = Array.isArray(process?.messages) ? process.messages : [];
+  if (messages.length > 0) {
+    return messages.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const text = typeof entry.text === 'string' ? entry.text.trim() : '';
+      return text.length > 0;
+    });
+  }
+
+  return false;
+}
+
+function isRecoverableUnfinishedProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process?.status || '');
+  if (status === 'completed') return false;
+  if (!isClosedProcessStatus(status)) return false;
+  if (!hasUnfinishedProcessExecutionEvidence(process)) return false;
+
+  const reason = typeof process?.reason === 'string' ? process.reason.trim().toLowerCase() : '';
+  if (reason && UNFINISHED_RECOVERY_EXCLUDED_REASONS.has(reason)) {
+    return false;
+  }
+  return true;
+}
+
+function getUnfinishedCandidateProgressMeta(candidate) {
+  const currentPrompt = Number.isInteger(candidate?.currentPrompt) && candidate.currentPrompt > 0
+    ? candidate.currentPrompt
+    : 0;
+  const totalPrompts = Number.isInteger(candidate?.totalPrompts) && candidate.totalPrompts > 0
+    ? candidate.totalPrompts
+    : 0;
+  const ratio = totalPrompts > 0
+    ? Math.max(0, Math.min(1, currentPrompt / totalPrompts))
+    : 0;
+  const timestamp = Number.isInteger(candidate?.timestamp) ? candidate.timestamp : 0;
+  return {
+    currentPrompt,
+    totalPrompts,
+    ratio,
+    timestamp
+  };
+}
+
+function compareUnfinishedCandidatesByProgressDesc(left, right) {
+  const leftMeta = getUnfinishedCandidateProgressMeta(left);
+  const rightMeta = getUnfinishedCandidateProgressMeta(right);
+  if (rightMeta.ratio !== leftMeta.ratio) {
+    return rightMeta.ratio - leftMeta.ratio;
+  }
+  if (rightMeta.currentPrompt !== leftMeta.currentPrompt) {
+    return rightMeta.currentPrompt - leftMeta.currentPrompt;
+  }
+  if (leftMeta.totalPrompts !== rightMeta.totalPrompts) {
+    return leftMeta.totalPrompts - rightMeta.totalPrompts;
+  }
+  if (rightMeta.timestamp !== leftMeta.timestamp) {
+    return rightMeta.timestamp - leftMeta.timestamp;
+  }
+  const leftRunId = typeof left?.runId === 'string' ? left.runId : '';
+  const rightRunId = typeof right?.runId === 'string' ? right.runId : '';
+  return leftRunId.localeCompare(rightRunId, 'en', { sensitivity: 'base' });
+}
+
 function resolveUnfinishedProcessStageName(process) {
   const stageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
   if (stageName) return stageName;
@@ -1527,10 +1724,14 @@ function resolveUnfinishedProcessStageName(process) {
 function buildUnfinishedProcessItem(process) {
   const chatUrl = extractProcessChatUrl(process);
   const runId = typeof process?.id === 'string' ? process.id : '';
+  const status = normalizeProcessStatus(process?.status || '');
+  const sourceUrl = typeof process?.sourceUrl === 'string' ? process.sourceUrl : '';
+  const sourceMeta = normalizeUnfinishedProcessSource(sourceUrl);
   return {
     runId,
     title: typeof process?.title === 'string' ? process.title : '',
-    status: normalizeProcessStatus(process?.status || ''),
+    status,
+    isFailedStatus: isFailedProcessStatusForUnfinished(status),
     needsAction: process?.needsAction === true,
     currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0,
     totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0,
@@ -1538,17 +1739,24 @@ function buildUnfinishedProcessItem(process) {
     timestamp: Number.isInteger(process?.timestamp) ? process.timestamp : 0,
     chatUrl,
     hasChatUrl: !!chatUrl,
-    sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : '',
+    sourceUrl,
+    sourceKey: sourceMeta.sourceKey,
+    sourceLabel: sourceMeta.sourceLabel,
     lastError: typeof process?.error === 'string' ? process.error : ''
   };
 }
 
 async function listUnfinishedProcessesForResume(options = {}) {
   const includeNonCompleted = options?.includeNonCompleted !== false;
+  const recoverOnly = options?.recoverOnly !== false;
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter);
   const snapshot = await getProcessSnapshot();
-  const items = (Array.isArray(snapshot) ? snapshot : [])
+  const allItems = (Array.isArray(snapshot) ? snapshot : [])
     .filter((process) => process && typeof process === 'object')
     .filter((process) => {
+      if (recoverOnly) {
+        return isRecoverableUnfinishedProcess(process);
+      }
       const status = normalizeProcessStatus(process?.status || '');
       if (includeNonCompleted) {
         return status !== 'completed';
@@ -1557,6 +1765,13 @@ async function listUnfinishedProcessesForResume(options = {}) {
     })
     .map((process) => buildUnfinishedProcessItem(process))
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const availableSources = buildUnfinishedSourceCatalog(allItems);
+  const items = sourceFilter
+    ? allItems.filter((item) => item.sourceKey === sourceFilter)
+    : allItems;
+  const sourceFilterMatched = sourceFilter
+    ? availableSources.some((source) => source.key === sourceFilter)
+    : true;
 
   const runnable = items.filter((item) => item.hasChatUrl).length;
   const skippedMissingUrl = items.length - runnable;
@@ -1567,6 +1782,11 @@ async function listUnfinishedProcessesForResume(options = {}) {
     total: items.length,
     runnable,
     skippedMissingUrl,
+    sourceFilter: sourceFilter || 'all',
+    sourceFilterApplied: !!sourceFilter,
+    sourceFilterMatched,
+    recoverOnly,
+    availableSources,
     items
   };
 }
@@ -1826,7 +2046,10 @@ async function runResumeUnfinishedProcessesBatch(jobId, options = {}) {
     const providedCandidates = Array.isArray(options?.candidates) ? options.candidates : null;
     const listing = providedCandidates
       ? null
-      : await listUnfinishedProcessesForResume({ includeNonCompleted: true });
+      : await listUnfinishedProcessesForResume({
+        includeNonCompleted: true,
+        recoverOnly: true
+      });
     const candidates = providedCandidates || (Array.isArray(listing?.items) ? listing.items : []);
     let state = await getUnfinishedResumeBatchState(safeJobId);
     if (!state || state.status !== 'running') {
@@ -1927,6 +2150,8 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     ? options.origin.trim()
     : 'runtime-message';
   const forceRestartIfRunning = options?.forceRestartIfRunning === true;
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter);
+  const limitRequested = normalizeUnfinishedResumeLimit(options?.limit);
   const current = await getUnfinishedResumeBatchState();
   if (current?.status === 'running') {
     if (!forceRestartIfRunning) {
@@ -1947,7 +2172,40 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     });
   }
 
-  const listing = await listUnfinishedProcessesForResume({ includeNonCompleted: true });
+  const listing = await listUnfinishedProcessesForResume({
+    includeNonCompleted: true,
+    recoverOnly: true,
+    sourceFilter
+  });
+  const allCandidates = Array.isArray(listing?.items) ? listing.items : [];
+  const rankingStrategy = Number.isInteger(limitRequested)
+    ? 'most_advanced_incomplete_first'
+    : 'latest_update_first';
+  const rankedCandidates = Number.isInteger(limitRequested)
+    ? allCandidates.slice().sort(compareUnfinishedCandidatesByProgressDesc)
+    : allCandidates.slice();
+  const limitApplied = Number.isInteger(limitRequested)
+    ? Math.min(limitRequested, rankedCandidates.length)
+    : null;
+  const candidates = Number.isInteger(limitApplied)
+    ? rankedCandidates.slice(0, limitApplied)
+    : rankedCandidates;
+  const selectedRunnable = candidates.filter((item) => item?.hasChatUrl === true).length;
+  const selectedSkippedMissingUrl = candidates.length - selectedRunnable;
+  const selectedSource = sourceFilter
+    ? (Array.isArray(listing?.availableSources)
+      ? listing.availableSources.find((entry) => entry?.key === sourceFilter)
+      : null)
+    : null;
+  const selection = {
+    sourceFilter: sourceFilter || 'all',
+    sourceLabel: selectedSource?.label || '',
+    strategy: rankingStrategy,
+    limitRequested,
+    limitApplied,
+    filteredTotal: Number.isInteger(listing?.total) ? listing.total : rankedCandidates.length
+  };
+
   const jobId = createUnfinishedResumeBatchJobId('unfinished-resume');
   const initialState = {
     jobId,
@@ -1955,10 +2213,11 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     startedAt: Date.now(),
     finishedAt: null,
     origin,
+    selection,
     totals: normalizeUnfinishedResumeBatchTotals({
-      total: listing.total,
-      runnable: listing.runnable,
-      skippedMissingUrl: listing.skippedMissingUrl,
+      total: candidates.length,
+      runnable: selectedRunnable,
+      skippedMissingUrl: selectedSkippedMissingUrl,
       processed: 0,
       resumed: 0,
       skipped_missing_chat_url: 0,
@@ -1978,14 +2237,20 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     origin,
     details: {
       jobId,
-      total: listing.total,
-      runnable: listing.runnable,
-      skippedMissingUrl: listing.skippedMissingUrl
+      total: candidates.length,
+      runnable: selectedRunnable,
+      skippedMissingUrl: selectedSkippedMissingUrl,
+      sourceFilter: selection.sourceFilter,
+      sourceLabel: selection.sourceLabel,
+      strategy: selection.strategy,
+      limitRequested: selection.limitRequested,
+      limitApplied: selection.limitApplied,
+      filteredTotal: selection.filteredTotal
     }
   });
   void runResumeUnfinishedProcessesBatch(jobId, {
     origin,
-    candidates: Array.isArray(listing?.items) ? listing.items : []
+    candidates
   });
   return {
     success: true,
@@ -2055,6 +2320,150 @@ function inferProblemLogStageName(rawStageName, reason, fallbackTitle = '') {
 
   const title = trimProblemLogText(fallbackTitle || '', 120);
   return title || '';
+}
+
+function toProblemLogNonNegativeInteger(value) {
+  if (Number.isInteger(value)) {
+    return value >= 0 ? value : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const normalized = Math.trunc(value);
+    return normalized >= 0 ? normalized : null;
+  }
+  return null;
+}
+
+function resolveProblemLogStageProgress({
+  status = '',
+  reason = '',
+  error = '',
+  statusText = '',
+  currentPrompt = null,
+  totalPrompts = null,
+  stageIndex = null,
+  stageName = ''
+} = {}) {
+  let normalizedCurrentPrompt = toProblemLogNonNegativeInteger(currentPrompt);
+  let normalizedTotalPrompts = toProblemLogNonNegativeInteger(totalPrompts);
+  let normalizedStageIndex = toProblemLogNonNegativeInteger(stageIndex);
+  const normalizedStageName = trimProblemLogText(stageName || '', 120);
+
+  if (normalizedCurrentPrompt !== null && normalizedCurrentPrompt <= 0) {
+    normalizedCurrentPrompt = null;
+  }
+  if (normalizedTotalPrompts !== null && normalizedTotalPrompts <= 0) {
+    normalizedTotalPrompts = null;
+  }
+
+  if (normalizedCurrentPrompt === null && normalizedStageIndex !== null) {
+    normalizedCurrentPrompt = normalizedStageIndex + 1;
+  }
+  if (normalizedStageIndex === null && normalizedCurrentPrompt !== null) {
+    normalizedStageIndex = normalizedCurrentPrompt - 1;
+  }
+  if (
+    normalizedTotalPrompts !== null
+    && normalizedCurrentPrompt !== null
+    && normalizedCurrentPrompt > normalizedTotalPrompts
+  ) {
+    normalizedCurrentPrompt = normalizedTotalPrompts;
+  }
+  if (
+    normalizedTotalPrompts !== null
+    && normalizedStageIndex !== null
+    && normalizedStageIndex >= normalizedTotalPrompts
+  ) {
+    normalizedStageIndex = normalizedTotalPrompts - 1;
+  }
+
+  const normalizedStatus = normalizeProcessStatus(status);
+  const signalBlob = [reason, error, statusText]
+    .map((value) => (typeof value === 'string' ? value.toLowerCase() : ''))
+    .join(' ');
+  const hasBlockingSignal = /needs_action|missing_assistant_reply|invalid_response|timeout|send_failed|save_failed|data[_\s-]?gap|failed|error/.test(signalBlob);
+  const canAdvance = !isClosedProcessStatus(normalizedStatus)
+    && !hasBlockingSignal
+    && (normalizedStatus === 'running' || normalizedStatus === 'starting' || normalizedStatus === 'started' || normalizedStatus === 'queued');
+
+  let nextPrompt = null;
+  if (normalizedCurrentPrompt !== null) {
+    nextPrompt = canAdvance ? (normalizedCurrentPrompt + 1) : normalizedCurrentPrompt;
+  } else if (normalizedStageIndex !== null) {
+    nextPrompt = canAdvance ? (normalizedStageIndex + 2) : (normalizedStageIndex + 1);
+  }
+  if (normalizedTotalPrompts !== null && nextPrompt !== null && nextPrompt > normalizedTotalPrompts) {
+    nextPrompt = normalizedTotalPrompts;
+  }
+  if (nextPrompt !== null && nextPrompt <= 0) {
+    nextPrompt = null;
+  }
+
+  let nextStageIndex = null;
+  if (nextPrompt !== null) {
+    nextStageIndex = Math.max(0, nextPrompt - 1);
+    if (normalizedTotalPrompts !== null && nextStageIndex >= normalizedTotalPrompts) {
+      nextStageIndex = normalizedTotalPrompts - 1;
+    }
+  }
+
+  let nextStageName = '';
+  if (nextPrompt !== null) {
+    nextStageName = `Prompt ${nextPrompt}`;
+  } else if (normalizedStageName) {
+    nextStageName = normalizedStageName;
+  }
+
+  return {
+    currentPrompt: normalizedCurrentPrompt,
+    totalPrompts: normalizedTotalPrompts,
+    stageIndex: normalizedStageIndex,
+    stageName: normalizedStageName,
+    nextPrompt,
+    nextStageIndex,
+    nextStageName: trimProblemLogText(nextStageName, 120),
+    canAdvance
+  };
+}
+
+function inferProblemLogDataGapState({
+  status = '',
+  reason = '',
+  error = '',
+  statusText = '',
+  message = '',
+  explicitDetected = false,
+  explicitSignal = '',
+  explicitMissingInputs = ''
+} = {}) {
+  const parsed = parseDataGapsStopFromText([
+    typeof statusText === 'string' ? statusText : '',
+    typeof error === 'string' ? error : '',
+    typeof message === 'string' ? message : ''
+  ].filter(Boolean).join('\n'));
+  const markerDetected = [
+    status,
+    reason,
+    error,
+    statusText,
+    message
+  ].some((value) => looksLikeDataGapMarker(typeof value === 'string' ? value : ''));
+
+  const detected = explicitDetected || parsed.detected || markerDetected;
+  const signal = trimProblemLogText(
+    explicitSignal
+      || (parsed.detected ? 'system_command' : (markerDetected ? 'marker' : '')),
+    80
+  );
+  const missingInputs = trimProblemLogText(
+    explicitMissingInputs || parsed.missingInputsText || '',
+    320
+  );
+
+  return {
+    detected,
+    signal,
+    missingInputs
+  };
 }
 
 function classifyProblemLogCategory({
@@ -2144,6 +2553,26 @@ function buildProblemLogMessage(entry) {
       ? entry.chatUrl
       : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
   );
+  const stageProgress = resolveProblemLogStageProgress({
+    status,
+    reason,
+    error,
+    statusText,
+    currentPrompt: entry.currentPrompt,
+    totalPrompts: entry.totalPrompts,
+    stageIndex: entry.stageIndex,
+    stageName
+  });
+  const dataGapState = inferProblemLogDataGapState({
+    status,
+    reason,
+    error,
+    statusText,
+    message: typeof entry.message === 'string' ? entry.message : '',
+    explicitDetected: entry.dataGapDetected === true,
+    explicitSignal: typeof entry.dataGapSignal === 'string' ? entry.dataGapSignal : '',
+    explicitMissingInputs: typeof entry.dataGapMissingInputs === 'string' ? entry.dataGapMissingInputs : ''
+  });
 
   if (title) parts.push(`title=${title}`);
   if (status) parts.push(`status=${status}`);
@@ -2151,13 +2580,24 @@ function buildProblemLogMessage(entry) {
   if (error) parts.push(`error=${error}`);
   if (statusText) parts.push(`statusText=${statusText}`);
 
-  const currentPrompt = Number.isInteger(entry.currentPrompt) ? entry.currentPrompt : null;
-  const totalPrompts = Number.isInteger(entry.totalPrompts) ? entry.totalPrompts : null;
-  if (currentPrompt !== null || totalPrompts !== null) {
-    parts.push(`prompt=${currentPrompt ?? '?'}${totalPrompts !== null ? `/${totalPrompts}` : ''}`);
+  if (stageProgress.currentPrompt !== null || stageProgress.totalPrompts !== null) {
+    parts.push(
+      `prompt=${stageProgress.currentPrompt ?? '?'}${stageProgress.totalPrompts !== null ? `/${stageProgress.totalPrompts}` : ''}`
+    );
   }
-  if (stageName) {
-    parts.push(`stage=${stageName}`);
+  if (stageProgress.stageName) {
+    parts.push(`stage=${stageProgress.stageName}`);
+  }
+  if (stageProgress.nextPrompt !== null) {
+    parts.push(`next_prompt=${stageProgress.nextPrompt}`);
+  }
+  if (stageProgress.nextStageName) {
+    parts.push(`next_stage=${stageProgress.nextStageName}`);
+  }
+  if (dataGapState.detected) {
+    parts.push('data_gap=1');
+    if (dataGapState.signal) parts.push(`data_gap_signal=${dataGapState.signal}`);
+    if (dataGapState.missingInputs) parts.push(`data_gap_missing_inputs=${dataGapState.missingInputs}`);
   }
   if (sourceUrl) {
     parts.push(`sourceUrl=${sourceUrl}`);
@@ -2196,6 +2636,16 @@ function sanitizeProblemLogEntry(rawEntry) {
   const title = inferProblemLogTitle(rawEntry.title || '', reason, rawEntry.message || '');
   const analysisType = trimProblemLogText(rawEntry.analysisType || '', 40);
   const stageName = inferProblemLogStageName(rawEntry.stageName || '', reason, title);
+  const stageProgress = resolveProblemLogStageProgress({
+    status,
+    reason,
+    error,
+    statusText,
+    currentPrompt: rawEntry.currentPrompt,
+    totalPrompts: rawEntry.totalPrompts,
+    stageIndex: rawEntry.stageIndex,
+    stageName
+  });
   const supportId = trimProblemLogText(
     rawEntry.supportId
       || extractSupportIdFromProblemLogSource(source)
@@ -2226,6 +2676,18 @@ function sanitizeProblemLogEntry(rawEntry) {
       : (typeof rawEntry.source_url === 'string' ? rawEntry.source_url : '')
   );
   const heartbeat = rawEntry.heartbeat === true;
+  const dataGapState = inferProblemLogDataGapState({
+    status,
+    reason,
+    error,
+    statusText,
+    message: typeof rawEntry.message === 'string' ? rawEntry.message : '',
+    explicitDetected: rawEntry.dataGapDetected === true,
+    explicitSignal: typeof rawEntry.dataGapSignal === 'string' ? rawEntry.dataGapSignal : '',
+    explicitMissingInputs: typeof rawEntry.dataGapMissingInputs === 'string'
+      ? rawEntry.dataGapMissingInputs
+      : ''
+  });
   const message = trimProblemLogText(rawEntry.message || buildProblemLogMessage(rawEntry));
   const signature = trimProblemLogText(rawEntry.signature || '', 380);
   const entryId = typeof rawEntry.id === 'string' && rawEntry.id.trim()
@@ -2248,10 +2710,16 @@ function sanitizeProblemLogEntry(rawEntry) {
     statusText,
     message: message || 'problem_detected',
     signature,
-    currentPrompt: Number.isInteger(rawEntry.currentPrompt) ? rawEntry.currentPrompt : null,
-    totalPrompts: Number.isInteger(rawEntry.totalPrompts) ? rawEntry.totalPrompts : null,
-    stageIndex: Number.isInteger(rawEntry.stageIndex) ? rawEntry.stageIndex : null,
-    stageName,
+    currentPrompt: stageProgress.currentPrompt,
+    totalPrompts: stageProgress.totalPrompts,
+    stageIndex: stageProgress.stageIndex,
+    stageName: stageProgress.stageName,
+    nextPrompt: stageProgress.nextPrompt,
+    nextStageIndex: stageProgress.nextStageIndex,
+    nextStageName: stageProgress.nextStageName,
+    dataGapDetected: dataGapState.detected,
+    dataGapSignal: dataGapState.signal,
+    dataGapMissingInputs: dataGapState.missingInputs,
     tabId: Number.isInteger(rawEntry.tabId) ? rawEntry.tabId : null,
     windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null,
     sourceUrl: sourceUrl || '',
@@ -2399,6 +2867,11 @@ function normalizeConversationLogSnapshotEntry(rawEntry) {
     runId: trimProblemLogText(normalized.runId || '', 120),
     currentPrompt: Number.isInteger(normalized.currentPrompt) ? normalized.currentPrompt : null,
     totalPrompts: Number.isInteger(normalized.totalPrompts) ? normalized.totalPrompts : null,
+    nextPrompt: Number.isInteger(normalized.nextPrompt) ? normalized.nextPrompt : null,
+    nextStageName: trimProblemLogText(normalized.nextStageName || '', 120),
+    dataGapDetected: normalized.dataGapDetected === true,
+    dataGapSignal: trimProblemLogText(normalized.dataGapSignal || '', 80),
+    dataGapMissingInputs: trimProblemLogText(normalized.dataGapMissingInputs || '', 320),
     chatUrl: chatUrl || ''
   };
 }
@@ -3115,6 +3588,59 @@ async function upsertProcess(runId, patch = {}) {
   return next;
 }
 
+async function markInterruptedProcessesForClosedTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return { matched: 0, marked: 0 };
+  }
+  await ensureProcessRegistryReady();
+  const candidates = Array.from(processRegistry.values()).filter((process) => (
+    process
+    && !isClosedProcessStatus(process.status)
+    && Number.isInteger(process.tabId)
+    && process.tabId === tabId
+  ));
+  if (candidates.length === 0) {
+    return { matched: 0, marked: 0 };
+  }
+
+  let marked = 0;
+  for (const process of candidates) {
+    if (!hasUnfinishedProcessExecutionEvidence(process)) {
+      continue;
+    }
+    await upsertProcess(process.id, {
+      status: 'stopped',
+      statusText: 'Karta ChatGPT zamknieta - proces przerwany',
+      reason: 'tab_closed',
+      needsAction: false,
+      tabId: null,
+      windowId: null,
+      finishedAt: Date.now(),
+      timestamp: Date.now()
+    });
+    marked += 1;
+  }
+
+  if (marked > 0) {
+    reportAdminActionEvent('processes_marked_stopped_on_tab_close', {
+      level: 'warn',
+      status: 'updated',
+      reason: 'tab_closed',
+      origin: 'tabs.onRemoved',
+      details: {
+        tabId,
+        matched: candidates.length,
+        marked
+      }
+    });
+  }
+
+  return {
+    matched: candidates.length,
+    marked
+  };
+}
+
 function resolveProcessConversationUrlFromMessage(message, sender) {
   const candidates = [
     typeof message?.chatUrl === 'string' ? message.chatUrl : '',
@@ -3514,13 +4040,17 @@ function collectKnownProcessResponseIds(process, expectedRunId = '') {
   return ids;
 }
 
-function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '') {
+function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '', details = {}) {
   const prev = previousDispatch && typeof previousDispatch === 'object'
     ? previousDispatch
     : {};
   const sent = Number.isInteger(prev.sent) ? Math.max(prev.sent, 1) : 1;
   const failed = Number.isInteger(prev.failed) ? Math.max(0, prev.failed) : 0;
   const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+  const dbVerification = normalizeWatchlistDbVerification(details?.dbVerification || prev.dbVerification);
+  const nextState = isWatchlistDbVerificationSuccessful(dbVerification)
+    ? 'dispatch_confirmed'
+    : 'dispatch_accepted_unverified';
   return {
     ...prev,
     queued: true,
@@ -3540,8 +4070,111 @@ function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '')
     failureStatus: null,
     failureRequestId: '',
     failureIntakeUrl: '',
-    state: 'dispatch_confirmed',
-    responseId: normalizedResponseId || (typeof prev.responseId === 'string' ? prev.responseId : '')
+    state: nextState,
+    responseId: normalizedResponseId || (typeof prev.responseId === 'string' ? prev.responseId : ''),
+    dbVerification
+  };
+}
+
+function getProcessSuccessfulDbVerification(process, expectedResponseId = '') {
+  const normalizedExpectedResponseId = typeof expectedResponseId === 'string' ? expectedResponseId.trim() : '';
+  const candidates = [
+    process?.persistenceStatus?.dispatch?.dbVerification,
+    process?.completedResponseDispatch?.dbVerification,
+    process?.finalStagePersistence?.dbVerification
+  ];
+  for (const candidate of candidates) {
+    const verification = normalizeWatchlistDbVerification(candidate);
+    if (!isWatchlistDbVerificationSuccessful(verification)) continue;
+    if (
+      normalizedExpectedResponseId
+      && typeof verification?.responseId === 'string'
+      && verification.responseId.trim()
+      && verification.responseId.trim() !== normalizedExpectedResponseId
+    ) {
+      continue;
+    }
+    return verification;
+  }
+  return null;
+}
+
+async function maybeAutoCloseProcessAfterDbVerify(runId = '', options = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) {
+    return { closed: false, reason: 'missing_run_id' };
+  }
+
+  await ensureProcessRegistryReady();
+  const process = processRegistry.get(normalizedRunId) || null;
+  if (!process || typeof process !== 'object') {
+    return { closed: false, reason: 'process_missing' };
+  }
+
+  const status = normalizeProcessStatus(process.status);
+  if (status !== 'completed' && status !== 'completed_with_errors') {
+    return { closed: false, reason: 'process_not_completed' };
+  }
+  if (Number.isInteger(process?.autoClosedAfterDbVerifyAt)) {
+    return { closed: false, reason: 'already_auto_closed' };
+  }
+
+  const verification = getProcessSuccessfulDbVerification(process, options?.responseId || '');
+  if (!verification) {
+    return { closed: false, reason: 'db_verify_not_confirmed' };
+  }
+
+  const processTabId = Number.isInteger(options?.tabId)
+    ? options.tabId
+    : (Number.isInteger(process?.tabId) ? process.tabId : null);
+  const processWindowId = Number.isInteger(options?.windowId)
+    ? options.windowId
+    : (Number.isInteger(process?.windowId) ? process.windowId : null);
+
+  let closed = false;
+  if (processTabId !== null) {
+    closed = await removeTabSafe(processTabId);
+  }
+  if (!closed && processWindowId !== null) {
+    const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
+    const validTabs = Array.isArray(tabsInWindow?.tabs)
+      ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
+      : [];
+    const hasOnlyProcessTab = validTabs.length === 1
+      && processTabId !== null
+      && validTabs[0].id === processTabId;
+    if (hasOnlyProcessTab) {
+      closed = await removeWindowSafe(processWindowId);
+    }
+  }
+
+  const now = Date.now();
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'db_verify';
+  const patch = {
+    autoCloseAfterDbVerifyAttemptedAt: now,
+    autoCloseAfterDbVerifyState: closed ? 'closed' : 'close_failed',
+    autoCloseAfterDbVerifyOrigin: origin,
+    timestamp: now
+  };
+  if (closed) {
+    patch.autoClosedAfterDbVerifyAt = now;
+    patch.tabId = null;
+    patch.windowId = null;
+  }
+  await upsertProcess(normalizedRunId, patch);
+
+  console.log('[copy-flow] [process:auto-close-after-db-verify]', {
+    runId: normalizedRunId,
+    responseId: verification.responseId || '',
+    eventId: verification.eventId ?? null,
+    origin,
+    closed
+  });
+  return {
+    closed,
+    reason: closed ? 'closed' : 'close_failed'
   };
 }
 
@@ -3570,7 +4203,10 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
       ? process.completedResponseDispatch
       : {});
 
-  const nextDispatch = createDeliveredDispatchSnapshot(previousDispatch, normalizedResponseId);
+  const normalizedDbVerification = normalizeWatchlistDbVerification(details?.dbVerification);
+  const nextDispatch = createDeliveredDispatchSnapshot(previousDispatch, normalizedResponseId, {
+    dbVerification: normalizedDbVerification
+  });
   const dispatchSummary = formatDispatchUiSummary(nextDispatch);
   const previousLog = Array.isArray(previousPersistenceStatus?.dispatchProcessLog)
     ? previousPersistenceStatus.dispatchProcessLog
@@ -3580,8 +4216,9 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
     'ok',
     `responseId=${normalizedResponseId || 'n/a'}`,
     `status=${Number.isInteger(details?.status) ? details.status : 'n/a'}`,
-    `eventId=${typeof details?.eventId === 'string' && details.eventId.trim() ? details.eventId.trim() : 'n/a'}`,
-    `requestId=${typeof details?.requestId === 'string' && details.requestId.trim() ? details.requestId.trim() : 'n/a'}`
+    `eventId=${Number.isInteger(details?.eventId) ? details.eventId : (typeof details?.eventId === 'string' && details.eventId.trim() ? details.eventId.trim() : 'n/a')}`,
+    `requestId=${typeof details?.requestId === 'string' && details.requestId.trim() ? details.requestId.trim() : 'n/a'}`,
+    `dbVerify=${normalizedDbVerification?.success ? 'ok' : (normalizedDbVerification?.state || 'n/a')}`
   ].join('|');
   const nextLog = [...previousLog.slice(-15), deliveryLogEntry];
 
@@ -3628,13 +4265,18 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
       failureStatus: null,
       failureRequestId: '',
       failureIntakeUrl: '',
-      state: 'dispatch_confirmed',
+      state: nextDispatch.state,
       dispatchSummary,
+      dbVerification: normalizedDbVerification || previousFinalStagePersistence?.dbVerification || null,
       updatedAt: now
     };
   }
 
   await upsertProcess(normalizedRunId, patch);
+  await maybeAutoCloseProcessAfterDbVerify(normalizedRunId, {
+    responseId: normalizedResponseId,
+    origin: 'dispatch_delivery'
+  }).catch(() => {});
   return true;
 }
 
@@ -3874,6 +4516,7 @@ function summarizeFinalStagePersistence(result) {
   const state = typeof dispatch?.state === 'string' && dispatch.state.trim()
     ? dispatch.state.trim()
     : '';
+  const dbVerification = normalizeWatchlistDbVerification(dispatch?.dbVerification);
   return {
     attempted: result.attempted === true,
     success: result.success === true,
@@ -3901,7 +4544,8 @@ function summarizeFinalStagePersistence(result) {
     hasConversationUrl,
     conversationSnapshotRefreshed,
     conversationSnapshotSource,
-    state
+    state,
+    dbVerification
   };
 }
 
@@ -5744,6 +6388,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
+      await maybeAutoCloseProcessAfterDbVerify(processId, {
+        tabId,
+        windowId: Number.isInteger(windowId) ? windowId : null,
+        origin: 'auto_resume_completed'
+      }).catch(() => {});
 
       return {
         success: true,
@@ -10339,6 +10988,7 @@ function formatDispatchUiSummary(dispatchOutcome) {
     : null;
   const hasConversationUrl = dispatch.hasConversationUrl === true;
   const conversationSnapshotRefreshed = dispatch.conversationSnapshotRefreshed === true;
+  const dbVerification = normalizeWatchlistDbVerification(dispatch.dbVerification);
   const diagnosticParts = [];
   if (failureStage) diagnosticParts.push(`stage=${failureStage}`);
   if (failureReason) diagnosticParts.push(`reason=${failureReason}`);
@@ -10347,6 +10997,9 @@ function formatDispatchUiSummary(dispatchOutcome) {
   if (conversationLogCount !== null) diagnosticParts.push(`convLogs=${conversationLogCount}`);
   if (hasConversationUrl) diagnosticParts.push('convUrl=1');
   if (conversationSnapshotRefreshed) diagnosticParts.push('convRefresh=1');
+  if (dbVerification?.attempted) {
+    diagnosticParts.push(`dbVerify=${dbVerification.success ? 'ok' : (dbVerification.state || 'failed')}`);
+  }
   const diagnosticSuffix = diagnosticParts.length > 0
     ? `, diag=[${diagnosticParts.join(', ')}]`
     : '';
@@ -10495,6 +11148,7 @@ function buildPersistenceUiSummary(options = {}) {
   );
   const dispatchFlowUiLines = buildDispatchProcessLogUiLines(dispatchProcessLog);
   const dispatchSummary = formatDispatchUiSummary(dispatch);
+  const dbVerificationSummaryLine = formatWatchlistDbVerificationSummary(dispatch?.dbVerification);
   const conversationSummaryLine = buildConversationAnalysisUiLine(saveResult, dispatch);
 
   if (!hasResponse) {
@@ -10526,6 +11180,7 @@ function buildPersistenceUiSummary(options = {}) {
       storageSummary,
       ...(bridgeSummary ? [bridgeSummary] : []),
       dispatchSummary,
+      ...(dbVerificationSummaryLine ? [dbVerificationSummaryLine] : []),
       ...(conversationSummaryLine ? [conversationSummaryLine] : []),
       ...dispatchFlowUiLines
     ];
@@ -10557,6 +11212,7 @@ function buildPersistenceUiSummary(options = {}) {
     storageSummary,
     ...(bridgeSummary ? [bridgeSummary] : []),
     dispatchSummary,
+    ...(dbVerificationSummaryLine ? [dbVerificationSummaryLine] : []),
     ...(conversationSummaryLine ? [conversationSummaryLine] : []),
     ...dispatchFlowUiLines
   ];
@@ -11097,6 +11753,26 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
 function buildProblemLogDispatchText(entry, installationId = '') {
   if (!entry || typeof entry !== 'object') return '';
   const parts = [];
+  const stageProgress = resolveProblemLogStageProgress({
+    status: entry.status,
+    reason: entry.reason,
+    error: entry.error,
+    statusText: entry.statusText,
+    currentPrompt: entry.currentPrompt,
+    totalPrompts: entry.totalPrompts,
+    stageIndex: entry.stageIndex,
+    stageName: entry.stageName
+  });
+  const dataGapState = inferProblemLogDataGapState({
+    status: entry.status,
+    reason: entry.reason,
+    error: entry.error,
+    statusText: entry.statusText,
+    message: typeof entry.message === 'string' ? entry.message : '',
+    explicitDetected: entry.dataGapDetected === true,
+    explicitSignal: typeof entry.dataGapSignal === 'string' ? entry.dataGapSignal : '',
+    explicitMissingInputs: typeof entry.dataGapMissingInputs === 'string' ? entry.dataGapMissingInputs : ''
+  });
   const supportId = typeof installationId === 'string' ? installationId.trim() : '';
   if (supportId) parts.push(`support_id=${supportId}`);
   if (entry?.category) parts.push(`category=${entry.category}`);
@@ -11108,11 +11784,18 @@ function buildProblemLogDispatchText(entry, installationId = '') {
   if (entry?.status) parts.push(`status=${entry.status}`);
   if (entry?.reason) parts.push(`reason=${entry.reason}`);
   if (entry?.error) parts.push(`error=${entry.error}`);
-  if (entry?.stageName) parts.push(`stage=${entry.stageName}`);
-  if (Number.isInteger(entry?.currentPrompt) || Number.isInteger(entry?.totalPrompts)) {
-    const currentPrompt = Number.isInteger(entry?.currentPrompt) ? entry.currentPrompt : '?';
-    const totalPrompts = Number.isInteger(entry?.totalPrompts) ? entry.totalPrompts : '?';
+  if (stageProgress.stageName) parts.push(`stage=${stageProgress.stageName}`);
+  if (stageProgress.currentPrompt !== null || stageProgress.totalPrompts !== null) {
+    const currentPrompt = stageProgress.currentPrompt !== null ? stageProgress.currentPrompt : '?';
+    const totalPrompts = stageProgress.totalPrompts !== null ? stageProgress.totalPrompts : '?';
     parts.push(`prompt=${currentPrompt}/${totalPrompts}`);
+  }
+  if (stageProgress.nextPrompt !== null) parts.push(`next_prompt=${stageProgress.nextPrompt}`);
+  if (stageProgress.nextStageName) parts.push(`next_stage=${stageProgress.nextStageName}`);
+  if (dataGapState.detected) {
+    parts.push('data_gap=1');
+    if (dataGapState.signal) parts.push(`data_gap_signal=${dataGapState.signal}`);
+    if (dataGapState.missingInputs) parts.push(`data_gap_missing_inputs=${dataGapState.missingInputs}`);
   }
   const chatUrl = normalizeChatConversationUrl(
     typeof entry?.chatUrl === 'string'
@@ -11208,6 +11891,40 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
   if (normalizedEntry.source && normalizedEntry.source !== PROBLEM_LOG_REMOTE_SOURCE) {
     sourceParts.push(`origin:${normalizedEntry.source}`);
   }
+  const stageProgress = resolveProblemLogStageProgress({
+    status: normalizedEntry.status,
+    reason: normalizedEntry.reason,
+    error: normalizedEntry.error,
+    statusText: normalizedEntry.statusText,
+    currentPrompt: normalizedEntry.currentPrompt,
+    totalPrompts: normalizedEntry.totalPrompts,
+    stageIndex: normalizedEntry.stageIndex,
+    stageName: normalizedEntry.stageName
+  });
+  const dataGapState = inferProblemLogDataGapState({
+    status: normalizedEntry.status,
+    reason: normalizedEntry.reason,
+    error: normalizedEntry.error,
+    statusText: normalizedEntry.statusText,
+    message: normalizedEntry.message || '',
+    explicitDetected: normalizedEntry.dataGapDetected === true,
+    explicitSignal: normalizedEntry.dataGapSignal || '',
+    explicitMissingInputs: normalizedEntry.dataGapMissingInputs || ''
+  });
+  const isProcessMonitorStage = problemLogSourceMatches(normalizedEntry.source, 'process-monitor')
+    && (normalizedEntry.category === 'process_stream' || normalizedEntry.category === 'process_state');
+  const dispatchCurrentPrompt = isProcessMonitorStage
+    && Number.isInteger(stageProgress.nextPrompt)
+    ? stageProgress.nextPrompt
+    : stageProgress.currentPrompt;
+  const dispatchStageIndex = isProcessMonitorStage
+    && Number.isInteger(stageProgress.nextStageIndex)
+    ? stageProgress.nextStageIndex
+    : stageProgress.stageIndex;
+  const dispatchStageName = isProcessMonitorStage
+    && stageProgress.nextStageName
+    ? stageProgress.nextStageName
+    : stageProgress.stageName;
   const stage = {
     title: normalizedEntry.title || '',
     source: normalizedEntry.source || '',
@@ -11217,10 +11934,19 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
     reason: normalizedEntry.reason || '',
     error: normalizedEntry.error || '',
     supportId: supportId || '',
-    stageName: normalizedEntry.stageName || '',
-    currentPrompt: Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : null,
-    totalPrompts: Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : null,
-    stageIndex: Number.isInteger(normalizedEntry.stageIndex) ? normalizedEntry.stageIndex : null,
+    stageName: dispatchStageName || '',
+    currentPrompt: Number.isInteger(dispatchCurrentPrompt) ? dispatchCurrentPrompt : null,
+    totalPrompts: Number.isInteger(stageProgress.totalPrompts) ? stageProgress.totalPrompts : null,
+    stageIndex: Number.isInteger(dispatchStageIndex) ? dispatchStageIndex : null,
+    currentPromptObserved: Number.isInteger(stageProgress.currentPrompt) ? stageProgress.currentPrompt : null,
+    stageIndexObserved: Number.isInteger(stageProgress.stageIndex) ? stageProgress.stageIndex : null,
+    stageNameObserved: stageProgress.stageName || '',
+    nextPrompt: Number.isInteger(stageProgress.nextPrompt) ? stageProgress.nextPrompt : null,
+    nextStageIndex: Number.isInteger(stageProgress.nextStageIndex) ? stageProgress.nextStageIndex : null,
+    nextStageName: stageProgress.nextStageName || '',
+    dataGapDetected: dataGapState.detected === true ? true : null,
+    dataGapSignal: dataGapState.signal || '',
+    dataGapMissingInputs: dataGapState.missingInputs || '',
     sourceUrl: normalizeProblemLogSourceUrl(
       typeof normalizedEntry.sourceUrl === 'string' ? normalizedEntry.sourceUrl : ''
     ),
@@ -11736,6 +12462,154 @@ function buildWatchlistProblemLogUrlCandidates(primaryIntakeUrl) {
   return [...new Set(candidates)];
 }
 
+function convertWatchlistIntakeUrlToVerifyUrl(rawIntakeUrl) {
+  const normalized = normalizeWatchlistIntakeUrl(rawIntakeUrl);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    const pathname = typeof parsed.pathname === 'string' ? parsed.pathname : '';
+    if (/\/economist-response\/?$/i.test(pathname)) {
+      parsed.pathname = pathname.replace(/\/economist-response\/?$/i, '/economist-response/verify');
+    } else {
+      const basePath = pathname.replace(/\/+$/, '');
+      parsed.pathname = `${basePath}${WATCHLIST_RESPONSE_VERIFY_PATH.startsWith('/') ? WATCHLIST_RESPONSE_VERIFY_PATH : `/${WATCHLIST_RESPONSE_VERIFY_PATH}`}`;
+    }
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function buildWatchlistVerifyUrlCandidates(primaryIntakeUrl) {
+  const candidates = buildWatchlistDispatchUrlCandidates(primaryIntakeUrl)
+    .map((candidate) => convertWatchlistIntakeUrlToVerifyUrl(candidate))
+    .filter((candidate) => typeof candidate === 'string' && candidate.trim());
+  return [...new Set(candidates)];
+}
+
+function normalizeWatchlistDbVerification(rawVerification) {
+  if (!rawVerification || typeof rawVerification !== 'object') return null;
+  const requiredFieldsRaw = Array.isArray(rawVerification.requiredFields)
+    ? rawVerification.requiredFields
+    : (Array.isArray(rawVerification.required_fields) ? rawVerification.required_fields : []);
+  const missingFieldsRaw = Array.isArray(rawVerification.missingFields)
+    ? rawVerification.missingFields
+    : (Array.isArray(rawVerification.missing_fields) ? rawVerification.missing_fields : []);
+  const mismatchFieldsRaw = Array.isArray(rawVerification.mismatchFields)
+    ? rawVerification.mismatchFields
+    : (Array.isArray(rawVerification.mismatch_fields) ? rawVerification.mismatch_fields : []);
+  const requiredFields = requiredFieldsRaw
+    .filter((field) => typeof field === 'string' && field.trim())
+    .map((field) => field.trim())
+    .slice(0, 16);
+  const missingFields = missingFieldsRaw
+    .filter((field) => typeof field === 'string' && field.trim())
+    .map((field) => field.trim())
+    .slice(0, 16);
+  const mismatchFields = mismatchFieldsRaw
+    .filter((field) => typeof field === 'string' && field.trim())
+    .map((field) => field.trim())
+    .slice(0, 16);
+  const state = typeof rawVerification.state === 'string' && rawVerification.state.trim()
+    ? rawVerification.state.trim()
+    : '';
+  const reason = typeof rawVerification.reason === 'string' && rawVerification.reason.trim()
+    ? rawVerification.reason.trim()
+    : '';
+  const ingestStatus = typeof rawVerification.ingestStatus === 'string' && rawVerification.ingestStatus.trim()
+    ? rawVerification.ingestStatus.trim()
+    : (
+      typeof rawVerification.ingest_status === 'string' && rawVerification.ingest_status.trim()
+        ? rawVerification.ingest_status.trim()
+        : ''
+    );
+  const responseId = typeof rawVerification.responseId === 'string' && rawVerification.responseId.trim()
+    ? rawVerification.responseId.trim()
+    : (
+      typeof rawVerification.response_id === 'string' && rawVerification.response_id.trim()
+        ? rawVerification.response_id.trim()
+        : ''
+    );
+  const eventId = Number.isInteger(rawVerification.eventId)
+    ? rawVerification.eventId
+    : (Number.isInteger(rawVerification.event_id) ? rawVerification.event_id : null);
+  const checkedAt = Number.isInteger(rawVerification.checkedAt)
+    ? rawVerification.checkedAt
+    : Date.now();
+  return {
+    attempted: rawVerification.attempted === true || rawVerification.success === true || rawVerification.ok === true || !!state,
+    success: rawVerification.success === true || rawVerification.ok === true,
+    found: rawVerification.found === true,
+    state,
+    reason,
+    responseId,
+    eventId,
+    ingestStatus,
+    requiredFields,
+    missingFields,
+    mismatchFields,
+    checkedAt
+  };
+}
+
+function isWatchlistDbVerificationSuccessful(rawVerification) {
+  const verification = normalizeWatchlistDbVerification(rawVerification);
+  return !!(verification && verification.attempted && verification.success);
+}
+
+function buildWatchlistDbVerificationRequest(payload = {}, details = {}) {
+  const responseId = typeof payload?.responseId === 'string' && payload.responseId.trim()
+    ? payload.responseId.trim()
+    : '';
+  const eventId = Number.isInteger(details?.eventId) ? details.eventId : null;
+  if (!responseId && eventId === null) return null;
+
+  const conversationLogs = Array.isArray(payload?.conversationLogs) ? payload.conversationLogs : [];
+  const explicitConversationLogCount = Number.isInteger(payload?.conversationLogCount)
+    ? Math.max(0, payload.conversationLogCount)
+    : null;
+  const conversationLogCount = explicitConversationLogCount !== null
+    ? explicitConversationLogCount
+    : conversationLogs.length;
+  const expected = {
+    runId: typeof payload?.runId === 'string' ? payload.runId.trim() : '',
+    source: typeof payload?.source === 'string' ? payload.source.trim() : '',
+    analysisType: typeof payload?.analysisType === 'string' ? payload.analysisType.trim() : '',
+    conversationUrl: normalizeChatConversationUrl(typeof payload?.conversationUrl === 'string' ? payload.conversationUrl : ''),
+    expectStage: !!(payload?.stage && typeof payload.stage === 'object' && !Array.isArray(payload.stage)),
+    expectText: true,
+    expectTimestamp: true
+  };
+  if (conversationLogCount > 0) {
+    expected.conversationLogCount = conversationLogCount;
+  }
+
+  return {
+    responseId,
+    ...(eventId !== null ? { eventId } : {}),
+    expected
+  };
+}
+
+function formatWatchlistDbVerificationSummary(rawVerification) {
+  const verification = normalizeWatchlistDbVerification(rawVerification);
+  if (!verification || !verification.attempted) return '';
+  if (verification.success) {
+    const meta = [];
+    if (verification.ingestStatus) meta.push(`status=${verification.ingestStatus}`);
+    if (Number.isInteger(verification.eventId)) meta.push(`event=${verification.eventId}`);
+    return `DB verify: OK${meta.length > 0 ? ` (${meta.join(', ')})` : ''}`;
+  }
+  const details = [];
+  if (verification.state) details.push(verification.state);
+  if (verification.ingestStatus) details.push(`status=${verification.ingestStatus}`);
+  if (verification.missingFields.length > 0) details.push(`missing=${verification.missingFields.join('+')}`);
+  if (verification.mismatchFields.length > 0) details.push(`mismatch=${verification.mismatchFields.join('+')}`);
+  return `DB verify: ${details.length > 0 ? details.join(', ') : (verification.reason || 'failed')}`;
+}
+
 function parseRemoteProblemLogTimestamp(...values) {
   for (const rawValue of values) {
     if (Number.isInteger(rawValue) && rawValue > 0) {
@@ -11829,6 +12703,12 @@ function normalizeRemoteProblemLogEntries(rawItems) {
       totalPrompts: Number.isInteger(stage.totalPrompts) ? stage.totalPrompts : null,
       stageIndex: Number.isInteger(stage.stageIndex) ? stage.stageIndex : null,
       stageName,
+      nextPrompt: Number.isInteger(stage.nextPrompt) ? stage.nextPrompt : null,
+      nextStageIndex: Number.isInteger(stage.nextStageIndex) ? stage.nextStageIndex : null,
+      nextStageName: trimProblemLogText(stage.nextStageName || '', 120),
+      dataGapDetected: stage.dataGapDetected === true,
+      dataGapSignal: trimProblemLogText(stage.dataGapSignal || '', 80),
+      dataGapMissingInputs: trimProblemLogText(stage.dataGapMissingInputs || '', 320),
       tabId: Number.isInteger(stage.tabId) ? stage.tabId : null,
       windowId: Number.isInteger(stage.windowId) ? stage.windowId : null,
       chatUrl: chatUrl || '',
@@ -11968,6 +12848,255 @@ async function fetchRemoteProblemLogs(options = {}) {
     intakeUrl: lastIntakeUrl,
     supportId
   };
+}
+
+async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispatchConfigOverride = null) {
+  const verificationRequest = buildWatchlistDbVerificationRequest(payload, details);
+  if (!verificationRequest) {
+    return {
+      attempted: false,
+      success: false,
+      state: 'verify_missing_identity',
+      reason: 'verify_missing_identity',
+      found: false,
+      responseId: typeof payload?.responseId === 'string' ? payload.responseId.trim() : '',
+      eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+      requiredFields: [],
+      missingFields: [],
+      mismatchFields: [],
+      checkedAt: Date.now()
+    };
+  }
+
+  const dispatchConfig = dispatchConfigOverride && typeof dispatchConfigOverride === 'object'
+    ? dispatchConfigOverride
+    : await resolveWatchlistDispatchConfiguration();
+  if (!dispatchConfig?.ok) {
+    return {
+      attempted: false,
+      success: false,
+      state: 'verify_config_missing',
+      reason: dispatchConfig?.reason || 'missing_dispatch_credentials',
+      found: false,
+      responseId: verificationRequest.responseId || '',
+      eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+      requiredFields: [],
+      missingFields: [],
+      mismatchFields: [],
+      checkedAt: Date.now()
+    };
+  }
+
+  const preferredIntakeUrl = typeof details?.intakeUrl === 'string' && details.intakeUrl.trim()
+    ? details.intakeUrl.trim()
+    : dispatchConfig.intakeUrl;
+  const urlCandidates = buildWatchlistVerifyUrlCandidates(preferredIntakeUrl);
+  if (urlCandidates.length === 0) {
+    return {
+      attempted: false,
+      success: false,
+      state: 'verify_endpoint_missing',
+      reason: 'verify_endpoint_missing',
+      found: false,
+      responseId: verificationRequest.responseId || '',
+      eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+      requiredFields: [],
+      missingFields: [],
+      mismatchFields: [],
+      checkedAt: Date.now()
+    };
+  }
+
+  const body = JSON.stringify(verificationRequest);
+  const trace = buildCopyTrace(
+    typeof payload?.runId === 'string' ? payload.runId.trim() : '',
+    verificationRequest.responseId || ''
+  );
+  const timeoutMs = Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
+  let lastVerification = {
+    attempted: true,
+    success: false,
+    state: 'verify_unavailable',
+    reason: 'verify_unavailable',
+    found: false,
+    responseId: verificationRequest.responseId || '',
+    eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+    requiredFields: [],
+    missingFields: [],
+    mismatchFields: [],
+    checkedAt: Date.now()
+  };
+
+  emitWatchlistDispatchProcessLog('info', 'verify_start', 'Starting DB verification after dispatch', {
+    trace,
+    responseId: verificationRequest.responseId || '',
+    eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null
+  });
+
+  for (const candidate of urlCandidates) {
+    for (let attempt = 1; attempt <= WATCHLIST_DB_VERIFY_MAX_ATTEMPTS; attempt += 1) {
+      const controller = new AbortController();
+      let timeoutId = null;
+      try {
+        const endpoint = new URL(candidate);
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const nonce = generateWatchlistNonce();
+        const bodyHash = await sha256HexForDispatch(body);
+        const canonical = buildWatchlistCanonicalString({
+          method: 'POST',
+          path: endpoint.pathname || '/',
+          timestamp,
+          nonce,
+          bodyHash
+        });
+        const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
+
+        console.log('[copy-flow] [dispatch:verify-start]', {
+          trace,
+          attempt,
+          maxAttempts: WATCHLIST_DB_VERIFY_MAX_ATTEMPTS,
+          verifyUrl: endpoint.toString(),
+          responseId: verificationRequest.responseId || '',
+          eventId: verificationRequest.eventId ?? null
+        });
+
+        const response = await Promise.race([
+          fetch(endpoint.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Watchlist-Key-Id': dispatchConfig.keyId,
+              'X-Watchlist-Timestamp': timestamp,
+              'X-Watchlist-Nonce': nonce,
+              'X-Watchlist-Signature': signature,
+            },
+            body,
+            signal: controller.signal
+          }),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              try {
+                controller.abort();
+              } catch {
+                // Ignore abort exceptions in timeout branch.
+              }
+              reject(createDispatchTimeoutError(timeoutMs));
+            }, timeoutMs);
+          })
+        ]);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          lastVerification = {
+            attempted: true,
+            success: false,
+            state: `verify_http_${response.status}`,
+            reason: truncateDispatchLogText(errorText || `http_${response.status}`, 180) || `http_${response.status}`,
+            found: false,
+            responseId: verificationRequest.responseId || '',
+            eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+            requiredFields: [],
+            missingFields: [],
+            mismatchFields: [],
+            checkedAt: Date.now()
+          };
+          if (response.status === 401 || response.status === 403 || response.status === 404) {
+            break;
+          }
+          continue;
+        }
+
+        const responseJson = await response.json().catch(() => ({}));
+        const normalizedVerification = normalizeWatchlistDbVerification(responseJson) || {
+          attempted: true,
+          success: false,
+          state: 'verify_invalid_response',
+          reason: 'verify_invalid_response',
+          found: false,
+          responseId: verificationRequest.responseId || '',
+          eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+          requiredFields: [],
+          missingFields: [],
+          mismatchFields: [],
+          checkedAt: Date.now()
+        };
+        lastVerification = normalizedVerification;
+        if (normalizedVerification.success) {
+          console.log('[copy-flow] [dispatch:verify-ok]', {
+            trace,
+            responseId: normalizedVerification.responseId || verificationRequest.responseId || '',
+            eventId: normalizedVerification.eventId ?? verificationRequest.eventId ?? null,
+            ingestStatus: normalizedVerification.ingestStatus || ''
+          });
+          emitWatchlistDispatchProcessLog('info', 'verify_ok', 'DB verification confirmed stored response', {
+            trace,
+            responseId: normalizedVerification.responseId || verificationRequest.responseId || '',
+            eventId: normalizedVerification.eventId ?? verificationRequest.eventId ?? null,
+            ingestStatus: normalizedVerification.ingestStatus || ''
+          });
+          return normalizedVerification;
+        }
+
+        const retryableNotFound = normalizedVerification.state === 'not_found'
+          && attempt < WATCHLIST_DB_VERIFY_MAX_ATTEMPTS;
+        if (retryableNotFound) {
+          await sleep(WATCHLIST_DB_VERIFY_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+        break;
+      } catch (error) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        lastVerification = {
+          attempted: true,
+          success: false,
+          state: 'verify_error',
+          reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_error',
+          found: false,
+          responseId: verificationRequest.responseId || '',
+          eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+          requiredFields: [],
+          missingFields: [],
+          mismatchFields: [],
+          checkedAt: Date.now()
+        };
+        if (attempt < WATCHLIST_DB_VERIFY_MAX_ATTEMPTS) {
+          await sleep(WATCHLIST_DB_VERIFY_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+      }
+      break;
+    }
+    if (isWatchlistDbVerificationSuccessful(lastVerification)) {
+      return lastVerification;
+    }
+  }
+
+  console.warn('[copy-flow] [dispatch:verify-failed]', {
+    trace,
+    responseId: lastVerification.responseId || verificationRequest.responseId || '',
+    eventId: lastVerification.eventId ?? verificationRequest.eventId ?? null,
+    state: lastVerification.state || '',
+    reason: lastVerification.reason || '',
+    missingFields: lastVerification.missingFields || [],
+    mismatchFields: lastVerification.mismatchFields || []
+  });
+  emitWatchlistDispatchProcessLog('warn', 'verify_failed', 'DB verification did not confirm stored response', {
+    trace,
+    responseId: lastVerification.responseId || verificationRequest.responseId || '',
+    eventId: lastVerification.eventId ?? verificationRequest.eventId ?? null,
+    state: lastVerification.state || '',
+    reason: lastVerification.reason || '',
+    missingFields: Array.isArray(lastVerification.missingFields) ? lastVerification.missingFields.join(',') : '',
+    mismatchFields: Array.isArray(lastVerification.mismatchFields) ? lastVerification.mismatchFields.join(',') : ''
+  });
+  return lastVerification;
 }
 
 function shouldSwitchWatchlistUrlCandidateEarly({
@@ -12754,11 +13883,42 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
         } catch {
           responseJson = null;
         }
+        const responseEventId = Number.isInteger(responseJson?.event_id)
+          ? responseJson.event_id
+          : null;
+        const dbVerification = await verifyWatchlistDispatchStoredRecord(
+          payloadForSend,
+          {
+            eventId: responseEventId,
+            intakeUrl: url
+          },
+          dispatchConfig
+        ).catch((error) => ({
+          attempted: true,
+          success: false,
+          state: 'verify_error',
+          reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_error',
+          found: false,
+          responseId: traceResponseId,
+          eventId: responseEventId,
+          requiredFields: [],
+          missingFields: [],
+          mismatchFields: [],
+          checkedAt: Date.now()
+        }));
         console.log('[copy-flow] [dispatch:ok]', {
           trace: copyTrace,
           intakeUrl: url,
           status: response.status,
           requestId,
+          dbVerification: dbVerification
+            ? {
+              success: dbVerification.success === true,
+              state: dbVerification.state || '',
+              eventId: dbVerification.eventId ?? responseEventId,
+              responseId: dbVerification.responseId || traceResponseId || ''
+            }
+            : null,
           responseBody: responseJson && typeof responseJson === 'object'
             ? {
               status: responseJson.status || '',
@@ -12773,7 +13933,9 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           maxAttempts,
           status: response.status,
           requestId,
-          eventId: responseJson?.event_id || null
+          eventId: responseJson?.event_id || null,
+          dbVerifyState: dbVerification?.state || '',
+          dbVerifySuccess: dbVerification?.success === true
         });
         appendWatchlistDispatchHistory({
           ts: Date.now(),
@@ -12788,16 +13950,21 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           trace: traceForHistory,
           runId: traceRunId,
           responseId: traceResponseId,
-          eventId: typeof responseJson?.event_id === 'string' ? responseJson.event_id : '',
+          eventId: responseEventId !== null
+            ? responseEventId
+            : (typeof responseJson?.event_id === 'string' ? responseJson.event_id : ''),
           requestId,
           intakeUrl: url,
           status: response.status
         }).catch(() => {});
         await updateProcessDispatchAfterSendSuccess(traceRunId, traceResponseId, {
           status: response.status,
-          eventId: typeof responseJson?.event_id === 'string' ? responseJson.event_id : '',
+          eventId: responseEventId !== null
+            ? responseEventId
+            : (typeof responseJson?.event_id === 'string' ? responseJson.event_id : ''),
           requestId,
-          intakeUrl: url
+          intakeUrl: url,
+          dbVerification
         }).catch((error) => {
           console.warn('[copy-flow] [dispatch:process-update-failed]', {
             runId: traceRunId,
@@ -12812,6 +13979,7 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           requestId,
           intakeUrl: url,
           stage: 'send_http',
+          dbVerification,
           conversationLogCount,
           hasConversationUrl,
           conversationSnapshotRefreshed,
@@ -13079,7 +14247,8 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         conversationLogCount: null,
         hasConversationUrl: false,
         conversationSnapshotRefreshed: false,
-        conversationSnapshotSource: ''
+        conversationSnapshotSource: '',
+        itemResults: {}
       };
     }
 
@@ -13108,6 +14277,36 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     const sendTimeoutMs = Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
     let scannedInThisRun = 0;
     let attemptedInThisRun = 0;
+    const itemResults = {};
+    const recordItemResult = (queuePayload, patch = {}) => {
+      const responseId = typeof queuePayload?.responseId === 'string' && queuePayload.responseId.trim()
+        ? queuePayload.responseId.trim()
+        : '';
+      if (!responseId) return;
+      const previous = itemResults[responseId] && typeof itemResults[responseId] === 'object'
+        ? itemResults[responseId]
+        : {};
+      const next = {
+        responseId,
+        runId: typeof queuePayload?.runId === 'string' ? queuePayload.runId.trim() : '',
+        success: false,
+        pending: false,
+        state: '',
+        reason: '',
+        error: '',
+        status: null,
+        requestId: '',
+        intakeUrl: '',
+        ...previous,
+        ...patch
+      };
+      if (patch?.dbVerification) {
+        next.dbVerification = normalizeWatchlistDbVerification(patch.dbVerification);
+      } else if (previous?.dbVerification) {
+        next.dbVerification = previous.dbVerification;
+      }
+      itemResults[responseId] = next;
+    };
 
     for (let index = 0; index < queued.length; index += 1) {
       const item = queued[index];
@@ -13121,11 +14320,21 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
           const queuedItemNextAttemptAt = Number.isInteger(queuedItem?.nextAttemptAt) ? queuedItem.nextAttemptAt : 0;
           return queuedItemNextAttemptAt <= Date.now();
         });
-        remaining.push(...unprocessed);
-        deferred += unprocessed.length;
         budgetStopReason = limitByItemsReached
           ? `limit_items_${flushMaxItemsPerRun}`
           : `limit_runtime_${flushMaxRuntimeMs}ms`;
+        unprocessed.forEach((queuedItem) => {
+          if (!queuedItem?.payload || typeof queuedItem.payload !== 'object') return;
+          recordItemResult(queuedItem.payload, {
+            success: false,
+            pending: true,
+            state: 'pending_budget',
+            reason: budgetStopReason || 'budget_limit',
+            error: ''
+          });
+        });
+        remaining.push(...unprocessed);
+        deferred += unprocessed.length;
         if (hasReadyUnprocessed) {
           watchlistDispatchFlushPending = true;
           if (!watchlistDispatchFlushPendingReason) {
@@ -13171,6 +14380,13 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
           trace,
           waitMs
         });
+        recordItemResult(item.payload, {
+          success: false,
+          pending: true,
+          state: 'pending_retry_window',
+          reason: 'pending_retry_window',
+          error: ''
+        });
         remaining.push(item);
         continue;
       }
@@ -13197,6 +14413,20 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       }
       if (dispatchResult.success) {
         sent += 1;
+        recordItemResult(payload, {
+          success: true,
+          pending: false,
+          state: isWatchlistDbVerificationSuccessful(dispatchResult?.dbVerification)
+            ? 'dispatch_verified'
+            : 'dispatch_accepted_unverified',
+          reason: '',
+          error: '',
+          status: Number.isInteger(dispatchResult?.status) ? dispatchResult.status : null,
+          requestId: typeof dispatchResult?.requestId === 'string' ? dispatchResult.requestId.trim() : '',
+          intakeUrl: typeof dispatchResult?.intakeUrl === 'string' ? dispatchResult.intakeUrl.trim() : '',
+          eventId: Number.isInteger(dispatchResult?.eventId) ? dispatchResult.eventId : null,
+          dbVerification: dispatchResult?.dbVerification || null
+        });
         continue;
       }
 
@@ -13247,6 +14477,16 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         attemptCount,
         retryDelayMs,
         error: truncateDispatchLogText(dispatchError, 400)
+      });
+      recordItemResult(payload, {
+        success: false,
+        pending: true,
+        state: 'retry_scheduled',
+        reason: dispatchError,
+        error: dispatchErrorMessage || dispatchError,
+        status: dispatchStatus,
+        requestId: dispatchRequestId,
+        intakeUrl: dispatchIntakeUrl
       });
       remaining.push({
         ...item,
@@ -13339,7 +14579,8 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       conversationLogCount,
       hasConversationUrl,
       conversationSnapshotRefreshed,
-      conversationSnapshotSource: conversationSnapshotSource || ''
+      conversationSnapshotSource: conversationSnapshotSource || '',
+      itemResults
     };
   } catch (error) {
     emitWatchlistDispatchProcessLog('error', 'flush_exception', 'Flush crashed with unexpected error', {
@@ -13949,8 +15190,7 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
   { pattern: "https://*.barrons.com/*", name: "Barron's" },
   { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
-  { pattern: "https://open.spotify.com/*", name: "Spotify" },
-  { pattern: "https://mail.google.com/*", name: "Gmail" }
+  { pattern: "https://open.spotify.com/*", name: "Spotify" }
 ];
 
 // Funkcja zwracająca tablicę URLi do query
@@ -14289,10 +15529,16 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       hasConversationUrl: conversationAnalysis.hasConversationUrl,
       conversationSnapshotRefreshed: conversationAnalysis.snapshotRefreshedBeforeSend,
       conversationSnapshotSource: conversationAnalysis.snapshotSource,
+      responseId: normalizedResponseId,
+      currentResponseState: '',
+      currentResponsePending: false,
+      currentResponseEventId: null,
+      dbVerification: null,
       state: '',
       processLog: []
     };
     const dispatchProcessLog = [];
+    let currentResponseDispatchResult = null;
     const appendDispatchProcessLog = (stage, status, details = '') => {
       const normalizedStage = typeof stage === 'string' ? stage.trim() : '';
       const normalizedStatus = typeof status === 'string' ? status.trim() : '';
@@ -14346,6 +15592,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
           dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
           dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
+          const flushItemResults = flushResult?.itemResults && typeof flushResult.itemResults === 'object'
+            ? flushResult.itemResults
+            : {};
+          currentResponseDispatchResult = flushItemResults[normalizedResponseId] && typeof flushItemResults[normalizedResponseId] === 'object'
+            ? flushItemResults[normalizedResponseId]
+            : null;
           dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
           dispatchOutcome.failureStage = typeof flushResult?.firstFailureStage === 'string'
             ? flushResult.firstFailureStage.trim()
@@ -14378,11 +15630,32 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.hasConversationUrl = conversationAnalysis.hasConversationUrl;
           dispatchOutcome.conversationSnapshotRefreshed = conversationAnalysis.snapshotRefreshedBeforeSend;
           dispatchOutcome.conversationSnapshotSource = conversationAnalysis.snapshotSource;
+          dispatchOutcome.currentResponseState = typeof currentResponseDispatchResult?.state === 'string'
+            ? currentResponseDispatchResult.state.trim()
+            : '';
+          dispatchOutcome.currentResponsePending = currentResponseDispatchResult?.pending === true;
+          dispatchOutcome.currentResponseEventId = Number.isInteger(currentResponseDispatchResult?.eventId)
+            ? currentResponseDispatchResult.eventId
+            : null;
+          dispatchOutcome.dbVerification = normalizeWatchlistDbVerification(currentResponseDispatchResult?.dbVerification);
           appendDispatchProcessLog(
             'flush_result',
             dispatchOutcome.failed > 0 ? 'partial' : 'ok',
             `sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
           );
+          if (dispatchOutcome.dbVerification) {
+            appendDispatchProcessLog(
+              'db_verify',
+              dispatchOutcome.dbVerification.success ? 'ok' : 'warn',
+              `state=${dispatchOutcome.dbVerification.state || 'n/a'}, missing=${dispatchOutcome.dbVerification.missingFields.join('+') || 'none'}, mismatch=${dispatchOutcome.dbVerification.mismatchFields.join('+') || 'none'}`
+            );
+          } else if (currentResponseDispatchResult) {
+            appendDispatchProcessLog(
+              'current_response',
+              currentResponseDispatchResult.success ? 'accepted' : (currentResponseDispatchResult.pending ? 'pending' : 'warn'),
+              `state=${dispatchOutcome.currentResponseState || 'n/a'}, responseId=${normalizedResponseId}`
+            );
+          }
           appendDispatchProcessLog(
             'conversation_analysis',
             'used_for_report',
@@ -14421,8 +15694,13 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
 
     const pipelineDispatchState = (() => {
       if (dispatchOutcome.queueSkipped) return 'dispatch_skipped';
+      if (currentResponseDispatchResult?.success === true && isWatchlistDbVerificationSuccessful(dispatchOutcome.dbVerification)) {
+        return 'dispatch_confirmed';
+      }
+      if (currentResponseDispatchResult?.success === true) return 'dispatch_accepted_unverified';
+      if (currentResponseDispatchResult?.pending === true) return 'dispatch_pending';
       if (dispatchOutcome.failed > 0) return 'dispatch_failed';
-      if (dispatchOutcome.sent > 0 && dispatchOutcome.failed === 0) return 'dispatch_confirmed';
+      if (dispatchOutcome.sent > 0 && dispatchOutcome.failed === 0) return 'dispatch_pending';
       if (dispatchOutcome.flushSkipped || dispatchOutcome.deferred > 0 || dispatchOutcome.remaining > 0) {
         return 'dispatch_pending';
       }
@@ -14466,7 +15744,11 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
         failureReason: dispatchOutcome.failureReason || '',
         failureStatus: Number.isInteger(dispatchOutcome.failureStatus) ? dispatchOutcome.failureStatus : null,
         failureRequestId: dispatchOutcome.failureRequestId || '',
-        failureIntakeUrl: dispatchOutcome.failureIntakeUrl || ''
+        failureIntakeUrl: dispatchOutcome.failureIntakeUrl || '',
+        dbVerifyState: dispatchOutcome.dbVerification?.state || '',
+        dbVerifySuccess: dispatchOutcome.dbVerification?.success === true,
+        currentResponseState: dispatchOutcome.currentResponseState || '',
+        currentResponsePending: dispatchOutcome.currentResponsePending === true
       }
     );
     appendWatchlistDispatchHistory({
@@ -14877,7 +16159,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'GET_UNFINISHED_PROCESSES') {
     (async () => {
       const includeNonCompleted = message?.includeNonCompleted !== false;
-      const result = await listUnfinishedProcessesForResume({ includeNonCompleted });
+      const recoverOnly = message?.recoverOnly !== false;
+      const sourceFilter = typeof message?.sourceFilter === 'string' ? message.sourceFilter : '';
+      const result = await listUnfinishedProcessesForResume({
+        includeNonCompleted,
+        recoverOnly,
+        sourceFilter
+      });
       sendResponse(result);
     })().catch((error) => {
       console.warn('[unfinished-resume] GET_UNFINISHED_PROCESSES failed:', error);
@@ -14887,6 +16175,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         total: 0,
         runnable: 0,
         skippedMissingUrl: 0,
+        sourceFilter: 'all',
+        sourceFilterApplied: false,
+        sourceFilterMatched: true,
+        recoverOnly: true,
+        availableSources: [],
         items: [],
         error: error?.message || String(error)
       });
@@ -14896,7 +16189,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const result = await startResumeUnfinishedProcessesBatch({
         origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
-        forceRestartIfRunning: message?.forceRestartIfRunning === true
+        forceRestartIfRunning: message?.forceRestartIfRunning === true,
+        sourceFilter: typeof message?.sourceFilter === 'string' ? message.sourceFilter : '',
+        limit: message?.limit
       });
       sendResponse(result);
     })().catch((error) => {
@@ -16318,6 +17613,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       ytTranscriptInFlightRequests.delete(cacheKey);
     }
   }
+  void markInterruptedProcessesForClosedTab(tabId).catch((error) => {
+    console.warn('[monitor] Failed to mark interrupted process after tab close:', error?.message || String(error));
+  });
 });
 
 function clampWindowMetric(value, minValue, maxValue) {
@@ -17096,6 +18394,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
+      await maybeAutoCloseProcessAfterDbVerify(processId, {
+        tabId: chatTabId,
+        origin: 'process_completed'
+      }).catch(() => {});
 
       const processSuccess = finalStatus === 'completed';
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
@@ -17806,114 +19108,12 @@ async function extractText() {
     }
   }
 
-  async function extractGmailOpenEmail() {
-    try {
-      const url = new URL(window.location.href);
-
-      // Gmail renders message panels lazily after navigation.
-      await sleep(500);
-
-      const firstText = (selectors, minLength = 1) => {
-        for (const selector of selectors) {
-          let elements = [];
-          try {
-            elements = Array.from(document.querySelectorAll(selector));
-          } catch (_) {
-            continue;
-          }
-          for (const element of elements) {
-            const text = elementText(element);
-            if (text.length >= minLength) {
-              return text;
-            }
-          }
-        }
-        return '';
-      };
-
-      const longestText = (selectors, minLength = 1) => {
-        let best = '';
-        for (const selector of selectors) {
-          let elements = [];
-          try {
-            elements = Array.from(document.querySelectorAll(selector));
-          } catch (_) {
-            continue;
-          }
-          for (const element of elements) {
-            const text = elementText(element);
-            if (text.length >= minLength && text.length > best.length) {
-              best = text;
-            }
-          }
-        }
-        return best;
-      };
-
-      const subject = firstText([
-        'h2.hP',
-        'h2[data-thread-perm-id]',
-        'div[role="main"] h2[tabindex="-1"]',
-        'div[role="main"] h2'
-      ], 2);
-
-      const sender = firstText([
-        'div.adn.ads span.gD',
-        'div[role="listitem"] span.gD',
-        'span.gD[email]',
-        'span[email][name]',
-        'span[email]'
-      ], 2);
-
-      const sentAtNode = document.querySelector('div.adn.ads span.g3[title], div[role="listitem"] span.g3[title], span.g3[title]');
-      const sentAt = normalizeText(
-        (sentAtNode && (sentAtNode.getAttribute('title') || sentAtNode.innerText || sentAtNode.textContent)) || ''
-      );
-
-      const bodyText = longestText([
-        'div.adn.ads div.a3s.aiL',
-        'div.adn.ads div.a3s',
-        'div[role="listitem"] div.a3s.aiL',
-        'div[role="listitem"] div.a3s',
-        'div[role="main"] div.a3s.aiL',
-        'div[role="main"] div.a3s'
-      ], 20);
-
-      if (!subject && !bodyText) {
-        return '';
-      }
-
-      const headerParts = [
-        '[Gmail]',
-        subject ? `Subject: ${subject}` : null,
-        sender ? `From: ${sender}` : null,
-        sentAt ? `Date: ${sentAt}` : null,
-        `URL: ${url.href}`
-      ].filter(Boolean);
-
-      return `${headerParts.join(' | ')}\n\n${bodyText}`;
-    } catch (error) {
-      console.error('Gmail extraction failed:', error);
-      return '';
-    }
-  }
-
   if (hostname.includes('open.spotify.com')) {
     const spotifyTranscript = await extractSpotifyTranscript();
     if (spotifyTranscript && spotifyTranscript.length > 50) {
       console.log(`Spotify: extracted transcript text, length=${spotifyTranscript.length}`);
       return spotifyTranscript;
     }
-  }
-
-  if (hostname.includes('mail.google.com')) {
-    const gmailEmail = await extractGmailOpenEmail();
-    if (gmailEmail && gmailEmail.length > 20) {
-      console.log(`Gmail: extracted open email, length=${gmailEmail.length}`);
-      return gmailEmail;
-    }
-    console.log('Gmail: open email not detected, skipping tab');
-    return '';
   }
   console.log(`Próbuję wyekstrahować tekst z: ${hostname}`);
   

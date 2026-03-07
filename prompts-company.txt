@@ -10,6 +10,8 @@ Here is the article content you will analyze:
 
 You will work through a strict sequence to maintain auditability and avoid narrative drift:
 
+Throughout this pipeline you must maintain a clear distinction between two fundamentally different types of risk. Thesis risk is the possibility that the structural change you are analyzing does not occur or occurs differently than described — within this pipeline, thesis risk is set aside because the thesis is treated as an axiom. Model risk is the possibility that your analytical instruments — your exposure calculations, timing estimates, margin assumptions, scoring rubrics, and valuation mechanics — produce systematically wrong outputs even when the thesis is perfectly correct. Most investment losses in thesis-driven analysis do not come from identifying the wrong trend. They come from correctly identifying a trend but then misattributing which company captures value, overestimating the speed of capital flow conversion, confusing a large spending pool with a large profit pool, or misjudging the durability of a gating constraint. At every stage, ask yourself two questions: does the evidence support my conclusion, and is my method of measurement appropriate for what I am measuring? A company might score highly on every rubric and still be a poor investment if the rubrics themselves are measuring the wrong thing for that particular business model, contract structure, or competitive dynamic. When you notice that your scoring feels mechanical — you are going through motions rather than reasoning about mechanisms — pause and ask whether the framework is illuminating the situation or obscuring it.
+
 1. **Extract evidence** › Build ledger of atomic claims with quotes and evidence grades
 2. **Reconstruct worldview** › Map the author's success/failure logic, constraints, and agency
 3. **Generate thesis candidates** › Produce 3 conditional statements from the worldview
@@ -22,27 +24,29 @@ You will work through a strict sequence to maintain auditability and avoid narra
 
 **Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
-# DATA_GAP PROTOCOL — Global Rule (applies to every stage in this conversation)
+# DATA_GAP PROTOCOL — Global Rule
 
-DATA = anything found in the full conversation:
-  [1] Named fields in the current message
-  [2] Any prior stage output (prose, table, bullets, anchor block)
-  [3] Article content or quotes
-  [4] Prior assumptions or disconfirmers
-  [5] [RECONSTRUCTED] — derived from [1-4]
-  [6] [ASSUMPTION] — stated guess, confidence H/M/L
+DATA = everything in the full conversation: prior stage outputs (prose,
+tables, bullets, structured text), article content, quotes, assumptions,
+and any reconstructions or inferences you made.
 
-Before executing any stage: scan sources [1-6] for all required inputs.
-If input is missing from [1-4]: derive it as [5] or assume as [6].
+EXECUTION IS THE DEFAULT. Always attempt to complete the stage using
+whatever data exists in the conversation. Reconstruct missing inputs
+from context. Use conservative assumptions when needed (label them
+ASSUMPTION).
 
-OUTPUT DATA_GAP_STAGE=<X> IF:
-  - Stage X produced zero output OR produced output missing a REQUIRED
-    artifact/handoff block (check against that stage's "Required Output" list)
-  - AND you cannot reconstruct the missing artifact's essential fields from [1-4]
+DATA_GAP_STAGE=<X> is an EMERGENCY STOP used ONLY when:
+  - A prior stage produced ZERO usable output (not "imperfect" - literally nothing), AND
+  - You cannot reconstruct the essential inputs from ANY source in the conversation, AND
+  - Without those inputs the stage's calculations are mathematically impossible (not just uncertain).
 
-Then STOP.
+If you CAN proceed with assumptions or proxies: PROCEED. Do not stop.
+If data exists in any format anywhere in the conversation: USE IT. Do not stop.
+DATA_GAP is a circuit breaker, not a quality gate.
 
-DATA_GAP is the exception. Execution is the default.
+HANDOFF FORMAT RULE: Handoff blocks are preferred but not mandatory.
+If a prior stage produced output in prose, tables, or any other format,
+that output IS the handoff. Do not require exact block formatting to proceed.
 
 # Key Definitions
 
@@ -77,6 +81,8 @@ Use this ladder for all claims:
 - **E3** = Strongly implied by context (ordering, repetition, examples, contrast)
 - **E4** = External inference (your own knowledge; not stated or implied in the article)
 
+The distinction between E2 and E3 requires genuine judgment, not pattern matching. E2 means the author states something in words different from a direct quote, but the meaning is unambiguous — any competent reader would arrive at the same paraphrase without needing additional context or interpretation. E3 means you are reconstructing the author's likely belief from indirect signals: the order in which arguments appear, what the author conspicuously omits, contrasts drawn between alternatives, or the emotional weight given to certain examples. The critical test is substitutability: could another analyst, reading the same passage with no prior knowledge of your thesis, independently arrive at the same claim? If yes, you have E2. If they would need your reasoning chain to see it, you have E3. Be especially vigilant about a common failure mode: when you already have a thesis forming in your mind, you will unconsciously read E3-level implications as if they were E2-level statements, because the interpretation feels obvious to you. It is obvious because you have already decided what it means, not because the text compels that reading. When in doubt, grade conservatively as E3 and note what interpretive step you took.
+
 ## Evidence Rules
 
 1. Step 0 (worldview reconstruction) uses ONLY E1-E3 evidence (no E4)
@@ -106,6 +112,8 @@ Otherwise, treat compliance as timing/catalyst, not value capture.
 # Contract-Form Test (Mandatory Gate)
 
 Every thesis candidate must pass this test before proceeding to capital flow mapping:
+
+The contract-form test exists to enforce a fundamental discipline: an investment thesis must have a monetary transmission mechanism, not just a causal story. Many structural changes are real but not investable because the path from "this is happening" to "this company receives a check" is broken, diffuse, or already priced. The test asks you to walk the entire path: who authorizes spending, through what budget or contract mechanism, for what specific purchasable items, what prevents the purchase from happening today, and when the money actually moves. If you cannot complete this chain with primarily E1/E2 evidence, your thesis is an observation about the world, not a hypothesis about capital flows. That does not mean the observation is wrong — it means you have not yet found the investable expression of it. The most common failure mode is successfully naming a payer and a general spending category but being unable to specify invoice-level items — the concrete things that appear on a purchase order. "Utilities will spend on grid modernization" is a narrative. "Utility X issues an EPC contract for 115kV autotransformers with 24-month lead times from qualified vendors on an approved supplier list" is a capital flow you can analyze. If you find yourself writing vague invoice items, the thesis needs more specificity before it can generate useful company selection downstream.
 
 Can you trace a complete chain?
 **Payer › Contract Vehicle › Invoice Line Items › Bottlenecks/Gates › Timing**
@@ -171,6 +179,8 @@ Extract 12-20 of the most concrete ideas/facts/events the author uses. These tok
 ### Step 0.5 — Worldview Reconstruction
 
 Based on the Evidence Ledger (cite anchor IDs throughout):
+
+Worldview reconstruction is not summarization in a different format. Your goal is to rebuild the author's internal causal model — the logic engine that connects their observations to their conclusions. A successful reconstruction lets you answer the question: what would this author predict about a related situation they did not discuss? If you can only repeat what they said but cannot extend their logic to adjacent problems, you have summarized, not reconstructed. When writing success drivers, do not list factors the author mentions as positive. Instead, articulate the mechanism the author believes connects those factors to outcomes — the "because" chain. When writing failure modes, do not list risks the author flags. Instead, identify what the author treats as fragile or reversible in their model, and why fragility there specifically would cascade. When mapping agency, do not catalog actors. Instead, describe whose decisions the author treats as consequential versus decorative — many actors are mentioned but only some have genuine causal power in the author's mental model. Test your reconstruction by asking: could I write a paragraph the author would endorse about a topic they did not cover? If not, your reconstruction is too thin.
 
 **Success drivers**: 3-6 bullets explaining what makes outcomes succeed (cite A#)
 
@@ -671,6 +681,8 @@ A sub-segment must be separated into its own distinct segment if ANY of the foll
 - **Critical gate** (e.g., regulatory qualification vs throughput/capacity vs system integration vs testing/QA vs working capital availability)
 - **Funnel timing** (e.g., different phases in policy›award›backlog›delivery progression)
 
+The decision to split or merge sub-segments is an economic judgment, not a taxonomic exercise. The question is never "is the payer formally different" but "does a difference in payer, contract form, or gate mean that money flows through a fundamentally different channel with different timing, different margins, and different bottlenecks?" Two segments with the same nominal payer — say, a federal agency — may require splitting if one channel is CAPEX procurement with 18-month qualification cycles and the other is OPEX services under existing framework agreements with 90-day task orders. The money comes from the same institution but travels through entirely different pipes at different speeds with different gatekeepers. Conversely, two nominally different payers may be economically equivalent if they both face the same regulatory gate, use the same contract vehicle, and purchase from the same constrained supplier base — splitting them would create artificial complexity without analytical value. When deciding whether to split, ask: would an investor make a different company selection decision based on this split? Would the timing funnel, margin profile, or gating constraints change materially? If not, merge. If yes, split. The goal is 5-8 segments that each represent a genuinely distinct channel through which thesis capital flows, not a comprehensive taxonomy of every possible buyer-seller relationship.
+
 **Why this matters**: These splits ensure that sub-segments are economically distinct—different in how money flows, who controls it, and what risks block it—not just cosmetically different labels.
 
 ### MECHANIC 2: Invoice-First Definition
@@ -712,6 +724,8 @@ Connect S-curve timing to contract timing: if a segment has only intent signals 
 For each sub-segment, provide Low/Base/High "Invoice Pool" ranges calculated using BOTH of these methods:
 - **Method 1**: Plan/budget › market share allocation
 - **Method 2**: Unit-based bottom-up calculation
+
+When your two sizing methods produce different numbers, the gap between them is itself a valuable analytical signal — do not simply average or ignore it. If Method 1 (top-down from budgets and plans) produces a materially larger pool than Method 2 (bottom-up from units and per-unit spending), this typically means that stated budgets contain aspirational elements that will not convert to real orders within the modeled timeframe, or that the budget horizon and your delivery horizon do not match, or that market absorption capacity is smaller than institutional ambitions. In this case, use Method 2 as your Base and treat Method 1 as an upper bound for Bull scenarios only. If Method 2 produces larger numbers than Method 1, it typically signals that budgets have not yet caught up to real demand — spending authority is lagging actual need, and budgets are likely to be revised upward. This is a positive timing signal for the thesis, but your near-term Base should still be constrained by currently authorized budgets, because money cannot flow until budgets are approved regardless of how strong bottom-up demand appears. In both cases, record the divergence explicitly and state your interpretation, because the next analyst who inherits your work needs to understand not just your Base number but the structural reason for uncertainty around it.
 
 Apply strict labeling discipline:
 - **SOURCE**: Information directly from plans, budgets, public filings, or regulatory documents
@@ -947,14 +961,22 @@ Your current task is to translate this thesis and sub-segment analysis into a co
 
 You will need to gather data to validate company exposure, financials, and market positioning. Follow these requirements:
 
+Effective company research requires a structured search methodology, not just a source hierarchy. Start with the most specific query possible: company name plus the exact financial term you need — for example, "Curtiss-Wright 2024 10-K segment revenue defense" rather than "Curtiss-Wright financials." Specific queries find specific answers; broad queries find press releases and aggregator pages that may contain outdated or imprecise numbers. When searching for thesis-relevant exposure, use invoice-item vocabulary from your sub-segment definitions — if your thesis identifies "power conversion modules" as a key invoice item, search for that term in combination with the company name and "revenue" or "backlog" or "contract." If the first search does not return filings or IR materials, navigate directly to the company's investor relations page and search within their document library. Annual reports, investor presentations, and earnings transcripts are almost always more informative than third-party summaries. When you find a number, verify it by checking whether it appears in a formal filing versus a press release versus an aggregator estimate — these are different levels of reliability. If two sources give different numbers, prefer the one from a formal regulatory filing (10-K, 20-F, annual report) because these carry legal liability for accuracy. When you cannot find a specific number after two targeted searches, do not continue searching indefinitely — switch to the Proxy Ladder and document your proxy logic. Three unproductive searches signal that the information is either not publicly disclosed or requires a different search approach, and further searching has diminishing returns. When using aggregator data as fallback, always use at least two independent aggregators and note any discrepancy, because aggregators frequently disagree on segment definitions, currency treatment, and fiscal year alignment.
+
 **Search Requirements:**
-- Use web search to validate: tickers, listings, currency, market caps, current prices, shares outstanding, net debt/cash positions, and segment information
+- Use web search to FETCH (not derive): tickers, listings, currency, market caps, current prices, shares outstanding, net debt/cash positions, segment information, TOTAL REVENUE (TTM or latest FY), and FREE CASH FLOW or OPERATING CASH FLOW (same period)
+- Revenue and FCF are publicly available for all listed companies. Do NOT derive revenue from P/E × EPS ÷ assumed margin. Do NOT derive FCF from revenue × assumed margin. Fetch them directly from filings or aggregators.
 - Prefer this source hierarchy: company filings/investor relations › official exchange data › reputable aggregators
 - Document EVERY search query you use (not just in Phase 6)
 - Search queries and results should be recorded in your systematic analysis working space
 
 **Handling Missing Data:**
 When you cannot find a critical number, do NOT stop your analysis. Instead:
+
+**CRITICAL: The Proxy Ladder is for genuinely unavailable data only.**
+Revenue, FCF, net debt, and diluted shares are available for virtually all public companies.
+You must attempt at least 2 different search queries targeting filings/IR before concluding data is "missing."
+If you use Proxy Ladder level D or E for Revenue₀ or FCF₀, flag DATA_QUALITY = LOW for that company.
 
 1. Use the Proxy Ladder (in this priority order):
    - **A) Company filings/IR**: Look for segment revenue, backlog, customer mix, recurring revenue mix
@@ -964,9 +986,10 @@ When you cannot find a critical number, do NOT stop your analysis. Instead:
    - **E) Conservative priors**: Create wide ranges using industry norms, then shrink the Base case toward the conservative end
 
 2. Clearly label what you're doing:
-   - Mark as **SOURCE** when you have direct evidence
-   - Mark as **ASSUMPTION** when using proxies or priors
-   - Mark as **INFERENCE** when deriving from other known facts
+   - Mark as **SOURCE** when the number comes directly from a cited filing, IR page, or official data source
+   - Mark as **INFERENCE** when derived arithmetically from 2+ SOURCE numbers (e.g., FCF margin = FCF_SOURCE / Revenue_SOURCE). ALL inputs to the calculation must be SOURCE.
+   - Mark as **ASSUMPTION** when ANY input to the calculation is not SOURCE
+   - **CRITICAL**: If you label a load-bearing input (Revenue, FCF, net debt, shares) as ASSUMPTION, ask: "Could I fetch this instead?" If yes, fetch it. ASSUMPTION is for genuinely unavailable data, not computational convenience.
    - Always note your confidence level (HIGH/MEDIUM/LOW)
 
 3. For peer-implied proxies (Method D):
@@ -1075,6 +1098,17 @@ Work through these seven phases systematically. Conduct all reasoning, research 
    - Focus on value chain positions identified in Phase 1
    - Prioritize companies at the points where invoices are generated (or bottlenecks that gate those invoices)
 
+**MANDATORY FETCH GATE (before ANY exposure calculation):**
+For each company, you must have fetched and recorded as SOURCE:
+1. Total revenue (TTM or latest FY)
+2. FCF or operating cash flow (same period)
+3. Net debt or net cash (latest balance sheet)
+4. Diluted shares outstanding
+5. Segment revenue breakdown (at least top-level)
+
+If after 2 search attempts any of items 1-4 is not found, use Proxy Ladder D/E but flag the company as DATA_QUALITY = LOW.
+Do NOT proceed to exposure calculation without items 1-4.
+
 2. **Calculate Thesis Exposure Using Evidence-Based Methods:**
 
    For EACH candidate company, you MUST:
@@ -1114,6 +1148,8 @@ Work through these seven phases systematically. Conduct all reasoning, research 
    - Set exposure range = 0%-20% (conservative)
    - Label confidence as LOW
    - Classify at most as Catalytic (never Core)
+
+The single most common error in thesis-driven stock selection is confusing industry membership with thesis exposure. A company can operate in the same sector as your thesis and derive zero revenue from the specific invoice items your sub-segments identify. Exposure is real only when you can connect a specific line in the company's revenue breakdown to a specific invoice item in your sub-segment catalog. "Company manufactures power transformers" is not exposure — you need to know whether they manufacture the specific voltage class, for the specific buyer type, under the specific contract mechanism that your thesis identifies as the capital flow channel. A company making distribution transformers for residential construction has zero exposure to a thesis about high-voltage transmission buildout, even though both involve transformers. When you catch yourself writing an exposure justification that uses broad category language — "participates in the AI infrastructure supply chain," "provides components for renewable energy," "serves defense customers" — stop and ask: which specific invoice item from my Stage 1 catalog does this company's disclosed segment revenue map to? If you cannot make that connection at the invoice level with evidence from filings, you have a thematic association, not an exposure calculation. Thematic associations should be classified as Catalytic at best, and are often below threshold entirely.
 
 3. **Critical Audit to Prevent "Guessed Exposure":**
    
@@ -1166,6 +1202,8 @@ Score each moat source (0 = absent, 1 = developing, 2 = strong):
 4. **Proprietary assets**: Data/technology/IP that competitors cannot replicate
 5. **Brand/trust**: Ability to charge >20% premium without losing market share
 6. **Scale economies**: Long-run marginal cost declining with volume
+
+After computing the additive score, perform a second-order assessment that the raw number cannot capture: do the moats reinforce each other as a system, or do they exist in isolation? This matters because moats that interact multiplicatively create defenses that are much harder to attack than the sum of their parts, while isolated moats can be neutralized one by one. Network effects combined with switching costs create a powerful system: users cannot leave because migration is costly, and they do not want to leave because the network keeps improving. Either moat alone is attackable — a new network can overcome switching costs with sufficient subsidy, and a better product can overcome network effects if switching is easy. Together, they are nearly impregnable. Regulatory barriers combined with scale economies create another powerful system: new entrants face both a qualification wall and a cost disadvantage, and the scale economies fund the compliance infrastructure that maintains regulatory standing. But regulatory barriers without scale economies are political rents — they protect today but can be legislated away, and they provide no cost advantage if competitors eventually qualify. Switching costs without proprietary technology are time-limited moats: the competitor replicates your product and offers migration assistance, and the switching cost eventually becomes the only barrier. When you see a high additive score, ask whether the moats form a reinforcing system or merely coexist. A score of 4 from two deeply interlinked moats often predicts better long-term defensibility than a score of 8 from four independent ones, because the 4-point system requires an attacker to solve multiple problems simultaneously while the 8-point collection allows sequential neutralization.
 
 Calculate total moat score (0-12 points):
 
@@ -1414,6 +1452,11 @@ After completing your systematic analysis, present your final 15 stock recommend
 
 ---
 
+**ASSUMPTION AUDIT (mandatory before final output):**
+- Count companies where Revenue₀ is labeled ASSUMPTION (not SOURCE). If >3 out of 15: go back and fetch.
+- Count companies where thesis exposure % is ASSUMPTION without segment-level filing evidence. If >10: flag EXPOSURE_QUALITY = LOW in your output header.
+- Any company where BOTH Revenue₀ AND exposure % are ASSUMPTION cannot be classified as Core Play.
+
 Your final output should consist only of the 15 stock recommendations in the format specified above, without duplicating or rehashing any intermediate analysis work.
 ◄PROMPT_SEPARATOR►
 
@@ -1461,6 +1504,7 @@ Do not score the company’s overall business traction unless you explicitly exp
 WEB RESEARCH POLICY (mandatory; audit trail required)
 For each company:
 - You MUST use web research.
+- Before scoring, verify that Revenue₀ inherited from Stage 2 is labeled SOURCE (not ASSUMPTION). If it is ASSUMPTION, fetch revenue now and correct it. Do not score traction on fabricated baselines.
 - Preferred source hierarchy:
   1) Company filings / IR: annual report (10-K/20-F), 10-Q/interim, earnings deck, transcript.
   2) Official contract/award/procurement sources when relevant (country/sector appropriate).
@@ -1508,6 +1552,8 @@ Record:
 - Whether KPI is thesis-stream specific or company-wide (if company-wide: flag “dilution risk”).
 
 Step 4 — Contract Semantics Audit (mandatory; write a verdict)
+Contract semantics is not a compliance exercise — it is the foundation upon which every downstream valuation rests. If you misclassify a ceiling as an obligation, or an unfunded option as committed backlog, the error propagates through every subsequent stage: Stage 4 will build scenarios on revenue that does not exist, Stage 8 will compute wedge NPV from phantom cash flows, and Stage 9 will diagnose market mispricing that is actually your modeling error. Markets systematically confuse these categories because companies have strong incentives to present the largest possible headline numbers in press releases, and analysts have strong incentives to put those numbers into models because it reduces the appearance of uncertainty. Your job is to cut through this by asking: how much money has the customer actually committed to spend, under what conditions can they walk away, and what is the realistic conversion path from commitment to cash in the company's bank account? A 500 million dollar framework agreement with zero minimum commitment is worth exactly zero in your Base scenario. It belongs in Bull only if you can cite evidence that the customer has historically utilized a measurable percentage of similar frameworks, and even then you apply the historical utilization rate, not the headline value.
+
 For the thesis stream, answer explicitly:
 - Are the headline contract numbers ceilings (“up to”) or obligated/funded amounts?
 - If backlog exists: is it funded or inflated by options/unfunded elements?
@@ -1526,7 +1572,9 @@ TS3: Binding award exists with obligated/funded amount (or equivalent committed 
 TS4: Funded backlog + delivery schedule implies revenue recognition within modeled horizon; backlog conversion is visible.
 TS5: Delivered + cash conversion and/or renewals/option exercises prove repeatability.
 
-Rule: score conservatively when evidence is ambiguous. If uncertain between two levels, take the lower, flag DATA_GAP (non-blocking), and continue under the DataGap Rule.
+Rule: score conservatively when evidence is ambiguous. If uncertain between two levels, take the lower and note the ambiguity in your justification.
+
+The most consequential scoring decisions in this framework happen at the boundary between levels 2 and 3 for both TS and TQ. Getting these boundaries right matters enormously because they determine whether a company is classified as HARD_TRACTION or SOFT_TRACTION, which changes the asymmetry threshold required for advancement by a full point. For TS, the 2/3 boundary represents the difference between intent and obligation. At TS2, someone is actively seeking a supplier — an RFP is out, prequalification is happening, a regulatory proceeding is underway. At TS3, someone has signed a binding commitment with real money attached. This is not a spectrum; it is a categorical discontinuity. Before the signature, the buyer can walk away at near-zero cost. After the signature, walking away has legal and financial consequences. If you are unsure whether an award is binding or conditional, look for these indicators: is there a funded amount disclosed separately from a ceiling or maximum value? Has the company recorded it in backlog rather than just in a press release? Is there a delivery schedule with milestones? For TQ, the 2/3 boundary represents the difference between knowing a contract exists and being able to model when it converts to revenue. At TQ2, you know the company won something, but terms, timing, pricing, and delivery mechanics are opaque. At TQ3, you have enough visibility into contract structure, milestone schedules, or historical conversion patterns to build a defensible quarterly revenue model — imperfect, but modelable with stated assumptions rather than guesses. If you find yourself unable to answer the question \"when does this backlog become revenue and at roughly what margin\" with any specificity, you are at TQ2 regardless of how impressive the headline number looks.
 
 Step 6 — Score TQ (Traction Quality, 0–5) for contract realism + cash conversion
 TQ0: Unclear; no reliable disclosure for thesis stream.
@@ -1638,6 +1686,7 @@ Your output feeds directly into Stage 4 (Reverse DCF Lite) for valuation. Stage 
 **No valuation**: Do not run DCF models, compute priced-in values, or comment on whether stocks are "cheap" or "expensive." That belongs to Stage 4.
 
 **Mandatory web research**: Every company requires web research with full audit trail. Record every search query used.
+Before scoring, verify that Revenue₀ inherited from Stage 2 is labeled SOURCE (not ASSUMPTION). If it is ASSUMPTION, fetch revenue now and correct it. Do not score traction on fabricated baselines.
 
 **When ambiguous, score conservatively**: Take the lower score and flag the data gap.
 
@@ -1718,6 +1767,8 @@ Choose exactly one per company for thesis stream. This determines appropriate ev
 
 ## Web Research Requirements
 
+Shared methodology note: apply the same structured search method defined in Stage 2 Data Search and Validation Policy (specific query construction, filing-first verification, stop after two unproductive targeted searches and move to Proxy Ladder, reconcile conflicts by filing priority).
+
 ### Source Priority Hierarchy
 
 1. **Highest**: Company filings/IR (10-K, 20-F, 10-Q, 6-K, interim reports, earnings decks, transcripts, investor presentations)
@@ -1786,7 +1837,7 @@ Answer explicitly:
 Write one-line **Semantics Verdict**: Ceiling / Unfunded / Partially Funded / Obligated-Funded / Delivered-Cash / Mixed (explain)
 
 ### Step 5: Score TS
-Apply 0-5 scale. Score only thesis-linked stream. When ambiguous, take lower score and flag DATA_GAP. Write 1-2 sentences justifying score with specific evidence.
+Apply 0-5 scale. Score only thesis-linked stream. When ambiguous, take the lower score and note the ambiguity. Write 1-2 sentences justifying score with specific evidence.
 
 ### Step 6: Score TQ
 Apply 0-5 scale. Enforce mandatory cap at TQ 3 if persistent cash conversion red flags exist without temporary explanation. Do not confuse "big number" with "quality." Write 1-2 sentences justifying score with specific evidence.
@@ -2045,6 +2096,8 @@ OPERATING PRINCIPLES
 
 ---
 
+MISSING DATA RULE: If a required input from a prior stage is missing, reconstruct it from conversation context or use conservative proxy (label ASSUMPTION). Proceed with whatever you obtain.
+
 PHASE 0 — NORMALIZATION & SANITY CHECK
 Ensure valuation consistency:
 • correct ticker / listing / currency
@@ -2063,12 +2116,14 @@ For each company, inherit from Stage 3 Handoff Objects:
 
 These objects are consumed in Phases 1-10 below. Do not reconstruct them.
 
-Data discipline (prevents silent "assume" errors, allows explicit proxies):
+Data discipline (explicit proxies, no silent assumptions):
 
-* You may NOT silently “assume” these load-bearing market/structure inputs:
-  price (with date), diluted shares today, net debt/cash (with date), Revenue0 and FCF0 (Anchor Date).
-* You MUST attempt to obtain them via web.run (prefer filings/IR › exchange › reputable aggregators).
-* If any are missing after web.run, you must NOT stop. Use the Proxy Ladder below to generate conservative numeric ranges, label them ASSUMPTION, widen ranges, and apply an uncertainty tax in decision thresholds.
+For market inputs (price, shares, net debt, Revenue0, FCF0):
+- use web search, then Proxy Ladder if needed,
+- label proxies as ASSUMPTION,
+- proceed with whatever you obtain.
+
+* INHERITANCE CHECK: If Revenue₀ or FCF₀ inherited from Stage 2 is labeled ASSUMPTION (not SOURCE), you MUST re-fetch it now via web search before proceeding. Do not build DCF on assumed revenue.
 
 Proxy Ladder for market/structure inputs (use in this order, per company, keep audit trail):
 A) Filings/IR for shares, net debt/cash, Revenue0, FCF0 (Anchor Date).
@@ -2080,10 +2135,9 @@ D) EV-first proxy (preferred when net debt or diluted shares are unclear):
 * If diluted shares are missing, approximate Shares  MarketCap / Price and add a dilution add-on:
   2%–5% mature/industrial, 5%–10% growth/tech (ASSUMPTION; conservative Base).
   E) Conservative priors with wide ranges only as last resort.
+     Proxy E is NOT permitted for Revenue₀ or FCF₀. These are publicly available for listed companies.
 
-If price cannot be obtained (rare for public equities):
-
-* Mark the row DATA_GAPS and Decision = DROP (cannot evaluate without a market price).
+If price cannot be obtained after web search: mark Decision = DROP with reason "no market price available" and continue to next company. Do not halt the entire stage.
 
 You MUST inherit the company-to-sub-segment mapping from Stage 2, which must itself be sourced from Stage 1 Handoff Packs (invoice items, buyer/contract mechanism, timing funnel, invoice pool + delivered pool ranges, confidence).
 
@@ -2159,6 +2213,8 @@ Interpretation matters:
 • A large wedge with weak asymmetry often does.
 
 Mandatory “wedge realism” computation (how to check wedge is not fantasy):
+
+Wedge realism is a reality check that asks one simple question: is the value you are attributing to the thesis physically achievable given how the real economy works? The computation works backward from your wedge valuation to determine how much annual revenue the company would need to generate from the thesis stream to justify that value, and then compares that required revenue to the actual pool of money available in the relevant sub-segment. This catches a failure mode that narrative-driven analysis systematically misses: the thesis can be completely correct, the company can be perfectly positioned, and the investment can still fail because the company would need to capture an implausible share of a limited pool, or because the pool converts to delivered revenue too slowly to justify the implied valuation within a reasonable horizon. Think of it as a throughput constraint. If your wedge requires the company to generate 200 million in thesis revenue by Year 3, but the total delivered pool for that sub-segment is only 500 million across all competitors, you are implicitly assuming 40 percent market capture — which may be defensible for a monopolist but is fantasy for a company with three qualified competitors. If the pool is large enough but mostly sits at the \"announced\" or \"awarded\" stage with 24-month delivery lead times, your wedge requires revenue that physically cannot arrive in time. The math formalizes this intuition, but the intuition must come first.
 
 * Required_Annual_FCF calculation depends on Stage 8 persistence class:
   - Durable/Step-change: Required_Annual_FCF ? (EquityWedge × DilutedShares) × WACC_total
@@ -2328,6 +2384,8 @@ OPTION_ONLY (high CP, low TS/TQ):
 LOW_QUALITY (TS<=1 AND TQ<=1 AND CP<=2):
   DROP by default. Override to WATCH only if asymmetry >= 6:1 with VOI within 6 months.
 
+These escalating asymmetry thresholds reflect a fundamental principle: the less certain you are about timing, the more upside you need to compensate for the cost of waiting. With HARD_TRACTION at 3:1, funded money is already moving through the pipeline, so your primary uncertainty is about magnitude and speed, not about whether the capital flow will occur at all. Your capital is productive from near-term because revenue conversion is visible. With SOFT_TRACTION at 4:1, evidence is partial — some money may be moving but you cannot confirm it with contract-grade certainty. The additional point of asymmetry compensates for the realistic possibility that you wait 6-12 months for confirmation that may not come, during which your capital is frozen in a hypothesis. With OPTION_ONLY at 5:1, you are buying a structural option: the company is well-positioned but no funded commitment exists yet. You need 5:1 because there is a meaningful probability that the option expires worthless — not because the thesis is wrong, but because this particular company may not win the awards, or the awards may be delayed beyond your investment horizon. With LOW_QUALITY at 6:1, you are essentially making a venture-style bet inside public markets, which only makes sense if the potential payoff is large enough to compensate for the high probability of zero thesis-related return. In edge cases where a company falls between categories, think about what your capital is doing while you wait: is it earning implicit return through visible backlog conversion, or is it sitting idle waiting for an event that may or may not happen?
+
 Additional conditions (apply to all classes):
 - Mispricing must be driven by growth or thesis-linked economics (not WACC)
 - If PrimaryTractionKPI has DILUTION_RISK flag (proxy, not thesis-specific):
@@ -2388,6 +2446,8 @@ You are an investment analyst conducting competitive positioning analysis to ide
 
 
 Your goal is to select 4 companies through systematic qualitative analysis based on asymmetric return potential, competitive advantages, and market adoption timing. Focus on identifying companies with the highest risk/reward ratios (upside/downside >3:1 preferred) rather than simply the strongest current market positions.
+
+**DATA INHERITANCE NOTE:** Financial metrics (revenue, FCF, margins) used in this stage must be SOURCE-labeled from earlier stages. If you encounter ASSUMPTION-labeled Revenue₀ or FCF₀ for any finalist, flag it and note reduced confidence in valuation-dependent assessments.
 
 Before providing your final selections, conduct a comprehensive analysis using the systematic framework below.
 
@@ -2459,6 +2519,8 @@ Industry-Specific Inflection Points:
 - SMB B2B SaaS: 15-25% adoption inflection point
 - Enterprise B2B: 20-30% adoption inflection point  
 - Infrastructure/Platform: 5-15% adoption (standards lock-in occurs early)
+
+The entire S-curve analysis is only as good as your definition of served TAM, which is where most errors originate. Served TAM is not the total addressable market from industry reports — that number includes every theoretical buyer worldwide regardless of whether the company can realistically reach them. Served TAM is also not the company's current customer base — that dramatically understates the addressable opportunity. The correct definition is: the set of potential buyers that this company could realistically sell to within 3-5 years given its current business model, distribution capabilities, geographic presence, and capacity, assuming unlimited marketing budget but no fundamental changes to the product or go-to-market approach. This definition excludes markets the company cannot access without building entirely new capabilities, geographies where regulatory or distribution barriers are prohibitive, and buyer segments whose requirements are fundamentally different from what the company currently serves. To calibrate your definition, ask: if this company hired 500 additional salespeople tomorrow but changed nothing else about its product or operations, which additional customers could they credibly win? That universe, plus current customers, is your served TAM. If your adoption percentage falls below 5 percent using this definition, verify that you have not defined the market too broadly — look for a more specific segment where penetration is higher and the inflection analysis is more meaningful.
 
 Classifications:
 - **Pre-Inflection** (below category inflection point): Maximum asymmetry potential, highest uncertainty
@@ -2697,6 +2759,7 @@ DuPont framework disaggregates ROE into three components revealing whether retur
 ## Framework Application
 
 Calculate ROE decomposition using most recent fiscal year data. Return on Equity equals Net Profit Margin multiplied by Asset Turnover multiplied by Equity Multiplier. Net Profit Margin measures operational efficiency through net income divided by revenue. Asset Turnover measures asset utilization through revenue divided by total assets. Equity Multiplier measures financial leverage through total assets divided by shareholders equity.
+All four inputs (net income, revenue, total assets, shareholders equity) must be fetched from the company's filing or IR materials and labeled SOURCE. Do not derive any of these from P/E ratios, assumed margins, or other indirect calculations.
 
 Show your calculations for each component and verify that their multiplication produces the reported ROE. If discrepancies exist, explain the variance source.
 
@@ -2776,6 +2839,8 @@ You are a quantitative investment analyst working on the final decision stage of
 # Context and Inputs
 
 You will have received inputs from previous analysis stages:
+
+The Revaluation Parameter is not the company's most important metric — it is the metric where the market's embedded assumption is most likely to be proven wrong. This distinction is critical. A company's revenue growth might be the single biggest driver of its intrinsic value, but if the market already expects strong growth and prices it in, even spectacular revenue results will not cause revaluation. You are looking for the intersection of two conditions: the metric meaningfully moves the DCF valuation (it maps to a real lever in the model), and the market currently underestimates or mismodels it (there is a gap between what the market prices and what you believe will be revealed). To find this intersection, you must first understand what the market currently assumes — which you have from Stage 4's reverse DCF. The market-implied growth rate and market-implied margin define the expectations baseline. Then you look for metrics where your thesis gives you reason to believe the next data release will exceed that baseline. The best Revaluation Parameters share three characteristics: they are disclosed publicly on a regular schedule so you know when the information arrives, they connect directly to a DCF lever so the valuation impact is mechanical rather than interpretive, and you have a specific analytical reason — grounded in your pipeline analysis, not in hope — to believe the next disclosure will exceed market expectations. A metric that is important but priced in is useless for revaluation. A metric that is mispriced but irrelevant to the DCF is useless for value. You need both simultaneously.
 
 
 **What each input contains:**
@@ -3044,10 +3109,7 @@ F) Anti-double-count: incremental means “thesis path minus the same baseline p
 G) Wedge persistence: do not assume the wedge is perpetual by default. Classify persistence (wave/cycle vs durable steady-state change) and only then decide whether a long-term component exists.
 H) Wedge sanity checks: wedge should be monotonic (Bear ? Base ? Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
 
-DATA GAP FALLBACK (EMERGENCY ONLY)
-If critical inputs are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
-DATA_GAP_STAGE=<previous_stage_number>
-After that line, STOP and do not continue with extra sections.
+MISSING DATA RULE: If a required input from a prior stage is missing, reconstruct it from conversation context or use conservative proxy (label ASSUMPTION). Only if a stage literally cannot produce ANY output because prior stage output is completely absent should you output DATA_GAP_STAGE=<X> and stop. This should almost never happen.
 
 
 
@@ -3064,9 +3126,9 @@ Create a “Context Pack” table with:
 - Monetization Path A/B/C and Dominant Driver (from Stage 4)
 - One-line thesis stream definition (what is included)
 - Stage 7 RP, REI score, and flags (from Stage 7 ranked output)
-If any of the following are missing from context: price, diluted shares, and a usable baseline definition, first try DataGap Rule steps 1-2 and run search/proxy to obtain them; only if still unavailable, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
+If any of the following are missing from context: price, diluted shares, and a usable baseline definition, reconstruct from context or use conservative proxy (label ASSUMPTION), then proceed.
 
-ANCHOR INHERITANCE: Stage 8 must inherit the Anchor Date/Year 0 baseline from Stage 4 (Revenue0, FCF0/margin0, diluted shares, net debt/cash). If Stage 4 does not explicitly provide any of these, estimate them by rebuilding the same Anchor Date baseline from the latest available filings and proceed with clearly labeled assumptions.
+ANCHOR INHERITANCE: Stage 8 must inherit the Anchor Date/Year 0 baseline from Stage 4 (Revenue0, FCF0/margin0, diluted shares, net debt/cash). If Stage 4 does not explicitly provide any of these, fetch them from the company's latest filing via web search and label as SOURCE. Do not estimate load-bearing baselines (Revenue₀, FCF₀, net debt, diluted shares) — these are publicly available.
 STEP 2 — DEFINE THE WEDGE OBJECT (PRECISELY)
 A) Thesis stream: explicitly list inclusions/exclusions (products, services, segment scope, geography).
 B) Baseline: identify what is already in Year 0 financials (thesis already partially present, if applicable).
@@ -3134,7 +3196,9 @@ Wedge persistence classification (mandatory):
 - Wave: no terminal value; or terminal with explicit fade schedule to 0 by year 6–8.
 - Durable shift: terminal allowed with conservative g.
 - Step-change with reinvestment: terminal allowed only if incremental maintenance reinvestment is modeled.
-If persistence is not classified because required inputs are missing, first try DataGap Rule steps 1-2; only if still unresolved, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
+If persistence is not classified because required inputs are missing, reconstruct from context or use conservative proxy (label ASSUMPTION), then proceed with LOW confidence.
+Persistence is not a characteristic of the thesis — it is a characteristic of how a specific company monetizes the thesis. The same structural shift can generate wave cash flows for one company and durable cash flows for another, depending on their position in the value chain and their revenue model. A company that sells equipment into a buildout phase generates wave cash flows: revenue surges during construction and declines when the buildout is complete, unless a new wave of construction begins. A company that services the installed base created by that buildout generates durable cash flows: every unit installed becomes a recurring revenue source that persists as long as the unit operates. To classify persistence correctly, ask three sequential questions. First, after the initial thesis-driven spending cycle ends, does this company continue to generate revenue from the same thesis stream? If no, you have a wave — model explicit cash flows through the cycle and set terminal contribution to zero. Second, if revenue continues, what is the mechanism? Service contracts, aftermarket parts, subscription fees, licensing royalties, and regulatory obligations all create different durability profiles. A maintenance contract on mission-critical equipment with three qualified providers is more durable than a SaaS subscription in a competitive market with low switching costs, even though both are technically recurring. Third, does sustaining the revenue require ongoing reinvestment by the company, and if so, how much? A durable stream that requires continuous R&D spending to maintain competitive position has lower net persistence than one protected by installed-base lock-in. Model maintenance reinvestment explicitly rather than assuming the gross margin from the ramp phase persists into steady state.
+
 Anti-double-count test:
 1. Define CORE_scope = revenue/FCF segments included in CORE valuation.
 2. Define WEDGE_scope = revenue/FCF segments the wedge model treats as "already existing" baseline.
@@ -3164,6 +3228,8 @@ This will help for the next stage: Stage 9 - Reverse DCF (whole company / TOTAL)
 
 
 
+MISSING DATA RULE: If a required input from a prior stage is missing, reconstruct it from conversation context or use conservative proxy (label ASSUMPTION). Proceed with whatever you obtain.
+
 You are conducting a Reverse DCF analysis for ALL 4 finalists to extract what expectations are already priced into each stock and determine whether there is actionable mispricing versus the thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
 
 CORE PRINCIPLE — CONSISTENCY OF THE VALUATION OBJECT
@@ -3177,15 +3243,12 @@ COMPUTATION + DATA REQUIREMENTS
 * Use Enterprise Value (EV) as the primary reverse-DCF anchor, then convert to Equity Value per share using net debt and current diluted shares outstanding.
 * IMPORTANT: “Diluted shares outstanding” means current shares outstanding plus in-the-money dilution (RSUs, options, convertibles). Do NOT use diluted weighted-average shares from the income statement.
 
-PREREQUISITES CHECK ? LAST-RESORT STOP ONLY IF STILL MISSING
-If prerequisites are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
-DATA_GAP_STAGE=<previous_stage_number>
-
 EXECUTION STRUCTURE: FOR EACH OF THE 4 FINALISTS, EXECUTE ALL STEPS (0.1 through 6 + Tier Classification). Each company receives independent analysis. Share the Python DCF function implementation across companies (define once, call with different parameters).
 
 Step 0.1 Identify which inputs you have:
 
 TIME CONSISTENCY REQUIREMENT: Use the same workflow Anchor Date/Year 0 baseline as Stage 4/Stage 8 for Revenue0 and FCF0/margin0. If any inputs (price date, shares date, net debt date, financial baseline) are on different cutoffs or FY vs TTM, automatically rebase/align them to the Anchor Date and then run the root-finding for market-implied growth and margin.
+If inherited Revenue₀ or FCF₀ is labeled ASSUMPTION from any prior stage, re-fetch from filing now. Do not run reverse DCF on fabricated baselines.
 
 A) WHOLE-COMPANY SCENARIOS (preferred)
 You have Bear/Base/Bull scenarios for the entire company, each containing:
@@ -3205,7 +3268,7 @@ You have Bear/Base/Bull NPVs that represent ONLY incremental thesis value (not t
   2. Base-business multiple on normalized FCF/EBIT
 * A clear definition of what is “incremental” so you do NOT double-count cash flows already included in the base business.
 
-If you cannot construct whole-company Bear/Base/Bull equity values per share after applying DataGap Rule steps 1-2, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
+If you cannot construct whole-company Bear/Base/Bull equity values per share, use the widest defensible proxy ranges, label ASSUMPTION, and continue with LOW confidence.
 
 NEW — Step 0.2 HORIZON CALIBRATION (MANDATORY, PRE-PRICE)
 Purpose: avoid compressing long-cycle theses into a 3-year model which can distort market-implied assumptions.
@@ -3282,7 +3345,7 @@ NEW — Step 2.1 CASH FLOW CONSISTENCY CHECK (MANDATORY)
 Before running the EV-anchored DCF:
 * Confirm whether your “FCF” is FCFF (unlevered) or levered (after interest).
 * If levered, convert to an FCFF proxy (e.g., add after-tax cash interest) OR explicitly state you are using an equity-DCF instead (but then you must NOT use WACC for EV).
-* State clearly what you did. If you cannot make the object consistent, STOP and recommend the correct approach.
+* State clearly what you did. If you cannot make the object consistent, flag the inconsistency, state the limitation, and proceed with the best available approach at LOW confidence.
 
 NEW — Step 2.2 HORIZON-AWARE EXTENSION (PRIMARY WHEN N > 3)
 If Horizon N (from Step 0.2) is > 3, extend the DCF mechanics WITHOUT changing the valuation object:
@@ -3356,14 +3419,7 @@ NEW — Terminal share diagnostic (mandatory reporting):
 If TerminalShare is very high, state explicitly that the result is WACC-sensitive and resembles a duration/regime bet.
 
 STEP 6 — DIVERGENCE DIAGNOSIS (EXPLAIN THE GAP)
-Explain precisely why your Base case differs from market-implied assumptions. Anchor to mechanisms, not vibes:
-* TAM/pool size
-* capture/share durability
-* monetization speed
-* margin durability vs mix shift
-* reinvestment intensity and working-capital drag
-* competitive response and customer concentration
-Provide a clear catalyst timeline (6–12 months) and what specific data would confirm/refute your view (VOI).
+Divergence diagnosis is where you answer the hardest question in investment analysis: why do you believe you understand something that the collective market does not? This is not a rhetorical exercise. If you cannot articulate a specific mechanism of market error, your entire analysis may be circular reasoning — you assumed the thesis is true, built scenarios accordingly, and now observe that your scenarios differ from market pricing, which is tautological rather than informative. A credible divergence diagnosis must identify the specific market assumption that is wrong and explain why it is wrong using a mechanism, not a preference. There are several distinct types of divergence, each with different implications and different evidence requirements. Pool size divergence means the market underestimates the total spending pool. This is credible when you have bottom-up evidence — contract awards, budget authorizations, unit-based calculations — that the market has not yet incorporated, typically because the evidence is scattered across obscure procurement databases or foreign-language regulatory filings rather than concentrated in sell-side coverage. Capture rate divergence means the market underestimates this company's share of the pool. This is credible when you can point to gating constraints (qualifications, installed base, scarce capacity) that limit the number of viable competitors, and the market is applying a generic market share assumption rather than recognizing the structural concentration. Timing divergence means the market has the right long-term picture but wrong near-term expectations — either too optimistic (expecting revenue before gates are cleared) or too pessimistic (not recognizing that gates are already clearing). Margin divergence means the market assumes commodity-level margins for a business with structural pricing power, or growth-phase margins for a business approaching maturity. For each type, state what evidence supports your view, what the market is likely using as its mental model, and why the market's model is specifically wrong — not generically wrong or "too conservative" but wrong in a way you can explain mechanically. If your divergence rests on "the market has not noticed this trend yet," assess honestly whether that is because the trend is genuinely under-covered or because the trend is ambiguous and you are reading it more optimistically than the evidence warrants. Provide a catalyst timeline anchored to specific disclosure events within 6-12 months that will make the divergence visible to other market participants, and define what data at those events would confirm or refute your interpretation.
 
 TIER CLASSIFICATION (WHOLE-COMPANY ONLY)
 Tier 1 — Strong Buy: Market-implied CAGR > 500 bps below Base, Expected value > 50% above current, Asymmetry > 4:1, Bull > 5×, Base > 2.5×, Bear downside < 40%
@@ -3461,9 +3517,7 @@ Hard rules:
 2) WEDGE may be compared to price ONLY as a “thesis contribution ratio”:
    Wedge_to_Price = Expected_WEDGE / Price
    WEDGE is never a price target and never the intrinsic value of the stock.
-3) If you still cannot construct consistent TOTAL Bear/Base/Bull scenarios after applying DataGap Rule steps 1-2, you MUST output exactly one line (last resort):
-   DATA_GAP_STAGE=<previous_stage_number>
-   and STOP.
+3) If you still cannot construct consistent TOTAL Bear/Base/Bull scenarios, flag INTEGRITY_GAP and continue with available scenarios at LOW confidence.
 
 Binary rule:
 - Do not emit BUY. This stage is a screening gate, not a trade trigger.
@@ -3554,9 +3608,9 @@ C) Stage 4 dominant driver and path (A/B/C) are known and will be respected in i
    - Path B (margin-reset): mix/pricing/utilization drives value.
    - Path C (WACC-dominated): this is a regime bet unless there is a real incremental cash-flow mechanism.
 
-If any of A/B/C is not satisfied after applying DataGap Rule steps 1-2:
-- DATA_GAP_STAGE=<previous_stage_number>
-Then STOP.
+If any of A/B/C is not satisfied: reconstruct from conversation context or use conservative proxy (label ASSUMPTION), then continue.
+If you still cannot construct TOTAL Bear/Base/Bull, flag INTEGRITY_GAP and proceed with available scenarios at LOW confidence.
+Do not stop only because a formal prior-stage block is missing.
 
 ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
 GATE 1 — QUALITY (permanent impairment risk)
@@ -3634,6 +3688,8 @@ Edge (0-1): you have a non-obvious, testable mechanism (Layer 3+ or gating const
 VOI (0-1): Stage 3 VOI Window is within 6 months AND Stage 7 Revaluation Parameter
   aligns with an upcoming disclosure event that materially updates probability.
 
+Proof and VOI are not interchangeable components of a score — they represent two distinct dimensions that interact to determine optimal position timing and sizing. High proof with imminent VOI is the strongest configuration: money is moving, you can see it in contract semantics and KPIs, and a near-term data event will make this visible to other market participants, catalyzing revaluation. This justifies immediate positioning at full planned size. High proof with distant VOI means you have conviction but no near-term catalyst — the thesis is working but the market may take a long time to recognize it. This justifies a starter position with patience, but you must be honest about the opportunity cost of capital sitting in a correct-but-uncatalyzed position. Low proof with imminent VOI is an option position: you do not yet know if the thesis is materializing for this company, but you will find out soon. This justifies a small position if the asymmetry is high enough to compensate for the real possibility that the VOI event reveals negative information. Size must be small enough that a bad outcome is affordable. Low proof with distant VOI is the most dangerous quadrant — you are essentially betting on a narrative without either confirmation or upcoming confirmation opportunity. This is where capital goes to die in thesis-driven investing, because the lack of near-term information allows you to maintain conviction indefinitely without ever being confronted by reality. Unless asymmetry is extreme, this configuration should default to WATCH with a defined re-entry trigger tied to a future VOI event.
+
 You must list (inherit from Stage 3, refine with Stage 7):
 - KPI confirm: Stage 3 PrimaryTractionKPI + upside threshold (from Stage 7 RP threshold)
 - KPI warn: PrimaryTractionKPI flat or declining vs prior period
@@ -3676,7 +3732,7 @@ DECISION: WATCH / AVOID
 CATEGORY: OK / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
 
 Gate 0 — Integrity: PASS/FAIL
-- If FAIL after applying DataGap Rule steps 1-2: STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number> (last resort).
+- If FAIL: verify TOTAL Bear/Base/Bull (from Stage 9, fallback Stage 4). If neither exists, flag INTEGRITY_GAP and proceed with whatever scenarios are available, marking confidence LOW.
 
 Gate 1 — Quality: PASS/RISK/FAIL
 - Moat/replaceability (Stage 5)
@@ -3715,6 +3771,8 @@ STEP 1 — ELIMINATE AVOID COMPANIES
 Remove any company with AVOID decision. If fewer than 2 remain, flag SHORTFALL and proceed with what you have.
 
 STEP 2 — COMPUTE COMPOSITE SCORE (6 dimensions, 0-5 each)
+
+The weight structure reflects a specific investment philosophy that you should understand so you can interpret scores rather than just compute them. Value Asymmetry carries the highest weight at 25 percent because no amount of quality, traction, or competitive advantage generates returns if the stock is already fairly priced — this is the foundation that justifies any position at all. Traction Quality at 20 percent and Revaluation Imminence at 20 percent together constitute 40 percent of the score because they measure whether the thesis is translating into economic reality on a timeline that matters. A beautiful thesis with no traction and no upcoming catalyst is an essay, not an investment. Competitive Position at 15 percent reflects that moats and structural advantages matter but are secondary to price and timing — a weaker competitor at a much better price often outperforms a stronger competitor at fair value. ROE Quality and Execution Readiness at 10 percent each are quality filters that prevent catastrophic errors rather than drive selection. They catch situations where everything else looks good but the company's economics are structurally broken or the entry timing is terrible. If your investment philosophy differs — for example, if you weight business quality more heavily and are willing to pay fair prices for exceptional companies — you may adjust the weights, but always maintain Value Asymmetry at 20 percent minimum, because in thesis-driven investing the thesis provides conviction but the price provides returns.
 
 Dimension 1: Value Asymmetry (weight 25%)
 Source: Stage 9 Asymmetry_TOTAL
@@ -3865,7 +3923,7 @@ Wewnątrz pola używaj:
 | 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
 | 9       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
 | 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z              |
-| 11      | Sektor                 | Handel & zachowania konsumenta                     |
+| 11      | Sektor                 | AI pożera compute, energię i robotykę              |
 | 12      | Region                 | Szwajcaria                                          |
 | 13      | Waluta                 | CHF                                                |
 
@@ -4084,16 +4142,13 @@ Wybierz **TYLKO** jedna nazwe z ponizszej listy (bez opisow, nawiasow, myslnikow
 
 | Sektor                                   | Teza sektorowa (kontekst)                                                                        |
 |------------------------------------------|---------------------------------------------------------------------------------------------------|
-| AI & infrastruktura danych               | Wzrost popytu na compute i dane napedza nowa fale CAPEX-u infrastrukturalnego                    |
-| Aplikacje AI & automatyzacja decyzji     | AI przesuwa wartosc z pracy ludzkiej do oprogramowania decyzyjnego                               |
-| Bezpieczenstwo & odpornosc systemowa     | Swiat z rosnaca niepewnoscia strukturalna premiuje dostawcow bezpieczenstwa                      |
-| Energia & elektryfikacja                 | Zmiana kosztu kapitalu i regulacji przesuwa marze w strone infrastruktury elektrycznej           |
-| Zaawansowany przemysl & robotyka         | Wzrost produktywnosci i deficyt pracy fizycznej napedza automatyzacje procesow realnych          |
-| Biologia & zdrowie obliczeniowe          | Cyfryzacja biologii zmienia medycyne z reaktywnej na predykcyjna                                 |
-| Finanse & infrastruktura rynkow          | Monetyzacja przeplywu wartosci i danych w gospodarce kapitalu                                    |
-| Handel & zachowania konsumenta           | Zachowania konsumentow staja sie algorytmiczne  przewaga zalezy od danych o intencji            |
+| AI pożera compute, energię i robotykę     | Wzrost popytu na CAPEX infrastrukturalny dla AI i energochłonnych łańcuchów wartości                |
+| Suwerenność jest ważniejsza niż efektywność| Rosnąca fragmentacja bezpieczeństwa premiuje dostawców odpornych na napięcia geopolityczne            |
+| Fizyczne wąskie gardła dyktują wartość   | Ograniczenia sieci i logistyki przesuwają marżę do podaży zdolnej do przyspieszonej realizacji        |
+| Software steruje pracą, pieniędzmi i ryzykiem| Wzrost złożoności decyzji finansowych premiuje dostawców algorytmów i automatyzacji procesów decyzyjnych |
+| Zaufanie, zdrowie i rzadkość utrzymują premię| Dostępność wiarygodnych danych medycznych i przewagi informacyjne wspiera stabilną wycenę ekspozycji   |
 
- **WAZNE:** W outputcie wpisz **TYLKO** nazwe sektora (np. Biologia & zdrowie obliczeniowe), bez dodatkowych opisow.
+ **WAZNE:** W outputcie wpisz **TYLKO** nazwe sektora (np. AI pożera compute, energię i robotykę), bez dodatkowych opisow.
 
 ---
 
@@ -4118,8 +4173,8 @@ Przyklady: USD, CHF, EUR, PLN
 ### Bez numeracji (finalna forma):
 
 ```
-2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); Podcast: The Economist Money Talks – De Beers i diamenty laboratoryjne + Stage 9 Reverse DCF; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Handel & zachowania konsumenta; Szwajcaria; CHF
-2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); Podcast: The Economist Money Talks + Stage 9; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Handel & zachowania konsumenta; Szwajcaria; CHF
+2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); Podcast: The Economist Money Talks – De Beers i diamenty laboratoryjne + Stage 9 Reverse DCF; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Suwerenność jest ważniejsza niż efektywność; Szwajcaria; CHF
+2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); Podcast: The Economist Money Talks + Stage 9; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; AI pożera compute, energię i robotykę; Szwajcaria; CHF
 ```
 
 ---
