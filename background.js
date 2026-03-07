@@ -77,8 +77,23 @@ const WATCHLIST_DISPATCH = {
 };
 const WATCHLIST_PROBLEM_LOGS_PATH = '/api/v1/intake/problem-logs';
 const WATCHLIST_RESPONSE_VERIFY_PATH = '/api/v1/intake/economist-response/verify';
+const WATCHLIST_REMOTE_RUNNER_HEARTBEAT_PATH = '/api/v1/iskra/runner/heartbeat';
 const WATCHLIST_DB_VERIFY_MAX_ATTEMPTS = 3;
 const WATCHLIST_DB_VERIFY_RETRY_DELAY_MS = 700;
+const REMOTE_RUNNER = {
+  enabledStorageKey: 'remote_runner_enabled',
+  nameStorageKey: 'remote_runner_name',
+  controllerRunnerIdStorageKey: 'remote_controller_runner_id',
+  controllerRunnerNameCachedStorageKey: 'remote_controller_runner_name_cached',
+  controllerLastJobStorageKey: 'remote_controller_last_job',
+  runnerStateStorageKey: 'remote_runner_state',
+  runnerJobBindingsStorageKey: 'remote_runner_job_bindings',
+  alarmName: 'remote-runner-maintenance',
+  alarmPeriodMinutes: 0.5,
+  staleAfterSeconds: 90,
+  offlineAfterSeconds: 180,
+  timeoutMs: 20000
+};
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -192,6 +207,8 @@ let problemLogConsoleCaptureInProgress = false;
 let watchlistConnectionLogLastSignature = '';
 let watchlistConnectionLogLastTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
+let remoteRunnerMaintenanceInProgress = false;
+let remoteRunnerExecutionInProgress = false;
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -11689,6 +11706,10 @@ function normalizeWatchlistDispatchPayload(response) {
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
+  const sourceUrl = typeof response.sourceUrl === 'string' ? response.sourceUrl.trim() : '';
+  if (sourceUrl) {
+    payload.sourceUrl = sourceUrl;
+  }
   const conversationLogs = normalizeConversationLogSnapshot(
     response.conversationLogs,
     RESPONSE_CONVERSATION_LOG_MAX_ITEMS
@@ -11730,6 +11751,10 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
+  }
+  const sourceUrl = typeof rawPayload.sourceUrl === 'string' ? rawPayload.sourceUrl.trim() : '';
+  if (sourceUrl) {
+    payload.sourceUrl = sourceUrl;
   }
   const conversationLogs = normalizeConversationLogSnapshot(
     rawPayload.conversationLogs,
@@ -12485,6 +12510,28 @@ function convertWatchlistIntakeUrlToVerifyUrl(rawIntakeUrl) {
 function buildWatchlistVerifyUrlCandidates(primaryIntakeUrl) {
   const candidates = buildWatchlistDispatchUrlCandidates(primaryIntakeUrl)
     .map((candidate) => convertWatchlistIntakeUrlToVerifyUrl(candidate))
+    .filter((candidate) => typeof candidate === 'string' && candidate.trim());
+  return [...new Set(candidates)];
+}
+
+function convertWatchlistIntakeUrlToRemoteApiUrl(rawIntakeUrl, targetPath) {
+  const normalized = normalizeWatchlistIntakeUrl(rawIntakeUrl);
+  const safeTargetPath = typeof targetPath === 'string' ? targetPath.trim() : '';
+  if (!normalized || !safeTargetPath) return '';
+  try {
+    const parsed = new URL(normalized);
+    parsed.pathname = safeTargetPath.startsWith('/') ? safeTargetPath : `/${safeTargetPath}`;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function buildWatchlistRemoteApiUrlCandidates(primaryIntakeUrl, targetPath) {
+  const candidates = buildWatchlistDispatchUrlCandidates(primaryIntakeUrl)
+    .map((candidate) => convertWatchlistIntakeUrlToRemoteApiUrl(candidate, targetPath))
     .filter((candidate) => typeof candidate === 'string' && candidate.trim());
   return [...new Set(candidates)];
 }
@@ -13668,6 +13715,373 @@ function buildWatchlistCanonicalString({ method, path, timestamp, nonce, bodyHas
   ].join('\n');
 }
 
+function buildCompanyPromptHashSnapshot(promptChain = PROMPTS_COMPANY) {
+  const prompts = Array.isArray(promptChain)
+    ? promptChain.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+  return prompts.length > 0
+    ? textFingerprint(prompts.join('\nPROMPT_SEPARATOR\n'))
+    : '';
+}
+
+async function getRemoteRunnerSettings() {
+  const snapshot = await chrome.storage.local.get([
+    REMOTE_RUNNER.enabledStorageKey,
+    REMOTE_RUNNER.nameStorageKey,
+    REMOTE_RUNNER.controllerRunnerIdStorageKey,
+    REMOTE_RUNNER.controllerRunnerNameCachedStorageKey,
+  ]);
+  return {
+    enabled: snapshot?.[REMOTE_RUNNER.enabledStorageKey] === true,
+    runnerName: typeof snapshot?.[REMOTE_RUNNER.nameStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.nameStorageKey].trim()
+      : '',
+    controllerRunnerId: typeof snapshot?.[REMOTE_RUNNER.controllerRunnerIdStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.controllerRunnerIdStorageKey].trim()
+      : '',
+    controllerRunnerNameCached: typeof snapshot?.[REMOTE_RUNNER.controllerRunnerNameCachedStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.controllerRunnerNameCachedStorageKey].trim()
+      : '',
+  };
+}
+
+async function saveRemoteRunnerSettings(patch = {}) {
+  const current = await getRemoteRunnerSettings();
+  const next = {
+    enabled: typeof patch?.enabled === 'boolean' ? patch.enabled : current.enabled,
+    runnerName: typeof patch?.runnerName === 'string' ? patch.runnerName.trim() : current.runnerName,
+    controllerRunnerId: typeof patch?.controllerRunnerId === 'string'
+      ? patch.controllerRunnerId.trim()
+      : current.controllerRunnerId,
+    controllerRunnerNameCached: typeof patch?.controllerRunnerNameCached === 'string'
+      ? patch.controllerRunnerNameCached.trim()
+      : current.controllerRunnerNameCached,
+  };
+  await chrome.storage.local.set({
+    [REMOTE_RUNNER.enabledStorageKey]: next.enabled,
+    [REMOTE_RUNNER.nameStorageKey]: next.runnerName,
+    [REMOTE_RUNNER.controllerRunnerIdStorageKey]: next.controllerRunnerId,
+    [REMOTE_RUNNER.controllerRunnerNameCachedStorageKey]: next.controllerRunnerNameCached,
+  });
+  return next;
+}
+
+async function getRemoteControllerLastJobState() {
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.controllerLastJobStorageKey]);
+  const record = snapshot?.[REMOTE_RUNNER.controllerLastJobStorageKey];
+  return record && typeof record === 'object' ? record : null;
+}
+
+async function setRemoteControllerLastJobState(record = null) {
+  if (record && typeof record === 'object') {
+    await chrome.storage.local.set({
+      [REMOTE_RUNNER.controllerLastJobStorageKey]: {
+        ...record,
+        updatedAt: Date.now(),
+      }
+    });
+    return;
+  }
+  await chrome.storage.local.remove([REMOTE_RUNNER.controllerLastJobStorageKey]);
+}
+
+async function getRemoteRunnerExecutionState() {
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.runnerStateStorageKey]);
+  const record = snapshot?.[REMOTE_RUNNER.runnerStateStorageKey];
+  return record && typeof record === 'object' ? record : {};
+}
+
+async function setRemoteRunnerExecutionState(patch = {}) {
+  const current = await getRemoteRunnerExecutionState();
+  const next = {
+    ...(current && typeof current === 'object' ? current : {}),
+    ...(patch && typeof patch === 'object' ? patch : {}),
+    updatedAt: Date.now()
+  };
+  await chrome.storage.local.set({ [REMOTE_RUNNER.runnerStateStorageKey]: next });
+  return next;
+}
+
+async function clearRemoteRunnerExecutionState() {
+  await chrome.storage.local.remove([REMOTE_RUNNER.runnerStateStorageKey]);
+}
+
+async function setRemoteRunnerJobBinding(jobId, patch = {}) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return null;
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.runnerJobBindingsStorageKey]);
+  const current = snapshot?.[REMOTE_RUNNER.runnerJobBindingsStorageKey]
+    && typeof snapshot[REMOTE_RUNNER.runnerJobBindingsStorageKey] === 'object'
+      ? snapshot[REMOTE_RUNNER.runnerJobBindingsStorageKey]
+      : {};
+  const next = {
+    ...current,
+    [safeJobId]: {
+      ...(current?.[safeJobId] && typeof current[safeJobId] === 'object' ? current[safeJobId] : {}),
+      ...(patch && typeof patch === 'object' ? patch : {}),
+      updatedAt: Date.now()
+    }
+  };
+  await chrome.storage.local.set({ [REMOTE_RUNNER.runnerJobBindingsStorageKey]: next });
+  return next[safeJobId];
+}
+
+async function getRemoteRunnerJobBinding(jobId) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return null;
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.runnerJobBindingsStorageKey]);
+  const bindings = snapshot?.[REMOTE_RUNNER.runnerJobBindingsStorageKey];
+  if (!bindings || typeof bindings !== 'object') return null;
+  const record = bindings[safeJobId];
+  return record && typeof record === 'object' ? record : null;
+}
+
+async function sendSignedWatchlistApiRequest({ method = 'GET', endpointPath = '', payload = null, timeoutMs = null }) {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    return { success: false, error: 'dispatch_disabled' };
+  }
+
+  const safeMethod = typeof method === 'string' && method.trim()
+    ? method.trim().toUpperCase()
+    : 'GET';
+  const safeEndpointPath = typeof endpointPath === 'string' ? endpointPath.trim() : '';
+  if (!safeEndpointPath) {
+    return { success: false, error: 'missing_endpoint_path' };
+  }
+
+  const dispatchConfig = await resolveWatchlistDispatchConfiguration();
+  if (!dispatchConfig.ok) {
+    return { success: false, error: dispatchConfig.reason || 'missing_dispatch_credentials' };
+  }
+
+  const urlCandidates = buildWatchlistRemoteApiUrlCandidates(dispatchConfig.intakeUrl, safeEndpointPath);
+  if (urlCandidates.length === 0) {
+    return { success: false, error: 'remote_api_endpoint_missing' };
+  }
+
+  const safeTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0
+    ? Math.max(1000, timeoutMs)
+    : Math.max(1000, Number(REMOTE_RUNNER.timeoutMs || 0) || 20000);
+  const body = safeMethod === 'GET'
+    ? ''
+    : JSON.stringify(payload && typeof payload === 'object' ? payload : {});
+  const bodyHash = await sha256HexForDispatch(body);
+
+  let lastError = 'remote_api_request_failed';
+  let lastStatus = null;
+  let lastIntakeUrl = '';
+  for (const candidate of urlCandidates) {
+    const controller = new AbortController();
+    let timeoutId = null;
+    try {
+      const url = new URL(candidate);
+      lastIntakeUrl = url.toString();
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const nonce = generateWatchlistNonce();
+      const canonical = buildWatchlistCanonicalString({
+        method: safeMethod,
+        path: url.pathname || '/',
+        timestamp,
+        nonce,
+        bodyHash,
+      });
+      const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
+      const response = await Promise.race([
+        fetch(url.toString(), {
+          method: safeMethod,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Watchlist-Key-Id': dispatchConfig.keyId,
+            'X-Watchlist-Timestamp': timestamp,
+            'X-Watchlist-Nonce': nonce,
+            'X-Watchlist-Signature': signature,
+          },
+          ...(safeMethod === 'GET' ? {} : { body }),
+          signal: controller.signal
+        }),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            try {
+              controller.abort();
+            } catch {
+              // Ignore abort exceptions after timeout.
+            }
+            reject(createDispatchTimeoutError(safeTimeoutMs));
+          }, safeTimeoutMs);
+        })
+      ]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
+      let responseJson = null;
+      try {
+        responseJson = await response.json();
+      } catch {
+        responseJson = null;
+      }
+
+      if (!response.ok) {
+        lastStatus = response.status;
+        lastError = typeof responseJson?.detail === 'string' && responseJson.detail.trim()
+          ? responseJson.detail.trim()
+          : `http_${response.status}`;
+        if (response.status === 401 || response.status === 403) {
+          break;
+        }
+        continue;
+      }
+
+      return {
+        success: true,
+        status: response.status,
+        data: responseJson && typeof responseJson === 'object' ? responseJson : {},
+        intakeUrl: url.toString()
+      };
+    } catch (error) {
+      lastError = trimProblemLogText(error?.message || String(error), 180) || 'remote_api_request_failed';
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
+  return {
+    success: false,
+    error: lastError,
+    status: lastStatus,
+    intakeUrl: lastIntakeUrl
+  };
+}
+
+function normalizeRemoteRunnerStatusRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== 'object') return null;
+  const status = typeof rawRecord.status === 'string' ? rawRecord.status.trim().toLowerCase() : '';
+  return {
+    runnerId: typeof rawRecord.runner_id === 'string'
+      ? rawRecord.runner_id
+      : (typeof rawRecord.runnerId === 'string' ? rawRecord.runnerId : ''),
+    runnerName: typeof rawRecord.runner_name === 'string'
+      ? rawRecord.runner_name
+      : (typeof rawRecord.runnerName === 'string' ? rawRecord.runnerName : ''),
+    enabled: rawRecord.enabled === true,
+    promptsLoaded: rawRecord.prompts_loaded === true || rawRecord.promptsLoaded === true,
+    promptHash: typeof rawRecord.prompt_hash === 'string'
+      ? rawRecord.prompt_hash
+      : (typeof rawRecord.promptHash === 'string' ? rawRecord.promptHash : ''),
+    chatgptReady: rawRecord.chatgpt_ready === true || rawRecord.chatgptReady === true,
+    activeJobId: typeof rawRecord.active_job_id === 'string'
+      ? rawRecord.active_job_id
+      : (typeof rawRecord.activeJobId === 'string' ? rawRecord.activeJobId : ''),
+    activeJobStatus: typeof rawRecord.active_job_status === 'string'
+      ? rawRecord.active_job_status
+      : (typeof rawRecord.activeJobStatus === 'string' ? rawRecord.activeJobStatus : ''),
+    lastSeenAt: typeof rawRecord.last_seen_at === 'string'
+      ? rawRecord.last_seen_at
+      : (typeof rawRecord.lastSeenAt === 'string' ? rawRecord.lastSeenAt : ''),
+    updatedAt: typeof rawRecord.updated_at === 'string'
+      ? rawRecord.updated_at
+      : (typeof rawRecord.updatedAt === 'string' ? rawRecord.updatedAt : ''),
+    lastSeenAgeSeconds: Number.isInteger(rawRecord.last_seen_age_seconds)
+      ? rawRecord.last_seen_age_seconds
+      : (Number.isInteger(rawRecord.lastSeenAgeSeconds) ? rawRecord.lastSeenAgeSeconds : null),
+    acceptsRemoteJobs: rawRecord.accepts_remote_jobs === true || rawRecord.acceptsRemoteJobs === true,
+    isOnline: rawRecord.is_online === true || rawRecord.isOnline === true,
+    status
+  };
+}
+
+function normalizeRemoteJobRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== 'object') return null;
+  return {
+    jobId: typeof rawRecord.job_id === 'string'
+      ? rawRecord.job_id
+      : (typeof rawRecord.jobId === 'string' ? rawRecord.jobId : ''),
+    controllerId: typeof rawRecord.controller_id === 'string'
+      ? rawRecord.controller_id
+      : (typeof rawRecord.controllerId === 'string' ? rawRecord.controllerId : ''),
+    runnerId: typeof rawRecord.runner_id === 'string'
+      ? rawRecord.runner_id
+      : (typeof rawRecord.runnerId === 'string' ? rawRecord.runnerId : ''),
+    status: typeof rawRecord.status === 'string' ? rawRecord.status.trim().toLowerCase() : '',
+    requestPayload: rawRecord.request_payload && typeof rawRecord.request_payload === 'object'
+      ? rawRecord.request_payload
+      : (rawRecord.requestPayload && typeof rawRecord.requestPayload === 'object' ? rawRecord.requestPayload : null),
+    resultPayload: rawRecord.result_payload && typeof rawRecord.result_payload === 'object'
+      ? rawRecord.result_payload
+      : (rawRecord.resultPayload && typeof rawRecord.resultPayload === 'object' ? rawRecord.resultPayload : null),
+    error: typeof rawRecord.error === 'string' ? rawRecord.error.trim() : '',
+    createdAt: typeof rawRecord.created_at === 'string'
+      ? rawRecord.created_at
+      : (typeof rawRecord.createdAt === 'string' ? rawRecord.createdAt : ''),
+    claimedAt: typeof rawRecord.claimed_at === 'string'
+      ? rawRecord.claimed_at
+      : (typeof rawRecord.claimedAt === 'string' ? rawRecord.claimedAt : ''),
+    receivedAt: typeof rawRecord.received_at === 'string'
+      ? rawRecord.received_at
+      : (typeof rawRecord.receivedAt === 'string' ? rawRecord.receivedAt : ''),
+    startedAt: typeof rawRecord.started_at === 'string'
+      ? rawRecord.started_at
+      : (typeof rawRecord.startedAt === 'string' ? rawRecord.startedAt : ''),
+    heartbeatAt: typeof rawRecord.heartbeat_at === 'string'
+      ? rawRecord.heartbeat_at
+      : (typeof rawRecord.heartbeatAt === 'string' ? rawRecord.heartbeatAt : ''),
+    completedAt: typeof rawRecord.completed_at === 'string'
+      ? rawRecord.completed_at
+      : (typeof rawRecord.completedAt === 'string' ? rawRecord.completedAt : ''),
+    updatedAt: typeof rawRecord.updated_at === 'string'
+      ? rawRecord.updated_at
+      : (typeof rawRecord.updatedAt === 'string' ? rawRecord.updatedAt : ''),
+    heartbeatAgeSeconds: Number.isInteger(rawRecord.heartbeat_age_seconds)
+      ? rawRecord.heartbeat_age_seconds
+      : (Number.isInteger(rawRecord.heartbeatAgeSeconds) ? rawRecord.heartbeatAgeSeconds : null),
+    isStale: rawRecord.is_stale === true || rawRecord.isStale === true,
+  };
+}
+
+function normalizeRemotePreparedJobPayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const analysisType = typeof rawPayload.analysisType === 'string'
+    ? rawPayload.analysisType.trim().toLowerCase()
+    : '';
+  const promptChainSnapshot = Array.isArray(rawPayload.promptChainSnapshot)
+    ? rawPayload.promptChainSnapshot
+        .filter((item) => typeof item === 'string' && item.trim())
+        .map((item) => item.trim())
+    : [];
+  const preparedSources = Array.isArray(rawPayload.preparedSources)
+    ? rawPayload.preparedSources
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+          sourceId: typeof item.source_id === 'string'
+            ? item.source_id
+            : (typeof item.sourceId === 'string' ? item.sourceId : ''),
+          title: typeof item.title === 'string' ? item.title.trim() : '',
+          sourceUrl: typeof item.source_url === 'string'
+            ? item.source_url
+            : (typeof item.sourceUrl === 'string' ? item.sourceUrl : ''),
+          sourceName: typeof item.source_name === 'string'
+            ? item.source_name
+            : (typeof item.sourceName === 'string' ? item.sourceName : ''),
+          text: typeof item.text === 'string' ? item.text : '',
+          textHash: typeof item.text_hash === 'string'
+            ? item.text_hash
+            : (typeof item.textHash === 'string' ? item.textHash : ''),
+          extractedAtUtc: typeof item.extracted_at_utc === 'string'
+            ? item.extracted_at_utc
+            : (typeof item.extractedAtUtc === 'string' ? item.extractedAtUtc : '')
+        }))
+        .filter((item) => item.title && item.sourceUrl && item.sourceName && item.text)
+    : [];
+  if (analysisType !== 'company') return null;
+  if (promptChainSnapshot.length === 0 || preparedSources.length === 0) return null;
+  return {
+    analysisType,
+    promptChainSnapshot,
+    preparedSources
+  };
+}
+
 function createDispatchTimeoutError(timeoutMs) {
   const error = new Error(`dispatch_timeout_after_${timeoutMs}ms`);
   error.name = 'TimeoutError';
@@ -14645,6 +15059,33 @@ function ensureWatchlistDispatchAlarm() {
   }
 }
 
+async function syncRemoteRunnerAlarm() {
+  const settings = await getRemoteRunnerSettings();
+  if (!chrome?.alarms?.create) {
+    return { enabled: settings.enabled, alarmActive: false, nextRunAt: null };
+  }
+
+  if (settings.enabled) {
+    try {
+      chrome.alarms.create(REMOTE_RUNNER.alarmName, {
+        delayInMinutes: REMOTE_RUNNER.alarmPeriodMinutes,
+        periodInMinutes: REMOTE_RUNNER.alarmPeriodMinutes
+      });
+    } catch (error) {
+      console.warn('[remote-runner] create alarm failed:', error);
+    }
+  } else {
+    await clearAlarmSafe(REMOTE_RUNNER.alarmName);
+  }
+
+  const alarm = await getAlarmSafe(REMOTE_RUNNER.alarmName);
+  return {
+    enabled: settings.enabled,
+    alarmActive: !!alarm,
+    nextRunAt: alarm && Number.isInteger(alarm.scheduledTime) ? alarm.scheduledTime : null
+  };
+}
+
 function getAlarmSafe(alarmName) {
   return new Promise((resolve) => {
     if (!chrome?.alarms?.get) {
@@ -15165,9 +15606,15 @@ ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
 });
+syncRemoteRunnerAlarm().catch((error) => {
+  console.warn('[remote-runner] sync alarm on boot failed:', error);
+});
 logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
 logWatchlistRemoteConnectionState('service_worker_boot', false).catch(() => {});
 runProcessMonitorHeartbeatSweep('service_worker_boot').catch(() => {});
+runRemoteRunnerMaintenance('service_worker_boot').catch((error) => {
+  console.warn('[remote-runner] maintenance on boot failed:', error);
+});
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
 });
@@ -15210,8 +15657,14 @@ chrome.runtime.onInstalled.addListener(() => {
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onInstalled failed:', error);
   });
+  syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm onInstalled failed:', error);
+  });
   logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_installed', false).catch(() => {});
+  runRemoteRunnerMaintenance('on_installed').catch((error) => {
+    console.warn('[remote-runner] maintenance onInstalled failed:', error);
+  });
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
   });
@@ -15223,8 +15676,14 @@ chrome.runtime.onStartup.addListener(() => {
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onStartup failed:', error);
   });
+  syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm onStartup failed:', error);
+  });
   logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_startup', false).catch(() => {});
+  runRemoteRunnerMaintenance('on_startup').catch((error) => {
+    console.warn('[remote-runner] maintenance onStartup failed:', error);
+  });
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
   });
@@ -15332,6 +15791,13 @@ if (chrome?.alarms?.onAlarm) {
       runAutoRestoreWindowsCycle({ origin: 'auto_restore_alarm' }).catch((error) => {
         console.warn('[auto-restore] cycle failed:', error);
       });
+      return;
+    }
+
+    if (alarm.name === REMOTE_RUNNER.alarmName) {
+      runRemoteRunnerMaintenance('alarm').catch((error) => {
+        console.warn('[remote-runner] maintenance alarm failed:', error);
+      });
     }
   });
 }
@@ -15345,7 +15811,16 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null, conversationUrl = null) {
+async function saveResponse(
+  responseText,
+  source,
+  analysisType = 'company',
+  runId = null,
+  responseId = null,
+  stage = null,
+  conversationUrl = null,
+  extraMetadata = null
+) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -15422,6 +15897,29 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       newResponse.conversationLogs = conversationLogs;
       newResponse.conversationLogCount = conversationLogs.length;
     }
+    const safeExtraMetadata = extraMetadata && typeof extraMetadata === 'object' && !Array.isArray(extraMetadata)
+      ? extraMetadata
+      : null;
+    const sourceUrl = typeof safeExtraMetadata?.sourceUrl === 'string' ? safeExtraMetadata.sourceUrl.trim() : '';
+    const remoteSourceName = typeof safeExtraMetadata?.remoteSourceName === 'string'
+      ? safeExtraMetadata.remoteSourceName.trim()
+      : '';
+    const remoteJobId = typeof safeExtraMetadata?.remoteJobId === 'string' ? safeExtraMetadata.remoteJobId.trim() : '';
+    const remoteControllerId = typeof safeExtraMetadata?.remoteControllerId === 'string'
+      ? safeExtraMetadata.remoteControllerId.trim()
+      : '';
+    const remoteRunnerId = typeof safeExtraMetadata?.remoteRunnerId === 'string'
+      ? safeExtraMetadata.remoteRunnerId.trim()
+      : '';
+    const remoteSourceId = typeof safeExtraMetadata?.remoteSourceId === 'string'
+      ? safeExtraMetadata.remoteSourceId.trim()
+      : '';
+    if (sourceUrl) newResponse.sourceUrl = sourceUrl;
+    if (remoteSourceName) newResponse.remoteSourceName = remoteSourceName;
+    if (remoteJobId) newResponse.remoteJobId = remoteJobId;
+    if (remoteControllerId) newResponse.remoteControllerId = remoteControllerId;
+    if (remoteRunnerId) newResponse.remoteRunnerId = remoteRunnerId;
+    if (remoteSourceId) newResponse.remoteSourceId = remoteSourceId;
     
     const saveMaxAttempts = 4;
     const saveRetryDelayMs = 650;
@@ -15813,7 +16311,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.runId,
       message.responseId,
       message.stage || null,
-      message.conversationUrl || null
+      message.conversationUrl || null,
+      message.extraMetadata && typeof message.extraMetadata === 'object'
+        ? message.extraMetadata
+        : null
     )
       .then((saveResult) => {
         if (typeof sendResponse === 'function') {
@@ -15915,6 +16416,86 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         error: error?.message || String(error)
       });
       sendResponse({ success: false, error: error?.message || 'run_analysis_start_failed' });
+    });
+    return true;
+  } else if (message.type === 'RUN_REMOTE_ANALYSIS') {
+    (async () => {
+      const response = await runRemoteAnalysis({
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+      });
+      sendResponse(response);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'run_remote_analysis_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'GET_REMOTE_RUNNER_STATUS') {
+    getRemoteRunnerPopupStatus({
+      forceSync: message?.forceSync === true
+    })
+      .then((status) => sendResponse(status))
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          error: error?.message || 'remote_runner_status_failed'
+        });
+      });
+    return true;
+  } else if (message.type === 'CHECK_REMOTE_RUNNER') {
+    (async () => {
+      const settings = await getRemoteRunnerSettings();
+      const runnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
+        ? message.runnerId.trim()
+        : settings.controllerRunnerId;
+      if (!runnerId) {
+        sendResponse({ success: false, error: 'runner_id_missing' });
+        return;
+      }
+      const result = await fetchRemoteRunnerStatusRecord(runnerId);
+      if (result.success && result.runner?.runnerName) {
+        await saveRemoteRunnerSettings({
+          controllerRunnerId: runnerId,
+          controllerRunnerNameCached: result.runner.runnerName
+        });
+      }
+      sendResponse(result);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'remote_runner_check_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'SET_REMOTE_RUNNER_SETTINGS') {
+    (async () => {
+      const settings = await saveRemoteRunnerSettings({
+        enabled: typeof message?.enabled === 'boolean' ? message.enabled : undefined,
+        runnerName: typeof message?.runnerName === 'string' ? message.runnerName : undefined,
+        controllerRunnerId: typeof message?.controllerRunnerId === 'string'
+          ? message.controllerRunnerId
+          : undefined,
+        controllerRunnerNameCached: typeof message?.controllerRunnerNameCached === 'string'
+          ? message.controllerRunnerNameCached
+          : undefined
+      });
+      await syncRemoteRunnerAlarm();
+      if (settings.enabled) {
+        await runRemoteRunnerMaintenance('settings_updated').catch(() => null);
+      }
+      const status = await getRemoteRunnerPopupStatus({ forceSync: settings.enabled });
+      sendResponse({
+        success: true,
+        settings,
+        status
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'set_remote_runner_settings_failed'
+      });
     });
     return true;
   } else if (message.type === 'COUNT_COMPANY_CONVERSATION_MESSAGES') {
@@ -17696,6 +18277,776 @@ function buildPhoneLikeChatWindowCreateOptions(chatUrl, referenceWindow = null) 
   return createOptions;
 }
 
+function resolveSupportedSourceNameForTab(tab, { isManualSource = false, isManualPdf = false } = {}) {
+  if (isManualPdf) return 'Manual PDF';
+  if (isManualSource) {
+    const explicitRemoteSourceName = typeof tab?.remoteSourceName === 'string' ? tab.remoteSourceName.trim() : '';
+    return explicitRemoteSourceName || 'Manual Source';
+  }
+  const rawUrl = typeof tab?.url === 'string' ? tab.url.trim() : '';
+  if (!rawUrl) return 'Unknown';
+  try {
+    const hostname = new URL(rawUrl).hostname;
+    for (const source of SUPPORTED_SOURCES) {
+      const domain = source.pattern.replace('*://*.', '').replace('*://', '').replace('/*', '');
+      if (hostname.includes(domain)) {
+        return source.name;
+      }
+    }
+  } catch {
+    // Ignore URL parsing issues and fall back to Unknown.
+  }
+  return 'Unknown';
+}
+
+async function querySupportedSourceTabs() {
+  const allTabs = [];
+  const patterns = getSupportedSourcesQuery();
+  for (const pattern of patterns) {
+    const tabs = await chrome.tabs.query({ url: pattern });
+    allTabs.push(...tabs);
+  }
+  return Array.from(
+    new Map(
+      allTabs
+        .filter((tab) => Number.isInteger(tab?.id))
+        .map((tab) => [tab.id, tab])
+    ).values()
+  ).sort(compareTabsByWindowAndIndex);
+}
+
+async function extractArticleSourcePayload(tab, analysisType = 'company') {
+  const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
+  const isManualSource = manualUrl.startsWith('manual://');
+  const isManualPdf = manualUrl === 'manual://pdf';
+  const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
+    ? tab.manualPdfAttachment
+    : null;
+  let extractedText = '';
+  let transcriptLang = null;
+
+  if (isManualSource) {
+    extractedText = typeof tab?.manualText === 'string' ? tab.manualText : '';
+    if (!extractedText) {
+      return {
+        success: false,
+        title: tab?.title || 'Bez tytulu',
+        reason: 'manual_source_empty',
+        error: 'manual_source_empty'
+      };
+    }
+  } else {
+    const isYouTube = isYouTubeTabUrl(tab?.url);
+    if (isYouTube) {
+      const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
+        timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
+        maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
+      });
+      if (!transcriptResult.success || !transcriptResult.transcript) {
+        const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
+        return {
+          success: false,
+          title: tab?.title || 'Bez tytulu',
+          reason: `youtube_${ytReason}`,
+          error: transcriptResult.error || ytReason
+        };
+      }
+      extractedText = transcriptResult.transcript;
+      transcriptLang = transcriptResult.lang || 'unknown';
+    } else {
+      const results = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        function: extractText
+      });
+      extractedText = results?.[0]?.result || '';
+    }
+
+    if (!extractedText || extractedText.length < 50) {
+      return {
+        success: false,
+        title: tab?.title || 'Bez tytulu',
+        reason: 'text_too_short',
+        error: `text_too_short_${extractedText?.length || 0}`
+      };
+    }
+  }
+
+  const title = typeof tab?.title === 'string' && tab.title.trim() ? tab.title : 'Bez tytulu';
+  const sourceName = resolveSupportedSourceNameForTab(tab, { isManualSource, isManualPdf });
+  const sourceUrl = isManualSource
+    ? (
+      (typeof tab?.originalUrl === 'string' && tab.originalUrl.trim())
+        ? tab.originalUrl.trim()
+        : (tab?.url || 'manual://source')
+    )
+    : (tab?.url || '');
+
+  return {
+    success: true,
+    title,
+    text: extractedText,
+    sourceName,
+    sourceUrl,
+    transcriptLang,
+    isManualSource,
+    isManualPdf,
+    manualPdfAttachmentContext,
+    sourceWindowId: Number.isInteger(tab?.windowId) ? tab.windowId : null
+  };
+}
+
+async function prepareRemoteCompanyBatch() {
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady || !Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
+    return { success: false, error: 'prompts_not_loaded', preparedSources: [], skipped: [] };
+  }
+
+  const orderedTabs = await querySupportedSourceTabs();
+  if (!Array.isArray(orderedTabs) || orderedTabs.length === 0) {
+    return { success: false, error: 'no_supported_tabs', preparedSources: [], skipped: [] };
+  }
+
+  const preparedSources = [];
+  const skipped = [];
+  for (let index = 0; index < orderedTabs.length; index += 1) {
+    const tab = orderedTabs[index];
+    try {
+      const extracted = await extractArticleSourcePayload(tab, 'company');
+      if (!extracted?.success) {
+        skipped.push({
+          title: extracted?.title || tab?.title || 'Bez tytulu',
+          reason: extracted?.reason || 'extract_failed',
+          error: extracted?.error || ''
+        });
+        continue;
+      }
+      const textHash = await sha256HexForDispatch(extracted.text);
+      preparedSources.push({
+        source_id: `remote-src-${index + 1}-${textFingerprint(`${extracted.title}|${extracted.sourceUrl}`)}`,
+        title: extracted.title,
+        source_url: extracted.sourceUrl,
+        source_name: extracted.sourceName,
+        text: extracted.text,
+        text_hash: textHash,
+        extracted_at_utc: new Date().toISOString()
+      });
+    } catch (error) {
+      skipped.push({
+        title: tab?.title || 'Bez tytulu',
+        reason: 'extract_exception',
+        error: error?.message || String(error)
+      });
+    }
+  }
+
+  if (preparedSources.length === 0) {
+    return {
+      success: false,
+      error: skipped.length > 0 ? 'all_sources_failed_extraction' : 'no_prepared_sources',
+      preparedSources,
+      skipped
+    };
+  }
+
+  return {
+    success: true,
+    analysisType: 'company',
+    promptChainSnapshot: [...PROMPTS_COMPANY],
+    preparedSources,
+    skipped
+  };
+}
+
+async function fetchRemoteRunnerStatusRecord(runnerId) {
+  const safeRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
+  if (!safeRunnerId) return { success: false, error: 'runner_id_missing' };
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'GET',
+    endpointPath: `/api/v1/iskra/runner/${encodeURIComponent(safeRunnerId)}/status`
+  });
+  if (!response.success) {
+    return { success: false, error: response.error || 'remote_runner_status_failed' };
+  }
+  return {
+    success: true,
+    runner: normalizeRemoteRunnerStatusRecord(response?.data?.runner)
+  };
+}
+
+async function fetchRemoteJobRecordById(jobId) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return { success: false, error: 'job_id_missing' };
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'GET',
+    endpointPath: `/api/v1/iskra/remote-jobs/${encodeURIComponent(safeJobId)}`
+  });
+  if (!response.success) {
+    return { success: false, error: response.error || 'remote_job_fetch_failed' };
+  }
+  return {
+    success: true,
+    job: normalizeRemoteJobRecord(response?.data?.job)
+  };
+}
+
+async function createRemoteAnalysisJobRecord({ controllerId, runnerId, requestPayload }) {
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'POST',
+    endpointPath: '/api/v1/iskra/remote-jobs',
+    payload: {
+      controllerId,
+      runnerId,
+      requestPayload
+    }
+  });
+  if (!response.success) {
+    return {
+      success: false,
+      error: response.error || 'remote_job_create_failed'
+    };
+  }
+  if (response?.data?.success === false) {
+    return {
+      success: false,
+      error: response?.data?.reason || 'remote_job_create_failed',
+      runner: normalizeRemoteRunnerStatusRecord(response?.data?.runner)
+    };
+  }
+  return {
+    success: true,
+    job: normalizeRemoteJobRecord(response?.data?.job)
+  };
+}
+
+async function claimRemoteRunnerJobRecord(runnerId) {
+  const safeRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
+  if (!safeRunnerId) return { success: false, error: 'runner_id_missing' };
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'POST',
+    endpointPath: '/api/v1/iskra/remote-jobs/claim',
+    payload: { runnerId: safeRunnerId }
+  });
+  if (!response.success) {
+    return { success: false, error: response.error || 'remote_job_claim_failed' };
+  }
+  return {
+    success: true,
+    claimed: response?.data?.claimed === true,
+    job: normalizeRemoteJobRecord(response?.data?.job)
+  };
+}
+
+async function sendRemoteJobEventRecord(jobId, payload = {}) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return { success: false, error: 'job_id_missing' };
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'POST',
+    endpointPath: `/api/v1/iskra/remote-jobs/${encodeURIComponent(safeJobId)}/event`,
+    payload
+  });
+  if (!response.success) {
+    return { success: false, error: response.error || 'remote_job_event_failed' };
+  }
+  return {
+    success: true,
+    job: normalizeRemoteJobRecord(response?.data?.job)
+  };
+}
+
+async function sendRemoteRunnerHeartbeatNow(origin = 'manual', options = {}) {
+  const supportId = await ensureExtensionInstallationId().catch(() => '');
+  if (!supportId) {
+    return { success: false, error: 'support_id_unavailable', origin };
+  }
+  const settings = await getRemoteRunnerSettings();
+  const runnerState = options?.runnerState && typeof options.runnerState === 'object'
+    ? options.runnerState
+    : await getRemoteRunnerExecutionState();
+  const promptsReady = await ensureCompanyPromptsReady();
+  const payload = {
+    runnerId: supportId,
+    runnerName: typeof options?.runnerName === 'string' && options.runnerName.trim()
+      ? options.runnerName.trim()
+      : (settings.runnerName || supportId),
+    enabled: typeof options?.enabled === 'boolean' ? options.enabled : settings.enabled,
+    promptsLoaded: promptsReady,
+    promptHash: buildCompanyPromptHashSnapshot(PROMPTS_COMPANY),
+    chatgptReady: promptsReady,
+    activeJobId: typeof runnerState?.activeJobId === 'string' && runnerState.activeJobId.trim()
+      ? runnerState.activeJobId.trim()
+      : null
+  };
+  const response = await sendSignedWatchlistApiRequest({
+    method: 'POST',
+    endpointPath: WATCHLIST_REMOTE_RUNNER_HEARTBEAT_PATH,
+    payload
+  });
+  if (!response.success) {
+    return { success: false, error: response.error || 'remote_runner_heartbeat_failed', origin };
+  }
+  return {
+    success: true,
+    origin,
+    runner: normalizeRemoteRunnerStatusRecord(response?.data?.runner)
+  };
+}
+
+async function executePreparedRemoteCompanyBatch(requestPayload, options = {}) {
+  const normalizedPayload = normalizeRemotePreparedJobPayload(requestPayload);
+  if (!normalizedPayload) {
+    throw new Error('invalid_remote_job_payload');
+  }
+  const safeJobId = typeof options?.jobId === 'string' ? options.jobId.trim() : '';
+  const safeControllerId = typeof options?.controllerId === 'string' ? options.controllerId.trim() : '';
+  const safeRunnerId = typeof options?.runnerId === 'string' ? options.runnerId.trim() : '';
+  const pseudoTabs = normalizedPayload.preparedSources.map((source, index) => ({
+    id: `remote-${safeJobId || Date.now()}-${index}`,
+    title: source.title,
+    url: 'manual://remote-source',
+    manualText: source.text,
+    originalUrl: source.sourceUrl,
+    remoteSourceName: source.sourceName,
+    remoteJobId: safeJobId,
+    remoteControllerId: safeControllerId,
+    remoteRunnerId: safeRunnerId,
+    remoteSourceId: source.sourceId,
+    remoteTextHash: source.textHash,
+    remoteExtractedAtUtc: source.extractedAtUtc
+  }));
+
+  const settled = await processArticles(pseudoTabs, normalizedPayload.promptChainSnapshot, CHAT_URL, 'company', {
+    remoteJobId: safeJobId,
+    remoteControllerId: safeControllerId,
+    remoteRunnerId: safeRunnerId
+  });
+  const results = Array.isArray(settled) ? settled : [];
+  const fulfilled = results.filter((item) => item?.status === 'fulfilled');
+  const runIds = fulfilled
+    .map((item) => (typeof item?.value?.processId === 'string' ? item.value.processId : ''))
+    .filter((item) => item);
+  const successCount = fulfilled.filter((item) => item?.value?.success === true).length;
+  const failureCount = results.length - successCount;
+
+  return {
+    settled: results,
+    runIds,
+    successCount,
+    failureCount
+  };
+}
+
+async function executeClaimedRemoteRunnerJob(jobRecord) {
+  const job = normalizeRemoteJobRecord(jobRecord);
+  if (!job?.jobId || !job?.requestPayload) {
+    throw new Error('invalid_claimed_remote_job');
+  }
+
+  const supportId = await ensureExtensionInstallationId().catch(() => '');
+  const requestPayload = normalizeRemotePreparedJobPayload(job.requestPayload);
+  if (!requestPayload) {
+    const invalidPayloadError = 'invalid_remote_job_payload';
+    const failedEvent = await sendRemoteJobEventRecord(job.jobId, {
+      runnerId: supportId,
+      event: 'failed',
+      error: invalidPayloadError
+    });
+    if (!failedEvent.success) {
+      await setRemoteRunnerExecutionState({
+        activeJobId: job.jobId,
+        status: 'failed',
+        controllerId: job.controllerId,
+        pendingFinalEvent: {
+          event: 'failed',
+          error: invalidPayloadError,
+          resultPayload: null
+        }
+      });
+    } else {
+      await clearRemoteRunnerExecutionState();
+    }
+    return { success: false, error: invalidPayloadError };
+  }
+
+  remoteRunnerExecutionInProgress = true;
+  await setRemoteRunnerExecutionState({
+    activeJobId: job.jobId,
+    status: 'claimed',
+    controllerId: job.controllerId,
+    runIds: []
+  });
+  await setRemoteRunnerJobBinding(job.jobId, {
+    controllerId: job.controllerId,
+    status: 'claimed'
+  });
+
+  try {
+    await sendRemoteJobEventRecord(job.jobId, {
+      runnerId: supportId,
+      event: 'received'
+    }).catch(() => null);
+    await setRemoteRunnerExecutionState({
+      activeJobId: job.jobId,
+      status: 'received',
+      controllerId: job.controllerId,
+      runIds: []
+    });
+    await sendRemoteJobEventRecord(job.jobId, {
+      runnerId: supportId,
+      event: 'started'
+    }).catch(() => null);
+    await setRemoteRunnerExecutionState({
+      activeJobId: job.jobId,
+      status: 'started',
+      controllerId: job.controllerId,
+      runIds: []
+    });
+
+    const execution = await executePreparedRemoteCompanyBatch(requestPayload, {
+      jobId: job.jobId,
+      controllerId: job.controllerId,
+      runnerId: supportId
+    });
+    await setRemoteRunnerExecutionState({
+      activeJobId: job.jobId,
+      status: execution.failureCount > 0 ? 'failed' : 'completed',
+      controllerId: job.controllerId,
+      runIds: execution.runIds
+    });
+    await setRemoteRunnerJobBinding(job.jobId, {
+      controllerId: job.controllerId,
+      status: execution.failureCount > 0 ? 'failed' : 'completed',
+      runIds: execution.runIds
+    });
+
+    const resultPayload = {
+      analysisType: 'company',
+      runIds: execution.runIds,
+      successCount: execution.successCount,
+      failureCount: execution.failureCount,
+      sourceCount: requestPayload.preparedSources.length,
+      finishedAtUtc: new Date().toISOString()
+    };
+    const finalEvent = execution.failureCount > 0 ? 'failed' : 'completed';
+    const finalResponse = await sendRemoteJobEventRecord(job.jobId, {
+      runnerId: supportId,
+      event: finalEvent,
+      resultPayload,
+      ...(finalEvent === 'failed' ? { error: execution.failureCount > 0 ? 'remote_job_execution_failed' : '' } : {})
+    });
+
+    if (!finalResponse.success) {
+      await setRemoteRunnerExecutionState({
+        activeJobId: job.jobId,
+        status: finalEvent,
+        controllerId: job.controllerId,
+        runIds: execution.runIds,
+        pendingFinalEvent: {
+          event: finalEvent,
+          resultPayload,
+          error: finalEvent === 'failed' ? 'remote_job_execution_failed' : ''
+        }
+      });
+      return {
+        success: finalEvent === 'completed',
+        deferred: true,
+        runIds: execution.runIds
+      };
+    }
+
+    await clearRemoteRunnerExecutionState();
+    return {
+      success: finalEvent === 'completed',
+      runIds: execution.runIds
+    };
+  } catch (error) {
+    const errorText = error?.message || String(error);
+    const failedResponse = await sendRemoteJobEventRecord(job.jobId, {
+      runnerId: supportId,
+      event: 'failed',
+      error: errorText
+    });
+    if (!failedResponse.success) {
+      await setRemoteRunnerExecutionState({
+        activeJobId: job.jobId,
+        status: 'failed',
+        controllerId: job.controllerId,
+        pendingFinalEvent: {
+          event: 'failed',
+          error: errorText,
+          resultPayload: null
+        }
+      });
+    } else {
+      await clearRemoteRunnerExecutionState();
+    }
+    throw error;
+  } finally {
+    remoteRunnerExecutionInProgress = false;
+  }
+}
+
+async function runRemoteRunnerMaintenance(origin = 'manual') {
+  if (remoteRunnerMaintenanceInProgress) {
+    return { success: false, reason: 'remote_runner_maintenance_in_progress' };
+  }
+  remoteRunnerMaintenanceInProgress = true;
+  try {
+    const settings = await getRemoteRunnerSettings();
+    if (!settings.enabled) {
+      return { success: false, reason: 'remote_runner_disabled' };
+    }
+
+    const supportId = await ensureExtensionInstallationId().catch(() => '');
+    if (!supportId) {
+      return { success: false, reason: 'support_id_unavailable' };
+    }
+
+    let runnerState = await getRemoteRunnerExecutionState();
+    let heartbeat = await sendRemoteRunnerHeartbeatNow(origin, { runnerState });
+
+    const pendingFinalEvent = runnerState?.pendingFinalEvent && typeof runnerState.pendingFinalEvent === 'object'
+      ? runnerState.pendingFinalEvent
+      : null;
+    const activeJobId = typeof runnerState?.activeJobId === 'string' ? runnerState.activeJobId.trim() : '';
+    if (activeJobId && pendingFinalEvent?.event) {
+      const finalResult = await sendRemoteJobEventRecord(activeJobId, {
+        runnerId: supportId,
+        event: pendingFinalEvent.event,
+        resultPayload: pendingFinalEvent.resultPayload && typeof pendingFinalEvent.resultPayload === 'object'
+          ? pendingFinalEvent.resultPayload
+          : null,
+        error: typeof pendingFinalEvent.error === 'string' ? pendingFinalEvent.error : ''
+      });
+      if (finalResult.success) {
+        await clearRemoteRunnerExecutionState();
+        runnerState = {};
+        heartbeat = await sendRemoteRunnerHeartbeatNow(`${origin}:post-finalize`, { runnerState });
+      }
+    }
+
+    if (remoteRunnerExecutionInProgress) {
+      return {
+        success: true,
+        reason: 'remote_runner_execution_in_progress',
+        runner: heartbeat?.runner || null
+      };
+    }
+
+    runnerState = await getRemoteRunnerExecutionState();
+    const stillActiveJobId = typeof runnerState?.activeJobId === 'string' ? runnerState.activeJobId.trim() : '';
+    if (stillActiveJobId) {
+      return {
+        success: true,
+        reason: 'remote_runner_job_active',
+        runner: heartbeat?.runner || null,
+        activeJobId: stillActiveJobId
+      };
+    }
+
+    const claimResult = await claimRemoteRunnerJobRecord(supportId);
+    if (!claimResult.success) {
+      return {
+        success: false,
+        reason: claimResult.error || 'remote_job_claim_failed',
+        runner: heartbeat?.runner || null
+      };
+    }
+    if (!claimResult.claimed || !claimResult.job) {
+      return {
+        success: true,
+        claimed: false,
+        runner: heartbeat?.runner || null
+      };
+    }
+
+    void executeClaimedRemoteRunnerJob(claimResult.job).catch((error) => {
+      console.warn('[remote-runner] execute claimed job failed:', error);
+    });
+    return {
+      success: true,
+      claimed: true,
+      runner: heartbeat?.runner || null,
+      job: claimResult.job
+    };
+  } finally {
+    remoteRunnerMaintenanceInProgress = false;
+  }
+}
+
+async function getRemoteRunnerPopupStatus(options = {}) {
+  const supportId = await ensureExtensionInstallationId().catch(() => '');
+  const settings = await getRemoteRunnerSettings();
+  const promptsLoaded = await ensureCompanyPromptsReady();
+  const runnerState = await getRemoteRunnerExecutionState();
+  const promptHash = buildCompanyPromptHashSnapshot(PROMPTS_COMPANY);
+
+  let localRunner = null;
+  let localRunnerError = '';
+  if (settings.enabled) {
+    const heartbeat = options?.forceSync === true
+      ? await sendRemoteRunnerHeartbeatNow('popup_force_sync', { runnerState })
+      : await fetchRemoteRunnerStatusRecord(supportId);
+    if (heartbeat.success) {
+      localRunner = heartbeat.runner || null;
+    } else {
+      localRunnerError = heartbeat.error || 'remote_runner_status_failed';
+    }
+  }
+
+  let targetRunner = null;
+  let targetRunnerError = '';
+  if (settings.controllerRunnerId) {
+    const targetResult = await fetchRemoteRunnerStatusRecord(settings.controllerRunnerId);
+    if (targetResult.success) {
+      targetRunner = targetResult.runner || null;
+      if (targetRunner?.runnerName && targetRunner.runnerName !== settings.controllerRunnerNameCached) {
+        await saveRemoteRunnerSettings({
+          controllerRunnerNameCached: targetRunner.runnerName
+        });
+      }
+    } else {
+      targetRunnerError = targetResult.error || 'remote_runner_status_failed';
+    }
+  }
+
+  let controllerJob = null;
+  let controllerJobError = '';
+  const controllerLastJob = await getRemoteControllerLastJobState();
+  if (controllerLastJob?.jobId) {
+    const controllerJobResult = await fetchRemoteJobRecordById(controllerLastJob.jobId);
+    if (controllerJobResult.success) {
+      controllerJob = controllerJobResult.job || null;
+      if (controllerJob?.jobId) {
+        await setRemoteControllerLastJobState({
+          ...controllerLastJob,
+          jobId: controllerJob.jobId,
+          runnerId: controllerJob.runnerId || controllerLastJob.runnerId || '',
+          status: controllerJob.status || controllerLastJob.status || '',
+          completedAt: controllerJob.completedAt || '',
+          isStale: controllerJob.isStale === true
+        });
+      }
+    } else {
+      controllerJobError = controllerJobResult.error || 'remote_job_fetch_failed';
+      controllerJob = controllerLastJob;
+    }
+  }
+
+  let runnerJob = null;
+  let runnerJobError = '';
+  const runnerActiveJobId = typeof runnerState?.activeJobId === 'string' ? runnerState.activeJobId.trim() : '';
+  if (runnerActiveJobId) {
+    const runnerJobResult = await fetchRemoteJobRecordById(runnerActiveJobId);
+    if (runnerJobResult.success) {
+      runnerJob = runnerJobResult.job || null;
+    } else {
+      runnerJobError = runnerJobResult.error || 'remote_job_fetch_failed';
+      runnerJob = await getRemoteRunnerJobBinding(runnerActiveJobId);
+    }
+  }
+
+  return {
+    success: true,
+    supportId,
+    promptCount: Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0,
+    promptsLoaded,
+    promptHash,
+    settings,
+    localRunner,
+    localRunnerError,
+    targetRunner,
+    targetRunnerError,
+    controllerJob,
+    controllerJobError,
+    runnerJob,
+    runnerJobError,
+    runnerState
+  };
+}
+
+async function runRemoteAnalysis(options = {}) {
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady || !Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
+    return { success: false, error: 'prompts_not_loaded' };
+  }
+
+  const settings = await getRemoteRunnerSettings();
+  const runnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
+    ? options.runnerId.trim()
+    : settings.controllerRunnerId;
+  if (!runnerId) {
+    return { success: false, error: 'runner_id_missing' };
+  }
+
+  const controllerId = await ensureExtensionInstallationId().catch(() => '');
+  if (!controllerId) {
+    return { success: false, error: 'support_id_unavailable' };
+  }
+
+  const runnerStatusResult = await fetchRemoteRunnerStatusRecord(runnerId);
+  if (!runnerStatusResult.success || !runnerStatusResult.runner) {
+    return {
+      success: false,
+      error: runnerStatusResult.error || 'remote_runner_status_failed'
+    };
+  }
+  if (runnerStatusResult.runner.status !== 'ready' || runnerStatusResult.runner.acceptsRemoteJobs !== true) {
+    return {
+      success: false,
+      error: `runner_${runnerStatusResult.runner.status || 'not_ready'}`,
+      runner: runnerStatusResult.runner
+    };
+  }
+
+  const preparedBatch = await prepareRemoteCompanyBatch();
+  if (!preparedBatch.success) {
+    return {
+      success: false,
+      error: preparedBatch.error || 'remote_batch_prepare_failed',
+      skipped: preparedBatch.skipped || []
+    };
+  }
+
+  const requestPayload = {
+    analysisType: 'company',
+    promptChainSnapshot: [...preparedBatch.promptChainSnapshot],
+    preparedSources: preparedBatch.preparedSources,
+    createdAtUtc: new Date().toISOString()
+  };
+  const createResult = await createRemoteAnalysisJobRecord({
+    controllerId,
+    runnerId,
+    requestPayload
+  });
+  if (!createResult.success || !createResult.job) {
+    return {
+      success: false,
+      error: createResult.error || 'remote_job_create_failed',
+      runner: createResult.runner || runnerStatusResult.runner
+    };
+  }
+
+  await saveRemoteRunnerSettings({
+    controllerRunnerId: runnerId,
+    controllerRunnerNameCached: runnerStatusResult.runner.runnerName || settings.controllerRunnerNameCached
+  });
+  await setRemoteControllerLastJobState({
+    jobId: createResult.job.jobId,
+    runnerId,
+    status: createResult.job.status,
+    sourceCount: preparedBatch.preparedSources.length,
+    skippedCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0
+  });
+
+  return {
+    success: true,
+    job: createResult.job,
+    runner: runnerStatusResult.runner,
+    preparedSourceCount: preparedBatch.preparedSources.length,
+    skippedSourceCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0
+  };
+}
+
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
@@ -17712,115 +19063,34 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
     let processTitle = tab?.title || 'Bez tytulu';
     let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
-    const sourceWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
+    const sourceWindowId = Number.isInteger(tab?.windowId)
+      ? tab.windowId
+      : (Number.isInteger(options?.sourceWindowId) ? options.sourceWindowId : null);
     try {
       console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
       console.log(`URL: ${tab.url}`);
       
       // Małe opóźnienie między startami aby nie przytłoczyć przeglądarki
       await sleep(index * 500);
-      
-      // Sprawdź czy to pseudo-tab (ręcznie wklejone źródło)
-      const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
-      const isManualSource = manualUrl.startsWith('manual://');
-      const isManualPdf = manualUrl === 'manual://pdf';
-      let extractedText;
-      let transcriptLang = null; // Moze byc ustawiony przez YouTube content script
-      const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
-        ? tab.manualPdfAttachment
-        : null;      
-      if (isManualSource) {
-        // Użyj tekstu przekazanego bezpośrednio
-        extractedText = tab.manualText;
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Używam ręcznie wklejonego tekstu: ${extractedText?.length || 0} znaków`);
-        
-        // Dla manual source: brak walidacji długości (zgodnie z planem)
-        if (!extractedText || extractedText.length === 0) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - pusty tekst`);
-          return { success: false, title: processTitle, reason: 'pusty tekst', error: 'manual_source_empty' };
-        }
-      } else {
-        // Wykryj źródło najpierw, aby wiedzieć czy to YouTube
-        const isYouTube = isYouTubeTabUrl(tab.url);
-        
-        if (isYouTube) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube detected - fetching transcript`);
-          const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
-            timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
-            maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
-          });
-
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript result:`, {
-            success: transcriptResult.success,
-            length: transcriptResult.transcript?.length || 0,
-            lang: transcriptResult.lang,
-            method: transcriptResult.method,
-            cacheHit: transcriptResult.cacheHit,
-            errorCode: transcriptResult.errorCode,
-            error: transcriptResult.error,
-            attemptUsed: transcriptResult.attemptUsed,
-            attempts: transcriptResult.attempts,
-          });
-
-          if (!transcriptResult.success || !transcriptResult.transcript) {
-            const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
-            const ytError = transcriptResult.error || ytReason;
-            console.warn(
-              `[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript failed: reason=${ytReason} retryable=${transcriptResult.retryable === true} attempt=${transcriptResult.attemptUsed || 0}/${transcriptResult.attempts || YT_TRANSCRIPT_MAX_RETRIES} error=${truncateDispatchLogText(ytError, 220)}`
-            );
-            return {
-              success: false,
-              title: processTitle,
-              reason: `youtube_${ytReason}`,
-              error: ytError
-            };
-          }
-
-          extractedText = transcriptResult.transcript;
-          transcriptLang = transcriptResult.lang || 'unknown';
-        } else {
-          // === NON-YOUTUBE: Użyj executeScript z extractText ===
-          const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            function: extractText
-          });
-          extractedText = results[0]?.result;
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
-        }
-        
-        // Dla automatycznych źródeł: walidacja minimum 50 znaków
-        if (!extractedText || extractedText.length < 50) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - za mało tekstu`);
-          return {
-            success: false,
-            title: processTitle,
-            reason: 'za mało tekstu',
-            error: `text_too_short_${extractedText?.length || 0}`
-          };
-        }
+      const extracted = await extractArticleSourcePayload(tab, analysisType);
+      if (!extracted?.success) {
+        return {
+          success: false,
+          title: extracted?.title || processTitle,
+          reason: extracted?.reason || 'extract_failed',
+          error: extracted?.error || ''
+        };
       }
 
-      // Pobierz tytuł
-      const title = tab.title || "Bez tytułu";
+      const extractedText = extracted.text;
+      const title = extracted.title || tab.title || "Bez tytułu";
       processTitle = title;
-      
-      // Wykryj źródło artykułu (dla non-YouTube lub dla payload metadata)
-      let sourceName;
-      
-      if (isManualSource) {
-        sourceName = isManualPdf ? "Manual PDF" : "Manual Source";
-      } else {
-        const url = new URL(tab.url);
-        const hostname = url.hostname;
-        sourceName = "Unknown";
-        for (const source of SUPPORTED_SOURCES) {
-          const domain = source.pattern.replace('*://*.', '').replace('*://', '').replace('/*', '');
-          if (hostname.includes(domain)) {
-            sourceName = source.name;
-            break;
-          }
-        }
-      }
+      const isManualSource = extracted.isManualSource === true;
+      const isManualPdf = extracted.isManualPdf === true;
+      const transcriptLang = extracted.transcriptLang || null;
+      const sourceName = extracted.sourceName || 'Unknown';
+      const manualPdfAttachmentContext = extracted.manualPdfAttachmentContext || null;
+      const processSourceUrl = extracted.sourceUrl || (tab?.url || '');
 
       // Wyciągnij treść pierwszego prompta z promptChain
       const firstPrompt = promptChain[0] || '';
@@ -17842,8 +19112,36 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
-        sourceUrl: isManualSource ? (tab.url || 'manual://source') : (tab.url || ''),
+        sourceUrl: processSourceUrl,
+        sourceName,
         chatUrl,
+        ...(typeof tab?.remoteSourceName === 'string' && tab.remoteSourceName.trim()
+          ? { remoteSourceName: tab.remoteSourceName.trim() }
+          : {}),
+        ...(typeof tab?.remoteJobId === 'string' && tab.remoteJobId.trim()
+          ? { remoteJobId: tab.remoteJobId.trim() }
+          : (typeof options?.remoteJobId === 'string' && options.remoteJobId.trim()
+            ? { remoteJobId: options.remoteJobId.trim() }
+            : {})),
+        ...(typeof tab?.remoteControllerId === 'string' && tab.remoteControllerId.trim()
+          ? { remoteControllerId: tab.remoteControllerId.trim() }
+          : (typeof options?.remoteControllerId === 'string' && options.remoteControllerId.trim()
+            ? { remoteControllerId: options.remoteControllerId.trim() }
+            : {})),
+        ...(typeof tab?.remoteRunnerId === 'string' && tab.remoteRunnerId.trim()
+          ? { remoteRunnerId: tab.remoteRunnerId.trim() }
+          : (typeof options?.remoteRunnerId === 'string' && options.remoteRunnerId.trim()
+            ? { remoteRunnerId: options.remoteRunnerId.trim() }
+            : {})),
+        ...(typeof tab?.remoteSourceId === 'string' && tab.remoteSourceId.trim()
+          ? { remoteSourceId: tab.remoteSourceId.trim() }
+          : {}),
+        ...(typeof tab?.remoteTextHash === 'string' && tab.remoteTextHash.trim()
+          ? { remoteTextHash: tab.remoteTextHash.trim() }
+          : {}),
+        ...(typeof tab?.remoteExtractedAtUtc === 'string' && tab.remoteExtractedAtUtc.trim()
+          ? { remoteExtractedAtUtc: tab.remoteExtractedAtUtc.trim() }
+          : {}),
         ...(invocationWindowId !== null ? { invocationWindowId } : {}),
         ...(sourceWindowId !== null ? { sourceWindowId } : {}),
         messages: []
@@ -18224,7 +19522,21 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             processId,
             providedResponseId,
             Object.keys(stageMeta).length > 0 ? stageMeta : null,
-            conversationUrl || null
+            conversationUrl || null,
+            {
+              sourceUrl: processSourceUrl,
+              remoteSourceName: typeof tab?.remoteSourceName === 'string' ? tab.remoteSourceName.trim() : '',
+              remoteJobId: typeof tab?.remoteJobId === 'string'
+                ? tab.remoteJobId.trim()
+                : (typeof options?.remoteJobId === 'string' ? options.remoteJobId.trim() : ''),
+              remoteControllerId: typeof tab?.remoteControllerId === 'string'
+                ? tab.remoteControllerId.trim()
+                : (typeof options?.remoteControllerId === 'string' ? options.remoteControllerId.trim() : ''),
+              remoteRunnerId: typeof tab?.remoteRunnerId === 'string'
+                ? tab.remoteRunnerId.trim()
+                : (typeof options?.remoteRunnerId === 'string' ? options.remoteRunnerId.trim() : ''),
+              remoteSourceId: typeof tab?.remoteSourceId === 'string' ? tab.remoteSourceId.trim() : ''
+            }
           );
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
@@ -18404,6 +19716,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       return {
         success: processSuccess,
         title,
+        processId,
         reason: finalReason || '',
         error: finalError || ''
       };
@@ -18422,7 +19735,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
-      return { success: false, error: error.message };
+      return { success: false, processId, error: error.message };
     }
   });
 
@@ -18524,26 +19837,9 @@ async function runAnalysis(options = {}) {
     
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
-    const allTabs = [];
     const patterns = getSupportedSourcesQuery();
     console.log(`Szukam artykułów w ${patterns.length} źródłach:`, patterns);
-    
-    for (const pattern of patterns) {
-      const tabs = await chrome.tabs.query({url: pattern});
-      console.log(`  - ${pattern}: znaleziono ${tabs.length} kart`);
-      if (tabs.length > 0) {
-        tabs.forEach(tab => console.log(`    • ${tab.title} (${tab.url})`));
-      }
-      allTabs.push(...tabs);
-    }
-    
-    const orderedTabs = Array.from(
-      new Map(
-        allTabs
-          .filter((tab) => Number.isInteger(tab?.id))
-          .map((tab) => [tab.id, tab])
-      ).values()
-    ).sort(compareTabsByWindowAndIndex);
+    const orderedTabs = await querySupportedSourceTabs();
 
     if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");

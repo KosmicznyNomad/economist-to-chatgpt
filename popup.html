@@ -298,6 +298,36 @@
   </details>
 
   <details class="details">
+    <summary>Remote Runner</summary>
+    <div class="details-content">
+      <input
+        class="dispatch-input"
+        id="remoteRunnerNameInput"
+        type="text"
+        placeholder="Nazwa tego runnera"
+        autocomplete="off"
+      />
+      <div class="dispatch-actions">
+        <button class="btn btn-center" id="remoteRunnerToggleBtn">Runner: OFF</button>
+        <button class="btn btn-center" id="copySupportIdBtn">Kopiuj Runner ID</button>
+      </div>
+      <input
+        class="dispatch-input"
+        id="remoteTargetRunnerIdInput"
+        type="text"
+        placeholder="Runner ID drugiego komputera"
+        autocomplete="off"
+      />
+      <div class="dispatch-actions">
+        <button class="btn btn-center" id="checkRemoteRunnerBtn">Sprawdz runner</button>
+        <button class="btn btn-center" id="runRemoteBtn">Uruchom na drugim komputerze</button>
+      </div>
+      <p class="status" id="remoteRunnerStatus" aria-live="polite">Sprawdzam status runnera...</p>
+      <p class="status" id="remoteRunnerJobStatus" aria-live="polite" hidden></p>
+    </div>
+  </details>
+
+  <details class="details">
     <summary>Narzedzia</summary>
     <div class="details-content">
       <div class="row">

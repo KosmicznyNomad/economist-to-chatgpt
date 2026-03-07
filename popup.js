@@ -141,6 +141,14 @@ const watchlistSecretInput = document.getElementById('watchlistSecretInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
+const remoteRunnerNameInput = document.getElementById('remoteRunnerNameInput');
+const remoteTargetRunnerIdInput = document.getElementById('remoteTargetRunnerIdInput');
+const remoteRunnerToggleBtn = document.getElementById('remoteRunnerToggleBtn');
+const copySupportIdBtn = document.getElementById('copySupportIdBtn');
+const checkRemoteRunnerBtn = document.getElementById('checkRemoteRunnerBtn');
+const runRemoteBtn = document.getElementById('runRemoteBtn');
+const remoteRunnerStatus = document.getElementById('remoteRunnerStatus');
+const remoteRunnerJobStatus = document.getElementById('remoteRunnerJobStatus');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
 const countCompanyMessagesBtn = document.getElementById('countCompanyMessagesBtn');
@@ -152,6 +160,7 @@ const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 const unfinishedProcessesBtn = document.getElementById('unfinishedProcessesBtn');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
+let remoteRunnerStatusSnapshot = null;
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -220,6 +229,14 @@ function setRestoreProcessWindowsStatus(text, isError = false) {
 
 function setAutoRestoreStatus(text, isError = false) {
   setStatusElement(autoRestoreStatus, text, isError);
+}
+
+function setRemoteRunnerStatus(text, isError = false) {
+  setStatusElement(remoteRunnerStatus, text, isError);
+}
+
+function setRemoteRunnerJobStatus(text, isError = false) {
+  setStatusElement(remoteRunnerJobStatus, text, isError);
 }
 
 function applyAutoRestoreUi(status) {
@@ -371,6 +388,143 @@ function safePreview(value, fallback = 'n/a') {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text) return fallback;
   return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+}
+
+function formatRemoteRunnerStateLabel(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
+  if (normalized === 'ready') return 'ready';
+  if (normalized === 'busy') return 'busy';
+  if (normalized === 'stale') return 'stale';
+  if (normalized === 'online') return 'online';
+  return normalized || 'offline';
+}
+
+function formatRemoteRunnerSummary(record, fallbackId = '') {
+  if (!record || typeof record !== 'object') {
+    return fallbackId ? `Runner ${safePreview(fallbackId)}: offline.` : 'Runner: brak danych.';
+  }
+  const runnerId = typeof record.runnerId === 'string' && record.runnerId.trim()
+    ? record.runnerId.trim()
+    : fallbackId;
+  const runnerName = typeof record.runnerName === 'string' && record.runnerName.trim()
+    ? record.runnerName.trim()
+    : '';
+  const label = formatRemoteRunnerStateLabel(record.status);
+  const parts = [`Runner ${runnerName ? `${runnerName} ` : ''}(${safePreview(runnerId, 'n/a')}): ${label}.`];
+  if (record.promptsLoaded === false) parts.push('Prompty: brak.');
+  if (record.chatgptReady === false) parts.push('ChatGPT: not ready.');
+  if (typeof record.activeJobId === 'string' && record.activeJobId.trim()) {
+    parts.push(`Aktywny job: ${safePreview(record.activeJobId)}${record.activeJobStatus ? ` (${record.activeJobStatus})` : ''}.`);
+  }
+  if (Number.isInteger(record.lastSeenAgeSeconds)) {
+    parts.push(`Heartbeat: ${record.lastSeenAgeSeconds}s.`);
+  }
+  return parts.join(' ');
+}
+
+function formatRemoteJobSummary(job, fallbackLabel = 'Job') {
+  if (!job || typeof job !== 'object') return `${fallbackLabel}: brak.`;
+  const jobId = typeof job.jobId === 'string' && job.jobId.trim() ? job.jobId.trim() : 'n/a';
+  const status = typeof job.status === 'string' && job.status.trim() ? job.status.trim() : 'unknown';
+  const staleText = job.isStale === true ? ' stale' : '';
+  const parts = [`${fallbackLabel}: ${status}${staleText} (${safePreview(jobId)}).`];
+  if (typeof job.error === 'string' && job.error.trim()) {
+    parts.push(`Blad: ${safePreview(job.error, job.error)}.`);
+  }
+  const resultPayload = job.resultPayload && typeof job.resultPayload === 'object' ? job.resultPayload : null;
+  if (resultPayload) {
+    const successCount = Number.isInteger(resultPayload.successCount) ? resultPayload.successCount : null;
+    const failureCount = Number.isInteger(resultPayload.failureCount) ? resultPayload.failureCount : null;
+    if (successCount !== null || failureCount !== null) {
+      parts.push(`Wynik: ok=${successCount ?? 0}, fail=${failureCount ?? 0}.`);
+    }
+  }
+  return parts.join(' ');
+}
+
+function applyRemoteRunnerUi(status) {
+  remoteRunnerStatusSnapshot = status && typeof status === 'object' ? status : null;
+  const settings = remoteRunnerStatusSnapshot?.settings && typeof remoteRunnerStatusSnapshot.settings === 'object'
+    ? remoteRunnerStatusSnapshot.settings
+    : {};
+  if (remoteRunnerNameInput && document.activeElement !== remoteRunnerNameInput) {
+    remoteRunnerNameInput.value = typeof settings.runnerName === 'string' ? settings.runnerName : '';
+  }
+  if (remoteTargetRunnerIdInput && document.activeElement !== remoteTargetRunnerIdInput) {
+    remoteTargetRunnerIdInput.value = typeof settings.controllerRunnerId === 'string'
+      ? settings.controllerRunnerId
+      : '';
+  }
+  if (remoteRunnerToggleBtn) {
+    remoteRunnerToggleBtn.dataset.enabled = settings.enabled === true ? 'true' : 'false';
+    remoteRunnerToggleBtn.textContent = settings.enabled === true ? 'Runner: ON' : 'Runner: OFF';
+  }
+}
+
+function formatRemoteRunnerStatusView(status) {
+  if (!status || status.success === false) {
+    return `Remote runner: ${status?.error || 'blad statusu'}.`;
+  }
+  const lines = [];
+  const supportId = typeof status.supportId === 'string' && status.supportId.trim() ? status.supportId.trim() : '';
+  lines.push(`To urzadzenie: ${safePreview(supportId, 'brak Runner ID')}.`);
+  lines.push(
+    status?.settings?.enabled === true
+      ? formatRemoteRunnerSummary(status.localRunner, supportId)
+      : 'Ten komputer nie jest runnerem.'
+  );
+  const targetRunnerId = typeof status?.settings?.controllerRunnerId === 'string'
+    ? status.settings.controllerRunnerId.trim()
+    : '';
+  if (targetRunnerId) {
+    if (status.targetRunner) {
+      lines.push(`Cel: ${formatRemoteRunnerSummary(status.targetRunner, targetRunnerId)}`);
+    } else if (status.targetRunnerError) {
+      lines.push(`Cel: ${safePreview(targetRunnerId)} -> ${status.targetRunnerError}.`);
+    } else {
+      lines.push(`Cel: ${safePreview(targetRunnerId)}.`);
+    }
+  } else {
+    lines.push('Cel: brak wybranego runnera.');
+  }
+  if (status.promptsLoaded === false) {
+    lines.push('Prompty company nie sa zaladowane.');
+  }
+  return lines.join('\n');
+}
+
+function formatRemoteRunnerJobStatusView(status) {
+  if (!status || status.success === false) return '';
+  const lines = [];
+  if (status.controllerJob) {
+    lines.push(formatRemoteJobSummary(status.controllerJob, 'Controller job'));
+  } else if (status.controllerJobError) {
+    lines.push(`Controller job: ${status.controllerJobError}.`);
+  }
+  if (status.runnerJob) {
+    lines.push(formatRemoteJobSummary(status.runnerJob, 'Runner job'));
+  } else if (status.runnerJobError) {
+    lines.push(`Runner job: ${status.runnerJobError}.`);
+  }
+  return lines.join('\n');
+}
+
+async function refreshRemoteRunnerStatus(forceSync = false) {
+  if (!remoteRunnerStatus) return;
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_REMOTE_RUNNER_STATUS',
+      forceSync,
+    });
+    applyRemoteRunnerUi(response);
+    setRemoteRunnerStatus(formatRemoteRunnerStatusView(response), response?.success === false);
+    const jobText = formatRemoteRunnerJobStatusView(response);
+    setRemoteRunnerJobStatus(jobText, false);
+  } catch (error) {
+    applyRemoteRunnerUi(null);
+    setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+    setRemoteRunnerJobStatus('', false);
+  }
 }
 
 const DISPATCH_REASON_LABELS = {
@@ -1149,6 +1303,100 @@ async function executeResumeAllFromPopup(button, options = {}) {
   }
 }
 
+async function executeCheckRemoteRunnerFromPopup(button) {
+  if (!button) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Sprawdzam...';
+  setRemoteRunnerStatus('Sprawdzam runner...', false);
+
+  try {
+    const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+      ? remoteTargetRunnerIdInput.value.trim()
+      : '';
+    if (!runnerId) {
+      setRemoteRunnerStatus('Remote runner: wpisz Runner ID drugiego komputera.', true);
+      return;
+    }
+    const response = await sendRuntimeMessage({
+      type: 'CHECK_REMOTE_RUNNER',
+      runnerId
+    });
+    if (response?.success === false) {
+      setRemoteRunnerStatus(`Remote runner: ${response.error || 'blad sprawdzenia runnera'}.`, true);
+      return;
+    }
+    await sendRuntimeMessage({
+      type: 'SET_REMOTE_RUNNER_SETTINGS',
+      controllerRunnerId: runnerId,
+      controllerRunnerNameCached: typeof response?.runner?.runnerName === 'string' ? response.runner.runnerName : ''
+    });
+    await refreshRemoteRunnerStatus(true);
+  } catch (error) {
+    setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText || 'Sprawdz runner';
+  }
+}
+
+async function executeRunRemoteAnalysisFromPopup(button) {
+  if (!button) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Uruchamiam...';
+  setRunStatus('Przygotowuje batch tekstow i wysylam do runnera...');
+
+  try {
+    const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+      ? remoteTargetRunnerIdInput.value.trim()
+      : '';
+    if (!runnerId) {
+      setRunStatus('Remote runner: wpisz Runner ID przed zdalnym startem.', true);
+      return;
+    }
+    const response = await sendRuntimeMessage({
+      type: 'RUN_REMOTE_ANALYSIS',
+      runnerId,
+      origin: 'popup-run-remote-analysis'
+    });
+    if (response?.success === false) {
+      setRunStatus(`Remote runner: ${response.error || 'remote_start_failed'}`, true);
+      await refreshRemoteRunnerStatus(true);
+      return;
+    }
+    setRunStatus(
+      `Zdalny start wyslany. Job=${safePreview(response?.job?.jobId || '', 'n/a')}, zrodla=${response?.preparedSourceCount || 0}, skipped=${response?.skippedSourceCount || 0}.`,
+      false
+    );
+    await refreshRemoteRunnerStatus(true);
+  } catch (error) {
+    setRunStatus(`Remote runner: ${error?.message || String(error)}`, true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText || 'Uruchom na drugim komputerze';
+  }
+}
+
+async function saveRemoteRunnerSettingsFromPopup(patch = {}) {
+  const runnerName = typeof remoteRunnerNameInput?.value === 'string'
+    ? remoteRunnerNameInput.value.trim()
+    : '';
+  const controllerRunnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+    ? remoteTargetRunnerIdInput.value.trim()
+    : '';
+  const response = await sendRuntimeMessage({
+    type: 'SET_REMOTE_RUNNER_SETTINGS',
+    runnerName,
+    controllerRunnerId,
+    ...patch
+  });
+  if (response?.success === false) {
+    throw new Error(response.error || 'set_remote_runner_settings_failed');
+  }
+  return response;
+}
+
 async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   if (!button) return;
 
@@ -1555,6 +1803,72 @@ if (runBtn) {
   });
 }
 
+if (remoteRunnerToggleBtn) {
+  remoteRunnerToggleBtn.addEventListener('click', async () => {
+    const enabledNow = remoteRunnerToggleBtn.dataset.enabled === 'true';
+    const nextEnabled = !enabledNow;
+    const originalText = remoteRunnerToggleBtn.textContent;
+    remoteRunnerToggleBtn.disabled = true;
+    remoteRunnerToggleBtn.textContent = nextEnabled ? 'Runner: ON...' : 'Runner: OFF...';
+    try {
+      await saveRemoteRunnerSettingsFromPopup({ enabled: nextEnabled });
+      await refreshRemoteRunnerStatus(true);
+    } catch (error) {
+      setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+      remoteRunnerToggleBtn.textContent = originalText || 'Runner';
+    } finally {
+      remoteRunnerToggleBtn.disabled = false;
+    }
+  });
+}
+
+if (copySupportIdBtn) {
+  copySupportIdBtn.addEventListener('click', async () => {
+    try {
+      const status = remoteRunnerStatusSnapshot?.supportId
+        ? remoteRunnerStatusSnapshot
+        : await sendRuntimeMessage({ type: 'GET_REMOTE_RUNNER_STATUS', forceSync: false });
+      const supportId = typeof status?.supportId === 'string' ? status.supportId.trim() : '';
+      if (!supportId) {
+        setRemoteRunnerStatus('Remote runner: brak lokalnego Runner ID.', true);
+        return;
+      }
+      await copyTextToClipboard(supportId);
+      setRemoteRunnerStatus(`Skopiowano Runner ID: ${supportId}`, false);
+    } catch (error) {
+      setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+    }
+  });
+}
+
+if (checkRemoteRunnerBtn) {
+  checkRemoteRunnerBtn.addEventListener('click', () => {
+    void executeCheckRemoteRunnerFromPopup(checkRemoteRunnerBtn);
+  });
+}
+
+if (runRemoteBtn) {
+  runRemoteBtn.addEventListener('click', () => {
+    void executeRunRemoteAnalysisFromPopup(runRemoteBtn);
+  });
+}
+
+if (remoteRunnerNameInput) {
+  remoteRunnerNameInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+    });
+  });
+}
+
+if (remoteTargetRunnerIdInput) {
+  remoteTargetRunnerIdInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+    });
+  });
+}
+
 const resumeAllBtn = document.getElementById('resumeAllBtn');
 if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
@@ -1950,8 +2264,10 @@ installPopupRuntimeProblemLogging();
 void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
+  refreshRemoteRunnerStatus(true),
 ]);
 
 setInterval(() => {
   void refreshAutoRestoreStatus(false);
+  void refreshRemoteRunnerStatus(false);
 }, 15000);

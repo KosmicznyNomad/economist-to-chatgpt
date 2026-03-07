@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "120",
   "name": "Iskra",
   "version": "2.0",
   "description": "Analyze news in ChatGPT and sync final responses to Watchlist.",
