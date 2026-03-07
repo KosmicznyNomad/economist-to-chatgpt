@@ -540,6 +540,7 @@ function formatRemoteRunnerError(error) {
   if (normalized === 'remote_runner_list_failed') return 'blad pobierania listy runnerow';
   if (normalized === 'remote_runner_status_failed') return 'blad statusu runnera';
   if (normalized === 'remote_job_create_failed') return 'blad tworzenia zdalnego joba';
+  if (normalized === 'http_413' || normalized === 'payload_too_large') return 'payload jest za duzy dla serwera';
   if (normalized === 'remote_batch_prepare_failed') return 'nie udalo sie przygotowac batcha';
   if (normalized === 'prompts_not_loaded') return 'prompty company nie sa zaladowane';
   if (normalized.startsWith('runner_')) {

@@ -39,6 +39,7 @@ const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
+const PROCESS_QUEUE_MAX_CONCURRENCY = 5;
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
@@ -229,6 +230,9 @@ let unfinishedResumePageKeepaliveLastLogTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerMaintenanceInProgress = false;
 let remoteRunnerExecutionInProgress = false;
+let analysisProcessQueueActiveCount = 0;
+let analysisProcessQueueSequence = 0;
+const analysisProcessQueuePending = [];
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -14546,6 +14550,10 @@ function normalizeRemotePreparedJobPayload(rawPayload) {
         .filter((item) => typeof item === 'string' && item.trim())
         .map((item) => item.trim())
     : [];
+  const promptHash = typeof rawPayload.prompt_hash === 'string'
+    ? rawPayload.prompt_hash.trim()
+    : (typeof rawPayload.promptHash === 'string' ? rawPayload.promptHash.trim() : '');
+  const usesRunnerPrompts = rawPayload.uses_runner_prompts === true || rawPayload.usesRunnerPrompts === true;
   const preparedSources = Array.isArray(rawPayload.preparedSources)
     ? rawPayload.preparedSources
         .filter((item) => item && typeof item === 'object')
@@ -14571,10 +14579,12 @@ function normalizeRemotePreparedJobPayload(rawPayload) {
         .filter((item) => item.title && item.sourceUrl && item.sourceName && item.text)
     : [];
   if (analysisType !== 'company') return null;
-  if (promptChainSnapshot.length === 0 || preparedSources.length === 0) return null;
+  if (preparedSources.length === 0) return null;
   return {
     analysisType,
     promptChainSnapshot,
+    promptHash,
+    usesRunnerPrompts,
     preparedSources
   };
 }
@@ -19036,7 +19046,8 @@ async function prepareRemoteCompanyBatch() {
   return {
     success: true,
     analysisType: 'company',
-    promptChainSnapshot: [...PROMPTS_COMPANY],
+    promptHash: buildCompanyPromptHashSnapshot(PROMPTS_COMPANY),
+    usesRunnerPrompts: true,
     preparedSources,
     skipped
   };
@@ -19532,7 +19543,8 @@ async function prepareRemoteManualSourceBatch({ text = '', title = '', instances
   return {
     success: true,
     analysisType: 'company',
-    promptChainSnapshot: [...PROMPTS_COMPANY],
+    promptHash: buildCompanyPromptHashSnapshot(PROMPTS_COMPANY),
+    usesRunnerPrompts: true,
     preparedSources,
     skipped: [],
     sourceMode: 'manual_text'
@@ -19544,9 +19556,29 @@ async function executePreparedRemoteCompanyBatch(requestPayload, options = {}) {
   if (!normalizedPayload) {
     throw new Error('invalid_remote_job_payload');
   }
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady || !Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
+    throw new Error('prompts_not_loaded');
+  }
   const safeJobId = typeof options?.jobId === 'string' ? options.jobId.trim() : '';
   const safeControllerId = typeof options?.controllerId === 'string' ? options.controllerId.trim() : '';
   const safeRunnerId = typeof options?.runnerId === 'string' ? options.runnerId.trim() : '';
+  const promptChain = normalizedPayload.promptChainSnapshot.length > 0
+    ? [...normalizedPayload.promptChainSnapshot]
+    : [...PROMPTS_COMPANY];
+  const runnerPromptHash = buildCompanyPromptHashSnapshot(PROMPTS_COMPANY);
+  if (
+    normalizedPayload.promptHash
+    && runnerPromptHash
+    && normalizedPayload.promptHash !== runnerPromptHash
+  ) {
+    console.warn('[remote-runner] prompt hash mismatch; using runner-local prompts', {
+      jobId: safeJobId,
+      controllerPromptHash: normalizedPayload.promptHash,
+      runnerPromptHash,
+      usesRunnerPrompts: normalizedPayload.usesRunnerPrompts === true
+    });
+  }
   const pseudoTabs = normalizedPayload.preparedSources.map((source, index) => ({
     id: `remote-${safeJobId || Date.now()}-${index}`,
     title: source.title,
@@ -19562,7 +19594,7 @@ async function executePreparedRemoteCompanyBatch(requestPayload, options = {}) {
     remoteExtractedAtUtc: source.extractedAtUtc
   }));
 
-  const settled = await processArticles(pseudoTabs, normalizedPayload.promptChainSnapshot, CHAT_URL, 'company', {
+  const settled = await processArticles(pseudoTabs, promptChain, CHAT_URL, 'company', {
     remoteJobId: safeJobId,
     remoteControllerId: safeControllerId,
     remoteRunnerId: safeRunnerId
@@ -19997,7 +20029,8 @@ async function runRemoteAnalysis(options = {}) {
 
   const requestPayload = {
     analysisType: 'company',
-    promptChainSnapshot: [...preparedBatch.promptChainSnapshot],
+    promptHash: typeof preparedBatch.promptHash === 'string' ? preparedBatch.promptHash : '',
+    usesRunnerPrompts: preparedBatch.usesRunnerPrompts === true,
     preparedSources: preparedBatch.preparedSources,
     createdAtUtc: new Date().toISOString()
   };
@@ -20041,6 +20074,71 @@ async function runRemoteAnalysis(options = {}) {
   };
 }
 
+function getAnalysisProcessQueueSnapshot() {
+  return {
+    active: analysisProcessQueueActiveCount,
+    pending: analysisProcessQueuePending.length,
+    limit: Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1
+  };
+}
+
+function pumpAnalysisProcessQueue() {
+  const queueLimit = Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1);
+  while (analysisProcessQueueActiveCount < queueLimit && analysisProcessQueuePending.length > 0) {
+    const entry = analysisProcessQueuePending.shift();
+    if (!entry || typeof entry.runner !== 'function') continue;
+
+    analysisProcessQueueActiveCount += 1;
+    const slotId = analysisProcessQueueActiveCount;
+    console.log('[process-queue] start', {
+      queueId: entry.queueId,
+      analysisType: entry.analysisType,
+      title: entry.title,
+      slotId,
+      ...getAnalysisProcessQueueSnapshot()
+    });
+
+    Promise.resolve()
+      .then(() => entry.runner(slotId))
+      .then(entry.resolve, entry.reject)
+      .finally(() => {
+        analysisProcessQueueActiveCount = Math.max(0, analysisProcessQueueActiveCount - 1);
+        console.log('[process-queue] finish', {
+          queueId: entry.queueId,
+          analysisType: entry.analysisType,
+          title: entry.title,
+          ...getAnalysisProcessQueueSnapshot()
+        });
+        pumpAnalysisProcessQueue();
+      });
+  }
+}
+
+function enqueueAnalysisProcessTask(runner, options = {}) {
+  if (typeof runner !== 'function') {
+    return Promise.reject(new Error('analysis_process_runner_missing'));
+  }
+
+  const queueId = `apq-${Date.now()}-${analysisProcessQueueSequence += 1}`;
+  return new Promise((resolve, reject) => {
+    analysisProcessQueuePending.push({
+      queueId,
+      runner,
+      resolve,
+      reject,
+      analysisType: typeof options?.analysisType === 'string' ? options.analysisType : '',
+      title: typeof options?.title === 'string' ? options.title : ''
+    });
+    console.log('[process-queue] enqueue', {
+      queueId,
+      analysisType: typeof options?.analysisType === 'string' ? options.analysisType : '',
+      title: typeof options?.title === 'string' ? options.title : '',
+      ...getAnalysisProcessQueueSnapshot()
+    });
+    pumpAnalysisProcessQueue();
+  });
+}
+
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
@@ -20050,10 +20148,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
   const invocationWindowId = Number.isInteger(options?.invocationWindowId)
     ? options.invocationWindowId
     : null;
-  
-  console.log(`[${analysisType}] Rozpoczynam przetwarzanie ${tabs.length} artykułów`);
-  
-  const processingPromises = tabs.map(async (tab, index) => {
+  console.log(`[${analysisType}] Dodaję ${tabs.length} artykułów do kolejki procesów`, {
+    requested: tabs.length,
+    ...getAnalysisProcessQueueSnapshot()
+  });
+
+  const runSingleProcess = async (tab, index, slotId) => {
     const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
     let processTitle = tab?.title || 'Bez tytulu';
     let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
@@ -20061,11 +20161,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       ? tab.windowId
       : (Number.isInteger(options?.sourceWindowId) ? options.sourceWindowId : null);
     try {
-      console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
+      console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] [slot ${slotId}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
       console.log(`URL: ${tab.url}`);
-      
-      // Małe opóźnienie między startami aby nie przytłoczyć przeglądarki
-      await sleep(index * 500);
+
+      // Lekko rozsuń start aktywnych slotów, ale bez blokowania kolejki globalnej.
+      const startDelayMs = Math.max(0, (slotId - 1) * 300);
+      if (startDelayMs > 0) {
+        await sleep(startDelayMs);
+      }
       const extracted = await extractArticleSourcePayload(tab, analysisType);
       if (!extracted?.success) {
         return {
@@ -20731,9 +20834,15 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       });
       return { success: false, processId, error: error.message };
     }
-  });
+  };
 
-  // Poczekaj na uruchomienie wszystkich
+  const processingPromises = tabs.map((tab, index) => enqueueAnalysisProcessTask(
+    (slotId) => runSingleProcess(tab, index, slotId),
+    {
+      analysisType,
+      title: tab?.title || 'Bez tytulu'
+    }
+  ));
   const results = await Promise.allSettled(processingPromises);
   
   const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
