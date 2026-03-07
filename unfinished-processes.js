@@ -262,8 +262,8 @@ function renderProcessRows(listResult) {
       ? item.sourceLabel.trim()
       : (typeof item?.sourceKey === 'string' && item.sourceKey.trim() ? item.sourceKey.trim() : 'unknown');
     const stageText = Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
-      ? `P${item.currentPrompt}/${Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0} ${item?.stageName || ''}`.trim()
-      : (item?.stageName || '-');
+      ? `snapshot P${item.currentPrompt}/${Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0} ${item?.stageName || ''}`.trim()
+      : (item?.stageName ? `snapshot ${item.stageName}` : '-');
     const updated = formatDateTime(Number.isInteger(item?.timestamp) ? item.timestamp : null);
     const hasChatUrl = item?.hasChatUrl === true;
     const runnableText = hasChatUrl ? 'YES' : 'NO';

@@ -186,6 +186,7 @@ const UNFINISHED_RECOVERY_EXCLUDED_REASONS = new Set([
   'bulk_resume_reload',
   'restarted_in_same_window'
 ]);
+const UNFINISHED_RESUME_LIST_LOG_COOLDOWN_MS = 15000;
 const processRegistry = new Map();
 const ytTranscriptInFlightRequests = new Map();
 const ytTranscriptCache = new Map();
@@ -220,6 +221,8 @@ let problemLogConsoleCaptureInstalled = false;
 let problemLogConsoleCaptureInProgress = false;
 let watchlistConnectionLogLastSignature = '';
 let watchlistConnectionLogLastTs = 0;
+let unfinishedResumeListLogLastSignature = '';
+let unfinishedResumeListLogLastTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerMaintenanceInProgress = false;
 let remoteRunnerExecutionInProgress = false;
@@ -592,19 +595,26 @@ function pruneProcessRecords(records) {
 
   const deduped = Array.from(byId.values());
   const active = [];
-  const closed = [];
+  const closedRecoverable = [];
+  const closedHistory = [];
   for (const process of deduped) {
     if (isClosedProcessStatus(process.status)) {
-      closed.push(process);
+      if (isRecoverableUnfinishedProcess(process)) {
+        closedRecoverable.push(process);
+      } else {
+        closedHistory.push(process);
+      }
     } else {
       active.push(process);
     }
   }
 
   active.sort((a, b) => (b.startedAt || b.timestamp || 0) - (a.startedAt || a.timestamp || 0));
-  closed.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  closedRecoverable.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  closedHistory.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-  return active.concat(closed.slice(0, PROCESS_HISTORY_LIMIT));
+  // Keep all recoverable unfinished runs; only completed/non-recoverable history is trimmed.
+  return active.concat(closedRecoverable, closedHistory.slice(0, PROCESS_HISTORY_LIMIT));
 }
 
 function rehydrateProcessProblemLogState(records = []) {
@@ -1664,6 +1674,121 @@ function buildUnfinishedSourceCatalog(items) {
   });
 }
 
+function buildUnfinishedProcessListSummary(items = [], availableSources = []) {
+  const sourceItems = Array.isArray(items) ? items : [];
+  const total = sourceItems.length;
+  const runnable = sourceItems.filter((item) => item?.hasChatUrl === true).length;
+  const blockedMissingChatUrl = Math.max(0, total - runnable);
+  const failedStatuses = sourceItems.filter((item) => item?.isFailedStatus === true).length;
+  const needsAction = sourceItems.filter((item) => item?.needsAction === true).length;
+  const withStageSnapshot = sourceItems.filter((item) => (
+    Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
+  )).length;
+  const latestUpdatedAt = sourceItems.reduce((maxTs, item) => {
+    const itemTs = Number.isInteger(item?.timestamp) ? item.timestamp : 0;
+    return Math.max(maxTs, itemTs);
+  }, 0);
+  const statusCounts = {};
+  sourceItems.forEach((item) => {
+    const key = normalizeProcessStatus(item?.status || '') || 'unknown';
+    statusCounts[key] = (statusCounts[key] || 0) + 1;
+  });
+  const sourcePreview = (Array.isArray(availableSources) ? availableSources : [])
+    .slice(0, 4)
+    .map((source) => ({
+      key: typeof source?.key === 'string' ? source.key : '',
+      label: typeof source?.label === 'string' ? source.label : '',
+      total: toNonNegativeInt(source?.total, 0),
+      runnable: toNonNegativeInt(source?.runnable, 0)
+    }));
+
+  return {
+    total,
+    runnable,
+    blockedMissingChatUrl,
+    failedStatuses,
+    needsAction,
+    withStageSnapshot,
+    latestUpdatedAt,
+    runnableSharePct: total > 0 ? Math.round((runnable / total) * 100) : 0,
+    statusCounts,
+    sourcePreview
+  };
+}
+
+function buildUnfinishedProcessListLogSignature(summary, options = {}) {
+  const safeSummary = summary && typeof summary === 'object' ? summary : {};
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter) || 'all';
+  const origin = typeof options?.origin === 'string' ? options.origin.trim() : '';
+  const statusSignature = Object.entries(safeSummary.statusCounts || {})
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0]), 'en', { sensitivity: 'base' }))
+    .map(([status, count]) => `${status}:${count}`)
+    .join(',');
+  return [
+    sourceFilter,
+    origin,
+    safeSummary.total || 0,
+    safeSummary.runnable || 0,
+    safeSummary.blockedMissingChatUrl || 0,
+    safeSummary.failedStatuses || 0,
+    safeSummary.needsAction || 0,
+    safeSummary.withStageSnapshot || 0,
+    statusSignature
+  ].join('|');
+}
+
+function maybeReportUnfinishedProcessListSummary(summary, options = {}) {
+  const safeSummary = summary && typeof summary === 'object' ? summary : {};
+  const nowTs = Date.now();
+  const signature = buildUnfinishedProcessListLogSignature(safeSummary, options);
+  if (
+    signature === unfinishedResumeListLogLastSignature
+    && (nowTs - unfinishedResumeListLogLastTs) < UNFINISHED_RESUME_LIST_LOG_COOLDOWN_MS
+  ) {
+    return;
+  }
+
+  unfinishedResumeListLogLastSignature = signature;
+  unfinishedResumeListLogLastTs = nowTs;
+
+  const statusPreview = Object.entries(safeSummary.statusCounts || {})
+    .sort((left, right) => (right[1] || 0) - (left[1] || 0))
+    .slice(0, 4)
+    .map(([status, count]) => `${status}:${count}`)
+    .join(', ');
+  const sourcePreview = (Array.isArray(safeSummary.sourcePreview) ? safeSummary.sourcePreview : [])
+    .map((entry) => `${entry.key || 'unknown'}:${entry.total || 0}/${entry.runnable || 0}`)
+    .join(', ');
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter) || 'all';
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'unfinished-resume-list';
+  const detailPayload = {
+    sourceFilter,
+    total: safeSummary.total || 0,
+    runnable: safeSummary.runnable || 0,
+    blockedMissingChatUrl: safeSummary.blockedMissingChatUrl || 0,
+    failedStatuses: safeSummary.failedStatuses || 0,
+    needsAction: safeSummary.needsAction || 0,
+    withStageSnapshot: safeSummary.withStageSnapshot || 0,
+    runnableSharePct: safeSummary.runnableSharePct || 0,
+    latestUpdatedAt: safeSummary.latestUpdatedAt || 0,
+    statusPreview,
+    sourcePreview
+  };
+
+  console.log('[unfinished-resume] list counted', detailPayload);
+  reportAdminActionEvent('unfinished_resume_list_counted', {
+    level: 'info',
+    status: 'counted',
+    reason: 'unfinished_resume_list_counted',
+    origin,
+    title: 'Unfinished resume list counted',
+    message: `unfinished_resume_list_counted | total=${detailPayload.total} | runnable=${detailPayload.runnable} | blocked=${detailPayload.blockedMissingChatUrl} | source=${sourceFilter}`,
+    details: detailPayload
+  });
+}
+
 function normalizeUnfinishedResumeLimit(value) {
   if (value === null || value === undefined) return null;
   const asNumber = Number.parseInt(String(value).trim(), 10);
@@ -1758,14 +1883,20 @@ function buildUnfinishedProcessItem(process) {
   const status = normalizeProcessStatus(process?.status || '');
   const sourceUrl = typeof process?.sourceUrl === 'string' ? process.sourceUrl : '';
   const sourceMeta = normalizeUnfinishedProcessSource(sourceUrl);
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const progressShare = totalPrompts > 0 && currentPrompt > 0
+    ? Math.max(0, Math.min(1, currentPrompt / totalPrompts))
+    : 0;
   return {
     runId,
     title: typeof process?.title === 'string' ? process.title : '',
     status,
     isFailedStatus: isFailedProcessStatusForUnfinished(status),
     needsAction: process?.needsAction === true,
-    currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0,
-    totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0,
+    currentPrompt,
+    totalPrompts,
+    progressShare,
     stageName: resolveUnfinishedProcessStageName(process),
     timestamp: Number.isInteger(process?.timestamp) ? process.timestamp : 0,
     chatUrl,
@@ -1773,7 +1904,10 @@ function buildUnfinishedProcessItem(process) {
     sourceUrl,
     sourceKey: sourceMeta.sourceKey,
     sourceLabel: sourceMeta.sourceLabel,
-    lastError: typeof process?.error === 'string' ? process.error : ''
+    reason: typeof process?.reason === 'string' ? process.reason : '',
+    statusText: typeof process?.statusText === 'string' ? process.statusText : '',
+    lastError: typeof process?.error === 'string' ? process.error : '',
+    hasExecutionEvidence: hasUnfinishedProcessExecutionEvidence(process)
   };
 }
 
@@ -1781,6 +1915,7 @@ async function listUnfinishedProcessesForResume(options = {}) {
   const includeNonCompleted = options?.includeNonCompleted !== false;
   const recoverOnly = options?.recoverOnly !== false;
   const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter);
+  const origin = typeof options?.origin === 'string' ? options.origin : 'unfinished-resume-list';
   const snapshot = await getProcessSnapshot();
   const allItems = (Array.isArray(snapshot) ? snapshot : [])
     .filter((process) => process && typeof process === 'object')
@@ -1806,6 +1941,11 @@ async function listUnfinishedProcessesForResume(options = {}) {
 
   const runnable = items.filter((item) => item.hasChatUrl).length;
   const skippedMissingUrl = items.length - runnable;
+  const summary = buildUnfinishedProcessListSummary(items, sourceFilter ? availableSources.filter((entry) => entry?.key === sourceFilter) : availableSources);
+  maybeReportUnfinishedProcessListSummary(summary, {
+    origin,
+    sourceFilter
+  });
 
   return {
     success: true,
@@ -1817,6 +1957,13 @@ async function listUnfinishedProcessesForResume(options = {}) {
     sourceFilterApplied: !!sourceFilter,
     sourceFilterMatched,
     recoverOnly,
+    countingModel: {
+      listSource: 'process_monitor_state',
+      listStageMeaning: 'snapshot_saved_progress',
+      resumeStageMeaning: 'live_recalculation_on_chat_tab',
+      batchLimitMeaning: 'top_progress_snapshot_then_live_verify'
+    },
+    summary,
     availableSources,
     items
   };
@@ -1965,7 +2112,8 @@ async function resumeSingleUnfinishedProcess(candidate, context = {}) {
       windowId: Number.isInteger(latest?.windowId) ? latest.windowId : null,
       title: typeof latest?.title === 'string' ? latest.title : '',
       chatUrl,
-      origin: context?.origin || 'unfinished-resume-batch'
+      origin: context?.origin || 'unfinished-resume-batch',
+      preferFreshTab: true
     });
 
     const detectedPromptNumber = Number.isInteger(resumeResult?.detectedPromptNumber)
@@ -2206,7 +2354,8 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
   const listing = await listUnfinishedProcessesForResume({
     includeNonCompleted: true,
     recoverOnly: true,
-    sourceFilter
+    sourceFilter,
+    origin: `${origin}:selection`
   });
   const allCandidates = Array.isArray(listing?.items) ? listing.items : [];
   const rankingStrategy = Number.isInteger(limitRequested)
@@ -2236,6 +2385,40 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     limitApplied,
     filteredTotal: Number.isInteger(listing?.total) ? listing.total : rankedCandidates.length
   };
+  const candidatePreview = candidates.slice(0, 5).map((item) => ({
+    runId: typeof item?.runId === 'string' ? item.runId : '',
+    currentPrompt: Number.isInteger(item?.currentPrompt) ? item.currentPrompt : 0,
+    totalPrompts: Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0,
+    hasChatUrl: item?.hasChatUrl === true
+  }));
+  console.log('[unfinished-resume] batch selection', {
+    origin,
+    sourceFilter: selection.sourceFilter,
+    strategy: rankingStrategy,
+    filteredTotal: selection.filteredTotal,
+    selectedTotal: candidates.length,
+    runnableSelected: selectedRunnable,
+    blockedSelected: selectedSkippedMissingUrl,
+    candidatePreview
+  });
+  reportAdminActionEvent('unfinished_resume_candidates_selected', {
+    level: 'info',
+    status: 'selected',
+    reason: 'unfinished_resume_candidates_selected',
+    origin,
+    title: 'Unfinished resume candidates selected',
+    message: `unfinished_resume_candidates_selected | selected=${candidates.length}/${selection.filteredTotal} | runnable=${selectedRunnable} | blocked=${selectedSkippedMissingUrl} | strategy=${rankingStrategy}`,
+    details: {
+      sourceFilter: selection.sourceFilter,
+      sourceLabel: selection.sourceLabel,
+      strategy: rankingStrategy,
+      filteredTotal: selection.filteredTotal,
+      selectedTotal: candidates.length,
+      runnableSelected: selectedRunnable,
+      blockedSelected: selectedSkippedMissingUrl,
+      candidatePreview
+    }
+  });
 
   const jobId = createUnfinishedResumeBatchJobId('unfinished-resume');
   const initialState = {
@@ -9236,27 +9419,40 @@ async function getTabByIdSafe(tabId) {
   }
 }
 
+async function getWindowByIdSafe(windowId) {
+  if (!Number.isInteger(windowId)) return null;
+  try {
+    const windowInfo = await chrome.windows.get(windowId);
+    return windowInfo || null;
+  } catch (error) {
+    return null;
+  }
+}
+
 async function resolveChatTabForProcess(process, message = {}) {
+  const preferFreshTab = message?.preferFreshTab === true;
   const messageTabId = Number.isInteger(message?.tabId) ? message.tabId : null;
   const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
   const candidateTabIds = [messageTabId, processTabId].filter((tabId, index, arr) => (
     Number.isInteger(tabId) && arr.indexOf(tabId) === index
   ));
 
-  for (const tabId of candidateTabIds) {
-    const tab = await getTabByIdSafe(tabId);
-    if (tab && isChatGptUrl(getTabEffectiveUrl(tab))) {
-      const directUngroup = await ungroupTabsById([tab.id], {
-        origin: 'resume-direct-chat-tab'
-      });
-      if (!directUngroup.ok && directUngroup.reason !== 'already_ungrouped') {
-        console.warn('[resume] ungroup direct chat tab failed:', {
-          tabId: tab.id,
-          reason: directUngroup.reason,
-          error: directUngroup.error || ''
+  if (!preferFreshTab) {
+    for (const tabId of candidateTabIds) {
+      const tab = await getTabByIdSafe(tabId);
+      if (tab && isChatGptUrl(getTabEffectiveUrl(tab))) {
+        const directUngroup = await ungroupTabsById([tab.id], {
+          origin: 'resume-direct-chat-tab'
         });
+        if (!directUngroup.ok && directUngroup.reason !== 'already_ungrouped') {
+          console.warn('[resume] ungroup direct chat tab failed:', {
+            tabId: tab.id,
+            reason: directUngroup.reason,
+            error: directUngroup.error || ''
+          });
+        }
+        return tab;
       }
-      return tab;
     }
   }
 
@@ -9268,30 +9464,33 @@ async function resolveChatTabForProcess(process, message = {}) {
     return null;
   }
 
-  try {
-    const existingTabs = await chrome.tabs.query({ url: chatUrlRaw });
-    const candidate = Array.isArray(existingTabs) ? existingTabs[0] : null;
-    if (candidate && Number.isInteger(candidate.id)) {
-      const existingUngroup = await ungroupTabsById([candidate.id], {
-        origin: 'resume-existing-chat-tab'
-      });
-      if (!existingUngroup.ok && existingUngroup.reason !== 'already_ungrouped') {
-        console.warn('[resume] ungroup existing chat tab failed:', {
-          tabId: candidate.id,
-          reason: existingUngroup.reason,
-          error: existingUngroup.error || ''
+  if (!preferFreshTab) {
+    try {
+      const existingTabs = await chrome.tabs.query({ url: chatUrlRaw });
+      const candidate = Array.isArray(existingTabs) ? existingTabs[0] : null;
+      if (candidate && Number.isInteger(candidate.id)) {
+        const existingUngroup = await ungroupTabsById([candidate.id], {
+          origin: 'resume-existing-chat-tab'
         });
+        if (!existingUngroup.ok && existingUngroup.reason !== 'already_ungrouped') {
+          console.warn('[resume] ungroup existing chat tab failed:', {
+            tabId: candidate.id,
+            reason: existingUngroup.reason,
+            error: existingUngroup.error || ''
+          });
+        }
+        return candidate;
       }
-      return candidate;
+    } catch (error) {
+      // Ignore and fallback to opening a new tab.
     }
-  } catch (error) {
-    // Ignore and fallback to opening a new tab.
   }
 
   try {
     const createOptions = { url: chatUrlRaw, active: false };
-    if (Number.isInteger(process?.windowId)) {
-      createOptions.windowId = process.windowId;
+    const targetWindow = await getWindowByIdSafe(Number.isInteger(process?.windowId) ? process.windowId : null);
+    if (targetWindow && Number.isInteger(targetWindow.id)) {
+      createOptions.windowId = targetWindow.id;
     }
     const createdTab = await chrome.tabs.create(createOptions);
     if (createdTab && Number.isInteger(createdTab.id)) {
@@ -16634,7 +16833,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const response = await runRemoteAnalysis({
         runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
-        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        text: typeof message?.text === 'string' ? message.text : '',
+        title: typeof message?.title === 'string' ? message.title : '',
+        instances: Number.isInteger(message?.instances) ? message.instances : 1
       });
       sendResponse(response);
     })().catch((error) => {
@@ -16974,10 +17176,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const includeNonCompleted = message?.includeNonCompleted !== false;
       const recoverOnly = message?.recoverOnly !== false;
       const sourceFilter = typeof message?.sourceFilter === 'string' ? message.sourceFilter : '';
+      const origin = typeof message?.origin === 'string' ? message.origin : 'runtime-message:get-unfinished-processes';
       const result = await listUnfinishedProcessesForResume({
         includeNonCompleted,
         recoverOnly,
-        sourceFilter
+        sourceFilter,
+        origin
       });
       sendResponse(result);
     })().catch((error) => {
@@ -19147,6 +19351,45 @@ async function sendRemoteRunnerHeartbeatNow(origin = 'manual', options = {}) {
   };
 }
 
+async function prepareRemoteManualSourceBatch({ text = '', title = '', instances = 1 } = {}) {
+  const promptsReady = await ensureCompanyPromptsReady();
+  if (!promptsReady || !Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
+    return { success: false, error: 'prompts_not_loaded', preparedSources: [], skipped: [] };
+  }
+
+  const safeText = typeof text === 'string' ? text.trim() : '';
+  if (!safeText) {
+    return { success: false, error: 'manual_source_empty', preparedSources: [], skipped: [] };
+  }
+
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
+  const safeInstances = normalizeManualInstances(instances);
+  const extractedAtUtc = new Date().toISOString();
+  const textHash = await sha256HexForDispatch(safeText);
+  const preparedSources = [];
+
+  for (let index = 0; index < safeInstances; index += 1) {
+    preparedSources.push({
+      source_id: `remote-manual-${index + 1}-${textFingerprint(`${safeTitle}|${textHash}|${index + 1}`)}`,
+      title: safeInstances > 1 ? `${safeTitle} [${index + 1}]` : safeTitle,
+      source_url: 'manual://source',
+      source_name: 'Manual Source',
+      text: safeText,
+      text_hash: textHash,
+      extracted_at_utc: extractedAtUtc
+    });
+  }
+
+  return {
+    success: true,
+    analysisType: 'company',
+    promptChainSnapshot: [...PROMPTS_COMPANY],
+    preparedSources,
+    skipped: [],
+    sourceMode: 'manual_text'
+  };
+}
+
 async function executePreparedRemoteCompanyBatch(requestPayload, options = {}) {
   const normalizedPayload = normalizeRemotePreparedJobPayload(requestPayload);
   if (!normalizedPayload) {
@@ -19548,6 +19791,9 @@ async function runRemoteAnalysis(options = {}) {
   const requestedRunnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
     ? options.runnerId.trim()
     : '';
+  const manualText = typeof options?.text === 'string' ? options.text : '';
+  const manualTitle = typeof options?.title === 'string' ? options.title : '';
+  const manualInstances = normalizeManualInstances(options?.instances);
 
   const controllerId = await ensureExtensionInstallationId().catch(() => '');
   if (!controllerId) {
@@ -19585,7 +19831,13 @@ async function runRemoteAnalysis(options = {}) {
     };
   }
 
-  const preparedBatch = await prepareRemoteCompanyBatch();
+  const preparedBatch = manualText.trim()
+    ? await prepareRemoteManualSourceBatch({
+        text: manualText,
+        title: manualTitle,
+        instances: manualInstances
+      })
+    : await prepareRemoteCompanyBatch();
   if (!preparedBatch.success) {
     return {
       success: false,
@@ -19634,6 +19886,7 @@ async function runRemoteAnalysis(options = {}) {
     job: createResult.job,
     runner: runnerStatusResult.runner,
     targetSource: targetResolution.targetRunnerSource || '',
+    sourceMode: typeof preparedBatch.sourceMode === 'string' ? preparedBatch.sourceMode : 'tab_extract',
     preparedSourceCount: preparedBatch.preparedSources.length,
     skippedSourceCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0
   };

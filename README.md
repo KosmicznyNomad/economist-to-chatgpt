@@ -26,6 +26,11 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - `COMPANY_CHAIN_STAGE_MAP.md` - readable stage contract for `prompts-company.txt` + runtime mapping.
 - `MAINTENANCE_POPUP_RELOAD_RESTART_RESUME.md` - popup maintenance map: restore windows, restart/reload, resume and unfinished recovery.
 
+## Popup shortcuts
+- Digits `1-0`: manual source, run, resume stage, reload+resume all, responses, process panel, stop, copy YouTube transcript, restore process windows, auto-recovery toggle.
+- Letters `N / L / R / C / E / H`: unfinished recovery page, problem logs, repeat last prompt all, count company messages, reload+resume extended, reload+resume heavy.
+- `Esc` closes the popup.
+
 ## Storage
 - Responses are written in worker to `chrome.storage.session.responses`.
 - `responses.js` migrates and merges data to `chrome.storage.local.responses`.

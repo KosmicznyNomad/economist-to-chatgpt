@@ -5,341 +5,946 @@
   <title>Recovery Niedokonczonych Procesow</title>
   <style>
     :root {
-      --bg: #f3f5f8;
-      --panel: #ffffff;
-      --border: #d8dee6;
+      --bg-top: #f4efe6;
+      --bg-bottom: #eef4f8;
+      --panel: rgba(255, 255, 255, 0.92);
+      --panel-strong: #ffffff;
+      --border: rgba(148, 163, 184, 0.28);
+      --border-strong: rgba(15, 23, 42, 0.08);
       --text: #17212b;
-      --muted: #5b6876;
+      --muted: #5a6775;
+      --muted-strong: #334155;
+      --accent: #0f172a;
+      --accent-soft: #f8fafc;
       --ok: #0f766e;
+      --ok-soft: #ecfdf5;
       --warn: #b45309;
+      --warn-soft: #fffbeb;
       --err: #b91c1c;
+      --err-soft: #fef2f2;
       --run: #1d4ed8;
-      --shadow: 0 8px 24px rgba(15, 23, 42, 0.08);
+      --run-soft: #eff6ff;
+      --shadow-xl: 0 24px 70px rgba(15, 23, 42, 0.12);
+      --shadow-md: 0 12px 30px rgba(15, 23, 42, 0.08);
+      --radius-xl: 24px;
+      --radius-lg: 18px;
+      --radius-md: 14px;
+      --radius-sm: 10px;
     }
+
     * {
       box-sizing: border-box;
     }
+
     body {
       margin: 0;
-      padding: 16px;
-      background: linear-gradient(160deg, #eef2f7 0%, #f8fafc 100%);
+      min-height: 100vh;
+      padding: 22px;
+      background:
+        radial-gradient(circle at top left, rgba(180, 83, 9, 0.09), transparent 32%),
+        radial-gradient(circle at top right, rgba(29, 78, 216, 0.08), transparent 28%),
+        linear-gradient(180deg, var(--bg-top) 0%, var(--bg-bottom) 100%);
       color: var(--text);
       font-family: "Segoe UI", Tahoma, sans-serif;
-      min-height: 100vh;
     }
-    .header {
-      display: flex;
-      flex-wrap: wrap;
-      justify-content: space-between;
+
+    .page {
+      max-width: 1540px;
+      margin: 0 auto;
+      display: grid;
+      gap: 16px;
+    }
+
+    .hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1.4fr) minmax(320px, 0.9fr);
+      gap: 16px;
+      align-items: stretch;
+    }
+
+    .hero-main,
+    .hero-side,
+    .status,
+    .metric,
+    .explain-card,
+    .panel {
+      background: var(--panel);
+      backdrop-filter: blur(18px);
+      border: 1px solid var(--border);
+      border-radius: var(--radius-xl);
+      box-shadow: var(--shadow-md);
+    }
+
+    .hero-main {
+      padding: 22px 24px;
+      position: relative;
+      overflow: hidden;
+    }
+
+    .hero-main::after {
+      content: "";
+      position: absolute;
+      inset: auto -70px -90px auto;
+      width: 220px;
+      height: 220px;
+      background: radial-gradient(circle, rgba(180, 83, 9, 0.18), transparent 68%);
+      pointer-events: none;
+    }
+
+    .hero-side {
+      padding: 18px;
+      display: grid;
+      gap: 14px;
+      align-content: start;
+    }
+
+    .eyebrow {
+      display: inline-flex;
       align-items: center;
-      gap: 10px;
-      margin-bottom: 12px;
+      gap: 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.16em;
+      font-weight: 700;
+      color: var(--muted);
+      margin-bottom: 10px;
     }
+
+    .eyebrow::before {
+      content: "";
+      width: 28px;
+      height: 1px;
+      background: rgba(71, 85, 105, 0.45);
+    }
+
     h1 {
       margin: 0;
-      font-size: 22px;
-      letter-spacing: 0.01em;
+      font-size: 30px;
+      line-height: 1.05;
+      letter-spacing: -0.03em;
+      max-width: 760px;
     }
-    .actions {
-      display: flex;
-      gap: 8px;
-      flex-wrap: wrap;
+
+    .hero-text {
+      margin: 12px 0 0;
+      max-width: 860px;
+      color: var(--muted-strong);
+      font-size: 14px;
+      line-height: 1.55;
     }
-    .filters {
-      display: flex;
+
+    .logic-strip {
+      margin-top: 18px;
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 12px;
+    }
+
+    .logic-step {
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(255, 255, 255, 0.75);
+      border-radius: var(--radius-lg);
+      padding: 14px 14px 13px;
+      min-height: 126px;
+    }
+
+    .logic-index {
+      display: inline-flex;
       align-items: center;
-      gap: 8px;
-      margin-bottom: 12px;
+      justify-content: center;
+      width: 28px;
+      height: 28px;
+      border-radius: 999px;
+      background: #e2e8f0;
+      color: var(--accent);
       font-size: 12px;
+      font-weight: 800;
+      margin-bottom: 10px;
+    }
+
+    .logic-title {
+      font-size: 14px;
+      font-weight: 700;
+      margin-bottom: 6px;
+    }
+
+    .logic-copy {
       color: var(--muted);
-    }
-    .filter-select {
-      border: 1px solid var(--border);
-      background: #fff;
-      color: var(--text);
-      border-radius: 10px;
-      padding: 7px 10px;
       font-size: 12px;
-      font-weight: 600;
-      min-width: 220px;
+      line-height: 1.45;
     }
+
+    .actions {
+      display: grid;
+      gap: 10px;
+    }
+
+    .actions-title {
+      margin: 0;
+      font-size: 12px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .action-grid {
+      display: grid;
+      gap: 8px;
+    }
+
     .btn {
-      border: 1px solid var(--border);
-      background: #fff;
+      border: 1px solid var(--border-strong);
+      background: var(--panel-strong);
       color: var(--text);
-      border-radius: 10px;
-      padding: 8px 12px;
+      border-radius: 14px;
+      padding: 11px 13px;
       font-size: 12px;
-      font-weight: 600;
+      font-weight: 700;
       cursor: pointer;
+      transition: transform 120ms ease, box-shadow 120ms ease, border-color 120ms ease;
+      text-align: left;
     }
+
     .btn:hover:not(:disabled) {
       transform: translateY(-1px);
-      box-shadow: 0 2px 10px rgba(15, 23, 42, 0.12);
+      box-shadow: 0 10px 18px rgba(15, 23, 42, 0.08);
+      border-color: rgba(15, 23, 42, 0.16);
     }
+
     .btn:disabled {
-      opacity: 0.7;
+      opacity: 0.72;
       cursor: wait;
     }
+
     .btn-primary {
-      background: #0f172a;
+      background: linear-gradient(135deg, #0f172a 0%, #1e293b 100%);
       color: #fff;
       border-color: #0f172a;
     }
-    .status {
-      border: 1px solid var(--border);
-      background: #fff;
-      border-radius: 10px;
-      padding: 8px 10px;
-      margin-bottom: 12px;
+
+    .side-note {
+      border-radius: var(--radius-lg);
+      padding: 14px;
+      background: linear-gradient(135deg, rgba(255, 251, 235, 0.92) 0%, rgba(255, 255, 255, 0.92) 100%);
+      border: 1px solid rgba(180, 83, 9, 0.18);
+    }
+
+    .side-note strong {
+      display: block;
+      margin-bottom: 6px;
       font-size: 12px;
-      color: #334155;
-      white-space: pre-wrap;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
     }
+
+    .side-note p {
+      margin: 0;
+      font-size: 12px;
+      line-height: 1.5;
+      color: var(--muted-strong);
+    }
+
+    .status {
+      padding: 16px 18px;
+    }
+
     .status.error {
-      border-color: #fecaca;
-      background: #fef2f2;
-      color: var(--err);
+      border-color: rgba(185, 28, 28, 0.22);
+      background: rgba(254, 242, 242, 0.92);
     }
-    .metrics {
-      display: grid;
-      grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
-      gap: 10px;
+
+    .status-top {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 12px;
       margin-bottom: 12px;
     }
-    .metric {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      padding: 10px 12px;
-      box-shadow: var(--shadow);
-      min-height: 68px;
-    }
-    .metric-title {
-      margin: 0 0 6px;
+
+    .status-kicker {
       font-size: 11px;
-      color: var(--muted);
       text-transform: uppercase;
-      letter-spacing: 0.04em;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      font-weight: 700;
+      margin-bottom: 4px;
     }
-    .metric-value {
-      font-size: 15px;
+
+    .status-title {
+      font-size: 18px;
+      font-weight: 800;
+      letter-spacing: -0.02em;
+    }
+
+    .status-meta {
+      font-size: 12px;
+      color: var(--muted);
+      text-align: right;
+      max-width: 420px;
+      line-height: 1.45;
+    }
+
+    .status-hints {
+      display: flex;
+      flex-wrap: wrap;
+      gap: 8px;
+    }
+
+    .hint-chip {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      padding: 7px 10px;
+      border-radius: 999px;
+      background: rgba(248, 250, 252, 0.96);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      color: var(--muted-strong);
+      font-size: 11px;
       font-weight: 700;
     }
-    .layout {
+
+    .filters {
+      display: flex;
+      flex-wrap: wrap;
+      align-items: center;
+      gap: 10px;
+      padding: 0 2px;
+      font-size: 12px;
+      color: var(--muted);
+    }
+
+    .filter-label {
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      font-size: 11px;
+    }
+
+    .filter-select {
+      border: 1px solid var(--border);
+      background: rgba(255, 255, 255, 0.92);
+      color: var(--text);
+      border-radius: 14px;
+      padding: 10px 12px;
+      font-size: 12px;
+      font-weight: 700;
+      min-width: 260px;
+    }
+
+    .metrics {
       display: grid;
+      grid-template-columns: repeat(5, minmax(0, 1fr));
       gap: 12px;
     }
+
+    .metric {
+      padding: 16px 16px 15px;
+      min-height: 128px;
+      display: grid;
+      gap: 10px;
+    }
+
+    .metric-title {
+      margin: 0;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .metric-value {
+      font-size: 14px;
+      font-weight: 700;
+      line-height: 1.35;
+      color: var(--text);
+    }
+
+    .metric-number {
+      display: block;
+      font-size: 28px;
+      line-height: 1;
+      letter-spacing: -0.04em;
+      font-weight: 800;
+      margin-bottom: 6px;
+      color: var(--accent);
+    }
+
+    .metric-caption {
+      font-size: 12px;
+      line-height: 1.45;
+      color: var(--muted);
+    }
+
+    .progress-strip {
+      height: 9px;
+      border-radius: 999px;
+      background: rgba(226, 232, 240, 0.92);
+      overflow: hidden;
+      border: 1px solid rgba(148, 163, 184, 0.18);
+    }
+
+    .progress-fill {
+      height: 100%;
+      width: 0%;
+      border-radius: inherit;
+      transition: width 180ms ease;
+      background: linear-gradient(90deg, #0f766e 0%, #14b8a6 100%);
+    }
+
+    .progress-fill.warn {
+      background: linear-gradient(90deg, #b45309 0%, #f59e0b 100%);
+    }
+
+    .progress-fill.run {
+      background: linear-gradient(90deg, #1d4ed8 0%, #60a5fa 100%);
+    }
+
+    .explain-grid {
+      display: grid;
+      grid-template-columns: minmax(0, 1.1fr) minmax(0, 1fr) minmax(0, 1fr);
+      gap: 12px;
+    }
+
+    .explain-card {
+      padding: 16px 18px;
+      min-height: 180px;
+    }
+
+    .explain-kicker {
+      margin: 0 0 8px;
+      font-size: 11px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .explain-card h2 {
+      margin: 0 0 8px;
+      font-size: 17px;
+      letter-spacing: -0.02em;
+    }
+
+    .explain-copy {
+      margin: 0;
+      color: var(--muted-strong);
+      font-size: 13px;
+      line-height: 1.55;
+    }
+
+    .summary-list {
+      display: grid;
+      gap: 10px;
+      margin-top: 12px;
+    }
+
+    .summary-row {
+      display: grid;
+      gap: 3px;
+      padding-bottom: 10px;
+      border-bottom: 1px solid rgba(226, 232, 240, 0.8);
+    }
+
+    .summary-row:last-child {
+      padding-bottom: 0;
+      border-bottom: none;
+    }
+
+    .summary-label {
+      font-size: 10px;
+      text-transform: uppercase;
+      letter-spacing: 0.12em;
+      color: var(--muted);
+      font-weight: 700;
+    }
+
+    .summary-value {
+      font-size: 13px;
+      line-height: 1.5;
+      color: var(--muted-strong);
+    }
+
+    .layout {
+      display: grid;
+      gap: 14px;
+    }
+
     .panel {
-      background: var(--panel);
-      border: 1px solid var(--border);
-      border-radius: 12px;
-      box-shadow: var(--shadow);
-      padding: 12px;
+      padding: 16px 16px 14px;
       min-width: 0;
     }
-    .panel h2 {
-      margin: 0 0 8px;
-      font-size: 14px;
+
+    .panel-header {
+      display: flex;
+      justify-content: space-between;
+      align-items: flex-start;
+      gap: 16px;
+      margin-bottom: 12px;
     }
+
+    .panel-header h2 {
+      margin: 0;
+      font-size: 18px;
+      letter-spacing: -0.02em;
+    }
+
+    .panel-subtitle {
+      margin-top: 5px;
+      color: var(--muted);
+      font-size: 12px;
+      line-height: 1.45;
+      max-width: 760px;
+    }
+
+    .panel-tag {
+      flex: 0 0 auto;
+      display: inline-flex;
+      align-items: center;
+      padding: 8px 11px;
+      border-radius: 999px;
+      background: rgba(248, 250, 252, 0.92);
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      color: var(--muted-strong);
+      font-size: 11px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+    }
+
     .table-wrap {
       overflow: auto;
-      border: 1px solid #e6ebf1;
-      border-radius: 10px;
-      background: #fff;
+      border: 1px solid rgba(226, 232, 240, 0.92);
+      border-radius: 18px;
+      background: rgba(255, 255, 255, 0.96);
     }
+
     table {
       width: 100%;
       border-collapse: collapse;
-      min-width: 1040px;
+      min-width: 1380px;
     }
-    th, td {
+
+    th,
+    td {
       border-bottom: 1px solid #edf1f5;
       text-align: left;
-      padding: 8px 9px;
+      padding: 11px 12px;
       font-size: 12px;
       vertical-align: top;
     }
+
     th {
       position: sticky;
       top: 0;
-      background: #f8fafc;
       z-index: 1;
+      background: rgba(248, 250, 252, 0.98);
       color: var(--muted);
       text-transform: uppercase;
-      font-size: 11px;
-      letter-spacing: 0.04em;
+      font-size: 10px;
+      letter-spacing: 0.12em;
+      font-weight: 800;
     }
-    .placeholder {
-      color: var(--muted);
+
+    tr:last-child td {
+      border-bottom: none;
+    }
+
+    .process-row-runnable {
+      background: linear-gradient(90deg, rgba(240, 253, 244, 0.58) 0%, rgba(255, 255, 255, 0) 40%);
+    }
+
+    .process-row-blocked {
+      background: linear-gradient(90deg, rgba(255, 251, 235, 0.66) 0%, rgba(255, 255, 255, 0) 40%);
+    }
+
+    .table-stack {
+      display: grid;
+      gap: 4px;
+      min-width: 0;
+    }
+
+    .table-main {
       font-size: 12px;
-      padding: 10px;
+      font-weight: 700;
+      line-height: 1.4;
+      color: var(--text);
+      overflow-wrap: anywhere;
     }
-    .badge {
+
+    .table-sub {
+      color: var(--muted);
+      line-height: 1.45;
+      overflow-wrap: anywhere;
+    }
+
+    .table-sub.mono,
+    .mono {
+      font-family: Consolas, "Courier New", monospace;
+    }
+
+    .pill {
       display: inline-flex;
       align-items: center;
+      gap: 7px;
       border-radius: 999px;
+      padding: 5px 9px;
       font-size: 11px;
-      font-weight: 700;
-      padding: 2px 8px;
+      font-weight: 800;
       text-transform: uppercase;
-      letter-spacing: 0.04em;
-      color: #fff;
-    }
-    .badge-running { background: var(--run); }
-    .badge-completed { background: var(--ok); }
-    .badge-completed_with_errors { background: var(--warn); }
-    .badge-interrupted { background: #64748b; }
-    .badge-idle { background: #64748b; }
-    .status-chip {
-      display: inline-flex;
-      align-items: center;
-      border-radius: 999px;
-      padding: 2px 8px;
-      font-size: 11px;
-      font-weight: 700;
-      text-transform: uppercase;
-      letter-spacing: 0.03em;
-      border: 1px solid #cbd5e1;
-      color: #0f172a;
+      letter-spacing: 0.06em;
+      border: 1px solid rgba(148, 163, 184, 0.22);
       background: #f8fafc;
+      color: var(--text);
+      width: fit-content;
     }
-    .status-running { border-color: #93c5fd; color: #1d4ed8; background: #eff6ff; }
-    .status-needs-action { border-color: #fcd34d; color: #92400e; background: #fffbeb; }
-    .status-completed { border-color: #86efac; color: #166534; background: #f0fdf4; }
-    .status-failed { border-color: #fca5a5; color: #991b1b; background: #fef2f2; }
-    .status-other { border-color: #cbd5e1; color: #334155; background: #f8fafc; }
+
+    .pill-status-running,
+    .pill-ready {
+      background: var(--run-soft);
+      border-color: rgba(59, 130, 246, 0.25);
+      color: var(--run);
+    }
+
+    .pill-status-failed,
+    .pill-blocked,
+    .pill-outcome-failed {
+      background: var(--err-soft);
+      border-color: rgba(248, 113, 113, 0.28);
+      color: var(--err);
+    }
+
+    .pill-status-completed,
+    .pill-outcome-resumed {
+      background: var(--ok-soft);
+      border-color: rgba(52, 211, 153, 0.24);
+      color: var(--ok);
+    }
+
+    .pill-status-needs-action,
+    .pill-outcome-skipped,
+    .pill-live {
+      background: var(--warn-soft);
+      border-color: rgba(245, 158, 11, 0.22);
+      color: var(--warn);
+    }
+
     .source-chip {
       display: inline-flex;
       align-items: center;
-      border-radius: 8px;
-      padding: 2px 8px;
-      border: 1px solid #cbd5e1;
-      background: #f8fafc;
-      color: #334155;
+      border-radius: 999px;
+      padding: 4px 9px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: rgba(248, 250, 252, 0.94);
+      color: var(--muted-strong);
       font-size: 11px;
-      font-weight: 600;
-      max-width: 180px;
+      font-weight: 700;
+      width: fit-content;
+      max-width: 220px;
       overflow: hidden;
       text-overflow: ellipsis;
       white-space: nowrap;
     }
-    .outcome-resumed { color: var(--ok); font-weight: 700; }
-    .outcome-skipped_missing_chat_url,
-    .outcome-skipped_not_found,
-    .outcome-skipped_already_completed { color: var(--warn); font-weight: 700; }
-    .outcome-failed { color: var(--err); font-weight: 700; }
-    .link-btn {
-      border: 1px solid var(--border);
-      background: #fff;
-      color: var(--text);
-      border-radius: 8px;
-      padding: 4px 8px;
+
+    .stage-block {
+      display: grid;
+      gap: 7px;
+      min-width: 170px;
+    }
+
+    .stage-progress {
+      display: grid;
+      gap: 5px;
+    }
+
+    .stage-progress-label {
       font-size: 11px;
-      font-weight: 600;
+      color: var(--muted);
+      line-height: 1.35;
+    }
+
+    .stage-progress .progress-strip {
+      height: 7px;
+    }
+
+    .chat-block {
+      display: grid;
+      gap: 8px;
+      min-width: 170px;
+    }
+
+    .link-btn {
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      background: var(--panel-strong);
+      color: var(--text);
+      border-radius: 10px;
+      padding: 7px 10px;
+      font-size: 11px;
+      font-weight: 700;
       cursor: pointer;
+      width: fit-content;
     }
-    .mono {
-      font-family: Consolas, "Courier New", monospace;
+
+    .link-btn:hover {
+      box-shadow: 0 8px 16px rgba(15, 23, 42, 0.08);
     }
-    @media (max-width: 980px) {
+
+    .placeholder {
+      color: var(--muted);
+      font-size: 12px;
+      padding: 18px;
+      text-align: center;
+    }
+
+    @media (max-width: 1260px) {
+      .hero,
+      .explain-grid,
+      .metrics {
+        grid-template-columns: 1fr;
+      }
+
+      .logic-strip {
+        grid-template-columns: 1fr;
+      }
+    }
+
+    @media (max-width: 900px) {
       body {
-        padding: 12px;
+        padding: 14px;
+      }
+
+      .hero-main,
+      .hero-side,
+      .panel,
+      .metric,
+      .explain-card,
+      .status {
+        border-radius: 18px;
+      }
+
+      .status-top,
+      .panel-header {
+        flex-direction: column;
+      }
+
+      .status-meta {
+        text-align: left;
       }
     }
   </style>
 </head>
 <body>
-  <div class="header">
-    <h1>Recovery niedokonczonych procesow</h1>
-    <div class="actions">
-      <button class="btn" id="refresh-btn">Odswiez liste</button>
-      <button class="btn btn-primary" id="run-btn">Uruchom wszystkie</button>
-      <button class="btn" id="run-10-btn">Uruchom 10</button>
-      <button class="btn" id="open-panel-btn">Panel decyzyjny</button>
-    </div>
-  </div>
+  <div class="page">
+    <section class="hero">
+      <div class="hero-main">
+        <div class="eyebrow">Snapshot list + live resume verification</div>
+        <h1>Recovery niedokonczonych procesow</h1>
+        <p class="hero-text">
+          Ekran rozdziela trzy rzeczy: co system pamieta jako snapshot procesu, co da sie uruchomic od razu
+          i co zostanie policzone live dopiero po otwarciu nowej karty ChatGPT. Lista nie udaje finalnej prawdy o etapie
+          procesu. Ona pokazuje kandydatow do recovery.
+        </p>
 
-  <div class="filters">
-    <label for="source-filter">Filtr zrodla:</label>
-    <select id="source-filter" class="filter-select">
-      <option value="all">Wszystkie zrodla</option>
-    </select>
-  </div>
-
-  <div id="status" class="status">Ladowanie danych...</div>
-
-  <div class="metrics">
-    <div class="metric">
-      <p class="metric-title">Total</p>
-      <div id="metric-total" class="metric-value">-</div>
-    </div>
-    <div class="metric">
-      <p class="metric-title">Runnable</p>
-      <div id="metric-runnable" class="metric-value">-</div>
-    </div>
-    <div class="metric">
-      <p class="metric-title">Missing chatUrl</p>
-      <div id="metric-missing" class="metric-value">-</div>
-    </div>
-    <div class="metric">
-      <p class="metric-title">Batch status</p>
-      <div id="metric-batch-status" class="metric-value">-</div>
-    </div>
-    <div class="metric">
-      <p class="metric-title">Batch progress</p>
-      <div id="metric-progress" class="metric-value">-</div>
-    </div>
-  </div>
-
-  <div class="layout">
-    <section class="panel">
-      <h2>Lista procesow do recovery (zamkniete i niedokonczone)</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>runId</th>
-              <th>status</th>
-              <th>source</th>
-              <th>stage</th>
-              <th>updated</th>
-              <th>chatUrl</th>
-              <th>runnable</th>
-              <th>akcje</th>
-            </tr>
-          </thead>
-          <tbody id="process-body">
-            <tr><td colspan="9" class="placeholder">Brak danych.</td></tr>
-          </tbody>
-        </table>
+        <div class="logic-strip">
+          <div class="logic-step">
+            <div class="logic-index">1</div>
+            <div class="logic-title">Lista kandydatow</div>
+            <div class="logic-copy">
+              Widoczne sa tylko procesy zamkniete, nie-completed i z dowodem wykonania w monitorze procesu.
+            </div>
+          </div>
+          <div class="logic-step">
+            <div class="logic-index">2</div>
+            <div class="logic-title">Snapshot etapu</div>
+            <div class="logic-copy">
+              Kolumna etapu pokazuje zapisany snapshot progressu. To punkt orientacyjny, nie ostateczna decyzja startu.
+            </div>
+          </div>
+          <div class="logic-step">
+            <div class="logic-index">3</div>
+            <div class="logic-title">Live przy starcie</div>
+            <div class="logic-copy">
+              Gdy batch otwiera nowa karte, worker liczy etap live na rozmowie i dopiero wtedy wybiera bezpieczny prompt.
+            </div>
+          </div>
+        </div>
       </div>
+
+      <aside class="hero-side">
+        <div class="actions">
+          <p class="actions-title">Akcje</p>
+          <div class="action-grid">
+            <button class="btn" id="refresh-btn">Odswiez liste</button>
+            <button class="btn btn-primary" id="run-btn">Uruchom wszystkie</button>
+            <button class="btn" id="run-10-btn">Uruchom 10</button>
+            <button class="btn" id="open-panel-btn">Panel decyzyjny</button>
+          </div>
+        </div>
+
+        <div class="side-note">
+          <strong>Wazne</strong>
+          <p>
+            Przycisk <span class="mono">Uruchom 10</span> wybiera kandydatow po snapshot progressu.
+            Sam punkt wznowienia nadal jest liczony live po otwarciu karty.
+          </p>
+        </div>
+      </aside>
     </section>
 
-    <section class="panel">
-      <h2>Batch report</h2>
-      <div class="table-wrap">
-        <table>
-          <thead>
-            <tr>
-              <th>#</th>
-              <th>runId</th>
-              <th>title</th>
-              <th>outcome</th>
-              <th>detected/start</th>
-              <th>method</th>
-              <th>reason</th>
-              <th>error</th>
-              <th>chat</th>
-            </tr>
-          </thead>
-          <tbody id="batch-body">
-            <tr><td colspan="9" class="placeholder">Czekam na uruchomienie batch.</td></tr>
-          </tbody>
-        </table>
+    <section id="status" class="status">
+      <div class="status-top">
+        <div>
+          <div class="status-kicker">Stan recovery</div>
+          <div id="status-title" class="status-title">Ladowanie danych...</div>
+        </div>
+        <div id="status-meta" class="status-meta">Odczyt z worker service i process monitor state.</div>
       </div>
+      <div id="status-hints" class="status-hints"></div>
     </section>
+
+    <div class="filters">
+      <span class="filter-label">Filtr zrodla</span>
+      <select id="source-filter" class="filter-select">
+        <option value="all">Wszystkie zrodla</option>
+      </select>
+    </div>
+
+    <section class="metrics">
+      <article class="metric">
+        <p class="metric-title">Kandydaci recovery</p>
+        <div id="metric-total" class="metric-value">-</div>
+      </article>
+      <article class="metric">
+        <p class="metric-title">Startowalne teraz</p>
+        <div id="metric-runnable" class="metric-value">-</div>
+        <div id="metric-runnable-caption" class="metric-caption">-</div>
+        <div class="progress-strip"><div id="metric-runnable-bar" class="progress-fill"></div></div>
+      </article>
+      <article class="metric">
+        <p class="metric-title">Zablokowane</p>
+        <div id="metric-missing" class="metric-value">-</div>
+        <div id="metric-missing-caption" class="metric-caption">-</div>
+      </article>
+      <article class="metric">
+        <p class="metric-title">Batch</p>
+        <div id="metric-batch-status" class="metric-value">-</div>
+      </article>
+      <article class="metric">
+        <p class="metric-title">Przebieg batcha</p>
+        <div id="metric-progress" class="metric-value">-</div>
+        <div class="progress-strip"><div id="metric-progress-bar" class="progress-fill run"></div></div>
+      </article>
+    </section>
+
+    <section class="explain-grid">
+      <article class="explain-card">
+        <p class="explain-kicker">Co policzyl system</p>
+        <h2>Aktualny odczyt listy</h2>
+        <p class="explain-copy">
+          Ten blok pokazuje aktualny bilans kandydatow: ile ma zapisany snapshot etapu,
+          ile da sie otworzyc od razu i jak swiezy jest ostatni zapis.
+        </p>
+        <div id="counting-summary" class="summary-list"></div>
+      </article>
+
+      <article class="explain-card">
+        <p class="explain-kicker">Co zrobi batch</p>
+        <h2>Selekcja i strategia</h2>
+        <p class="explain-copy">
+          Batch wznowienia wybiera kandydatow z tej listy, ale start promptu wylicza ponownie live
+          na rozmowie po otwarciu karty.
+        </p>
+        <div id="selection-summary" class="summary-list"></div>
+      </article>
+
+      <article class="explain-card">
+        <p class="explain-kicker">Jak czytac kolumny</p>
+        <h2>Legenda</h2>
+        <div class="summary-list">
+          <div class="summary-row">
+            <div class="summary-label">Snapshot etapu</div>
+            <div class="summary-value">Zapisany stan procesu z monitora. Sluzy do orientacji i rankingu.</div>
+          </div>
+          <div class="summary-row">
+            <div class="summary-label">Gotowosc</div>
+            <div class="summary-value">Czy worker ma conversation/chat URL i moze otworzyc nowa karte bez rekonstrukcji.</div>
+          </div>
+          <div class="summary-row">
+            <div class="summary-label">Przy wznowieniu</div>
+            <div class="summary-value">Opisuje, czy system zrobi live detect, czy odpadnie z powodu braku URL albo innego sygnalu.</div>
+          </div>
+        </div>
+      </article>
+    </section>
+
+    <div class="layout">
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Kandydaci recovery</h2>
+            <div class="panel-subtitle">
+              Lista pokazuje zamkniete, niedokonczone procesy wraz z zapisanym snapshotem etapu,
+              gotowoscia do otwarcia nowej karty i ostatnim sygnalem procesu.
+            </div>
+          </div>
+          <div class="panel-tag">Snapshot + readiness</div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Proces</th>
+                <th>Status</th>
+                <th>Snapshot etapu</th>
+                <th>Gotowosc</th>
+                <th>Przy wznowieniu</th>
+                <th>Ostatni sygnal</th>
+                <th>Zrodlo / update</th>
+                <th>Chat</th>
+              </tr>
+            </thead>
+            <tbody id="process-body">
+              <tr><td colspan="9" class="placeholder">Brak danych.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+
+      <section class="panel">
+        <div class="panel-header">
+          <div>
+            <h2>Batch report</h2>
+            <div class="panel-subtitle">
+              Tabela pokazuje juz wykonane proby wznowienia: wykryty prompt live, wybrany punkt startu
+              i powod sukcesu albo odrzucenia.
+            </div>
+          </div>
+          <div class="panel-tag">Live detect -> start</div>
+        </div>
+
+        <div class="table-wrap">
+          <table>
+            <thead>
+              <tr>
+                <th>#</th>
+                <th>Proces</th>
+                <th>Outcome</th>
+                <th>Live detect -> start</th>
+                <th>Method</th>
+                <th>Powod / error</th>
+                <th>Chat</th>
+              </tr>
+            </thead>
+            <tbody id="batch-body">
+              <tr><td colspan="7" class="placeholder">Czekam na uruchomienie batch.</td></tr>
+            </tbody>
+          </table>
+        </div>
+      </section>
+    </div>
   </div>
 
   <script src="unfinished-processes.js"></script>

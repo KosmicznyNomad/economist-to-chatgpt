@@ -74,6 +74,26 @@
       margin-bottom: 16px;
     }
 
+    .remote-runner-option {
+      margin-bottom: 16px;
+      padding: 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      background: #fafafa;
+    }
+
+    .remote-runner-checkbox {
+      display: flex;
+      align-items: center;
+      gap: 10px;
+      margin-bottom: 6px;
+      cursor: pointer;
+    }
+
+    .remote-runner-checkbox input[type="checkbox"] {
+      margin: 0;
+    }
+
     .pdf-section {
       margin-bottom: 16px;
       padding: 12px;
@@ -251,6 +271,14 @@
 
     <label for="sourceInput">Tekst zrodla</label>
     <textarea id="sourceInput" placeholder="Wklej tutaj tekst artykulu lub zrodla..." autofocus></textarea>
+
+    <div class="remote-runner-option">
+      <label class="remote-runner-checkbox" for="remoteRunnerCheckbox">
+        <input type="checkbox" id="remoteRunnerCheckbox">
+        <span>Uruchom na innym komputerze (Remote Runner)</span>
+      </label>
+      <p id="remoteRunnerHint" class="info">Tryb zdalny dziala dla tekstu. PDF pozostaje uruchamiany lokalnie.</p>
+    </div>
 
     <div class="pdf-section">
       <label for="pdfInput">Zalacz PDF (opcjonalnie)</label>

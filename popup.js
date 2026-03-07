@@ -177,19 +177,47 @@ const POPUP_SHORTCUTS = Object.freeze({
   stop: '7',
   copyYouTube: '8',
   restoreWindows: '9',
-  autoRestoreToggle: '0'
+  autoRestoreToggle: '0',
+  unfinishedProcesses: 'n',
+  problemLogs: 'l',
+  repeatLastPromptAll: 'r',
+  countCompanyMessages: 'c',
+  resumeAllExtended: 'e',
+  resumeAllHeavy: 'h'
 });
 
-function buildShortcutButtonHtml(label, shortcutKey) {
-  const safeLabel = typeof label === 'string' ? label.trim() : '';
-  const safeShortcut = typeof shortcutKey === 'string' ? shortcutKey.trim() : '';
-  if (!safeShortcut) return safeLabel;
-  return `${safeLabel} <span class="shortcut">${safeShortcut}</span>`;
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function setShortcutButtonLabel(button, label, shortcutKey) {
+function formatShortcutDisplay(shortcutKey) {
+  const safeShortcut = typeof shortcutKey === 'string' ? shortcutKey.trim() : '';
+  return safeShortcut ? safeShortcut.toUpperCase() : '';
+}
+
+function buildShortcutButtonHtml(label, shortcutKey, detail = '') {
+  const safeLabel = typeof label === 'string' ? label.trim() : '';
+  const safeShortcut = formatShortcutDisplay(shortcutKey);
+  const safeDetail = typeof detail === 'string' ? detail.trim() : '';
+  const shortcutHtml = safeShortcut ? `<span class="shortcut">${escapeHtml(safeShortcut)}</span>` : '';
+  const detailHtml = safeDetail ? `<span class="btn-detail">${escapeHtml(safeDetail)}</span>` : '';
+  return `<span class="btn-copy"><span class="btn-label">${escapeHtml(safeLabel)}</span>${detailHtml}</span>${shortcutHtml}`;
+}
+
+function setShortcutButtonLabel(button, label, shortcutKey = null, detail = null) {
   if (!button) return;
-  button.innerHTML = buildShortcutButtonHtml(label, shortcutKey);
+  const resolvedShortcut = typeof shortcutKey === 'string' && shortcutKey.trim()
+    ? shortcutKey.trim()
+    : (typeof button.dataset?.shortcutKey === 'string' ? button.dataset.shortcutKey : '');
+  const resolvedDetail = typeof detail === 'string'
+    ? detail
+    : (typeof button.dataset?.shortcutDetail === 'string' ? button.dataset.shortcutDetail : '');
+  button.innerHTML = buildShortcutButtonHtml(label, resolvedShortcut, resolvedDetail);
 }
 
 function setStatusElement(element, text, isError = false) {
@@ -250,9 +278,10 @@ function applyAutoRestoreUi(status) {
     ? status.periodInMinutes
     : 5;
   if (autoRestoreToggleBtn) {
+    autoRestoreToggleBtn.dataset.shortcutDetail = `Co ${periodInMinutes} min: restore okien, health check i reload+resume`;
     setShortcutButtonLabel(
       autoRestoreToggleBtn,
-      enabled ? `Auto co ${periodInMinutes} min: ON` : `Auto co ${periodInMinutes} min: OFF`,
+      enabled ? 'Auto: ON' : 'Auto: OFF',
       POPUP_SHORTCUTS.autoRestoreToggle
     );
     autoRestoreToggleBtn.dataset.enabled = enabled ? 'true' : 'false';
@@ -1235,9 +1264,9 @@ function formatCompanyConversationCountStatus(response) {
 async function executeCountCompanyMessagesFromPopup(button) {
   if (!button) return;
 
-  const originalText = button.textContent;
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Licze...';
+  setShortcutButtonLabel(button, 'Licze...');
   setRunStatus('Licze wszystkie wiadomosci company na aktywnej konwersacji...');
 
   try {
@@ -1268,7 +1297,7 @@ async function executeCountCompanyMessagesFromPopup(button) {
     setRestoreProcessWindowsStatus(`Licznik procesu: blad (${error?.message || String(error)})`, true);
   } finally {
     button.disabled = false;
-    button.textContent = originalText || 'Policz wszystkie wiadomosci (company)';
+    button.innerHTML = originalHtml;
   }
 }
 
@@ -1277,7 +1306,7 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
 
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Uruchamiam...';
+  setShortcutButtonLabel(button, 'Uruchamiam...');
   setRunStatus('Uruchamiam analizy...');
 
   try {
@@ -1409,7 +1438,7 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = `Restart + wznawiam${effortSuffix}...`;
+  setShortcutButtonLabel(button, `Restart + wznawiam${effortSuffix}...`);
   setRunStatus(
     composerThinkingEffort
       ? `Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start, tryb: ${composerThinkingEffort}.`
@@ -1582,9 +1611,9 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all';
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
-  const originalText = button.textContent;
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Powtarzam...';
+  setShortcutButtonLabel(button, 'Powtarzam...');
   setRunStatus('Powtarzam ostatni prompt we wszystkich aktywnych procesach company...');
   openReloadResumeMonitorWindow(monitorSessionId, {
     origin,
@@ -1615,7 +1644,7 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
   } finally {
     button.disabled = false;
-    button.textContent = originalText || 'Powtorz ostatni prompt (wszystkie)';
+    button.innerHTML = originalHtml;
   }
 }
 
@@ -2290,16 +2319,25 @@ const popupShortcutHandlers = {
   [POPUP_SHORTCUTS.copyYouTube]: () => clickIfEnabled(copyYouTubeTranscriptBtn),
   [POPUP_SHORTCUTS.restoreWindows]: () => clickIfEnabled(restoreProcessWindowsBtn),
   [POPUP_SHORTCUTS.autoRestoreToggle]: () => clickIfEnabled(autoRestoreToggleBtn),
+  [POPUP_SHORTCUTS.unfinishedProcesses]: () => clickIfEnabled(unfinishedProcessesBtn),
+  [POPUP_SHORTCUTS.problemLogs]: () => clickIfEnabled(problemLogsBtn),
+  [POPUP_SHORTCUTS.repeatLastPromptAll]: () => clickIfEnabled(repeatLastPromptAllBtn),
+  [POPUP_SHORTCUTS.countCompanyMessages]: () => clickIfEnabled(countCompanyMessagesBtn),
+  [POPUP_SHORTCUTS.resumeAllExtended]: () => clickIfEnabled(resumeAllExtendedBtn),
+  [POPUP_SHORTCUTS.resumeAllHeavy]: () => clickIfEnabled(resumeAllHeavyBtn),
 };
 
 function resolvePopupShortcutKey(event) {
   if (!event) return '';
   const key = typeof event.key === 'string' ? event.key.trim() : '';
   if (/^[0-9]$/.test(key)) return key;
+  if (/^[a-z]$/i.test(key)) return key.toLowerCase();
 
   const code = typeof event.code === 'string' ? event.code.trim() : '';
   const digitMatch = code.match(/^Digit([0-9])$/);
   if (digitMatch) return digitMatch[1];
+  const keyMatch = code.match(/^Key([A-Z])$/);
+  if (keyMatch) return keyMatch[1].toLowerCase();
   const numpadMatch = code.match(/^Numpad([0-9])$/);
   if (numpadMatch) return numpadMatch[1];
 
