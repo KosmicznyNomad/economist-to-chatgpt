@@ -1,0 +1,9 @@
+# Chrome (unpacked extensions) rejects arbitrary files/dirs starting with "_"
+_tmp_problem_logs_dump*.json
+
+# Local/debug dumps
+tmp_problem_logs_dump*.json
+
+# Local tool worktrees and virtualenvs
+.claude/
+
