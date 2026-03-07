@@ -170,6 +170,7 @@ const REMOTE_RUNNER_TRANSPORT_WATCHLIST = 'watchlist';
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
   runAnalysis: '2',
+  runRemote: 'z',
   resumeStage: '3',
   resumeAll: '4',
   responses: '5',
@@ -281,7 +282,7 @@ function applyAutoRestoreUi(status) {
     autoRestoreToggleBtn.dataset.shortcutDetail = `Co ${periodInMinutes} min: restore okien, health check i reload+resume`;
     setShortcutButtonLabel(
       autoRestoreToggleBtn,
-      enabled ? 'Auto: ON' : 'Auto: OFF',
+      enabled ? 'Auto ON' : 'Auto OFF',
       POPUP_SHORTCUTS.autoRestoreToggle
     );
     autoRestoreToggleBtn.dataset.enabled = enabled ? 'true' : 'false';
@@ -1524,9 +1525,9 @@ async function executeCheckRemoteRunnerFromPopup(button) {
 
 async function executeRunRemoteAnalysisFromPopup(button) {
   if (!button) return;
-  const originalText = button.textContent;
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Uruchamiam...';
+  setShortcutButtonLabel(button, 'Start...');
   setRunStatus('Przygotowuje batch tekstow i wysylam do runnera...');
 
   try {
@@ -1561,7 +1562,7 @@ async function executeRunRemoteAnalysisFromPopup(button) {
     setRunStatus(`Remote runner: ${error?.message || String(error)}`, true);
   } finally {
     button.disabled = false;
-    button.textContent = originalText || 'Uruchom na drugim komputerze';
+    button.innerHTML = originalHtml;
   }
 }
 
@@ -2311,6 +2312,7 @@ function clickIfEnabled(button) {
 const popupShortcutHandlers = {
   [POPUP_SHORTCUTS.manualSource]: () => clickIfEnabled(manualSourceBtn),
   [POPUP_SHORTCUTS.runAnalysis]: () => clickIfEnabled(runBtn),
+  [POPUP_SHORTCUTS.runRemote]: () => clickIfEnabled(runRemoteBtn),
   [POPUP_SHORTCUTS.resumeStage]: () => clickIfEnabled(resumeStageBtn),
   [POPUP_SHORTCUTS.resumeAll]: () => clickIfEnabled(resumeAllBtn),
   [POPUP_SHORTCUTS.responses]: () => clickIfEnabled(responsesBtn),

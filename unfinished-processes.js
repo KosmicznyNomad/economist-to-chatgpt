@@ -4,13 +4,23 @@ const run10Btn = document.getElementById('run-10-btn');
 const openPanelBtn = document.getElementById('open-panel-btn');
 const sourceFilterSelect = document.getElementById('source-filter');
 const statusBox = document.getElementById('status');
+const statusTitleBox = document.getElementById('status-title');
+const statusMetaBox = document.getElementById('status-meta');
+const statusHintsBox = document.getElementById('status-hints');
 const processBody = document.getElementById('process-body');
 const batchBody = document.getElementById('batch-body');
 const metricTotal = document.getElementById('metric-total');
 const metricRunnable = document.getElementById('metric-runnable');
+const metricRunnableCaption = document.getElementById('metric-runnable-caption');
+const metricRunnableBar = document.getElementById('metric-runnable-bar');
 const metricMissing = document.getElementById('metric-missing');
+const metricMissingCaption = document.getElementById('metric-missing-caption');
 const metricBatchStatus = document.getElementById('metric-batch-status');
 const metricProgress = document.getElementById('metric-progress');
+const metricProgressBar = document.getElementById('metric-progress-bar');
+const countingSummary = document.getElementById('counting-summary');
+const selectionSummary = document.getElementById('selection-summary');
+const UNFINISHED_RESUME_KEEPALIVE_INTERVAL_MS = 15000;
 
 const FAILED_PROCESS_STATUSES = new Set([
   'failed',
@@ -28,6 +38,11 @@ let refreshInProgress = false;
 let pendingRefresh = false;
 let pollIntervalId = null;
 let selectedSourceFilter = 'all';
+let keepalivePort = null;
+let keepaliveTimerId = null;
+let keepaliveReconnectTimerId = null;
+let pageIsClosing = false;
+const keepalivePageId = `unfinished-resume-page-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
@@ -41,10 +56,189 @@ function sendRuntimeMessage(payload) {
   });
 }
 
-function setStatus(text, isError = false) {
+function getKeepaliveState() {
+  return normalizeBatchStatus(lastBatchState?.status) === 'running' ? 'running' : 'idle';
+}
+
+function postKeepaliveTick() {
+  if (!keepalivePort) return;
+  try {
+    keepalivePort.postMessage({
+      type: 'UNFINISHED_RESUME_PAGE_KEEPALIVE',
+      pageId: keepalivePageId,
+      state: getKeepaliveState(),
+      sourceFilter: selectedSourceFilter,
+      timestamp: Date.now()
+    });
+  } catch (_) {
+    // onDisconnect handles cleanup.
+  }
+}
+
+function stopWorkerKeepalive() {
+  pageIsClosing = true;
+  if (keepaliveTimerId !== null) {
+    clearInterval(keepaliveTimerId);
+    keepaliveTimerId = null;
+  }
+  if (keepaliveReconnectTimerId !== null) {
+    clearTimeout(keepaliveReconnectTimerId);
+    keepaliveReconnectTimerId = null;
+  }
+  if (!keepalivePort) return;
+  try {
+    keepalivePort.disconnect();
+  } catch (_) {
+    // Ignore disconnect races.
+  }
+  keepalivePort = null;
+}
+
+function startWorkerKeepalive() {
+  if (keepalivePort) return;
+  pageIsClosing = false;
+  if (keepaliveReconnectTimerId !== null) {
+    clearTimeout(keepaliveReconnectTimerId);
+    keepaliveReconnectTimerId = null;
+  }
+  try {
+    keepalivePort = chrome.runtime.connect({ name: `unfinished-resume-page:${keepalivePageId}` });
+    keepalivePort.onDisconnect.addListener(() => {
+      keepalivePort = null;
+      if (keepaliveTimerId !== null) {
+        clearInterval(keepaliveTimerId);
+        keepaliveTimerId = null;
+      }
+      const batchRunning = normalizeBatchStatus(lastBatchState?.status) === 'running';
+      if (batchRunning) {
+        setStatus('Polaczenie z workerem zostalo przerwane', {
+          meta: 'Batch moze zostac zatrzymany po uspieniu workera lub przeladowaniu rozszerzenia.',
+          hints: ['odswiez strone recovery', 'sprawdz log worker service'],
+          isError: true
+        });
+      }
+      if (!pageIsClosing && keepaliveReconnectTimerId === null) {
+        keepaliveReconnectTimerId = window.setTimeout(() => {
+          keepaliveReconnectTimerId = null;
+          startWorkerKeepalive();
+        }, 1500);
+      }
+    });
+    postKeepaliveTick();
+    keepaliveTimerId = setInterval(() => {
+      postKeepaliveTick();
+    }, UNFINISHED_RESUME_KEEPALIVE_INTERVAL_MS);
+  } catch (_) {
+    keepalivePort = null;
+    if (keepaliveTimerId !== null) {
+      clearInterval(keepaliveTimerId);
+      keepaliveTimerId = null;
+    }
+  }
+}
+
+function clearNode(node) {
+  if (!node) return;
+  while (node.firstChild) {
+    node.removeChild(node.firstChild);
+  }
+}
+
+function createTextLine(text, className) {
+  const line = document.createElement('div');
+  line.className = className;
+  line.textContent = text;
+  return line;
+}
+
+function createPill(text, className = '') {
+  const pill = document.createElement('span');
+  pill.className = `pill ${className}`.trim();
+  pill.textContent = text;
+  return pill;
+}
+
+function createStackCell(lines = []) {
+  const wrap = document.createElement('div');
+  wrap.className = 'table-stack';
+  lines.filter(Boolean).forEach((entry, index) => {
+    const value = typeof entry === 'string' ? entry : entry.text;
+    if (!value) return;
+    const className = typeof entry === 'string'
+      ? (index === 0 ? 'table-main' : 'table-sub')
+      : (entry.className || (index === 0 ? 'table-main' : 'table-sub'));
+    wrap.appendChild(createTextLine(value, className));
+  });
+  return wrap;
+}
+
+function createMetricValue(primary, secondary = '') {
+  const wrap = document.createElement('div');
+  const number = document.createElement('span');
+  number.className = 'metric-number';
+  number.textContent = primary;
+  wrap.appendChild(number);
+  if (secondary) {
+    wrap.appendChild(createTextLine(secondary, 'metric-caption'));
+  }
+  return wrap;
+}
+
+function setMetricValue(node, primary, secondary = '') {
+  clearNode(node);
+  node.appendChild(createMetricValue(primary, secondary));
+}
+
+function setProgressFill(node, ratio, tone = '') {
+  if (!node) return;
+  const safeRatio = Number.isFinite(ratio) ? Math.max(0, Math.min(ratio, 1)) : 0;
+  node.style.width = `${Math.round(safeRatio * 100)}%`;
+  node.className = `progress-fill${tone ? ` ${tone}` : ''}`;
+}
+
+function appendSummaryRows(container, rows, emptyText) {
+  clearNode(container);
+  const safeRows = Array.isArray(rows) ? rows.filter((row) => row && row.label && row.value) : [];
+  if (safeRows.length === 0) {
+    const row = document.createElement('div');
+    row.className = 'summary-row';
+    row.appendChild(createTextLine('Brak danych', 'summary-label'));
+    row.appendChild(createTextLine(emptyText || '-', 'summary-value'));
+    container.appendChild(row);
+    return;
+  }
+
+  safeRows.forEach((entry) => {
+    const row = document.createElement('div');
+    row.className = 'summary-row';
+    row.appendChild(createTextLine(entry.label, 'summary-label'));
+    row.appendChild(createTextLine(entry.value, 'summary-value'));
+    container.appendChild(row);
+  });
+}
+
+function setStatus(title, options = {}) {
   if (!statusBox) return;
-  statusBox.textContent = typeof text === 'string' ? text : '';
-  statusBox.classList.toggle('error', !!isError);
+  const safeTitle = typeof title === 'string' && title.trim()
+    ? title.trim()
+    : 'Brak statusu.';
+  const meta = typeof options?.meta === 'string' ? options.meta.trim() : '';
+  const hints = Array.isArray(options?.hints) ? options.hints : [];
+
+  statusBox.classList.toggle('error', options?.isError === true);
+  if (statusTitleBox) statusTitleBox.textContent = safeTitle;
+  if (statusMetaBox) statusMetaBox.textContent = meta;
+
+  clearNode(statusHintsBox);
+  hints
+    .map((hint) => (typeof hint === 'string' ? hint.trim() : ''))
+    .filter(Boolean)
+    .forEach((hint) => {
+      const chip = document.createElement('span');
+      chip.className = 'hint-chip';
+      chip.textContent = hint;
+      statusHintsBox.appendChild(chip);
+    });
 }
 
 function formatDateTime(ts) {
@@ -86,12 +280,30 @@ function normalizeProcessStatusToken(status) {
 function formatSelectionStrategy(strategy) {
   const normalized = typeof strategy === 'string' ? strategy.trim().toLowerCase() : '';
   if (normalized === 'most_advanced_incomplete_first') {
-    return 'top-progress';
+    return 'top-progress snapshot';
   }
   if (normalized === 'latest_update_first') {
-    return 'latest';
+    return 'latest update';
   }
   return normalized || '-';
+}
+
+function describeSelectionStrategy(strategy) {
+  const normalized = typeof strategy === 'string' ? strategy.trim().toLowerCase() : '';
+  if (normalized === 'most_advanced_incomplete_first') {
+    return 'ranking po snapshot progressu, potem live verify';
+  }
+  if (normalized === 'latest_update_first') {
+    return 'kolejnosc po czasie zapisu, potem live verify';
+  }
+  return 'brak jawnej strategii';
+}
+
+function formatPercent(part, total) {
+  if (!Number.isInteger(total) || total <= 0 || !Number.isInteger(part) || part <= 0) {
+    return '0%';
+  }
+  return `${Math.round((part / total) * 100)}%`;
 }
 
 function isFailedProcessStatus(status) {
@@ -109,30 +321,125 @@ function resolveProcessStatusModel(item) {
   if (item?.isFailedStatus === true || isFailedProcessStatus(status)) {
     return {
       text: formatStatusText(status || 'failed'),
-      className: 'status-failed'
+      className: 'pill-status-failed'
     };
   }
   if (status === 'running') {
     return {
       text: 'running',
-      className: 'status-running'
+      className: 'pill-status-running'
     };
   }
   if (status === 'completed') {
     return {
       text: 'completed',
-      className: 'status-completed'
+      className: 'pill-status-completed'
     };
   }
   if (status === 'needs_action' || item?.needsAction === true) {
     return {
       text: 'needs action',
-      className: 'status-needs-action'
+      className: 'pill-status-needs-action'
     };
   }
   return {
     text: formatStatusText(status || 'unknown'),
-    className: 'status-other'
+    className: 'pill-live'
+  };
+}
+
+function resolveReadinessModel(item) {
+  const hasSnapshot = Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0;
+  if (item?.hasChatUrl === true) {
+    return {
+      text: hasSnapshot ? 'ready-live' : 'ready-live-no-snapshot',
+      className: 'pill-ready',
+      detail: hasSnapshot
+        ? 'ma chatUrl; worker otworzy nowa karte i przeliczy etap live'
+        : 'ma chatUrl; etap bedzie liczony live bez snapshotu promptu'
+    };
+  }
+  return {
+    text: 'blocked',
+    className: 'pill-blocked',
+    detail: 'brak chatUrl / conversation URL; batch nie ruszy tego rekordu'
+  };
+}
+
+function resolveStageSnapshotModel(item) {
+  const currentPrompt = Number.isInteger(item?.currentPrompt) ? item.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0;
+  const progressShare = Number.isFinite(item?.progressShare) ? item.progressShare : 0;
+  const stageName = typeof item?.stageName === 'string' ? item.stageName.trim() : '';
+  if (currentPrompt > 0 && totalPrompts > 0) {
+    return {
+      headline: `snapshot P${currentPrompt}/${totalPrompts}`,
+      subline: stageName || `${Math.round(progressShare * 100)}% chaina`,
+      ratio: progressShare
+    };
+  }
+  if (currentPrompt > 0) {
+    return {
+      headline: `snapshot P${currentPrompt}`,
+      subline: stageName || 'zapisany prompt bez pelnej dlugosci chaina',
+      ratio: 0
+    };
+  }
+  return {
+    headline: 'brak snapshotu etapu',
+    subline: 'punkt startu bedzie liczony dopiero live po otwarciu karty',
+    ratio: 0
+  };
+}
+
+function resolveProcessPlanModel(item) {
+  if (item?.hasChatUrl === true) {
+    if (Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0) {
+      return {
+        headline: 'nowa karta -> live detect -> bezpieczny prompt',
+        subline: 'snapshot sluzy jako wskazowka i ranking, nie jako finalna decyzja'
+      };
+    }
+    return {
+      headline: 'nowa karta -> live detect od zera',
+      subline: 'brak snapshotu promptu, decyzja startu opiera sie na rozmowie'
+    };
+  }
+  return {
+    headline: 'stop przed startem',
+    subline: 'brak chatUrl; bez rekonstrukcji rozmowy batch nie wznowi procesu'
+  };
+}
+
+function resolveProcessSignalModel(item) {
+  const statusText = typeof item?.statusText === 'string' ? item.statusText.trim() : '';
+  const reason = typeof item?.reason === 'string' ? item.reason.trim() : '';
+  const lastError = typeof item?.lastError === 'string' ? item.lastError.trim() : '';
+
+  const primary = statusText || (reason ? `reason: ${formatStatusText(reason)}` : 'brak dodatkowego statusText');
+  const secondary = statusText && reason ? `reason: ${formatStatusText(reason)}` : '';
+  const tertiary = lastError ? `error: ${shortenText(lastError, 120)}` : '';
+
+  return { primary, secondary, tertiary };
+}
+
+function resolveBatchOutcomeModel(outcome) {
+  const normalized = typeof outcome === 'string' ? outcome.trim() : '';
+  if (normalized === 'resumed') {
+    return {
+      text: 'resumed',
+      className: 'pill-outcome-resumed'
+    };
+  }
+  if (normalized === 'failed') {
+    return {
+      text: 'failed',
+      className: 'pill-outcome-failed'
+    };
+  }
+  return {
+    text: normalized || 'skipped',
+    className: 'pill-outcome-skipped'
   };
 }
 
@@ -200,175 +507,370 @@ function rebuildSourceFilterOptions(listResult) {
   sourceFilterSelect.value = selectedSourceFilter;
 }
 
+function buildFallbackSummary(listResult) {
+  const items = Array.isArray(listResult?.items) ? listResult.items : [];
+  const total = items.length;
+  const runnable = items.filter((item) => item?.hasChatUrl === true).length;
+  const blockedMissingChatUrl = Math.max(0, total - runnable);
+  const failedStatuses = items.filter((item) => item?.isFailedStatus === true).length;
+  const needsAction = items.filter((item) => item?.needsAction === true).length;
+  const withStageSnapshot = items.filter((item) => (
+    Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
+  )).length;
+  const latestUpdatedAt = items.reduce((maxTs, item) => {
+    const ts = Number.isInteger(item?.timestamp) ? item.timestamp : 0;
+    return Math.max(maxTs, ts);
+  }, 0);
+  const statusCounts = {};
+  items.forEach((item) => {
+    const key = normalizeProcessStatusToken(item?.status || '') || 'unknown';
+    statusCounts[key] = (statusCounts[key] || 0) + 1;
+  });
+
+  return {
+    total,
+    runnable,
+    blockedMissingChatUrl,
+    failedStatuses,
+    needsAction,
+    withStageSnapshot,
+    latestUpdatedAt,
+    runnableSharePct: total > 0 ? Math.round((runnable / total) * 100) : 0,
+    statusCounts
+  };
+}
+
+function getListSummary(listResult) {
+  if (listResult?.summary && typeof listResult.summary === 'object') {
+    return {
+      ...buildFallbackSummary(listResult),
+      ...listResult.summary
+    };
+  }
+  return buildFallbackSummary(listResult);
+}
+
 function renderMetrics(listResult, batchState) {
   const list = listResult && typeof listResult === 'object' ? listResult : {};
   const state = batchState && typeof batchState === 'object' ? batchState : {};
   const totals = state?.totals && typeof state.totals === 'object' ? state.totals : {};
   const selection = state?.selection && typeof state.selection === 'object' ? state.selection : {};
   const status = normalizeBatchStatus(state?.status);
-  const processed = Number.isInteger(totals?.processed) ? totals.processed : 0;
-  const total = Number.isInteger(totals?.total) ? totals.total : (Number.isInteger(list?.total) ? list.total : 0);
-
-  metricTotal.textContent = String(Number.isInteger(list?.total) ? list.total : 0);
-  metricRunnable.textContent = String(Number.isInteger(list?.runnable) ? list.runnable : 0);
-  metricMissing.textContent = String(Number.isInteger(list?.skippedMissingUrl) ? list.skippedMissingUrl : 0);
-
-  metricBatchStatus.innerHTML = '';
-  const badge = document.createElement('span');
-  badge.className = `badge badge-${status}`;
-  badge.textContent = status;
-  metricBatchStatus.appendChild(badge);
-
-  const selectionSource = normalizeSourceFilter(selection?.sourceFilter || 'all');
-  const selectionLimitApplied = Number.isInteger(selection?.limitApplied) ? selection.limitApplied : null;
-  const selectionLimitRequested = Number.isInteger(selection?.limitRequested) ? selection.limitRequested : null;
-  const selectionLimit = selectionLimitApplied ?? selectionLimitRequested;
-  const selectionLabel = typeof selection?.sourceLabel === 'string' && selection.sourceLabel.trim()
-    ? selection.sourceLabel.trim()
-    : selectionSource;
-  const selectionStrategy = formatSelectionStrategy(selection?.strategy);
-  const details = document.createElement('div');
-  details.textContent = [
-    '',
-    `job: ${state?.jobId || '-'} | active: ${state?.activeRunId || '-'}`,
-    `src: ${selectionLabel || 'all'} | limit: ${selectionLimit || 'all'} | mode: ${selectionStrategy}`
-  ].join('\n');
-  metricBatchStatus.appendChild(details);
-
+  const summary = getListSummary(list);
+  const total = Number.isInteger(summary.total) ? summary.total : 0;
+  const runnable = Number.isInteger(summary.runnable) ? summary.runnable : 0;
+  const blocked = Number.isInteger(summary.blockedMissingChatUrl) ? summary.blockedMissingChatUrl : 0;
+  const snapshotCount = Number.isInteger(summary.withStageSnapshot) ? summary.withStageSnapshot : 0;
+  const runnableSharePct = Number.isInteger(summary.runnableSharePct) ? summary.runnableSharePct : 0;
   const resumed = Number.isInteger(totals?.resumed) ? totals.resumed : 0;
   const failed = Number.isInteger(totals?.failed) ? totals.failed : 0;
   const skippedMissing = Number.isInteger(totals?.skipped_missing_chat_url) ? totals.skipped_missing_chat_url : 0;
   const skippedNotFound = Number.isInteger(totals?.skipped_not_found) ? totals.skipped_not_found : 0;
-  const skippedDone = Number.isInteger(totals?.skipped_already_completed) ? totals.skipped_already_completed : 0;
-  metricProgress.textContent = `${processed}/${total} | resumed=${resumed} | failed=${failed}`;
-  const progressExtra = document.createElement('div');
-  progressExtra.textContent = `\nskip_url=${skippedMissing} | skip_not_found=${skippedNotFound} | skip_done=${skippedDone}`;
-  metricProgress.appendChild(progressExtra);
+  const processed = Number.isInteger(totals?.processed) ? totals.processed : 0;
+  const batchTotal = Number.isInteger(totals?.total) ? totals.total : total;
+
+  setMetricValue(metricTotal, String(total), `${snapshotCount}/${total || 0} ma zapisany snapshot etapu`);
+  setMetricValue(metricRunnable, String(runnable));
+  if (metricRunnableCaption) {
+    metricRunnableCaption.textContent = total > 0
+      ? `${runnableSharePct}% kandydatow ma chatUrl i jest gotowe do live wznowienia`
+      : 'Brak kandydatow do uruchomienia.';
+  }
+  setProgressFill(metricRunnableBar, total > 0 ? (runnable / total) : 0, 'run');
+
+  setMetricValue(metricMissing, String(blocked));
+  if (metricMissingCaption) {
+    const failedStatuses = Number.isInteger(summary.failedStatuses) ? summary.failedStatuses : 0;
+    const needsAction = Number.isInteger(summary.needsAction) ? summary.needsAction : 0;
+    metricMissingCaption.textContent = `failed=${failedStatuses} | needs_action=${needsAction}`;
+  }
+
+  clearNode(metricBatchStatus);
+  metricBatchStatus.appendChild(createPill(status, status === 'completed'
+    ? 'pill-outcome-resumed'
+    : status === 'completed_with_errors'
+      ? 'pill-outcome-skipped'
+      : status === 'running'
+        ? 'pill-status-running'
+        : 'pill-live'));
+  metricBatchStatus.appendChild(createStackCell([
+    {
+      text: `job: ${state?.jobId || '-'}`,
+      className: 'table-sub mono'
+    },
+    {
+      text: `src: ${(selection?.sourceLabel || selection?.sourceFilter || 'all')} | mode: ${formatSelectionStrategy(selection?.strategy)}`,
+      className: 'table-sub'
+    },
+    {
+      text: `limit: ${Number.isInteger(selection?.limitApplied) ? selection.limitApplied : 'all'} | filtered: ${Number.isInteger(selection?.filteredTotal) ? selection.filteredTotal : total}`,
+      className: 'table-sub'
+    }
+  ]));
+
+  setMetricValue(metricProgress, `${processed}/${batchTotal || 0}`);
+  metricProgress.appendChild(createTextLine(`resumed=${resumed} | failed=${failed}`, 'metric-caption'));
+  metricProgress.appendChild(createTextLine(
+    `skip_url=${skippedMissing} | skip_not_found=${skippedNotFound}`,
+    'metric-caption'
+  ));
+  setProgressFill(metricProgressBar, batchTotal > 0 ? (processed / batchTotal) : 0, 'run');
+}
+
+function renderCountingSummary(listResult) {
+  const summary = getListSummary(listResult);
+  const countingModel = listResult?.countingModel && typeof listResult.countingModel === 'object'
+    ? listResult.countingModel
+    : {};
+  appendSummaryRows(countingSummary, [
+    {
+      label: 'Lista',
+      value: `snapshot z ${countingModel.listSource || 'process_monitor_state'}; kandydaci=${summary.total || 0}`
+    },
+    {
+      label: 'Snapshot etapu',
+      value: `${summary.withStageSnapshot || 0}/${summary.total || 0} rekordow ma zapisany prompt lub stage snapshot`
+    },
+    {
+      label: 'Startowalnosc',
+      value: `${summary.runnable || 0} gotowych teraz | ${summary.blockedMissingChatUrl || 0} zablokowanych przez brak chatUrl`
+    },
+    {
+      label: 'Najswiezszy zapis',
+      value: formatDateTime(Number.isInteger(summary.latestUpdatedAt) ? summary.latestUpdatedAt : 0)
+    }
+  ], 'Brak podsumowania liczenia.');
+}
+
+function renderSelectionSummary(listResult, batchState) {
+  const list = listResult && typeof listResult === 'object' ? listResult : {};
+  const state = batchState && typeof batchState === 'object' ? batchState : {};
+  const selection = state?.selection && typeof state.selection === 'object' ? state.selection : {};
+  const sourceLabel = typeof selection?.sourceLabel === 'string' && selection.sourceLabel.trim()
+    ? selection.sourceLabel.trim()
+    : (selection?.sourceFilter || 'all');
+  appendSummaryRows(selectionSummary, [
+    {
+      label: 'Live przy starcie',
+      value: 'Kazdy uruchamiany rekord przechodzi live detect etapu na karcie ChatGPT przed wznowieniem.'
+    },
+    {
+      label: 'Uruchom 10',
+      value: 'Najpierw ranking po snapshot progressu, potem live verification i korekta punktu startu.'
+    },
+    {
+      label: 'Biezacy batch',
+      value: `status=${normalizeBatchStatus(state?.status)} | source=${sourceLabel || 'all'} | mode=${describeSelectionStrategy(selection?.strategy)}`
+    },
+    {
+      label: 'Zakres',
+      value: `limit=${Number.isInteger(selection?.limitApplied) ? selection.limitApplied : 'all'} | filtered=${Number.isInteger(selection?.filteredTotal) ? selection.filteredTotal : (Number.isInteger(list?.total) ? list.total : 0)}`
+    }
+  ], 'Brak aktywnego batcha.');
 }
 
 function renderProcessRows(listResult) {
-  processBody.innerHTML = '';
+  clearNode(processBody);
   const items = Array.isArray(listResult?.items) ? listResult.items : [];
   if (items.length === 0) {
-    processBody.appendChild(createPlaceholderRow(9, 'Brak procesow do recovery.'));
+    processBody.appendChild(createPlaceholderRow(9, 'Brak procesow do recovery. Lista obejmuje tylko rekordy zamkniete, niedokonczone i z dowodem wykonania.'));
     return;
   }
 
   items.forEach((item, index) => {
     const row = document.createElement('tr');
-    const runId = typeof item?.runId === 'string' ? item.runId : '';
     const statusModel = resolveProcessStatusModel(item);
+    const readinessModel = resolveReadinessModel(item);
+    const stageModel = resolveStageSnapshotModel(item);
+    const planModel = resolveProcessPlanModel(item);
+    const signalModel = resolveProcessSignalModel(item);
     const sourceLabel = typeof item?.sourceLabel === 'string' && item.sourceLabel.trim()
       ? item.sourceLabel.trim()
       : (typeof item?.sourceKey === 'string' && item.sourceKey.trim() ? item.sourceKey.trim() : 'unknown');
-    const stageText = Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
-      ? `snapshot P${item.currentPrompt}/${Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0} ${item?.stageName || ''}`.trim()
-      : (item?.stageName ? `snapshot ${item.stageName}` : '-');
-    const updated = formatDateTime(Number.isInteger(item?.timestamp) ? item.timestamp : null);
-    const hasChatUrl = item?.hasChatUrl === true;
-    const runnableText = hasChatUrl ? 'YES' : 'NO';
+    row.className = item?.hasChatUrl === true ? 'process-row-runnable' : 'process-row-blocked';
 
     const orderCell = document.createElement('td');
     orderCell.textContent = String(index + 1);
     row.appendChild(orderCell);
 
-    const runIdCell = document.createElement('td');
-    runIdCell.className = 'mono';
-    runIdCell.textContent = runId || '-';
-    row.appendChild(runIdCell);
+    const processCell = document.createElement('td');
+    processCell.appendChild(createStackCell([
+      { text: item?.title || 'Bez tytulu', className: 'table-main' },
+      { text: item?.runId || '-', className: 'table-sub mono' }
+    ]));
+    row.appendChild(processCell);
 
     const statusCell = document.createElement('td');
-    const statusChip = document.createElement('span');
-    statusChip.className = `status-chip ${statusModel.className}`;
-    statusChip.textContent = statusModel.text;
-    statusCell.appendChild(statusChip);
+    statusCell.appendChild(createPill(statusModel.text, statusModel.className));
+    if (item?.needsAction === true) {
+      statusCell.appendChild(createTextLine('needsAction=true w snapshotcie', 'table-sub'));
+    }
     row.appendChild(statusCell);
 
+    const stageCell = document.createElement('td');
+    const stageWrap = document.createElement('div');
+    stageWrap.className = 'stage-block';
+    stageWrap.appendChild(createTextLine(stageModel.headline, 'table-main'));
+    stageWrap.appendChild(createTextLine(stageModel.subline, 'table-sub'));
+    const stageProgress = document.createElement('div');
+    stageProgress.className = 'stage-progress';
+    const stageProgressLabel = document.createElement('div');
+    stageProgressLabel.className = 'stage-progress-label';
+    stageProgressLabel.textContent = stageModel.ratio > 0
+      ? `${Math.round(stageModel.ratio * 100)}% chaina zapisane w snapshotcie`
+      : 'bez twardego progresu do rankingu';
+    stageProgress.appendChild(stageProgressLabel);
+    const stageTrack = document.createElement('div');
+    stageTrack.className = 'progress-strip';
+    const stageFill = document.createElement('div');
+    setProgressFill(stageFill, stageModel.ratio, stageModel.ratio > 0 ? 'run' : '');
+    stageTrack.appendChild(stageFill);
+    stageProgress.appendChild(stageTrack);
+    stageWrap.appendChild(stageProgress);
+    stageCell.appendChild(stageWrap);
+    row.appendChild(stageCell);
+
+    const readinessCell = document.createElement('td');
+    readinessCell.appendChild(createPill(readinessModel.text, readinessModel.className));
+    readinessCell.appendChild(createTextLine(readinessModel.detail, 'table-sub'));
+    row.appendChild(readinessCell);
+
+    const planCell = document.createElement('td');
+    planCell.appendChild(createStackCell([
+      { text: planModel.headline, className: 'table-main' },
+      { text: planModel.subline, className: 'table-sub' }
+    ]));
+    row.appendChild(planCell);
+
+    const signalCell = document.createElement('td');
+    signalCell.appendChild(createStackCell([
+      { text: signalModel.primary, className: 'table-main' },
+      signalModel.secondary ? { text: signalModel.secondary, className: 'table-sub' } : null,
+      signalModel.tertiary ? { text: signalModel.tertiary, className: 'table-sub' } : null
+    ]));
+    row.appendChild(signalCell);
+
     const sourceCell = document.createElement('td');
+    const sourceWrap = document.createElement('div');
+    sourceWrap.className = 'table-stack';
     const sourceChip = document.createElement('span');
     sourceChip.className = 'source-chip';
     sourceChip.textContent = sourceLabel;
     sourceChip.title = sourceLabel;
-    sourceCell.appendChild(sourceChip);
+    sourceWrap.appendChild(sourceChip);
+    sourceWrap.appendChild(createTextLine(
+      `updated: ${formatDateTime(Number.isInteger(item?.timestamp) ? item.timestamp : 0)}`,
+      'table-sub'
+    ));
+    sourceCell.appendChild(sourceWrap);
     row.appendChild(sourceCell);
 
-    const stageCell = document.createElement('td');
-    stageCell.textContent = stageText;
-    row.appendChild(stageCell);
-
-    const updatedCell = document.createElement('td');
-    updatedCell.textContent = updated;
-    row.appendChild(updatedCell);
-
     const chatCell = document.createElement('td');
-    chatCell.textContent = hasChatUrl ? shortenText(item.chatUrl, 82) : '-';
-    row.appendChild(chatCell);
-
-    const runnableCell = document.createElement('td');
-    runnableCell.textContent = runnableText;
-    runnableCell.className = hasChatUrl ? 'outcome-resumed' : 'outcome-skipped_missing_chat_url';
-    row.appendChild(runnableCell);
-
-    const actionCell = document.createElement('td');
-    if (hasChatUrl) {
+    const chatWrap = document.createElement('div');
+    chatWrap.className = 'chat-block';
+    if (item?.hasChatUrl === true) {
+      chatWrap.appendChild(createPill('chat ready', 'pill-ready'));
+      chatWrap.appendChild(createTextLine(shortenText(item.chatUrl, 88), 'table-sub mono'));
       const openBtn = document.createElement('button');
       openBtn.className = 'link-btn';
       openBtn.textContent = 'Otworz chat';
       openBtn.addEventListener('click', () => openChat(item.chatUrl));
-      actionCell.appendChild(openBtn);
+      chatWrap.appendChild(openBtn);
     } else {
-      actionCell.textContent = '-';
+      chatWrap.appendChild(createPill('no chatUrl', 'pill-blocked'));
+      chatWrap.appendChild(createTextLine('brak conversation URL do otwarcia nowej karty', 'table-sub'));
     }
-    row.appendChild(actionCell);
+    chatCell.appendChild(chatWrap);
+    row.appendChild(chatCell);
 
     processBody.appendChild(row);
   });
 }
 
 function renderBatchRows(state) {
-  batchBody.innerHTML = '';
-  const rows = Array.isArray(state?.rows) ? state.rows.slice() : [];
+  clearNode(batchBody);
+  const rows = Array.isArray(state?.rows) ? state.rows.slice().reverse() : [];
   if (rows.length === 0) {
-    batchBody.appendChild(createPlaceholderRow(9, 'Czekam na uruchomienie batch.'));
+    batchBody.appendChild(createPlaceholderRow(7, 'Czekam na uruchomienie batch.'));
     return;
   }
 
-  rows.reverse().forEach((item, index) => {
+  rows.forEach((item, index) => {
     const row = document.createElement('tr');
-    const outcome = typeof item?.outcome === 'string' ? item.outcome : '';
+    const outcomeModel = resolveBatchOutcomeModel(item?.outcome);
     const detected = Number.isInteger(item?.detectedPromptNumber) ? item.detectedPromptNumber : null;
     const started = Number.isInteger(item?.startPromptNumber) ? item.startPromptNumber : null;
     const detectedStartText = `${detected !== null ? `P${detected}` : '-'} -> ${started !== null ? `P${started}` : '-'}`;
+    const reason = typeof item?.reason === 'string' && item.reason.trim() ? item.reason.trim() : '-';
+    const error = typeof item?.error === 'string' && item.error.trim() ? item.error.trim() : '';
 
-    const cells = [
-      String(index + 1),
-      item?.runId || '-',
-      shortenText(item?.title || '-', 78),
-      outcome || '-',
-      detectedStartText,
-      item?.detectedMethod || '-',
-      shortenText(item?.reason || '-', 64),
-      shortenText(item?.error || '-', 90)
-    ];
-    cells.forEach((value, cellIndex) => {
-      const cell = document.createElement('td');
-      if (cellIndex === 1) cell.className = 'mono';
-      if (cellIndex === 3) {
-        cell.className = `outcome-${outcome || 'failed'}`;
+    const orderCell = document.createElement('td');
+    orderCell.textContent = String(index + 1);
+    row.appendChild(orderCell);
+
+    const processCell = document.createElement('td');
+    processCell.appendChild(createStackCell([
+      { text: item?.title || 'Bez tytulu', className: 'table-main' },
+      { text: item?.runId || '-', className: 'table-sub mono' }
+    ]));
+    row.appendChild(processCell);
+
+    const outcomeCell = document.createElement('td');
+    outcomeCell.appendChild(createPill(outcomeModel.text, outcomeModel.className));
+    if (item?.retrySamePrompt === true) {
+      outcomeCell.appendChild(createTextLine(
+        `retry same prompt${item?.retryReason ? `: ${item.retryReason}` : ''}`,
+        'table-sub'
+      ));
+    }
+    row.appendChild(outcomeCell);
+
+    const detectCell = document.createElement('td');
+    detectCell.appendChild(createStackCell([
+      { text: detectedStartText, className: 'table-main mono' },
+      {
+        text: Number.isInteger(item?.detectedPromptNumber) || Number.isInteger(item?.startPromptNumber)
+          ? 'wykryty prompt live -> wyslany prompt startowy'
+          : 'brak live detekcji lub brak startu'
       }
-      cell.textContent = value;
-      row.appendChild(cell);
-    });
+    ]));
+    row.appendChild(detectCell);
+
+    const methodCell = document.createElement('td');
+    methodCell.appendChild(createStackCell([
+      { text: item?.detectedMethod || '-', className: 'table-main' },
+      {
+        text: item?.detectedMethod
+          ? 'zrodlo decyzji wznowienia'
+          : 'brak zarejestrowanej metody'
+      }
+    ]));
+    row.appendChild(methodCell);
+
+    const reasonCell = document.createElement('td');
+    reasonCell.appendChild(createStackCell([
+      { text: reason, className: 'table-main' },
+      error ? { text: `error: ${shortenText(error, 120)}`, className: 'table-sub' } : null
+    ]));
+    row.appendChild(reasonCell);
 
     const chatCell = document.createElement('td');
     if (typeof item?.chatUrl === 'string' && item.chatUrl.trim()) {
+      const chatWrap = document.createElement('div');
+      chatWrap.className = 'chat-block';
+      chatWrap.appendChild(createPill('chat', 'pill-ready'));
+      chatWrap.appendChild(createTextLine(shortenText(item.chatUrl, 88), 'table-sub mono'));
       const openBtn = document.createElement('button');
       openBtn.className = 'link-btn';
       openBtn.textContent = 'Otworz';
       openBtn.addEventListener('click', () => openChat(item.chatUrl));
-      chatCell.appendChild(openBtn);
+      chatWrap.appendChild(openBtn);
+      chatCell.appendChild(chatWrap);
     } else {
-      chatCell.textContent = '-';
+      chatCell.appendChild(createStackCell([
+        { text: 'no chat', className: 'table-main' },
+        { text: 'rekord bez otwieralnego URL', className: 'table-sub' }
+      ]));
     }
     row.appendChild(chatCell);
 
@@ -376,16 +878,33 @@ function renderBatchRows(state) {
   });
 }
 
+function buildStatusHints(listResult, extraHints = []) {
+  const summary = getListSummary(listResult);
+  const hints = [
+    `${summary.total || 0} kandydatow`,
+    `${summary.runnable || 0} startowalnych`,
+    `${summary.withStageSnapshot || 0} ze snapshotem etapu`,
+    'live detect on start'
+  ];
+  if (selectedSourceFilter !== 'all') {
+    hints.unshift(`source=${selectedSourceFilter}`);
+  }
+  return hints.concat(Array.isArray(extraHints) ? extraHints : []);
+}
+
 function updateRunButtonState(state) {
   const status = normalizeBatchStatus(state?.status);
   const running = status === 'running';
+  const total = Number.isInteger(lastListResult?.total) ? lastListResult.total : 0;
+  const runnable = Number.isInteger(lastListResult?.runnable) ? lastListResult.runnable : 0;
+  const noRunnable = total === 0 || runnable === 0;
   if (runBtn) {
-    runBtn.disabled = running;
-    runBtn.textContent = running ? 'Batch w trakcie...' : 'Uruchom wszystkie';
+    runBtn.disabled = running || noRunnable;
+    runBtn.textContent = running ? 'Batch w toku...' : 'Uruchom wszystkie';
   }
   if (run10Btn) {
-    run10Btn.disabled = running;
-    run10Btn.textContent = running ? 'Batch w trakcie...' : 'Uruchom 10';
+    run10Btn.disabled = running || noRunnable;
+    run10Btn.textContent = running ? 'Top 10 w toku...' : 'Uruchom 10';
   }
   if (sourceFilterSelect) {
     sourceFilterSelect.disabled = running;
@@ -395,8 +914,11 @@ function updateRunButtonState(state) {
 function applyData(listResult, batchState) {
   lastListResult = listResult && typeof listResult === 'object' ? listResult : null;
   lastBatchState = batchState && typeof batchState === 'object' ? batchState : null;
+  postKeepaliveTick();
   rebuildSourceFilterOptions(lastListResult);
   renderMetrics(lastListResult, lastBatchState);
+  renderCountingSummary(lastListResult);
+  renderSelectionSummary(lastListResult, lastBatchState);
   renderProcessRows(lastListResult);
   renderBatchRows(lastBatchState);
   updateRunButtonState(lastBatchState);
@@ -410,7 +932,10 @@ async function refreshData(options = {}) {
   refreshInProgress = true;
   const silent = options?.silent === true;
   if (!silent) {
-    setStatus('Odswiezam dane...');
+    setStatus('Odswiezam recovery list...', {
+      meta: 'Czytam process_monitor_state i unfinished_resume_batch_state.',
+      hints: ['snapshot scan', 'live verify on start']
+    });
   }
 
   try {
@@ -419,7 +944,8 @@ async function refreshData(options = {}) {
         type: 'GET_UNFINISHED_PROCESSES',
         includeNonCompleted: true,
         recoverOnly: true,
-        sourceFilter: selectedSourceFilter
+        sourceFilter: selectedSourceFilter,
+        origin: 'unfinished-processes-page'
       }),
       sendRuntimeMessage({
         type: 'GET_UNFINISHED_RESUME_BATCH_STATE'
@@ -434,15 +960,23 @@ async function refreshData(options = {}) {
     }
 
     applyData(listResult, batchStateResult?.state || null);
+    const summary = getListSummary(listResult);
     const state = batchStateResult?.state || {};
     const updatedAt = Number.isInteger(state?.updatedAt) ? formatDateTime(state.updatedAt) : '-';
     const filterMatched = listResult?.sourceFilterMatched !== false;
     const filterNote = selectedSourceFilter !== 'all'
-      ? ` | source=${selectedSourceFilter}${filterMatched ? '' : ' (0 match)'}`
-      : '';
-    setStatus(`Lista odswiezona: ${formatDateTime(listResult.generatedAt)} | batch updated: ${updatedAt}${filterNote}`);
+      ? `source=${selectedSourceFilter}${filterMatched ? '' : ' (0 match)'}`
+      : 'source=all';
+    setStatus('Lista recovery policzona', {
+      meta: `snapshot=${formatDateTime(listResult.generatedAt)} | batch=${updatedAt} | ${filterNote}`,
+      hints: buildStatusHints(listResult, [`${summary.blockedMissingChatUrl || 0} blocked by chatUrl`])
+    });
   } catch (error) {
-    setStatus(`Blad odswiezania: ${error?.message || String(error)}`, true);
+    setStatus('Blad odswiezania recovery listy', {
+      meta: error?.message || String(error),
+      hints: ['sprawdz worker service', 'sprawdz problem log'],
+      isError: true
+    });
   } finally {
     refreshInProgress = false;
     if (pendingRefresh) {
@@ -455,8 +989,11 @@ async function refreshData(options = {}) {
 async function startBatch(limit = null) {
   updateRunButtonState({ status: 'running' });
   const limitText = Number.isInteger(limit) && limit > 0 ? `${limit}` : 'all';
-  const modeText = Number.isInteger(limit) && limit > 0 ? 'top-progress' : 'latest';
-  setStatus(`Uruchamiam batch wznowienia (source=${selectedSourceFilter}, limit=${limitText}, mode=${modeText})...`);
+  const modeText = Number.isInteger(limit) && limit > 0 ? 'top-progress snapshot' : 'latest update';
+  setStatus('Uruchamiam batch wznowienia...', {
+    meta: `source=${selectedSourceFilter} | limit=${limitText} | strategy=${modeText}`,
+    hints: ['fresh tab for each resume', 'live detect on chat', 'snapshot ranking before start']
+  });
   try {
     const response = await sendRuntimeMessage({
       type: 'RESUME_UNFINISHED_PROCESSES',
@@ -470,15 +1007,25 @@ async function startBatch(limit = null) {
     }
     if (response?.alreadyRunning) {
       applyData(lastListResult, response?.state || lastBatchState);
-      setStatus(`Batch juz dziala (jobId=${response?.jobId || '-'})`);
+      setStatus('Batch juz dziala', {
+        meta: `jobId=${response?.jobId || '-'} | aktywny batch nie zostal nadpisany`,
+        hints: ['monitoring live enabled']
+      });
       return;
     }
 
     applyData(lastListResult, response?.state || null);
-    setStatus(`Batch wystartowal (jobId=${response?.jobId || '-'})`);
+    setStatus('Batch wystartowal', {
+      meta: `jobId=${response?.jobId || '-'} | limit=${limitText} | strategy=${modeText}`,
+      hints: buildStatusHints(lastListResult, ['nowe karty beda otwierane per recovery run'])
+    });
     void refreshData({ silent: true });
   } catch (error) {
-    setStatus(`Blad startu batch: ${error?.message || String(error)}`, true);
+    setStatus('Blad startu batcha', {
+      meta: error?.message || String(error),
+      hints: ['sprawdz problem log', 'sprawdz chatUrl i worker service'],
+      isError: true
+    });
     updateRunButtonState(lastBatchState);
   }
 }
@@ -492,9 +1039,15 @@ chrome.runtime.onMessage.addListener((message) => {
   if (status === 'running') {
     const processed = Number.isInteger(state?.totals?.processed) ? state.totals.processed : 0;
     const total = Number.isInteger(state?.totals?.total) ? state.totals.total : 0;
-    setStatus(`Batch running: ${processed}/${total} | active=${state.activeRunId || '-'}`);
+    setStatus('Batch wznowienia trwa', {
+      meta: `processed=${processed}/${total} | active=${state.activeRunId || '-'} | updated=${formatDateTime(state.updatedAt)}`,
+      hints: ['live detect in progress', 'new tabs per candidate']
+    });
   } else {
-    setStatus(`Batch status: ${status} | updated: ${formatDateTime(state.updatedAt)}`);
+    setStatus(`Batch zakonczony: ${status}`, {
+      meta: `updated=${formatDateTime(state.updatedAt)} | jobId=${state.jobId || '-'}`,
+      hints: buildStatusHints(lastListResult)
+    });
     void refreshData({ silent: true });
   }
 });
@@ -530,6 +1083,10 @@ if (openPanelBtn) {
   });
 }
 
+window.addEventListener('beforeunload', () => {
+  stopWorkerKeepalive();
+});
+
 if (pollIntervalId) {
   window.clearInterval(pollIntervalId);
 }
@@ -537,4 +1094,5 @@ pollIntervalId = window.setInterval(() => {
   void refreshData({ silent: true });
 }, 5000);
 
+startWorkerKeepalive();
 void refreshData();

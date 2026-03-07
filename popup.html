@@ -4,23 +4,19 @@
   <meta charset="utf-8">
   <style>
     :root {
-      --card: rgba(255, 255, 255, 0.94);
-      --card-strong: rgba(255, 255, 255, 0.98);
-      --text: #102033;
-      --muted: #5f6f86;
-      --muted-strong: #42526a;
-      --border: #d8e2ef;
-      --border-strong: #bfd2eb;
-      --separator: rgba(148, 163, 184, 0.22);
-      --primary: #0f3b84;
-      --primary-hover: #0d316d;
-      --primary-strong: #0b2043;
-      --tonal-bg: #eef5ff;
-      --tonal-border: #bfd7ff;
-      --danger: #8a1c1c;
+      --bg: #f5f7fb;
+      --card: #ffffff;
+      --text: #111827;
+      --muted: #6b7280;
+      --border: #d7dde7;
+      --border-strong: #c7d0dd;
+      --button-hover: #f8fafc;
+      --button-tonal: #f3f6fa;
+      --button-tonal-hover: #edf2f7;
+      --primary: #1f2937;
+      --primary-hover: #111827;
       --status-bg: #f3f4f6;
       --status-border: #d1d5db;
-      --shadow: 0 18px 34px rgba(15, 23, 42, 0.08);
     }
 
     * {
@@ -30,213 +26,123 @@
     body {
       width: 348px;
       margin: 0;
-      padding: 12px;
-      font-family: 'Aptos', 'Segoe UI', Tahoma, sans-serif;
-      background:
-        radial-gradient(circle at top right, rgba(59, 130, 246, 0.2), transparent 36%),
-        linear-gradient(180deg, #edf4ff 0%, #f7f9fd 42%, #fcfdff 100%);
+      padding: 10px;
+      font-family: 'Segoe UI', Tahoma, sans-serif;
+      background: var(--bg);
       color: var(--text);
     }
 
     .header {
-      margin-bottom: 12px;
-      padding: 12px 14px;
-      border: 1px solid rgba(96, 165, 250, 0.22);
-      border-radius: 20px;
-      background: linear-gradient(145deg, #0d1f40 0%, #0f3b84 54%, #1f6ad1 100%);
-      color: #ffffff;
-      box-shadow: 0 20px 42px rgba(15, 23, 42, 0.18);
-    }
-
-    .eyebrow {
-      display: none;
+      margin-bottom: 8px;
+      padding: 10px 12px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
     }
 
     .title {
       margin: 0;
-      font-size: 18px;
+      font-size: 16px;
       font-weight: 700;
-      letter-spacing: 0.02em;
+      letter-spacing: 0.01em;
     }
 
     .subtitle {
       margin: 4px 0 0;
-      font-size: 11px;
-      color: rgba(255, 255, 255, 0.78);
-    }
-
-    .shortcut-strip {
-      display: none;
-    }
-
-    .legend-chip {
-      display: inline-flex;
-      align-items: center;
-      min-height: 24px;
-      padding: 0 10px;
-      border-radius: 999px;
-      border: 1px solid rgba(255, 255, 255, 0.22);
-      background: rgba(255, 255, 255, 0.14);
-      color: #f8fbff;
       font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.04em;
-    }
-
-    .card {
-      background: var(--card);
-      border: 1px solid var(--border-strong);
-      border-radius: 18px;
-      padding: 12px;
-      box-shadow: var(--shadow);
-      margin-bottom: 12px;
-      backdrop-filter: blur(8px);
-    }
-
-    .section-head {
-      margin-bottom: 8px;
-    }
-
-    .card-title {
-      margin: 0;
-      font-size: 10px;
-      font-weight: 800;
-      letter-spacing: 0.12em;
-      text-transform: uppercase;
-      color: var(--muted-strong);
-    }
-
-    .card-subtitle {
-      display: none;
-    }
-
-    .group {
-      margin-top: 10px;
-      padding-top: 10px;
-      border-top: 1px solid var(--separator);
-    }
-
-    .group:first-of-type {
-      margin-top: 0;
-      padding-top: 0;
-      border-top: 0;
-    }
-
-    .group-label {
-      margin: 0 0 8px;
-      font-size: 10px;
-      font-weight: 700;
-      letter-spacing: 0.08em;
-      text-transform: uppercase;
       color: var(--muted);
     }
 
-    .row {
-      display: flex;
-      gap: 8px;
+    .card {
       margin-bottom: 8px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
     }
 
-    .row:last-child {
-      margin-bottom: 0;
-    }
-
-    .row-2 .btn {
-      width: auto;
-      flex: 1;
+    .action-grid {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
     }
 
     .btn {
       position: relative;
       display: flex;
-      flex-direction: column;
-      align-items: flex-start;
-      justify-content: center;
+      align-items: center;
+      justify-content: flex-start;
       width: 100%;
-      min-height: 56px;
+      min-height: 44px;
+      padding: 8px 32px 8px 10px;
       border: 1px solid var(--border);
-      border-radius: 14px;
-      padding: 10px 40px 10px 12px;
-      font-size: 13px;
-      font-weight: 700;
+      border-radius: 10px;
+      background: #ffffff;
       color: var(--text);
-      background: linear-gradient(180deg, #ffffff 0%, #f9fbff 100%);
-      cursor: pointer;
+      font-size: 12px;
+      font-weight: 600;
+      line-height: 1.15;
       text-align: left;
-      transition: transform 0.16s ease, border-color 0.16s ease, box-shadow 0.16s ease, background 0.16s ease;
-      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.9);
+      cursor: pointer;
+      transition: background 0.12s ease, border-color 0.12s ease;
     }
 
     .btn:hover {
-      background: linear-gradient(180deg, #ffffff 0%, #f5f9ff 100%);
-      border-color: #93c5fd;
-      box-shadow: 0 12px 22px rgba(37, 99, 235, 0.08);
-      transform: translateY(-1px);
+      background: var(--button-hover);
+      border-color: var(--border-strong);
     }
 
     .btn:disabled {
       opacity: 0.7;
       cursor: wait;
-      transform: none;
-      box-shadow: none;
     }
 
     .btn:focus-visible {
-      outline: 2px solid rgba(37, 99, 235, 0.35);
-      outline-offset: 2px;
+      outline: 2px solid #94a3b8;
+      outline-offset: 1px;
     }
 
     .btn-primary {
-      background: linear-gradient(145deg, var(--primary-strong) 0%, var(--primary) 52%, #1f6ad1 100%);
+      background: var(--primary);
       color: #ffffff;
       border-color: var(--primary);
-      box-shadow: 0 16px 28px rgba(15, 59, 132, 0.2);
     }
 
     .btn-primary:hover {
       background: var(--primary-hover);
       border-color: var(--primary-hover);
-      box-shadow: 0 18px 30px rgba(15, 59, 132, 0.24);
     }
 
     .btn-tonal {
-      background: linear-gradient(180deg, var(--tonal-bg) 0%, #e6f0ff 100%);
-      border-color: var(--tonal-border);
+      background: var(--button-tonal);
     }
 
-    .btn-danger {
-      background: linear-gradient(180deg, #fff5f5 0%, #fee2e2 100%);
-      color: var(--danger);
-      border-color: #fecaca;
+    .btn-tonal:hover {
+      background: var(--button-tonal-hover);
     }
 
-    .btn-danger:hover {
-      background: linear-gradient(180deg, #fff1f1 0%, #fecaca 100%);
-      border-color: #fca5a5;
-    }
-
-    .btn-maintenance {
-      min-height: 54px;
-    }
-
-    .btn-center {
-      align-items: center;
+    .btn-full {
+      grid-column: 1 / -1;
       justify-content: center;
-      padding-right: 12px;
+      padding-right: 10px;
       text-align: center;
+    }
+
+    .btn-span-2 {
+      grid-column: span 2;
     }
 
     .btn-copy {
       display: flex;
-      flex-direction: column;
-      gap: 0;
+      align-items: center;
+      min-width: 0;
     }
 
     .btn-label {
       display: block;
-      font-size: 13px;
+      font-size: 10.5px;
       font-weight: 700;
-      line-height: 1.3;
+      word-break: break-word;
     }
 
     .btn-detail {
@@ -245,44 +151,38 @@
 
     .shortcut {
       position: absolute;
-      top: 8px;
-      right: 8px;
+      top: 6px;
+      right: 6px;
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-width: 28px;
-      height: 24px;
-      padding: 0 8px;
-      font-size: 10px;
-      color: #475569;
-      font-weight: 800;
-      letter-spacing: 0.04em;
-      border: 1px solid rgba(148, 163, 184, 0.5);
+      min-width: 22px;
+      height: 18px;
+      padding: 0 5px;
+      border: 1px solid var(--border-strong);
       border-radius: 999px;
-      background: rgba(255, 255, 255, 0.82);
+      background: #f8fafc;
+      color: #475569;
+      font-size: 9px;
+      font-weight: 700;
       text-transform: uppercase;
     }
 
-    .btn-primary .shortcut,
-    .btn-danger .shortcut {
+    .btn-primary .shortcut {
+      background: #ffffff;
       color: #334155;
-      background: rgba(255, 255, 255, 0.94);
-    }
-
-    .btn-danger .shortcut {
-      color: #7f1d1d;
-      border-color: #fecaca;
+      border-color: #e5e7eb;
     }
 
     .status {
       margin: 0;
-      padding: 10px 12px;
-      border-radius: 12px;
+      padding: 7px 9px;
       border: 1px solid var(--status-border);
+      border-radius: 10px;
       background: var(--status-bg);
       color: #374151;
-      font-size: 11px;
-      line-height: 1.35;
+      font-size: 10px;
+      line-height: 1.3;
       white-space: pre-line;
     }
 
@@ -291,23 +191,20 @@
     }
 
     .status-compact {
-      margin-bottom: 12px;
-      font-size: 11px;
-      padding: 8px 10px;
+      margin-top: 8px;
     }
 
     .status-stack {
       display: grid;
-      gap: 8px;
-      margin-top: 10px;
+      gap: 6px;
+      margin-top: 8px;
     }
 
     .details {
-      margin-bottom: 12px;
-      background: var(--card-strong);
-      border: 1px solid var(--border-strong);
-      border-radius: 18px;
-      box-shadow: var(--shadow);
+      margin-bottom: 8px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: var(--card);
       overflow: hidden;
     }
 
@@ -316,279 +213,261 @@
       display: flex;
       align-items: center;
       justify-content: space-between;
-      gap: 10px;
+      gap: 8px;
+      padding: 10px 12px;
       cursor: pointer;
-      padding: 14px;
-      color: var(--text);
-      border-bottom: 1px solid transparent;
       user-select: none;
-    }
-
-    .details[open] summary {
-      border-bottom-color: var(--border);
-      background: #f8fbff;
     }
 
     .details summary::-webkit-details-marker {
       display: none;
     }
 
+    .details[open] summary {
+      border-bottom: 1px solid var(--border);
+      background: #fafbfc;
+    }
+
     .summary-copy {
       display: flex;
-      flex-direction: column;
-      gap: 4px;
+      align-items: center;
+      min-width: 0;
     }
 
     .summary-title {
-      font-size: 12px;
+      font-size: 11px;
       font-weight: 700;
-      line-height: 1.3;
-    }
-
-    .summary-detail {
-      display: none;
     }
 
     .summary-shortcuts {
       display: inline-flex;
       align-items: center;
       justify-content: center;
-      min-height: 26px;
-      padding: 0 10px;
+      min-height: 18px;
+      padding: 0 6px;
+      border: 1px solid var(--border);
       border-radius: 999px;
-      border: 1px solid #dbeafe;
-      background: #eff6ff;
-      color: #1d4ed8;
-      font-size: 10px;
-      font-weight: 800;
-      letter-spacing: 0.08em;
+      background: #f8fafc;
+      color: var(--muted);
+      font-size: 9px;
+      font-weight: 700;
       text-transform: uppercase;
-      white-space: nowrap;
     }
 
     .details-content {
-      padding: 14px;
+      padding: 10px;
     }
 
     .advanced-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
-      gap: 10px;
+      gap: 8px;
+    }
+
+    .advanced-grid .btn {
+      min-height: 40px;
+      font-size: 11px;
     }
 
     .dispatch-input {
       width: 100%;
-      border: 1px solid #cbd5e1;
-      border-radius: 12px;
-      padding: 10px 12px;
-      font-size: 12px;
-      margin-bottom: 10px;
+      margin-bottom: 8px;
+      padding: 8px 10px;
+      border: 1px solid var(--border);
+      border-radius: 10px;
       background: #ffffff;
+      color: var(--text);
+      font-size: 11px;
     }
 
     .dispatch-actions {
       display: flex;
-      gap: 10px;
-      margin-bottom: 10px;
+      gap: 8px;
+      margin-bottom: 8px;
+    }
+
+    .dispatch-actions .btn {
+      flex: 1 1 0;
+      justify-content: center;
+      padding-right: 10px;
+      text-align: center;
     }
   </style>
 </head>
 <body>
   <div class="header">
     <p class="title">Iskra</p>
-    <p class="subtitle">Skroty: 1-0, N/L/R/C/E/H, Esc</p>
+    <p class="subtitle">1-0, Z, N/L/R/C/E/H, Esc</p>
   </div>
 
   <div class="card">
-    <div class="section-head">
-      <p class="card-title">Analiza</p>
-      <p class="card-subtitle">Zrodlo, start i szybkie wznowienie glownego workflow.</p>
-    </div>
-    <div class="group">
-      <p class="group-label">Zrodlo</p>
-      <div class="row row-2">
-        <button
-          class="btn"
-          id="manualSourceBtn"
-          data-shortcut-key="1"
-          data-shortcut-detail="Wklej tekst lub podepnij PDF jako zrodlo"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Wklej zrodlo</span>
-            <span class="btn-detail">Tekst lub PDF do analizy</span>
-          </span>
-          <span class="shortcut">1</span>
-        </button>
-        <button
-          class="btn"
-          id="copyYouTubeTranscriptBtn"
-          data-shortcut-key="8"
-          data-shortcut-detail="Skopiuj transkrypt z aktywnego filmu"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Kopiuj YT</span>
-            <span class="btn-detail">Transkrypt do schowka</span>
-          </span>
-          <span class="shortcut">8</span>
-        </button>
-      </div>
-    </div>
-    <div class="group">
-      <p class="group-label">Wykonanie</p>
-      <div class="row">
-        <button
-          class="btn btn-primary"
-          id="runBtn"
-          data-shortcut-key="2"
-          data-shortcut-detail="Start dla aktywnej karty lub wybranych tabow"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Uruchom</span>
-            <span class="btn-detail">Glowna akcja dla biezacego zrodla</span>
-          </span>
-          <span class="shortcut">2</span>
-        </button>
-      </div>
-      <div class="row row-2">
-        <button
-          class="btn btn-tonal"
-          id="resumeStageBtn"
-          title="Aktywna karta: wykryj ostatni etap i wznow od poprawnego promptu"
-          data-shortcut-key="3"
-          data-shortcut-detail="Aktywna karta ChatGPT: wykryj etap i kontynuuj"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Wznow etap</span>
-            <span class="btn-detail">Wykrycie etapu na aktywnej karcie</span>
-          </span>
-          <span class="shortcut">3</span>
-        </button>
-        <button
-          class="btn btn-tonal"
-          id="resumeAllBtn"
-          title="Aktywne procesy company (INVEST): stop, reload, detekcja etapu i start od poprawnego promptu"
-          data-shortcut-key="4"
-          data-shortcut-detail="Masowy reload, detekcja etapu i start od poprawnego promptu"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Wznow wszystko</span>
-            <span class="btn-detail">Bulk maintenance dla aktywnych procesow</span>
-          </span>
-          <span class="shortcut">4</span>
-        </button>
-      </div>
-    </div>
-  </div>
-  <p class="status status-compact" id="runStatus" aria-live="polite" hidden></p>
+    <div class="action-grid">
+      <button
+        class="btn btn-primary btn-span-2"
+        id="runBtn"
+        data-shortcut-key="2"
+        data-shortcut-detail="Start dla aktywnej karty lub wybranych tabow"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Uruchom</span>
+        </span>
+        <span class="shortcut">2</span>
+      </button>
 
-  <div class="card">
-    <div class="section-head">
-      <p class="card-title">Kontrola i recovery</p>
-      <p class="card-subtitle">Wyniki, monitoring i najczesciej potrzebne akcje naprawcze.</p>
+      <button
+        class="btn btn-tonal"
+        id="runRemoteBtn"
+        data-shortcut-key="Z"
+        data-shortcut-detail="Start zdalny przez Remote Runner"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Zdalnie</span>
+        </span>
+        <span class="shortcut">Z</span>
+      </button>
+
+      <button
+        class="btn"
+        id="manualSourceBtn"
+        data-shortcut-key="1"
+        data-shortcut-detail="Wklej tekst lub podepnij PDF jako zrodlo"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Wklej</span>
+        </span>
+        <span class="shortcut">1</span>
+      </button>
+
+      <button
+        class="btn btn-tonal"
+        id="resumeStageBtn"
+        title="Aktywna karta: wykryj ostatni etap i wznow od poprawnego promptu"
+        data-shortcut-key="3"
+        data-shortcut-detail="Aktywna karta ChatGPT: wykryj etap i kontynuuj"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Wznow etap</span>
+        </span>
+        <span class="shortcut">3</span>
+      </button>
+
+      <button
+        class="btn btn-tonal"
+        id="resumeAllBtn"
+        title="Aktywne procesy company (INVEST): stop, reload, detekcja etapu i start od poprawnego promptu"
+        data-shortcut-key="4"
+        data-shortcut-detail="Masowy reload, detekcja etapu i start od poprawnego promptu"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Wznow wszystko</span>
+        </span>
+        <span class="shortcut">4</span>
+      </button>
+
+      <button
+        class="btn"
+        id="copyYouTubeTranscriptBtn"
+        data-shortcut-key="8"
+        data-shortcut-detail="Skopiuj transkrypt z aktywnego filmu"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Kopiuj YT</span>
+        </span>
+        <span class="shortcut">8</span>
+      </button>
+
+      <button
+        class="btn"
+        id="responsesBtn"
+        data-shortcut-key="5"
+        data-shortcut-detail="Lokalne odpowiedzi, kopiowanie i przeglad historii"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Wyniki</span>
+        </span>
+        <span class="shortcut">5</span>
+      </button>
+
+      <button
+        class="btn"
+        id="decisionPanelBtn"
+        data-shortcut-key="6"
+        data-shortcut-detail="Aktywne procesy, decyzje i biezace statusy"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Procesy</span>
+        </span>
+        <span class="shortcut">6</span>
+      </button>
+
+      <button
+        class="btn"
+        id="problemLogsBtn"
+        data-shortcut-key="L"
+        data-shortcut-detail="Diagnostyka runtime, timeoutow i bledow procesow"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Logi</span>
+        </span>
+        <span class="shortcut">L</span>
+      </button>
+
+      <button
+        class="btn btn-tonal"
+        id="restoreProcessWindowsBtn"
+        title="Przywroc i sfokusuj istniejace okna procesow bez restartu prompt chaina"
+        data-shortcut-key="9"
+        data-shortcut-detail="Przywroc istniejace okna procesow bez restartu"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Okna</span>
+        </span>
+        <span class="shortcut">9</span>
+      </button>
+
+      <button
+        class="btn btn-tonal"
+        id="autoRestoreToggleBtn"
+        title="Co 5 minut: restore okien, health check i opcjonalny reload+resume"
+        data-shortcut-key="0"
+        data-shortcut-detail="Co 5 min: restore okien, health check i reload+resume"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Auto ON</span>
+        </span>
+        <span class="shortcut">0</span>
+      </button>
+
+      <button
+        class="btn btn-tonal"
+        id="unfinishedProcessesBtn"
+        data-shortcut-key="N"
+        data-shortcut-detail="Batch recovery dla zapisanych niedokonczonych procesow"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Przerwane</span>
+        </span>
+        <span class="shortcut">N</span>
+      </button>
+
+      <button
+        class="btn btn-full"
+        id="stopBtn"
+        data-shortcut-key="7"
+        data-shortcut-detail="Przerwij tylko proces przypiety do aktywnego okna"
+      >
+        <span class="btn-copy">
+          <span class="btn-label">Przerwij</span>
+        </span>
+        <span class="shortcut">7</span>
+      </button>
     </div>
-    <div class="group">
-      <p class="group-label">Podglad</p>
-      <div class="row row-2">
-        <button
-          class="btn"
-          id="responsesBtn"
-          data-shortcut-key="5"
-          data-shortcut-detail="Lokalne odpowiedzi, kopiowanie i przeglad historii"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Odpowiedzi</span>
-            <span class="btn-detail">Historia lokalnych zapisow</span>
-          </span>
-          <span class="shortcut">5</span>
-        </button>
-        <button
-          class="btn"
-          id="decisionPanelBtn"
-          data-shortcut-key="6"
-          data-shortcut-detail="Aktywne procesy, decyzje i biezace statusy"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Procesy</span>
-            <span class="btn-detail">Monitoring i decyzje runtime</span>
-          </span>
-          <span class="shortcut">6</span>
-        </button>
-      </div>
-    </div>
-    <div class="group">
-      <p class="group-label">Recovery</p>
-      <div class="row row-2">
-        <button
-          class="btn btn-tonal"
-          id="restoreProcessWindowsBtn"
-          title="Przywroc i sfokusuj istniejace okna procesow bez restartu prompt chaina"
-          data-shortcut-key="9"
-          data-shortcut-detail="Przywroc istniejace okna procesow bez restartu"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Przywroc okna</span>
-            <span class="btn-detail">Fokus bez restartu chaina</span>
-          </span>
-          <span class="shortcut">9</span>
-        </button>
-        <button
-          class="btn btn-tonal"
-          id="unfinishedProcessesBtn"
-          data-shortcut-key="N"
-          data-shortcut-detail="Batch recovery dla zapisanych niedokonczonych procesow"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Niedokonczone</span>
-            <span class="btn-detail">Osobna strona do batch wznowien</span>
-          </span>
-          <span class="shortcut">N</span>
-        </button>
-      </div>
-      <div class="row row-2">
-        <button
-          class="btn btn-tonal"
-          id="autoRestoreToggleBtn"
-          title="Co 5 minut: restore okien, health check i opcjonalny reload+resume"
-          data-shortcut-key="0"
-          data-shortcut-detail="Co 5 min: restore okien, health check i reload+resume"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Auto: ON</span>
-            <span class="btn-detail">Co 5 min: restore, health check, reload+resume</span>
-          </span>
-          <span class="shortcut">0</span>
-        </button>
-        <button
-          class="btn"
-          id="problemLogsBtn"
-          data-shortcut-key="L"
-          data-shortcut-detail="Diagnostyka runtime, timeoutow i bledow procesow"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Logi</span>
-            <span class="btn-detail">Szybki wglad w bledy i alerty</span>
-          </span>
-          <span class="shortcut">L</span>
-        </button>
-      </div>
-      <div class="row">
-        <button
-          class="btn btn-danger"
-          id="stopBtn"
-          data-shortcut-key="7"
-          data-shortcut-detail="Przerwij tylko proces przypiety do aktywnego okna"
-        >
-          <span class="btn-copy">
-            <span class="btn-label">Przerwij w tym oknie</span>
-            <span class="btn-detail">Destrukcyjne tylko dla aktywnego procesu</span>
-          </span>
-          <span class="shortcut">7</span>
-        </button>
-      </div>
-      <div class="status-stack">
-        <p class="status" id="restoreProcessWindowsStatus" aria-live="polite" hidden></p>
-        <p class="status" id="autoRestoreStatus" aria-live="polite" hidden></p>
-      </div>
+
+    <p class="status status-compact" id="runStatus" aria-live="polite" hidden></p>
+
+    <div class="status-stack">
+      <p class="status" id="restoreProcessWindowsStatus" aria-live="polite" hidden></p>
+      <p class="status" id="autoRestoreStatus" aria-live="polite" hidden></p>
     </div>
   </div>
 
@@ -596,57 +475,55 @@
     <summary>
       <span class="summary-copy">
         <span class="summary-title">Zaawansowane</span>
-        <span class="summary-detail">Rzadziej uzywane akcje diagnostyczne i warianty reload+resume.</span>
       </span>
       <span class="summary-shortcuts">R C E H</span>
     </summary>
     <div class="details-content">
       <div class="advanced-grid">
         <button
-          class="btn btn-maintenance"
+          class="btn"
           id="repeatLastPromptAllBtn"
           data-shortcut-key="R"
           data-shortcut-detail="Powtorz ostatni prompt we wszystkich aktywnych procesach"
         >
           <span class="btn-copy">
             <span class="btn-label">Powtorz prompt</span>
-            <span class="btn-detail">Wszystkie aktywne procesy company</span>
           </span>
           <span class="shortcut">R</span>
         </button>
+
         <button
-          class="btn btn-maintenance"
+          class="btn"
           id="countCompanyMessagesBtn"
           data-shortcut-key="C"
           data-shortcut-detail="Policz komplet wiadomosci na aktywnej konwersacji company"
         >
           <span class="btn-copy">
-            <span class="btn-label">Policz wiadomosci</span>
-            <span class="btn-detail">Inspekcja aktywnej konwersacji</span>
+            <span class="btn-label">Policz</span>
           </span>
           <span class="shortcut">C</span>
         </button>
+
         <button
-          class="btn btn-maintenance btn-tonal"
+          class="btn btn-tonal"
           id="resumeAllExtendedBtn"
           data-shortcut-key="E"
           data-shortcut-detail="Reload + wznowienie z composer thinking effort: extended"
         >
           <span class="btn-copy">
             <span class="btn-label">Extended</span>
-            <span class="btn-detail">Wariant z effort: extended</span>
           </span>
           <span class="shortcut">E</span>
         </button>
+
         <button
-          class="btn btn-maintenance btn-tonal"
+          class="btn btn-tonal"
           id="resumeAllHeavyBtn"
           data-shortcut-key="H"
           data-shortcut-detail="Reload + wznowienie z composer thinking effort: heavy"
         >
           <span class="btn-copy">
             <span class="btn-label">Heavy</span>
-            <span class="btn-detail">Wariant z effort: heavy</span>
           </span>
           <span class="shortcut">H</span>
         </button>
@@ -658,7 +535,6 @@
     <summary>
       <span class="summary-copy">
         <span class="summary-title">Watchlist</span>
-        <span class="summary-detail">Kolejka dispatch i lokalne credentials do intake.</span>
       </span>
     </summary>
     <div class="details-content">
@@ -686,12 +562,12 @@
           autocomplete="off"
         />
         <div class="dispatch-actions">
-          <button class="btn btn-center" id="saveWatchlistTokenBtn">Zapisz dane</button>
-          <button class="btn btn-center" id="clearWatchlistTokenBtn">Wyczysc</button>
+          <button class="btn" id="saveWatchlistTokenBtn">Zapisz</button>
+          <button class="btn" id="clearWatchlistTokenBtn">Wyczysc</button>
         </div>
       </div>
-      <div class="row">
-        <button class="btn btn-center" id="flushWatchlistDispatchBtn">Wymus flush kolejki</button>
+      <div class="dispatch-actions">
+        <button class="btn btn-full" id="flushWatchlistDispatchBtn">Flush kolejki</button>
       </div>
       <p class="status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status intake...</p>
     </div>
@@ -701,7 +577,6 @@
     <summary>
       <span class="summary-copy">
         <span class="summary-title">Remote Runner</span>
-        <span class="summary-detail">Przelaczanie runnera lokalnego lub przez Watchlist API.</span>
       </span>
     </summary>
     <div class="details-content">
@@ -724,8 +599,8 @@
         autocomplete="off"
       />
       <div class="dispatch-actions">
-        <button class="btn btn-center" id="remoteRunnerToggleBtn">Runner: OFF</button>
-        <button class="btn btn-center" id="copySupportIdBtn">Kopiuj Runner ID</button>
+        <button class="btn" id="remoteRunnerToggleBtn">Runner: OFF</button>
+        <button class="btn" id="copySupportIdBtn">Kopiuj Runner ID</button>
       </div>
       <input
         class="dispatch-input"
@@ -735,8 +610,7 @@
         autocomplete="off"
       />
       <div class="dispatch-actions">
-        <button class="btn btn-center" id="checkRemoteRunnerBtn">Sprawdz runner</button>
-        <button class="btn btn-center" id="runRemoteBtn">Uruchom na drugim komputerze</button>
+        <button class="btn btn-full" id="checkRemoteRunnerBtn">Sprawdz runner</button>
       </div>
       <p class="status" id="remoteRunnerStatus" aria-live="polite">Sprawdzam status runnera...</p>
       <p class="status" id="remoteRunnerJobStatus" aria-live="polite" hidden></p>

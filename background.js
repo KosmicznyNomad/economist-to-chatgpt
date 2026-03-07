@@ -154,6 +154,7 @@ const PROCESS_HISTORY_LIMIT = 30;
 const PROCESS_CONVERSATION_URL_HISTORY_LIMIT = 12;
 const UNFINISHED_RESUME_BATCH_STORAGE_KEY = 'unfinished_resume_batch_state';
 const UNFINISHED_RESUME_BATCH_MAX_ROWS = 500;
+const UNFINISHED_RESUME_PAGE_KEEPALIVE_LOG_COOLDOWN_MS = 15000;
 const UNFINISHED_RESUME_BATCH_STATUSES = new Set([
   'idle',
   'running',
@@ -191,6 +192,7 @@ const processRegistry = new Map();
 const ytTranscriptInFlightRequests = new Map();
 const ytTranscriptCache = new Map();
 const manualPdfProviderPorts = new Map();
+const unfinishedResumePagePorts = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
 let watchlistDispatchFlushPending = false;
@@ -223,6 +225,7 @@ let watchlistConnectionLogLastSignature = '';
 let watchlistConnectionLogLastTs = 0;
 let unfinishedResumeListLogLastSignature = '';
 let unfinishedResumeListLogLastTs = 0;
+let unfinishedResumePageKeepaliveLastLogTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerMaintenanceInProgress = false;
 let remoteRunnerExecutionInProgress = false;
@@ -233,6 +236,28 @@ function extractManualPdfProviderIdFromPort(port) {
   if (!name || !name.startsWith(prefix)) return '';
   const providerId = name.slice(prefix.length).trim();
   return providerId || '';
+}
+
+function extractUnfinishedResumePageIdFromPort(port) {
+  const name = typeof port?.name === 'string' ? port.name.trim() : '';
+  const prefix = 'unfinished-resume-page:';
+  if (!name || !name.startsWith(prefix)) return '';
+  const pageId = name.slice(prefix.length).trim();
+  return pageId || '';
+}
+
+function logUnfinishedResumeKeepalive(message, details = {}) {
+  const now = Date.now();
+  if ((now - unfinishedResumePageKeepaliveLastLogTs) < UNFINISHED_RESUME_PAGE_KEEPALIVE_LOG_COOLDOWN_MS) {
+    if (message === 'heartbeat') {
+      return;
+    }
+  }
+  unfinishedResumePageKeepaliveLastLogTs = now;
+  console.log('[unfinished-resume] keepalive', {
+    message,
+    ...details
+  });
 }
 
 async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
@@ -2235,7 +2260,14 @@ async function runResumeUnfinishedProcessesBatch(jobId, options = {}) {
       return state;
     }
 
-    for (const candidate of candidates) {
+    console.log('[unfinished-resume] batch runner started', {
+      jobId: safeJobId,
+      origin: context.origin,
+      totalCandidates: candidates.length,
+      keepalivePages: unfinishedResumePagePorts.size
+    });
+
+    for (const [candidateIndex, candidate] of candidates.entries()) {
       state = await getUnfinishedResumeBatchState(safeJobId);
       if (!state || state.status !== 'running') {
         break;
@@ -2243,9 +2275,27 @@ async function runResumeUnfinishedProcessesBatch(jobId, options = {}) {
       state.activeRunId = typeof candidate?.runId === 'string' ? candidate.runId : '';
       await setUnfinishedResumeBatchState(state);
 
+      console.log('[unfinished-resume] processing candidate', {
+        jobId: safeJobId,
+        candidateIndex: candidateIndex + 1,
+        totalCandidates: candidates.length,
+        runId: typeof candidate?.runId === 'string' ? candidate.runId : '',
+        title: typeof candidate?.title === 'string' ? candidate.title : '',
+        hasChatUrl: candidate?.hasChatUrl === true
+      });
+
       const row = await resumeSingleUnfinishedProcess(candidate, context);
       const nextRows = (Array.isArray(state.rows) ? state.rows : []).concat([row]).slice(-UNFINISHED_RESUME_BATCH_MAX_ROWS);
       const nextTotals = applyUnfinishedResumeOutcomeToTotals(state.totals, row);
+
+      console.log('[unfinished-resume] candidate finished', {
+        jobId: safeJobId,
+        candidateIndex: candidateIndex + 1,
+        runId: row?.runId || '',
+        outcome: row?.outcome || '',
+        reason: row?.reason || '',
+        error: row?.error || ''
+      });
 
       state = {
         ...state,
@@ -2391,6 +2441,10 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     totalPrompts: Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0,
     hasChatUrl: item?.hasChatUrl === true
   }));
+  const keepalivePages = unfinishedResumePagePorts.size;
+  if (keepalivePages === 0) {
+    console.warn('[unfinished-resume] starting batch without active keepalive page; worker may be interrupted before all tabs open');
+  }
   console.log('[unfinished-resume] batch selection', {
     origin,
     sourceFilter: selection.sourceFilter,
@@ -2399,6 +2453,7 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     selectedTotal: candidates.length,
     runnableSelected: selectedRunnable,
     blockedSelected: selectedSkippedMissingUrl,
+    keepalivePages,
     candidatePreview
   });
   reportAdminActionEvent('unfinished_resume_candidates_selected', {
@@ -2416,6 +2471,7 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
       selectedTotal: candidates.length,
       runnableSelected: selectedRunnable,
       blockedSelected: selectedSkippedMissingUrl,
+      keepalivePages,
       candidatePreview
     }
   });
@@ -2459,7 +2515,8 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
       strategy: selection.strategy,
       limitRequested: selection.limitRequested,
       limitApplied: selection.limitApplied,
-      filteredTotal: selection.filteredTotal
+      filteredTotal: selection.filteredTotal,
+      keepalivePages
     }
   });
   void runResumeUnfinishedProcessesBatch(jobId, {
@@ -16142,37 +16199,89 @@ if (typeof globalThis?.addEventListener === 'function') {
 if (chrome?.runtime?.onConnect) {
   chrome.runtime.onConnect.addListener((port) => {
     const providerId = extractManualPdfProviderIdFromPort(port);
-    if (!providerId) return;
+    if (providerId) {
+      manualPdfProviderPorts.set(providerId, {
+        port,
+        lastSeenAt: Date.now()
+      });
+      console.log('[manual-pdf] provider keepalive connected:', {
+        providerId
+      });
 
-    manualPdfProviderPorts.set(providerId, {
+      if (port?.onMessage?.addListener) {
+        port.onMessage.addListener((message) => {
+          const incomingProviderId = typeof message?.providerId === 'string'
+            ? message.providerId.trim()
+            : '';
+          if (!incomingProviderId || incomingProviderId !== providerId) return;
+          const record = manualPdfProviderPorts.get(providerId);
+          if (!record || record.port !== port) return;
+          record.lastSeenAt = Date.now();
+          manualPdfProviderPorts.set(providerId, record);
+        });
+      }
+
+      if (port?.onDisconnect?.addListener) {
+        port.onDisconnect.addListener(() => {
+          const record = manualPdfProviderPorts.get(providerId);
+          if (record && record.port === port) {
+            manualPdfProviderPorts.delete(providerId);
+          }
+          console.log('[manual-pdf] provider keepalive disconnected:', {
+            providerId
+          });
+        });
+      }
+      return;
+    }
+
+    const pageId = extractUnfinishedResumePageIdFromPort(port);
+    if (!pageId) return;
+
+    unfinishedResumePagePorts.set(pageId, {
       port,
-      lastSeenAt: Date.now()
+      lastSeenAt: Date.now(),
+      state: 'idle',
+      sourceFilter: 'all'
     });
-    console.log('[manual-pdf] provider keepalive connected:', {
-      providerId
+    logUnfinishedResumeKeepalive('connected', {
+      pageId,
+      openPages: unfinishedResumePagePorts.size
     });
 
     if (port?.onMessage?.addListener) {
       port.onMessage.addListener((message) => {
-        const incomingProviderId = typeof message?.providerId === 'string'
-          ? message.providerId.trim()
+        const incomingPageId = typeof message?.pageId === 'string'
+          ? message.pageId.trim()
           : '';
-        if (!incomingProviderId || incomingProviderId !== providerId) return;
-        const record = manualPdfProviderPorts.get(providerId);
+        if (!incomingPageId || incomingPageId !== pageId) return;
+        const record = unfinishedResumePagePorts.get(pageId);
         if (!record || record.port !== port) return;
         record.lastSeenAt = Date.now();
-        manualPdfProviderPorts.set(providerId, record);
+        record.state = typeof message?.state === 'string' && message.state.trim()
+          ? message.state.trim()
+          : record.state;
+        record.sourceFilter = typeof message?.sourceFilter === 'string' && message.sourceFilter.trim()
+          ? message.sourceFilter.trim()
+          : 'all';
+        unfinishedResumePagePorts.set(pageId, record);
+        logUnfinishedResumeKeepalive('heartbeat', {
+          pageId,
+          state: record.state,
+          sourceFilter: record.sourceFilter
+        });
       });
     }
 
     if (port?.onDisconnect?.addListener) {
       port.onDisconnect.addListener(() => {
-        const record = manualPdfProviderPorts.get(providerId);
+        const record = unfinishedResumePagePorts.get(pageId);
         if (record && record.port === port) {
-          manualPdfProviderPorts.delete(providerId);
+          unfinishedResumePagePorts.delete(pageId);
         }
-        console.log('[manual-pdf] provider keepalive disconnected:', {
-          providerId
+        logUnfinishedResumeKeepalive('disconnected', {
+          pageId,
+          openPages: unfinishedResumePagePorts.size
         });
       });
     }
