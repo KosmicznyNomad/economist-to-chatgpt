@@ -300,6 +300,17 @@
   <details class="details">
     <summary>Remote Runner</summary>
     <div class="details-content">
+      <select class="dispatch-input" id="remoteRunnerTransportModeInput">
+        <option value="watchlist">Transport: Watchlist API (HMAC)</option>
+        <option value="local">Transport: Local relay (bez key)</option>
+      </select>
+      <input
+        class="dispatch-input"
+        id="remoteRunnerBaseUrlInput"
+        type="url"
+        placeholder="Relay URL local mode (np. http://127.0.0.1:8787)"
+        autocomplete="off"
+      />
       <input
         class="dispatch-input"
         id="remoteRunnerNameInput"

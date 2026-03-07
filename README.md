@@ -96,6 +96,24 @@ If current network blocks direct access to Watchlist HTTPS endpoint, start local
 - tunnel: `ssh -N -L 18080:127.0.0.1:8080 iskierka`
 - intake URL: `http://127.0.0.1:18080/api/v1/intake/economist-response`
 
+### Remote Runner local mode (bez key / bez HMAC)
+Use this mode when one laptop is only the runner for the other and you do not want to depend on Watchlist API auth.
+
+1. On the runner laptop start the local relay server:
+   `python backend/local_runner_app.py --host 127.0.0.1 --port 8787`
+2. In popup -> `Remote Runner` switch transport to `Local relay (bez key)`.
+3. On the runner laptop set `Relay URL` to `http://127.0.0.1:8787`, then switch `Runner: ON`.
+4. Copy that laptop's `Runner ID`.
+5. On the controller laptop either:
+   - use an SSH tunnel: `ssh -N -L 18787:127.0.0.1:8787 <runner-host>`
+   - or point directly to a LAN/Tailscale URL and accept the one-host permission prompt.
+6. On the controller laptop set `Relay URL` to the tunnel/LAN URL, paste the remote `Runner ID`, then use `Sprawdz runner` and `Uruchom na drugim komputerze`.
+
+Safety notes for local mode:
+- no HMAC key is required, but the relay only accepts localhost/LAN/Tailscale clients,
+- auto-detect is intentionally disabled; use manual `Runner ID`,
+- for tighter control you can set `ISKRA_ALLOWED_CONTROLLER_IDS=<controller-runner-id>` before starting the relay server.
+
 ## Supported source updates
 Keep these in sync when adding/removing domains:
 - `manifest.json` host permissions

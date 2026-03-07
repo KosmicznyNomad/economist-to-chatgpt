@@ -84,6 +84,8 @@ const WATCHLIST_DB_VERIFY_RETRY_DELAY_MS = 700;
 const REMOTE_RUNNER = {
   enabledStorageKey: 'remote_runner_enabled',
   nameStorageKey: 'remote_runner_name',
+  transportModeStorageKey: 'remote_runner_transport_mode',
+  localBaseUrlStorageKey: 'remote_runner_local_base_url',
   controllerRunnerIdStorageKey: 'remote_controller_runner_id',
   controllerRunnerNameCachedStorageKey: 'remote_controller_runner_name_cached',
   controllerLastJobStorageKey: 'remote_controller_last_job',
@@ -95,6 +97,17 @@ const REMOTE_RUNNER = {
   offlineAfterSeconds: 180,
   timeoutMs: 20000
 };
+const REMOTE_RUNNER_TRANSPORT = Object.freeze({
+  WATCHLIST: 'watchlist',
+  LOCAL: 'local'
+});
+const LOCAL_REMOTE_RUNNER = Object.freeze({
+  defaultBaseUrl: 'http://127.0.0.1:8787',
+  statusPathTemplate: '/api/v1/local-runner/runner/{runnerId}/status',
+  heartbeatPath: '/api/v1/local-runner/runner/heartbeat',
+  remoteJobsPath: '/api/v1/local-runner/remote-jobs',
+  claimPath: '/api/v1/local-runner/remote-jobs/claim'
+});
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -12417,6 +12430,97 @@ function isLocalWatchlistLoopbackHost(rawHost) {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
+function normalizeRemoteRunnerTransportMode(rawMode) {
+  const mode = typeof rawMode === 'string' ? rawMode.trim().toLowerCase() : '';
+  return mode === REMOTE_RUNNER_TRANSPORT.LOCAL
+    ? REMOTE_RUNNER_TRANSPORT.LOCAL
+    : REMOTE_RUNNER_TRANSPORT.WATCHLIST;
+}
+
+function isPrivateIpv4Host(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim() : '';
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!match) return false;
+  const octets = match.slice(1).map((item) => Number.parseInt(item, 10));
+  if (octets.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) return false;
+  const [a, b] = octets;
+  if (a === 10 || a === 127) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+function isPrivateIpv6Host(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim().toLowerCase() : '';
+  if (!host) return false;
+  if (host === '::1' || host === '[::1]') return true;
+  const normalized = host.replace(/^\[/, '').replace(/\]$/, '');
+  return normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe8')
+    || normalized.startsWith('fe9')
+    || normalized.startsWith('fea')
+    || normalized.startsWith('feb');
+}
+
+function isSafeLocalRemoteRunnerHost(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim().toLowerCase() : '';
+  if (!host) return false;
+  if (host === 'localhost') return true;
+  if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home.arpa') || host.endsWith('.ts.net')) {
+    return true;
+  }
+  return isPrivateIpv4Host(host) || isPrivateIpv6Host(host);
+}
+
+function normalizeLocalRemoteRunnerBaseUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    const protocol = String(parsed.protocol || '').toLowerCase();
+    const hostname = String(parsed.hostname || '').toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:') return '';
+    if (!isSafeLocalRemoteRunnerHost(hostname)) return '';
+    parsed.pathname = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function resolveRemoteRunnerLocalBaseUrl(settings = {}, options = {}) {
+  const rawValue = typeof options?.baseUrl === 'string'
+    ? options.baseUrl
+    : (
+      typeof settings?.localBaseUrl === 'string'
+        ? settings.localBaseUrl
+        : ''
+    );
+  const normalized = normalizeLocalRemoteRunnerBaseUrl(rawValue);
+  if (normalized) return normalized;
+  return options?.allowDefault === true ? LOCAL_REMOTE_RUNNER.defaultBaseUrl : '';
+}
+
+function buildLocalRemoteRunnerUrl(baseUrl, endpointPath) {
+  const normalizedBaseUrl = normalizeLocalRemoteRunnerBaseUrl(baseUrl);
+  const safeEndpointPath = typeof endpointPath === 'string' ? endpointPath.trim() : '';
+  if (!normalizedBaseUrl || !safeEndpointPath) return '';
+  try {
+    const url = new URL(normalizedBaseUrl);
+    url.pathname = safeEndpointPath.startsWith('/') ? safeEndpointPath : `/${safeEndpointPath}`;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
 function normalizeWatchlistIntakeUrl(rawUrl) {
   const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
   if (!value) return '';
@@ -13729,6 +13833,8 @@ async function getRemoteRunnerSettings() {
   const snapshot = await chrome.storage.local.get([
     REMOTE_RUNNER.enabledStorageKey,
     REMOTE_RUNNER.nameStorageKey,
+    REMOTE_RUNNER.transportModeStorageKey,
+    REMOTE_RUNNER.localBaseUrlStorageKey,
     REMOTE_RUNNER.controllerRunnerIdStorageKey,
     REMOTE_RUNNER.controllerRunnerNameCachedStorageKey,
   ]);
@@ -13736,6 +13842,10 @@ async function getRemoteRunnerSettings() {
     enabled: snapshot?.[REMOTE_RUNNER.enabledStorageKey] === true,
     runnerName: typeof snapshot?.[REMOTE_RUNNER.nameStorageKey] === 'string'
       ? snapshot[REMOTE_RUNNER.nameStorageKey].trim()
+      : '',
+    transportMode: normalizeRemoteRunnerTransportMode(snapshot?.[REMOTE_RUNNER.transportModeStorageKey]),
+    localBaseUrl: typeof snapshot?.[REMOTE_RUNNER.localBaseUrlStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.localBaseUrlStorageKey].trim()
       : '',
     controllerRunnerId: typeof snapshot?.[REMOTE_RUNNER.controllerRunnerIdStorageKey] === 'string'
       ? snapshot[REMOTE_RUNNER.controllerRunnerIdStorageKey].trim()
@@ -13748,9 +13858,23 @@ async function getRemoteRunnerSettings() {
 
 async function saveRemoteRunnerSettings(patch = {}) {
   const current = await getRemoteRunnerSettings();
+  const requestedTransportMode = typeof patch?.transportMode === 'string'
+    ? normalizeRemoteRunnerTransportMode(patch.transportMode)
+    : current.transportMode;
+  const requestedLocalBaseUrl = typeof patch?.localBaseUrl === 'string'
+    ? patch.localBaseUrl.trim()
+    : current.localBaseUrl;
+  const normalizedLocalBaseUrl = requestedLocalBaseUrl
+    ? normalizeLocalRemoteRunnerBaseUrl(requestedLocalBaseUrl)
+    : '';
+  if (requestedLocalBaseUrl && !normalizedLocalBaseUrl) {
+    throw new Error('local_runner_base_url_invalid');
+  }
   const next = {
     enabled: typeof patch?.enabled === 'boolean' ? patch.enabled : current.enabled,
     runnerName: typeof patch?.runnerName === 'string' ? patch.runnerName.trim() : current.runnerName,
+    transportMode: requestedTransportMode,
+    localBaseUrl: normalizedLocalBaseUrl,
     controllerRunnerId: typeof patch?.controllerRunnerId === 'string'
       ? patch.controllerRunnerId.trim()
       : current.controllerRunnerId,
@@ -13761,6 +13885,8 @@ async function saveRemoteRunnerSettings(patch = {}) {
   await chrome.storage.local.set({
     [REMOTE_RUNNER.enabledStorageKey]: next.enabled,
     [REMOTE_RUNNER.nameStorageKey]: next.runnerName,
+    [REMOTE_RUNNER.transportModeStorageKey]: next.transportMode,
+    [REMOTE_RUNNER.localBaseUrlStorageKey]: next.localBaseUrl,
     [REMOTE_RUNNER.controllerRunnerIdStorageKey]: next.controllerRunnerId,
     [REMOTE_RUNNER.controllerRunnerNameCachedStorageKey]: next.controllerRunnerNameCached,
   });
@@ -13953,6 +14079,91 @@ async function sendSignedWatchlistApiRequest({ method = 'GET', endpointPath = ''
     status: lastStatus,
     intakeUrl: lastIntakeUrl
   };
+}
+
+async function sendLocalRemoteRunnerApiRequest({ baseUrl = '', method = 'GET', endpointPath = '', payload = null, timeoutMs = null }) {
+  const normalizedBaseUrl = normalizeLocalRemoteRunnerBaseUrl(baseUrl);
+  if (!normalizedBaseUrl) {
+    return { success: false, error: baseUrl ? 'local_runner_base_url_invalid' : 'local_runner_base_url_missing' };
+  }
+  const targetUrl = buildLocalRemoteRunnerUrl(normalizedBaseUrl, endpointPath);
+  if (!targetUrl) {
+    return { success: false, error: 'local_runner_base_url_invalid' };
+  }
+
+  const safeMethod = typeof method === 'string' && method.trim()
+    ? method.trim().toUpperCase()
+    : 'GET';
+  const safeTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0
+    ? Math.max(1000, timeoutMs)
+    : Math.max(1000, Number(REMOTE_RUNNER.timeoutMs || 0) || 20000);
+  const body = safeMethod === 'GET'
+    ? ''
+    : JSON.stringify(payload && typeof payload === 'object' ? payload : {});
+
+  const controller = new AbortController();
+  let timeoutId = null;
+  try {
+    const response = await Promise.race([
+      fetch(targetUrl, {
+        method: safeMethod,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        ...(safeMethod === 'GET' ? {} : { body }),
+        signal: controller.signal
+      }),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {
+            // Ignore abort exceptions after timeout.
+          }
+          reject(createDispatchTimeoutError(safeTimeoutMs));
+        }, safeTimeoutMs);
+      })
+    ]);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+
+    let responseJson = null;
+    try {
+      responseJson = await response.json();
+    } catch {
+      responseJson = null;
+    }
+
+    if (!response.ok) {
+      const detail = typeof responseJson?.detail === 'string' && responseJson.detail.trim()
+        ? responseJson.detail.trim()
+        : `http_${response.status}`;
+      return {
+        success: false,
+        error: detail || 'local_runner_unreachable',
+        status: response.status,
+        intakeUrl: targetUrl
+      };
+    }
+
+    return {
+      success: true,
+      status: response.status,
+      data: responseJson && typeof responseJson === 'object' ? responseJson : {},
+      intakeUrl: targetUrl
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: trimProblemLogText(error?.message || String(error), 180) || 'local_runner_unreachable',
+      status: null,
+      intakeUrl: targetUrl
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
 }
 
 function normalizeRemoteRunnerStatusRecord(rawRecord) {
@@ -16493,6 +16704,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const settings = await saveRemoteRunnerSettings({
         enabled: typeof message?.enabled === 'boolean' ? message.enabled : undefined,
         runnerName: typeof message?.runnerName === 'string' ? message.runnerName : undefined,
+        transportMode: typeof message?.transportMode === 'string' ? message.transportMode : undefined,
+        localBaseUrl: typeof message?.localBaseUrl === 'string' ? message.localBaseUrl : undefined,
         controllerRunnerId: typeof message?.controllerRunnerId === 'string'
           ? message.controllerRunnerId
           : undefined,
@@ -18476,9 +18689,39 @@ async function prepareRemoteCompanyBatch() {
   };
 }
 
-async function fetchRemoteRunnerStatusRecord(runnerId) {
+async function fetchRemoteRunnerStatusRecord(runnerId, options = {}) {
   const safeRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
   if (!safeRunnerId) return { success: false, error: 'runner_id_missing' };
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(settings, {
+      baseUrl: typeof options?.baseUrl === 'string' ? options.baseUrl : '',
+      allowDefault: options?.allowDefaultBaseUrl === true
+    });
+    if (!baseUrl) {
+      return {
+        success: false,
+        error: typeof options?.baseUrl === 'string' && options.baseUrl.trim()
+          ? 'local_runner_base_url_invalid'
+          : 'local_runner_base_url_missing'
+      };
+    }
+    const response = await sendLocalRemoteRunnerApiRequest({
+      baseUrl,
+      method: 'GET',
+      endpointPath: LOCAL_REMOTE_RUNNER.statusPathTemplate.replace('{runnerId}', encodeURIComponent(safeRunnerId))
+    });
+    if (!response.success) {
+      return { success: false, error: response.error || 'remote_runner_status_failed' };
+    }
+    return {
+      success: true,
+      runner: normalizeRemoteRunnerStatusRecord(response?.data?.runner)
+    };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'GET',
     endpointPath: `/api/v1/iskra/runner/${encodeURIComponent(safeRunnerId)}/status`
@@ -18492,7 +18735,14 @@ async function fetchRemoteRunnerStatusRecord(runnerId) {
   };
 }
 
-async function fetchRemoteRunnerListRecords() {
+async function fetchRemoteRunnerListRecords(options = {}) {
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    return { success: true, runners: [] };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'GET',
     endpointPath: WATCHLIST_REMOTE_RUNNERS_PATH
@@ -18521,6 +18771,7 @@ async function resolveRemoteRunnerSelection(options = {}) {
   const settings = options?.settings && typeof options.settings === 'object'
     ? options.settings
     : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
   const requestedRunnerId = typeof options?.requestedRunnerId === 'string'
     ? options.requestedRunnerId.trim()
     : '';
@@ -18528,7 +18779,59 @@ async function resolveRemoteRunnerSelection(options = {}) {
     ? settings.controllerRunnerId.trim()
     : '');
 
-  const runnerListResult = await fetchRemoteRunnerListRecords();
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    if (!preferredRunnerId) {
+      return {
+        success: false,
+        discoveredRunners: [],
+        discoveredRunnersError: '',
+        targetRunner: null,
+        targetRunnerSource: '',
+        targetRunnerError: 'local_runner_requires_manual_runner_id'
+      };
+    }
+    if (supportId && preferredRunnerId === supportId) {
+      return {
+        success: false,
+        discoveredRunners: [],
+        discoveredRunnersError: '',
+        targetRunner: null,
+        targetRunnerSource: '',
+        targetRunnerError: 'runner_id_matches_current_device'
+      };
+    }
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(settings, {
+      baseUrl: typeof options?.baseUrl === 'string' ? options.baseUrl : '',
+      allowDefault: false
+    });
+    if (!baseUrl) {
+      return {
+        success: false,
+        discoveredRunners: [],
+        discoveredRunnersError: '',
+        targetRunner: null,
+        targetRunnerSource: '',
+        targetRunnerError: typeof options?.baseUrl === 'string' && options.baseUrl.trim()
+          ? 'local_runner_base_url_invalid'
+          : 'local_runner_base_url_missing'
+      };
+    }
+    const localRunnerResult = await fetchRemoteRunnerStatusRecord(preferredRunnerId, {
+      settings,
+      baseUrl,
+      allowDefaultBaseUrl: false
+    });
+    return {
+      success: localRunnerResult.success,
+      discoveredRunners: [],
+      discoveredRunnersError: '',
+      targetRunner: localRunnerResult.success ? (localRunnerResult.runner || null) : null,
+      targetRunnerSource: requestedRunnerId ? 'manual_request_local' : 'manual_saved_local',
+      targetRunnerError: localRunnerResult.success ? '' : (localRunnerResult.error || 'runner_not_found')
+    };
+  }
+
+  const runnerListResult = await fetchRemoteRunnerListRecords({ settings });
   const discoveredRunners = runnerListResult.success
     ? runnerListResult.runners.filter((runner) => runner?.runnerId && runner.runnerId !== supportId)
     : [];
@@ -18545,7 +18848,7 @@ async function resolveRemoteRunnerSelection(options = {}) {
       targetRunner = discoveredRunnerMap.get(preferredRunnerId) || null;
       targetRunnerSource = requestedRunnerId ? 'manual_request' : 'manual_saved';
     } else {
-      const manualRunnerResult = await fetchRemoteRunnerStatusRecord(preferredRunnerId);
+      const manualRunnerResult = await fetchRemoteRunnerStatusRecord(preferredRunnerId, { settings });
       if (manualRunnerResult.success && manualRunnerResult.runner && manualRunnerResult.runner.runnerId !== supportId) {
         targetRunner = manualRunnerResult.runner;
         targetRunnerSource = requestedRunnerId ? 'manual_request' : 'manual_saved';
@@ -18586,9 +18889,34 @@ async function resolveRemoteRunnerSelection(options = {}) {
   };
 }
 
-async function fetchRemoteJobRecordById(jobId) {
+async function fetchRemoteJobRecordById(jobId, options = {}) {
   const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
   if (!safeJobId) return { success: false, error: 'job_id_missing' };
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(settings, {
+      baseUrl: typeof options?.baseUrl === 'string' ? options.baseUrl : '',
+      allowDefault: options?.allowDefaultBaseUrl === true
+    });
+    if (!baseUrl) {
+      return { success: false, error: 'local_runner_base_url_missing' };
+    }
+    const response = await sendLocalRemoteRunnerApiRequest({
+      baseUrl,
+      method: 'GET',
+      endpointPath: `${LOCAL_REMOTE_RUNNER.remoteJobsPath}/${encodeURIComponent(safeJobId)}`
+    });
+    if (!response.success) {
+      return { success: false, error: response.error || 'remote_job_fetch_failed' };
+    }
+    return {
+      success: true,
+      job: normalizeRemoteJobRecord(response?.data?.job)
+    };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'GET',
     endpointPath: `/api/v1/iskra/remote-jobs/${encodeURIComponent(safeJobId)}`
@@ -18602,7 +18930,47 @@ async function fetchRemoteJobRecordById(jobId) {
   };
 }
 
-async function createRemoteAnalysisJobRecord({ controllerId, runnerId, requestPayload }) {
+async function createRemoteAnalysisJobRecord({ controllerId, runnerId, requestPayload, settings = null }) {
+  const runnerSettings = settings && typeof settings === 'object'
+    ? settings
+    : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(runnerSettings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(runnerSettings, { allowDefault: false });
+    if (!baseUrl) {
+      return {
+        success: false,
+        error: 'local_runner_base_url_missing'
+      };
+    }
+    const response = await sendLocalRemoteRunnerApiRequest({
+      baseUrl,
+      method: 'POST',
+      endpointPath: LOCAL_REMOTE_RUNNER.remoteJobsPath,
+      payload: {
+        controllerId,
+        runnerId,
+        requestPayload
+      }
+    });
+    if (!response.success) {
+      return {
+        success: false,
+        error: response.error || 'remote_job_create_failed'
+      };
+    }
+    if (response?.data?.success === false) {
+      return {
+        success: false,
+        error: response?.data?.reason || 'remote_job_create_failed',
+        runner: normalizeRemoteRunnerStatusRecord(response?.data?.runner)
+      };
+    }
+    return {
+      success: true,
+      job: normalizeRemoteJobRecord(response?.data?.job)
+    };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'POST',
     endpointPath: '/api/v1/iskra/remote-jobs',
@@ -18631,9 +18999,34 @@ async function createRemoteAnalysisJobRecord({ controllerId, runnerId, requestPa
   };
 }
 
-async function claimRemoteRunnerJobRecord(runnerId) {
+async function claimRemoteRunnerJobRecord(runnerId, options = {}) {
   const safeRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
   if (!safeRunnerId) return { success: false, error: 'runner_id_missing' };
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(settings, {
+      baseUrl: typeof options?.baseUrl === 'string' ? options.baseUrl : '',
+      allowDefault: options?.allowDefaultBaseUrl !== false
+    });
+    if (!baseUrl) return { success: false, error: 'local_runner_base_url_missing' };
+    const response = await sendLocalRemoteRunnerApiRequest({
+      baseUrl,
+      method: 'POST',
+      endpointPath: LOCAL_REMOTE_RUNNER.claimPath,
+      payload: { runnerId: safeRunnerId }
+    });
+    if (!response.success) {
+      return { success: false, error: response.error || 'remote_job_claim_failed' };
+    }
+    return {
+      success: true,
+      claimed: response?.data?.claimed === true,
+      job: normalizeRemoteJobRecord(response?.data?.job)
+    };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'POST',
     endpointPath: '/api/v1/iskra/remote-jobs/claim',
@@ -18649,9 +19042,33 @@ async function claimRemoteRunnerJobRecord(runnerId) {
   };
 }
 
-async function sendRemoteJobEventRecord(jobId, payload = {}) {
+async function sendRemoteJobEventRecord(jobId, payload = {}, options = {}) {
   const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
   if (!safeJobId) return { success: false, error: 'job_id_missing' };
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(settings, {
+      baseUrl: typeof options?.baseUrl === 'string' ? options.baseUrl : '',
+      allowDefault: options?.allowDefaultBaseUrl !== false
+    });
+    if (!baseUrl) return { success: false, error: 'local_runner_base_url_missing' };
+    const response = await sendLocalRemoteRunnerApiRequest({
+      baseUrl,
+      method: 'POST',
+      endpointPath: `${LOCAL_REMOTE_RUNNER.remoteJobsPath}/${encodeURIComponent(safeJobId)}/event`,
+      payload
+    });
+    if (!response.success) {
+      return { success: false, error: response.error || 'remote_job_event_failed' };
+    }
+    return {
+      success: true,
+      job: normalizeRemoteJobRecord(response?.data?.job)
+    };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'POST',
     endpointPath: `/api/v1/iskra/remote-jobs/${encodeURIComponent(safeJobId)}/event`,
@@ -18671,7 +19088,9 @@ async function sendRemoteRunnerHeartbeatNow(origin = 'manual', options = {}) {
   if (!supportId) {
     return { success: false, error: 'support_id_unavailable', origin };
   }
-  const settings = await getRemoteRunnerSettings();
+  const settings = options?.settings && typeof options.settings === 'object'
+    ? options.settings
+    : await getRemoteRunnerSettings();
   const runnerState = options?.runnerState && typeof options.runnerState === 'object'
     ? options.runnerState
     : await getRemoteRunnerExecutionState();
@@ -18689,6 +19108,30 @@ async function sendRemoteRunnerHeartbeatNow(origin = 'manual', options = {}) {
       ? runnerState.activeJobId.trim()
       : null
   };
+  const transportMode = normalizeRemoteRunnerTransportMode(settings?.transportMode);
+  if (transportMode === REMOTE_RUNNER_TRANSPORT.LOCAL) {
+    const baseUrl = resolveRemoteRunnerLocalBaseUrl(settings, {
+      baseUrl: typeof options?.baseUrl === 'string' ? options.baseUrl : '',
+      allowDefault: true
+    });
+    if (!baseUrl) {
+      return { success: false, error: 'local_runner_base_url_missing', origin };
+    }
+    const response = await sendLocalRemoteRunnerApiRequest({
+      baseUrl,
+      method: 'POST',
+      endpointPath: LOCAL_REMOTE_RUNNER.heartbeatPath,
+      payload
+    });
+    if (!response.success) {
+      return { success: false, error: response.error || 'remote_runner_heartbeat_failed', origin };
+    }
+    return {
+      success: true,
+      origin,
+      runner: normalizeRemoteRunnerStatusRecord(response?.data?.runner)
+    };
+  }
   const response = await sendSignedWatchlistApiRequest({
     method: 'POST',
     endpointPath: WATCHLIST_REMOTE_RUNNER_HEARTBEAT_PATH,
@@ -18915,7 +19358,7 @@ async function runRemoteRunnerMaintenance(origin = 'manual') {
     }
 
     let runnerState = await getRemoteRunnerExecutionState();
-    let heartbeat = await sendRemoteRunnerHeartbeatNow(origin, { runnerState });
+    let heartbeat = await sendRemoteRunnerHeartbeatNow(origin, { runnerState, settings });
 
     const pendingFinalEvent = runnerState?.pendingFinalEvent && typeof runnerState.pendingFinalEvent === 'object'
       ? runnerState.pendingFinalEvent
@@ -18933,7 +19376,7 @@ async function runRemoteRunnerMaintenance(origin = 'manual') {
       if (finalResult.success) {
         await clearRemoteRunnerExecutionState();
         runnerState = {};
-        heartbeat = await sendRemoteRunnerHeartbeatNow(`${origin}:post-finalize`, { runnerState });
+        heartbeat = await sendRemoteRunnerHeartbeatNow(`${origin}:post-finalize`, { runnerState, settings });
       }
     }
 
@@ -18956,7 +19399,10 @@ async function runRemoteRunnerMaintenance(origin = 'manual') {
       };
     }
 
-    const claimResult = await claimRemoteRunnerJobRecord(supportId);
+    const claimResult = await claimRemoteRunnerJobRecord(supportId, {
+      settings,
+      allowDefaultBaseUrl: true
+    });
     if (!claimResult.success) {
       return {
         success: false,
@@ -18997,8 +19443,11 @@ async function getRemoteRunnerPopupStatus(options = {}) {
   let localRunnerError = '';
   if (settings.enabled) {
     const heartbeat = options?.forceSync === true
-      ? await sendRemoteRunnerHeartbeatNow('popup_force_sync', { runnerState })
-      : await fetchRemoteRunnerStatusRecord(supportId);
+      ? await sendRemoteRunnerHeartbeatNow('popup_force_sync', { runnerState, settings })
+      : await fetchRemoteRunnerStatusRecord(supportId, {
+          settings,
+          allowDefaultBaseUrl: true
+        });
     if (heartbeat.success) {
       localRunner = heartbeat.runner || null;
     } else {
@@ -19055,7 +19504,10 @@ async function getRemoteRunnerPopupStatus(options = {}) {
   let runnerJobError = '';
   const runnerActiveJobId = typeof runnerState?.activeJobId === 'string' ? runnerState.activeJobId.trim() : '';
   if (runnerActiveJobId) {
-    const runnerJobResult = await fetchRemoteJobRecordById(runnerActiveJobId);
+    const runnerJobResult = await fetchRemoteJobRecordById(runnerActiveJobId, {
+      settings,
+      allowDefaultBaseUrl: true
+    });
     if (runnerJobResult.success) {
       runnerJob = runnerJobResult.job || null;
     } else {
@@ -19118,7 +19570,7 @@ async function runRemoteAnalysis(options = {}) {
     };
   }
 
-  const runnerStatusResult = await fetchRemoteRunnerStatusRecord(runnerId);
+  const runnerStatusResult = await fetchRemoteRunnerStatusRecord(runnerId, { settings });
   if (!runnerStatusResult.success || !runnerStatusResult.runner) {
     return {
       success: false,
@@ -19151,7 +19603,8 @@ async function runRemoteAnalysis(options = {}) {
   const createResult = await createRemoteAnalysisJobRecord({
     controllerId,
     runnerId,
-    requestPayload
+    requestPayload,
+    settings
   });
   if (!createResult.success || !createResult.job) {
     return {

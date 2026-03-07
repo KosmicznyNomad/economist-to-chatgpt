@@ -141,6 +141,8 @@ const watchlistSecretInput = document.getElementById('watchlistSecretInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
+const remoteRunnerTransportModeInput = document.getElementById('remoteRunnerTransportModeInput');
+const remoteRunnerBaseUrlInput = document.getElementById('remoteRunnerBaseUrlInput');
 const remoteRunnerNameInput = document.getElementById('remoteRunnerNameInput');
 const remoteTargetRunnerIdInput = document.getElementById('remoteTargetRunnerIdInput');
 const remoteRunnerToggleBtn = document.getElementById('remoteRunnerToggleBtn');
@@ -161,6 +163,9 @@ const unfinishedProcessesBtn = document.getElementById('unfinishedProcessesBtn')
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
 let remoteRunnerStatusSnapshot = null;
+
+const REMOTE_RUNNER_TRANSPORT_LOCAL = 'local';
+const REMOTE_RUNNER_TRANSPORT_WATCHLIST = 'watchlist';
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -390,6 +395,94 @@ function safePreview(value, fallback = 'n/a') {
   return text.length > 48 ? `${text.slice(0, 45)}...` : text;
 }
 
+function normalizeRemoteRunnerTransportMode(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return normalized === REMOTE_RUNNER_TRANSPORT_LOCAL
+    ? REMOTE_RUNNER_TRANSPORT_LOCAL
+    : REMOTE_RUNNER_TRANSPORT_WATCHLIST;
+}
+
+function isLocalRunnerIpv4(hostname) {
+  const text = typeof hostname === 'string' ? hostname.trim() : '';
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (!match) return false;
+  const octets = match.slice(1).map((item) => Number.parseInt(item, 10));
+  if (octets.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) return false;
+  const [a, b] = octets;
+  if (a === 10 || a === 127) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+function isLocalRunnerIpv6(hostname) {
+  const text = typeof hostname === 'string' ? hostname.trim().toLowerCase() : '';
+  if (!text) return false;
+  if (text === '::1' || text === '[::1]') return true;
+  const normalized = text.replace(/^\[/, '').replace(/\]$/, '');
+  return normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe8')
+    || normalized.startsWith('fe9')
+    || normalized.startsWith('fea')
+    || normalized.startsWith('feb');
+}
+
+function isSafeLocalRunnerHostname(hostname) {
+  const text = typeof hostname === 'string' ? hostname.trim().toLowerCase() : '';
+  if (!text) return false;
+  if (text === 'localhost') return true;
+  if (text.endsWith('.local') || text.endsWith('.lan') || text.endsWith('.home.arpa') || text.endsWith('.ts.net')) {
+    return true;
+  }
+  return isLocalRunnerIpv4(text) || isLocalRunnerIpv6(text);
+}
+
+function normalizeLocalRemoteRunnerBaseUrl(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  try {
+    const parsed = new URL(text);
+    const protocol = String(parsed.protocol || '').toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:') return '';
+    const hostname = String(parsed.hostname || '').toLowerCase();
+    if (!isSafeLocalRunnerHostname(hostname)) return '';
+    parsed.pathname = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function buildOriginPatternFromBaseUrl(baseUrl) {
+  const normalized = normalizeLocalRemoteRunnerBaseUrl(baseUrl);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    return `${parsed.protocol}//${parsed.host}/*`;
+  } catch {
+    return '';
+  }
+}
+
+async function ensureRemoteRunnerBaseUrlPermission(baseUrl) {
+  const pattern = buildOriginPatternFromBaseUrl(baseUrl);
+  if (!pattern || !chrome?.permissions?.contains || !chrome?.permissions?.request) {
+    return { success: true };
+  }
+  const contains = await chrome.permissions.contains({ origins: [pattern] });
+  if (contains) return { success: true };
+  const granted = await chrome.permissions.request({ origins: [pattern] });
+  if (!granted) {
+    return { success: false, error: 'remote_runner_origin_permission_denied' };
+  }
+  return { success: true };
+}
+
 function formatRemoteRunnerStateLabel(status) {
   const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
   if (normalized === 'ready') return 'ready';
@@ -403,6 +496,13 @@ function formatRemoteRunnerError(error) {
   const normalized = typeof error === 'string' ? error.trim().toLowerCase() : '';
   if (!normalized) return 'blad remote runnera';
   if (normalized === 'runner_id_missing') return 'brak wybranego runnera';
+  if (normalized === 'local_runner_requires_manual_runner_id') return 'w trybie local wpisz Runner ID recznie';
+  if (normalized === 'local_runner_base_url_missing') return 'brak Relay URL dla trybu local';
+  if (normalized === 'local_runner_base_url_invalid') return 'Relay URL musi wskazywac localhost / LAN / Tailscale';
+  if (normalized === 'remote_runner_origin_permission_denied') return 'brak zgody na polaczenie z Relay URL';
+  if (normalized === 'local_runner_unreachable') return 'relay lokalny nie odpowiada';
+  if (normalized === 'local_runner_client_not_allowed') return 'relay lokalny odrzucil polaczenie spoza localhost/LAN';
+  if (normalized === 'controller_not_allowed') return 'ten kontroler nie jest na allowliscie relay';
   if (normalized === 'runner_id_matches_current_device') return 'wybrano ten sam komputer';
   if (normalized === 'no_remote_runner_discovered') return 'brak drugiego komputera z runnerem';
   if (normalized === 'multiple_remote_runners_detected') return 'wykryto wiele runnerow, wpisz Runner ID recznie';
@@ -466,6 +566,12 @@ function applyRemoteRunnerUi(status) {
   const settings = remoteRunnerStatusSnapshot?.settings && typeof remoteRunnerStatusSnapshot.settings === 'object'
     ? remoteRunnerStatusSnapshot.settings
     : {};
+  if (remoteRunnerTransportModeInput && document.activeElement !== remoteRunnerTransportModeInput) {
+    remoteRunnerTransportModeInput.value = normalizeRemoteRunnerTransportMode(settings.transportMode);
+  }
+  if (remoteRunnerBaseUrlInput && document.activeElement !== remoteRunnerBaseUrlInput) {
+    remoteRunnerBaseUrlInput.value = typeof settings.localBaseUrl === 'string' ? settings.localBaseUrl : '';
+  }
   if (remoteRunnerNameInput && document.activeElement !== remoteRunnerNameInput) {
     remoteRunnerNameInput.value = typeof settings.runnerName === 'string' ? settings.runnerName : '';
   }
@@ -485,7 +591,16 @@ function formatRemoteRunnerStatusView(status) {
     return `Remote runner: ${formatRemoteRunnerError(status?.error || 'blad statusu')}.`;
   }
   const lines = [];
+  const transportMode = normalizeRemoteRunnerTransportMode(status?.settings?.transportMode);
+  const localBaseUrl = typeof status?.settings?.localBaseUrl === 'string'
+    ? status.settings.localBaseUrl.trim()
+    : '';
   const supportId = typeof status.supportId === 'string' && status.supportId.trim() ? status.supportId.trim() : '';
+  lines.push(
+    transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL
+      ? `Transport: local relay${localBaseUrl ? ` (${safePreview(localBaseUrl, localBaseUrl)})` : ''}.`
+      : 'Transport: Watchlist API.'
+  );
   lines.push(`To urzadzenie: ${safePreview(supportId, 'brak Runner ID')}.`);
   lines.push(
     status?.settings?.enabled === true
@@ -511,6 +626,12 @@ function formatRemoteRunnerStatusView(status) {
     } else {
       lines.push(`Cel zapisany: ${safePreview(targetRunnerId)}.`);
     }
+  } else if (transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL) {
+    lines.push(
+      targetRunnerId
+        ? `Cel local: ${safePreview(targetRunnerId)}${localBaseUrl ? ` via ${safePreview(localBaseUrl, localBaseUrl)}` : ''}.`
+        : 'Tryb local: wpisz Runner ID i Relay URL recznie.'
+    );
   } else if (discoveredRunners.length === 1) {
     lines.push(`Auto-detect: ${formatRemoteRunnerSummary(discoveredRunners[0], discoveredRunners[0].runnerId || '')}`);
   } else if (discoveredRunners.length > 1) {
@@ -1347,6 +1468,7 @@ async function executeCheckRemoteRunnerFromPopup(button) {
   setRemoteRunnerStatus('Sprawdzam runner / auto-detect...', false);
 
   try {
+    await saveRemoteRunnerSettingsFromPopup();
     const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
       ? remoteTargetRunnerIdInput.value.trim()
       : '';
@@ -1379,6 +1501,7 @@ async function executeRunRemoteAnalysisFromPopup(button) {
   setRunStatus('Przygotowuje batch tekstow i wysylam do runnera...');
 
   try {
+    await saveRemoteRunnerSettingsFromPopup();
     const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
       ? remoteTargetRunnerIdInput.value.trim()
       : '';
@@ -1414,6 +1537,26 @@ async function executeRunRemoteAnalysisFromPopup(button) {
 }
 
 async function saveRemoteRunnerSettingsFromPopup(patch = {}) {
+  const transportMode = normalizeRemoteRunnerTransportMode(
+    typeof remoteRunnerTransportModeInput?.value === 'string'
+      ? remoteRunnerTransportModeInput.value
+      : ''
+  );
+  const localBaseUrlRaw = typeof remoteRunnerBaseUrlInput?.value === 'string'
+    ? remoteRunnerBaseUrlInput.value.trim()
+    : '';
+  const localBaseUrl = transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL
+    ? normalizeLocalRemoteRunnerBaseUrl(localBaseUrlRaw)
+    : '';
+  if (transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL && localBaseUrlRaw && !localBaseUrl) {
+    throw new Error('local_runner_base_url_invalid');
+  }
+  if (transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL && localBaseUrl) {
+    const permissionResult = await ensureRemoteRunnerBaseUrlPermission(localBaseUrl);
+    if (!permissionResult.success) {
+      throw new Error(permissionResult.error || 'remote_runner_origin_permission_denied');
+    }
+  }
   const runnerName = typeof remoteRunnerNameInput?.value === 'string'
     ? remoteRunnerNameInput.value.trim()
     : '';
@@ -1422,6 +1565,8 @@ async function saveRemoteRunnerSettingsFromPopup(patch = {}) {
     : '';
   const response = await sendRuntimeMessage({
     type: 'SET_REMOTE_RUNNER_SETTINGS',
+    transportMode,
+    localBaseUrl,
     runnerName,
     controllerRunnerId,
     ...patch
@@ -1890,6 +2035,22 @@ if (runRemoteBtn) {
 
 if (remoteRunnerNameInput) {
   remoteRunnerNameInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+    });
+  });
+}
+
+if (remoteRunnerTransportModeInput) {
+  remoteRunnerTransportModeInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
+    });
+  });
+}
+
+if (remoteRunnerBaseUrlInput) {
+  remoteRunnerBaseUrlInput.addEventListener('change', () => {
     void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
       setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
     });
