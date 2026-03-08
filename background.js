@@ -638,7 +638,13 @@ function normalizeProcessRecord(record) {
   const id = typeof record.id === 'string' ? record.id : String(record.id || '');
   if (!id) return null;
 
-  const status = normalizeProcessStatus(record.status);
+  let status = normalizeProcessStatus(record.status);
+  const hasVerifiedFinalPersistence = !isClosedProcessStatus(status)
+    && (record?.completedResponseSaved === true || record?.persistenceStatus?.saveOk === true)
+    && !!getProcessSuccessfulDbVerification(record);
+  if (hasVerifiedFinalPersistence) {
+    status = 'completed';
+  }
   const normalizedCounters = normalizePromptCounters(
     status,
     record.currentPrompt,
@@ -751,6 +757,22 @@ function normalizeProcessRecord(record) {
   }
   if (Number.isInteger(normalized.finishedAt) && normalized.finishedAt < normalized.startedAt) {
     normalized.finishedAt = normalized.timestamp;
+  }
+  if (hasVerifiedFinalPersistence) {
+    if (!Number.isInteger(normalized.finishedAt)) {
+      normalized.finishedAt = normalized.timestamp;
+    }
+    if (normalized.totalPrompts > 0) {
+      normalized.currentPrompt = normalized.totalPrompts;
+      normalized.stageIndex = normalized.totalPrompts - 1;
+      if (typeof normalized.stageName !== 'string' || !normalized.stageName.trim()) {
+        normalized.stageName = STAGE_NAMES_COMPANY[normalized.stageIndex] || `Prompt ${normalized.totalPrompts}`;
+      }
+    }
+    if (typeof normalized.statusText !== 'string' || !normalized.statusText.trim()) {
+      normalized.statusText = 'Zakonczono - potwierdzono zapis w bazie';
+    }
+    normalized.needsAction = false;
   }
   if (isClosedProcessStatus(status)) {
     delete normalized.autoRecovery;
