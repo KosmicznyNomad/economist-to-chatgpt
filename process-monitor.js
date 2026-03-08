@@ -35,8 +35,13 @@ const processCompanySnapshotCache = new Map();
 const processCompanySnapshotInFlight = new Map();
 const PROCESS_AUDIT_CACHE_TTL_MS = 45_000;
 const PROCESS_COMPANY_SNAPSHOT_TTL_MS = 60_000;
+const PROCESS_REFRESH_INTERVAL_MS = 8000;
 
 console.log('[panel] Monitor procesow uruchomiony');
+
+function isMonitorPageVisible() {
+  return document.visibilityState === 'visible';
+}
 
 async function loadStageNames() {
   return new Promise((resolve) => {
@@ -71,8 +76,15 @@ chrome.runtime.onMessage.addListener((message) => {
   }
 });
 
-// Odswiezaj co 6s jako backup
-setInterval(refreshProcesses, 3000);
+// Push updates remain primary; polling is only a visible-tab backup.
+setInterval(() => {
+  if (!isMonitorPageVisible()) return;
+  void refreshProcesses();
+}, PROCESS_REFRESH_INTERVAL_MS);
+document.addEventListener('visibilitychange', () => {
+  if (!isMonitorPageVisible()) return;
+  void refreshProcesses();
+});
 installProcessMonitorRuntimeProblemLogging();
 
 if (historyToggle && historyList) {
@@ -129,6 +141,7 @@ const reasonLabels = {
   auto_resume_failed: 'Auto-resume nieudany',
   auto_resume_unhandled_exception: 'Auto-resume: nieobsluzony wyjatek',
   bulk_resume_reload: 'Zatrzymano przed zbiorczym wznowieniem',
+  bulk_resume_no_reload: 'Zatrzymano przed zbiorczym wznowieniem bez reloadu',
   missing_execute_result: 'Brak wyniku executeScript',
   inject_failed: 'Inject zakonczyl sie bledem',
   inject_critical_error: 'Krytyczny blad injectToChat',

@@ -81,6 +81,18 @@ const WATCHLIST_DISPATCH = {
 };
 const WATCHLIST_PROBLEM_LOGS_PATH = '/api/v1/intake/problem-logs';
 const WATCHLIST_RESPONSE_VERIFY_PATH = '/api/v1/intake/economist-response/verify';
+const WATCHLIST_VERIFY_QUEUE = Object.freeze({
+  storageKey: 'watchlist_dispatch_verify_queue',
+  maxItems: 4000,
+  alarmName: 'watchlist-dispatch-verify',
+  alarmPeriodMinutes: 0.5,
+  maxItemsPerRun: 12,
+  maxRuntimeMs: 12000,
+  maxAttempts: 8,
+  baseBackoffMs: 5000,
+  maxBackoffMs: 15 * 60 * 1000,
+  timeoutMs: 5000
+});
 const WATCHLIST_REMOTE_RUNNER_HEARTBEAT_PATH = '/api/v1/iskra/runner/heartbeat';
 const WATCHLIST_REMOTE_RUNNERS_PATH = '/api/v1/iskra/runners';
 const WATCHLIST_DB_VERIFY_MAX_ATTEMPTS = 3;
@@ -149,7 +161,7 @@ const PROCESS_MONITOR_HEARTBEAT = {
 };
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
-const PROBLEM_LOG_CONSOLE_CAPTURE_ENABLED = true;
+const PROBLEM_LOG_CONSOLE_CAPTURE_ENABLED = false;
 const PROBLEM_LOG_CONSOLE_CAPTURE_DEDUPE_MS = 15000;
 const PROBLEM_LOG_CONSOLE_CAPTURE_MAX_KEYS = 600;
 const PROBLEM_LOG_CONSOLE_CAPTURE_MESSAGE_MAX_LENGTH = 300;
@@ -163,6 +175,15 @@ const CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY = '__iskra_pending_responses_v
 const CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS = 24;
 const ANALYSIS_RUN_KEEPALIVE_PORT_PREFIX = 'analysis-run:';
 const ANALYSIS_RUN_KEEPALIVE_HEARTBEAT_MS = 15000;
+const LOCAL_DEBUG_COLLECTOR = Object.freeze({
+  enabled: false,
+  baseUrl: 'http://127.0.0.1:17777',
+  snapshotPath: '/extension-debug/snapshot',
+  timeoutMs: 4000,
+  debounceMs: 350,
+  maxProblemLogs: 250,
+  maxProcesses: 180
+});
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
@@ -200,6 +221,7 @@ const FAILED_PROCESS_STATUSES = new Set([
 const UNFINISHED_RECOVERY_EXCLUDED_REASONS = new Set([
   'resumed_from_decision_panel',
   'bulk_resume_reload',
+  'bulk_resume_no_reload',
   'restarted_in_same_window'
 ]);
 const UNFINISHED_RESUME_LIST_LOG_COOLDOWN_MS = 15000;
@@ -216,6 +238,7 @@ let watchlistDispatchFlushPendingReason = '';
 let watchlistDispatchFlushStartedAt = 0;
 let watchlistDispatchFlushStartedReason = '';
 let watchlistOutboxMutationQueue = Promise.resolve();
+let watchlistVerifyQueueMutationQueue = Promise.resolve();
 let responseStorageMutationQueue = Promise.resolve();
 let watchlistDispatchCredentialsCache = null;
 let watchlistDispatchProcessLogEntries = [];
@@ -245,6 +268,12 @@ let unfinishedResumePageKeepaliveLastLogTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerMaintenanceInProgress = false;
 let remoteRunnerExecutionInProgress = false;
+let watchlistVerifyInProgress = false;
+let watchlistVerifyPending = false;
+let watchlistVerifyPendingReason = '';
+let localDebugCollectorTimer = null;
+let localDebugCollectorInFlight = null;
+let localDebugCollectorQueuedReason = '';
 let analysisProcessQueueSequence = 0;
 let analysisProcessQueueRecordSync = Promise.resolve();
 const analysisProcessQueuePending = [];
@@ -478,6 +507,130 @@ function logProcessTransition(runId, next, patch) {
     totalPrompts: next.totalPrompts,
     stageIndex: Number.isInteger(next.stageIndex) ? next.stageIndex : null
   });
+}
+
+function buildProcessSignalSnapshot(record) {
+  if (!record || typeof record !== 'object') return null;
+
+  const persistenceStatus = record.persistenceStatus && typeof record.persistenceStatus === 'object'
+    ? record.persistenceStatus
+    : null;
+  const persistenceDispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
+    ? persistenceStatus.dispatch
+    : null;
+  const persistenceVerification = persistenceDispatch?.dbVerification && typeof persistenceDispatch.dbVerification === 'object'
+    ? persistenceDispatch.dbVerification
+    : null;
+  const finalStagePersistence = record.finalStagePersistence && typeof record.finalStagePersistence === 'object'
+    ? record.finalStagePersistence
+    : null;
+  const finalStageVerification = finalStagePersistence?.dbVerification && typeof finalStagePersistence.dbVerification === 'object'
+    ? finalStagePersistence.dbVerification
+    : null;
+
+  return {
+    status: normalizeProcessStatus(record.status),
+    needsAction: record.needsAction === true,
+    currentPrompt: Number.isInteger(record.currentPrompt) ? record.currentPrompt : 0,
+    totalPrompts: Number.isInteger(record.totalPrompts) ? record.totalPrompts : 0,
+    stageIndex: Number.isInteger(record.stageIndex) ? record.stageIndex : null,
+    stageName: typeof record.stageName === 'string' ? record.stageName.trim() : '',
+    reason: typeof record.reason === 'string' ? record.reason.trim() : '',
+    error: typeof record.error === 'string' ? record.error.trim() : '',
+    title: typeof record.title === 'string' ? record.title.trim() : '',
+    analysisType: typeof record.analysisType === 'string' ? record.analysisType.trim() : '',
+    tabId: Number.isInteger(record.tabId) ? record.tabId : null,
+    windowId: Number.isInteger(record.windowId) ? record.windowId : null,
+    chatUrl: normalizeChatConversationUrl(typeof record.chatUrl === 'string' ? record.chatUrl : ''),
+    sourceUrl: typeof record.sourceUrl === 'string' ? record.sourceUrl.trim() : '',
+    queueState: typeof record.queueState === 'string' ? record.queueState.trim() : '',
+    queuePosition: Number.isInteger(record.queuePosition) ? record.queuePosition : null,
+    queueTotal: Number.isInteger(record.queueTotal) ? record.queueTotal : null,
+    queueSlot: Number.isInteger(record.queueSlot) ? record.queueSlot : null,
+    queueLimit: Number.isInteger(record.queueLimit) ? record.queueLimit : null,
+    finishedAt: Number.isInteger(record.finishedAt) ? record.finishedAt : null,
+    completedResponseSaved: record.completedResponseSaved === true,
+    completedResponseSavedAt: Number.isInteger(record.completedResponseSavedAt) ? record.completedResponseSavedAt : null,
+    completedResponseDispatchSummary: typeof record.completedResponseDispatchSummary === 'string'
+      ? record.completedResponseDispatchSummary.trim()
+      : '',
+    persistenceSaveOk: typeof persistenceStatus?.saveOk === 'boolean' ? persistenceStatus.saveOk : null,
+    persistenceSaveError: typeof persistenceStatus?.saveError === 'string' ? persistenceStatus.saveError.trim() : '',
+    persistenceBridgeError: typeof persistenceStatus?.bridgeError === 'string' ? persistenceStatus.bridgeError.trim() : '',
+    persistenceDispatchSummary: typeof persistenceStatus?.dispatchSummary === 'string'
+      ? persistenceStatus.dispatchSummary.trim()
+      : '',
+    persistenceUpdatedAt: Number.isInteger(persistenceStatus?.updatedAt) ? persistenceStatus.updatedAt : null,
+    persistenceDispatchSent: Number.isInteger(persistenceDispatch?.sent) ? persistenceDispatch.sent : null,
+    persistenceDispatchFailed: Number.isInteger(persistenceDispatch?.failed) ? persistenceDispatch.failed : null,
+    persistenceDispatchDeferred: Number.isInteger(persistenceDispatch?.deferred) ? persistenceDispatch.deferred : null,
+    persistenceDispatchRemaining: Number.isInteger(persistenceDispatch?.remaining) ? persistenceDispatch.remaining : null,
+    persistenceDispatchVerifyState: typeof persistenceVerification?.state === 'string'
+      ? persistenceVerification.state.trim()
+      : '',
+    finalStageSuccess: finalStagePersistence?.success === true,
+    finalStageSummary: typeof finalStagePersistence?.summary === 'string'
+      ? finalStagePersistence.summary.trim()
+      : '',
+    finalStageSent: Number.isInteger(finalStagePersistence?.sent) ? finalStagePersistence.sent : null,
+    finalStageFailed: Number.isInteger(finalStagePersistence?.failed) ? finalStagePersistence.failed : null,
+    finalStageVerifyState: typeof finalStageVerification?.state === 'string'
+      ? finalStageVerification.state.trim()
+      : ''
+  };
+}
+
+function getProcessSignalSignature(record) {
+  const snapshot = buildProcessSignalSnapshot(record);
+  if (!snapshot) return '';
+  try {
+    return JSON.stringify(snapshot);
+  } catch (error) {
+    return [
+      snapshot.status,
+      snapshot.needsAction ? '1' : '0',
+      snapshot.currentPrompt,
+      snapshot.totalPrompts,
+      snapshot.stageIndex ?? '',
+      snapshot.stageName,
+      snapshot.reason,
+      snapshot.error,
+      snapshot.title,
+      snapshot.analysisType,
+      snapshot.tabId ?? '',
+      snapshot.windowId ?? '',
+      snapshot.chatUrl,
+      snapshot.sourceUrl,
+      snapshot.queueState,
+      snapshot.queuePosition ?? '',
+      snapshot.queueTotal ?? '',
+      snapshot.queueSlot ?? '',
+      snapshot.queueLimit ?? '',
+      snapshot.finishedAt ?? '',
+      snapshot.completedResponseSaved ? '1' : '0',
+      snapshot.completedResponseSavedAt ?? '',
+      snapshot.completedResponseDispatchSummary,
+      snapshot.persistenceSaveOk === null ? '' : (snapshot.persistenceSaveOk ? '1' : '0'),
+      snapshot.persistenceSaveError,
+      snapshot.persistenceBridgeError,
+      snapshot.persistenceDispatchSummary,
+      snapshot.persistenceUpdatedAt ?? '',
+      snapshot.persistenceDispatchSent ?? '',
+      snapshot.persistenceDispatchFailed ?? '',
+      snapshot.persistenceDispatchDeferred ?? '',
+      snapshot.persistenceDispatchRemaining ?? '',
+      snapshot.persistenceDispatchVerifyState,
+      snapshot.finalStageSuccess ? '1' : '0',
+      snapshot.finalStageSummary,
+      snapshot.finalStageSent ?? '',
+      snapshot.finalStageFailed ?? '',
+      snapshot.finalStageVerifyState
+    ].join('|');
+  }
+}
+
+function hasMeaningfulProcessSignalChange(existingRecord, nextRecord) {
+  return getProcessSignalSignature(existingRecord) !== getProcessSignalSignature(nextRecord);
 }
 
 function normalizeProcessRecord(record) {
@@ -744,6 +897,7 @@ async function persistProcessRegistry() {
     processRegistry.set(record.id, record);
   });
   await chrome.storage.local.set({ [PROCESS_MONITOR_STORAGE_KEY]: records });
+  scheduleLocalDebugCollectorSnapshot('process_monitor_state');
   return records;
 }
 
@@ -861,8 +1015,8 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
 
     let staleDetected = 0;
     let staleLogged = 0;
-    let touched = 0;
     let fresh = 0;
+    let quiet = 0;
 
     for (const process of active) {
       const runId = typeof process?.id === 'string' ? process.id : '';
@@ -885,9 +1039,7 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
         fresh += 1;
         continue;
       }
-
-      const touchedRecord = await upsertProcess(runId, { timestamp: nowTs });
-      if (touchedRecord) touched += 1;
+      quiet += 1;
     }
 
     pruneProcessStaleWarnMap(nowTs);
@@ -895,8 +1047,8 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       success: true,
       origin,
       active: active.length,
-      touched,
       fresh,
+      quiet,
       staleDetected,
       staleLogged
     };
@@ -1154,7 +1306,10 @@ function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
   const detectedPrompts = sourceRows.reduce((sum, row) => (
     sum + (Number.isInteger(row?.detectedPromptNumber) ? 1 : 0)
   ), 0);
-  const reloadOk = sourceRows.filter((row) => typeof row?.reloadMethod === 'string' && row.reloadMethod.trim()).length;
+  const reloadOk = sourceRows.filter((row) => {
+    const reloadMethod = typeof row?.reloadMethod === 'string' ? row.reloadMethod.trim() : '';
+    return !!reloadMethod && reloadMethod !== 'no_reload';
+  }).length;
   const reloadTotal = Number.isInteger(reloadTotalHint)
     ? reloadTotalHint
     : sourceRows.filter((row) => row?.eligibleForReload === true).length;
@@ -1280,6 +1435,7 @@ function sanitizeReloadResumeMonitorState(rawState) {
     phase: typeof source.phase === 'string' ? source.phase : '',
     origin: typeof source.origin === 'string' ? source.origin : '',
     scope: typeof source.scope === 'string' ? source.scope : '',
+    reloadBeforeResume: source.reloadBeforeResume !== false,
     composerThinkingEffort: normalizeComposerThinkingEffort(source.composerThinkingEffort),
     forceRepeatLastPrompt: source.forceRepeatLastPrompt === true,
     startedAt: Number.isInteger(source.startedAt) ? source.startedAt : null,
@@ -1348,6 +1504,7 @@ async function setReloadResumeMonitorState(nextState) {
   await chrome.storage.local.set({
     [RELOAD_RESUME_MONITOR_STORAGE_KEY]: normalized
   });
+  scheduleLocalDebugCollectorSnapshot('reload_resume_monitor_state');
   try {
     await chrome.runtime.sendMessage({
       type: 'RELOAD_RESUME_MONITOR_UPDATE',
@@ -1370,14 +1527,106 @@ async function getReloadResumeMonitorState(sessionId = '') {
   return cloneReloadResumeMonitorState(reloadResumeMonitorState);
 }
 
+function buildLocalDebugCollectorUrl(pathname = '') {
+  const baseUrl = typeof LOCAL_DEBUG_COLLECTOR?.baseUrl === 'string'
+    ? LOCAL_DEBUG_COLLECTOR.baseUrl.trim().replace(/\/+$/, '')
+    : '';
+  const suffix = typeof pathname === 'string' ? pathname.trim() : '';
+  if (!baseUrl) return '';
+  if (!suffix) return baseUrl;
+  return `${baseUrl}${suffix.startsWith('/') ? suffix : `/${suffix}`}`;
+}
+
+async function postLocalDebugCollectorSnapshot(reason = 'state_change') {
+  if (LOCAL_DEBUG_COLLECTOR.enabled !== true || typeof fetch !== 'function') {
+    return false;
+  }
+  const targetUrl = buildLocalDebugCollectorUrl(LOCAL_DEBUG_COLLECTOR.snapshotPath);
+  if (!targetUrl) return false;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    try {
+      controller.abort();
+    } catch (error) {
+      // Ignore timeout abort failures.
+    }
+  }, LOCAL_DEBUG_COLLECTOR.timeoutMs);
+
+  try {
+    const [reloadResumeState, processMonitorState, problemLogs, unfinishedResumeState] = await Promise.all([
+      getReloadResumeMonitorState().catch(() => null),
+      getProcessSnapshot().catch(() => []),
+      getProblemLogSnapshot(LOCAL_DEBUG_COLLECTOR.maxProblemLogs).catch(() => []),
+      getUnfinishedResumeBatchState().catch(() => null)
+    ]);
+    const payload = {
+      source: 'iskra-extension',
+      reason: typeof reason === 'string' ? reason : 'state_change',
+      generatedAt: Date.now(),
+      sessionId: typeof reloadResumeState?.sessionId === 'string' ? reloadResumeState.sessionId : '',
+      reloadResumeMonitorState: reloadResumeState,
+      processMonitorState: Array.isArray(processMonitorState)
+        ? processMonitorState.slice(-LOCAL_DEBUG_COLLECTOR.maxProcesses)
+        : [],
+      problemLogEntries: Array.isArray(problemLogs) ? problemLogs : [],
+      unfinishedResumeBatchState: unfinishedResumeState
+    };
+    const response = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    return response.ok === true;
+  } catch (error) {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function scheduleLocalDebugCollectorSnapshot(reason = 'state_change') {
+  if (LOCAL_DEBUG_COLLECTOR.enabled !== true) return;
+  if (typeof reason === 'string' && reason.trim()) {
+    localDebugCollectorQueuedReason = reason.trim();
+  } else if (!localDebugCollectorQueuedReason) {
+    localDebugCollectorQueuedReason = 'state_change';
+  }
+  if (localDebugCollectorTimer) {
+    return;
+  }
+  localDebugCollectorTimer = setTimeout(() => {
+    localDebugCollectorTimer = null;
+    if (localDebugCollectorInFlight) {
+      return;
+    }
+    const queuedReason = localDebugCollectorQueuedReason || 'state_change';
+    localDebugCollectorQueuedReason = '';
+    localDebugCollectorInFlight = postLocalDebugCollectorSnapshot(queuedReason)
+      .catch(() => false)
+      .finally(() => {
+        localDebugCollectorInFlight = null;
+        if (localDebugCollectorQueuedReason) {
+          scheduleLocalDebugCollectorSnapshot(localDebugCollectorQueuedReason);
+        }
+      });
+  }, LOCAL_DEBUG_COLLECTOR.debounceMs);
+}
+
 async function startReloadResumeMonitorSession(payload = {}) {
   const sessionId = typeof payload.sessionId === 'string' && payload.sessionId.trim()
     ? payload.sessionId.trim()
     : createReloadResumeMonitorSessionId('reload-resume');
+  const reloadBeforeResume = payload.reloadBeforeResume !== false;
   const initialEvent = sanitizeReloadResumeMonitorEvent({
     level: 'info',
     code: 'session_started',
-    message: 'Reload + resume session started'
+    message: reloadBeforeResume
+      ? 'Reload + resume session started'
+      : 'Resume without reload session started'
   });
   return setReloadResumeMonitorState({
     sessionId,
@@ -1385,6 +1634,7 @@ async function startReloadResumeMonitorSession(payload = {}) {
     phase: 'init',
     origin: typeof payload.origin === 'string' ? payload.origin : '',
     scope: typeof payload.scope === 'string' ? payload.scope : '',
+    reloadBeforeResume,
     composerThinkingEffort: normalizeComposerThinkingEffort(payload.composerThinkingEffort),
     forceRepeatLastPrompt: payload.forceRepeatLastPrompt === true,
     startedAt: Date.now(),
@@ -1588,6 +1838,7 @@ async function setUnfinishedResumeBatchState(nextState, options = {}) {
   await chrome.storage.local.set({
     [UNFINISHED_RESUME_BATCH_STORAGE_KEY]: normalized
   });
+  scheduleLocalDebugCollectorSnapshot('unfinished_resume_batch_state');
   if (options?.broadcast === false) {
     return normalized;
   }
@@ -3134,6 +3385,7 @@ async function persistProblemLogEntries() {
   await chrome.storage.local.set({
     [PROBLEM_LOG_STORAGE_KEY]: problemLogEntries
   });
+  scheduleLocalDebugCollectorSnapshot('problem_log_entries');
 }
 
 function cloneProblemLogEntries(entries) {
@@ -3892,6 +4144,7 @@ installBackgroundConsoleProblemCapture();
 async function upsertProcess(runId, patch = {}) {
   if (!runId) return null;
   await ensureProcessRegistryReady();
+  const hadExistingRecord = processRegistry.has(runId);
   const patchData = (patch && typeof patch === 'object')
     ? { ...patch }
     : {};
@@ -3937,14 +4190,10 @@ async function upsertProcess(runId, patch = {}) {
 
   if (!next) return null;
   mergeProcessConversationUrls(existing, next);
-  const problemEntry = buildProcessProblemLogEntry(runId, next);
-  const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
-  const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
-  const heartbeatDue = !!(problemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
-  if (problemEntry && heartbeatDue && !signatureChanged) {
-    problemEntry.heartbeat = true;
-  }
-  if (problemEntry?.signature && (signatureChanged || heartbeatDue)) {
+  const signalChanged = !hadExistingRecord || hasMeaningfulProcessSignalChange(existing, next);
+  const problemEntry = signalChanged ? buildProcessProblemLogEntry(runId, next) : null;
+  const shouldEmitProblemEntry = !!(problemEntry?.signature && signalChanged);
+  if (shouldEmitProblemEntry) {
     const emittedEntry = await appendProblemLog(problemEntry);
     if (emittedEntry) {
       processLogLastEmitTsByRunId.set(runId, Date.now());
@@ -3960,8 +4209,10 @@ async function upsertProcess(runId, patch = {}) {
   }
   processRegistry.set(runId, next);
   logProcessTransition(runId, next, patchData);
-  await persistProcessRegistry();
-  await broadcastProcessUpdate();
+  if (signalChanged) {
+    await persistProcessRegistry();
+    await broadcastProcessUpdate();
+  }
   return next;
 }
 
@@ -4490,8 +4741,10 @@ async function verifyExistingProcessResponseInDb(process, options = {}) {
 
   const runId = typeof process?.id === 'string' ? process.id.trim() : '';
   const preferredResponseId = typeof options?.responseId === 'string' ? options.responseId.trim() : '';
+  // Snapshot verify is unsafe for resume/reset decisions because it can outlive a missing DB materialization.
+  const allowSnapshotVerification = options?.allowSnapshotVerification === true;
   const existingVerification = getProcessSuccessfulDbVerification(process, preferredResponseId);
-  if (existingVerification) {
+  if (existingVerification && allowSnapshotVerification) {
     return {
       attempted: false,
       persisted: true,
@@ -5919,30 +6172,30 @@ const STAGE_METADATA_COMPANY = [
   {
     promptIndex: 1,
     promptNumber: 2,
-    stageId: 'setup',
-    stageName: "Pipeline Setup (Rules + Data Contract)",
-    description: "Stage inheritance, time-anchor rules, data discipline, and execution order lock."
+    stageId: '1',
+    stageName: "Stage 1: Sub-segment Validation",
+    description: "Invoice-first sub-segment map, gates, timing funnel, and top sub-segment selection."
   },
   {
     promptIndex: 2,
     promptNumber: 3,
-    stageId: '1',
-    stageName: "Stage 1: Sub-segment Validation",
-    description: "Invoice-first sub-segment map, gates, timing funnel, delivered pool."
-  },
-  {
-    promptIndex: 3,
-    promptNumber: 4,
     stageId: '2',
     stageName: "Stage 2: Stock Universe (15 names)",
     description: "Exposure-based company mapping from invoice items to listed names."
   },
   {
-    promptIndex: 4,
-    promptNumber: 5,
+    promptIndex: 3,
+    promptNumber: 4,
     stageId: '3',
     stageName: "Stage 3: Thesis-Linked Traction Pack",
-    description: "Contract semantics, traction quality, and VOI objects for valuation handoff."
+    description: "Contract semantics, traction quality, and Stage 4 handoff objects."
+  },
+  {
+    promptIndex: 4,
+    promptNumber: 5,
+    stageId: '3.2',
+    stageName: "Stage 3.2: Traction Scoring Pack (Light)",
+    description: "Lean traction scoring pass for 15 companies feeding the Stage 4 valuation screen."
   },
   {
     promptIndex: 5,
@@ -6010,9 +6263,10 @@ const STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageNam
 // a clean "Stage X" marker in their heading.
 const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['0', 0],
-  ['1', 2],
-  ['2', 3],
-  ['3', 4],
+  ['1', 1],
+  ['2', 2],
+  ['3', 3],
+  ['3.2', 4], // current light traction scoring prompt between Stage 3 and Stage 4
   ['4', 5],
   ['5', 6],
   ['6', 7],
@@ -6024,7 +6278,6 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['12', 12],
   ['10.5', 11], // legacy alias: old chain used Stage 10.5 for composite rank
   ['2.5', 5], // legacy alias: old chain used 2.5 for Reverse DCF Lite
-  ['3.2', 5], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
   ['3.5', 7], // legacy alias: old chain treated DuPont as 3.5
   ['6.5', 7] // compatibility alias: midpoint naming for DuPont
 ]);
@@ -6130,102 +6383,14 @@ function normalizeSentenceSignature(text) {
 }
 
 function buildPromptSignatureCatalog(prompts) {
-  if (!Array.isArray(prompts)) return [];
-
-  const catalog = [];
-  prompts.forEach((promptText, index) => {
-    if (typeof promptText !== 'string') return;
-    const signatureRaw = extractLastTwoSentences(promptText);
-    const signature = normalizeSentenceSignature(signatureRaw);
-    if (!signature) return;
-    const promptNumber = index + 1;
-    catalog.push({
-      index,
-      promptNumber,
-      stageName: STAGE_NAMES_COMPANY[index] || `Prompt ${promptNumber}`,
-      signature,
-      signatureRaw,
-      signatureLength: signature.length
-    });
-  });
-
-  return catalog;
+  return buildCompanyPromptMatchRecords(prompts);
 }
 
-function detectPromptIndexFromMessage(lastUserMessageText, catalog) {
-  const messageSignatureRaw = extractLastTwoSentences(lastUserMessageText || '');
-  const messageSignature = normalizeSentenceSignature(messageSignatureRaw);
-  if (!messageSignature) {
-    return {
-      matched: false,
-      reason: 'no_user_message',
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const list = Array.isArray(catalog) ? catalog : [];
-  if (list.length === 0) {
-    return {
-      matched: false,
-      reason: 'catalog_empty',
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const exactMatches = list.filter((entry) => entry.signature === messageSignature);
-  if (exactMatches.length > 0) {
-    const selected = exactMatches.sort((a, b) => b.index - a.index)[0];
-    return {
-      matched: true,
-      method: 'exact',
-      ...selected,
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const minComparableLen = 24;
-  if (messageSignature.length < minComparableLen) {
-    return {
-      matched: false,
-      reason: 'signature_too_short',
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const includesMatches = list
-    .filter((entry) => {
-      const left = typeof entry?.signature === 'string' ? entry.signature : '';
-      if (left.length < minComparableLen) return false;
-      return messageSignature.includes(left) || left.includes(messageSignature);
-    })
-    .sort((a, b) => {
-      if (b.signatureLength !== a.signatureLength) {
-        return b.signatureLength - a.signatureLength;
-      }
-      return b.index - a.index;
-    });
-
-  if (includesMatches.length > 0) {
-    const selected = includesMatches[0];
-    return {
-      matched: true,
-      method: 'includes',
-      ...selected,
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  return {
-    matched: false,
-    reason: 'signature_not_found',
-    messageSignatureRaw,
-    messageSignature
-  };
+function detectPromptIndexFromMessage(lastUserMessageText, promptRecords) {
+  return matchCompanyPromptText(lastUserMessageText, promptRecords, {
+    minScore: COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE,
+    minGap: COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP
+  });
 }
 
 async function readFullConversationFromTab(tabId, options = {}) {
@@ -6584,6 +6749,7 @@ async function extractLastUserMessageFromTab(tabId) {
 
   const scanned = await readFullConversationFromTab(tabId, {
     maxWaitMs: 14000,
+    maxCharsPerMessage: 32000,
     transferUserMetaLimit: 2,
     hardForce: true,
     restoreScroll: true
@@ -7337,9 +7503,10 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
 }
 
 async function runResetScanStartAllTabs(options = {}) {
+  const reloadBeforeResume = options?.reloadBeforeResume !== false;
   const monitorSessionId = typeof options?.monitorSessionId === 'string' && options.monitorSessionId.trim()
     ? options.monitorSessionId.trim()
-    : createReloadResumeMonitorSessionId('reload-resume');
+    : createReloadResumeMonitorSessionId(reloadBeforeResume ? 'reload-resume' : 'resume-no-reload');
   try {
     const origin = typeof options?.origin === 'string' && options.origin.trim()
       ? options.origin.trim()
@@ -7371,6 +7538,7 @@ async function runResetScanStartAllTabs(options = {}) {
       sessionId: monitorSessionId,
       origin,
       scope,
+      reloadBeforeResume,
       forceRepeatLastPrompt,
       composerThinkingEffort,
       counts: {
@@ -7403,6 +7571,7 @@ async function runResetScanStartAllTabs(options = {}) {
       mode: 'scoped_context_targets',
       scope,
       forceRepeatLastPrompt,
+      reloadBeforeResume,
       composerThinkingEffort: composerThinkingEffort || ''
     };
 
@@ -7414,6 +7583,7 @@ async function runResetScanStartAllTabs(options = {}) {
       const response = {
         success: false,
         monitorSessionId,
+        reloadBeforeResume,
         scannedTabs: 0,
         matchedTabs: 0,
         startedTabs: 0,
@@ -7437,7 +7607,9 @@ async function runResetScanStartAllTabs(options = {}) {
       await appendReloadResumeMonitorEvent(monitorSessionId, {
         level: 'error',
         code: 'prompts_not_loaded',
-        message: 'Cannot run reload + resume: prompts not loaded'
+        message: reloadBeforeResume
+          ? 'Cannot run reload + resume: prompts not loaded'
+          : 'Cannot run resume without reload: prompts not loaded'
       });
       return response;
     }
@@ -7991,6 +8163,7 @@ async function runResetScanStartAllTabs(options = {}) {
     });
 
     console.log('[reset-scan-start] Init', {
+      monitorSessionId,
       origin,
       scope,
       promptsCompanyCount: PROMPTS_COMPANY.length,
@@ -8019,6 +8192,7 @@ async function runResetScanStartAllTabs(options = {}) {
     ) {
       passCount += 1;
       console.log('[reset-scan-start] Pass start', {
+        monitorSessionId,
         pass: passCount,
         pending: pendingKeys.size,
         scanned: scanTargets.length
@@ -8042,6 +8216,7 @@ async function runResetScanStartAllTabs(options = {}) {
         resultsByKey.set(target.key, row);
 
         console.log('[reset-scan-start] Inspect process', {
+          monitorSessionId,
           pass: passCount,
           runId: row.runId || '',
           tabId: row.tabId,
@@ -8062,26 +8237,53 @@ async function runResetScanStartAllTabs(options = {}) {
         }
 
         if (!preparedKeys.has(target.key)) {
+          const stopReason = reloadBeforeResume ? 'bulk_resume_reload' : 'bulk_resume_no_reload';
           const stopResult = await requestProcessForceStopOnTab(row.tabId, {
             runId: row.runId,
-            reason: 'bulk_resume_reload',
+            reason: stopReason,
             origin
-          });
+          }, reloadBeforeResume ? 1200 : 2500);
           row.stopSignalSent = stopResult?.sent === true;
           row.stopSignalAck = stopResult?.acknowledged === true;
           row.stopSignalReason = stopResult?.reason || '';
 
-          const prepareAttempt = await settleWithTimeout(
-            () => prepareTabForResume(row.tabId, row.windowId, {
-              timeoutMs: 15000,
-              bypassCache: true
-            }),
-            35000
-          );
+          if (!reloadBeforeResume && row.stopSignalAck !== true) {
+            row.action = 'detect_failed';
+            row.reason = `force_stop_not_acknowledged${row.stopSignalReason ? `:${row.stopSignalReason}` : ''}`;
+            setRecognitionSource(row, 'detect_unresolved');
+            appendRecognitionStep(row, 'force_stop', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            console.warn('[reset-scan-start] Stop not acknowledged in no-reload mode', {
+              runId: row.runId || '',
+              tabId: row.tabId,
+              windowId: row.windowId,
+              reason: row.reason
+            });
+            continue;
+          }
+
+          const prepareAttempt = reloadBeforeResume
+            ? await settleWithTimeout(
+              () => prepareTabForResume(row.tabId, row.windowId, {
+                timeoutMs: 15000,
+                bypassCache: true
+              }),
+              35000
+            )
+            : await settleWithTimeout(
+              () => prepareTabForDetection(row.tabId, row.windowId),
+              20000
+            );
           if (prepareAttempt?.timeout) {
-            row.action = 'reload_failed';
-            row.reason = 'prepare_tab_timeout';
-            row.reloadDetails = 'prepareTabForResume timed out';
+            row.action = reloadBeforeResume ? 'reload_failed' : 'detect_failed';
+            row.reason = reloadBeforeResume ? 'prepare_tab_timeout' : 'prepare_detection_timeout';
+            row.reloadDetails = reloadBeforeResume
+              ? 'prepareTabForResume timed out'
+              : 'prepareTabForDetection timed out';
+            if (!reloadBeforeResume) {
+              setRecognitionSource(row, 'detect_unresolved');
+            }
             appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
             resultsByKey.set(target.key, row);
             pendingKeys.delete(target.key);
@@ -8094,9 +8296,12 @@ async function runResetScanStartAllTabs(options = {}) {
             continue;
           }
           if (!prepareAttempt?.ok) {
-            row.action = 'reload_failed';
-            row.reason = prepareAttempt?.error?.message || 'prepare_tab_exception';
+            row.action = reloadBeforeResume ? 'reload_failed' : 'detect_failed';
+            row.reason = prepareAttempt?.error?.message || (reloadBeforeResume ? 'prepare_tab_exception' : 'prepare_detection_exception');
             row.reloadDetails = prepareAttempt?.error?.stack || '';
+            if (!reloadBeforeResume) {
+              setRecognitionSource(row, 'detect_unresolved');
+            }
             appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
             resultsByKey.set(target.key, row);
             pendingKeys.delete(target.key);
@@ -8109,33 +8314,39 @@ async function runResetScanStartAllTabs(options = {}) {
             continue;
           }
           const prepareResult = prepareAttempt.value;
-          if (!prepareResult?.ok) {
-            row.action = 'reload_failed';
-            row.reason = prepareResult?.reason || 'reload_failed';
-            row.reloadDetails = prepareResult?.error || '';
-            appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
-            resultsByKey.set(target.key, row);
-            pendingKeys.delete(target.key);
-            console.warn('[reset-scan-start] Reload failed for process context', {
-              runId: row.runId || '',
-              tabId: row.tabId,
-              windowId: row.windowId,
-              reason: row.reason,
-              details: row.reloadDetails || ''
-            });
-            continue;
+          if (reloadBeforeResume) {
+            if (!prepareResult?.ok) {
+              row.action = 'reload_failed';
+              row.reason = prepareResult?.reason || 'reload_failed';
+              row.reloadDetails = prepareResult?.error || '';
+              appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
+              resultsByKey.set(target.key, row);
+              pendingKeys.delete(target.key);
+              console.warn('[reset-scan-start] Reload failed for process context', {
+                runId: row.runId || '',
+                tabId: row.tabId,
+                windowId: row.windowId,
+                reason: row.reason,
+                details: row.reloadDetails || ''
+              });
+              continue;
+            }
+            row.reloadMethod = typeof prepareResult?.reloadResult?.method === 'string'
+              ? prepareResult.reloadResult.method
+              : '';
+          } else {
+            row.reloadMethod = 'no_reload';
           }
-          row.reloadMethod = typeof prepareResult?.reloadResult?.method === 'string'
-            ? prepareResult.reloadResult.method
-            : '';
           appendRecognitionStep(row, 'reload_prepare', 'ok', row.reloadMethod || 'prepared');
           preparedKeys.add(target.key);
 
           if (row.runId) {
             await upsertProcess(row.runId, {
               status: 'stopped',
-              statusText: 'Zatrzymany przed wznowieniem zbiorczym',
-              reason: 'bulk_resume_reload',
+              statusText: reloadBeforeResume
+                ? 'Zatrzymany przed wznowieniem zbiorczym'
+                : 'Zatrzymany przed wznowieniem zbiorczym bez reloadu',
+              reason: stopReason,
               needsAction: false,
               autoRecovery: null,
               finishedAt: Date.now(),
@@ -9126,9 +9337,11 @@ async function runResetScanStartAllTabs(options = {}) {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
-    const summary = calculateReloadResumeSummaryFromRows(results, scanTargets.length);
-    const summaryCheck = verifyReloadResumeSummary(summary, results, scanTargets.length);
+    const reloadTotalHint = reloadBeforeResume ? scanTargets.length : 0;
+    const summary = calculateReloadResumeSummaryFromRows(results, reloadTotalHint);
+    const summaryCheck = verifyReloadResumeSummary(summary, results, reloadTotalHint);
     console.log('[reset-scan-start] Summary', {
+      monitorSessionId,
       scope,
       maxPasses,
       maxRuntimeMs,
@@ -9147,7 +9360,10 @@ async function runResetScanStartAllTabs(options = {}) {
       dataGapsDetected: summary.data_gaps_detected
     });
     results.forEach((item) => {
-      console.log('[reset-scan-start] Process result', item);
+      console.log('[reset-scan-start] Process result', {
+        monitorSessionId,
+        ...item
+      });
     });
     await updateReloadResumeMonitorSession(monitorSessionId, {
       status: 'completed',
@@ -9202,6 +9418,7 @@ async function runResetScanStartAllTabs(options = {}) {
       summary,
       summaryCheck,
       resetSummary,
+      reloadBeforeResume,
       results
     };
   } catch (error) {
@@ -9257,6 +9474,7 @@ async function runResetScanStartAllTabs(options = {}) {
       summary,
       summaryCheck: failureSummaryCheck,
       scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+      reloadBeforeResume,
       results: [],
       error: error?.message || String(error)
     };
@@ -10297,18 +10515,7 @@ function buildTwoSentenceSignature(text) {
 }
 
 function buildPromptSignatureRecords(prompts) {
-  return (Array.isArray(prompts) ? prompts : [])
-    .map((promptText, index) => {
-      const signature = buildTwoSentenceSignature(promptText);
-      const normalizedPrefix = normalizeSignatureText(promptText).slice(0, 360);
-      return {
-        index,
-        promptNumber: index + 1,
-        signature,
-        normalizedPrefix
-      };
-    })
-    .filter((entry) => entry.signature.length > 0);
+  return buildCompanyPromptMatchRecords(prompts);
 }
 
 function sharedPrefixLength(left, right, maxLen = SIGNATURE_COMPARE_LIMIT) {
@@ -10636,6 +10843,7 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
 
   const scanned = await readFullConversationFromTab(tabId, {
     maxWaitMs,
+    maxCharsPerMessage: 32000,
     transferUserMetaLimit: 420,
     hardForce: true,
     restoreScroll: true
@@ -10678,6 +10886,8 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
 
 const COMPANY_PROMPT_MATCH_MIN_SCORE = 180;
 const COMPANY_PROMPT_MATCH_MAX_TOKENS = 1800;
+const COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE = 220;
+const COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP = 120;
 
 function extractSentenceWindowSignature(text, startIndex = 0, count = 2) {
   const safeStart = Number.isInteger(startIndex) ? Math.max(startIndex, 0) : 0;
@@ -10753,6 +10963,128 @@ function buildCompanyPromptMatchRecords(prompts) {
   });
 
   return records;
+}
+
+function rankCompanyPromptCandidatesForText(messageText, promptRecords) {
+  const records = Array.isArray(promptRecords)
+    ? promptRecords.filter((record) => record && Number.isInteger(record.promptNumber))
+    : [];
+  const features = buildConversationMessageMatchFeatures(messageText);
+  const candidates = records
+    .map((record) => {
+      const scoreInfo = computeCompanyPromptMatchScore(features, record);
+      return {
+        index: record.index,
+        promptNumber: record.promptNumber,
+        stageName: record.stageName || `Prompt ${record.promptNumber}`,
+        ...scoreInfo
+      };
+    })
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      const leftStrong = hasStrongCompanyPromptSignal(left) ? 1 : 0;
+      const rightStrong = hasStrongCompanyPromptSignal(right) ? 1 : 0;
+      if (rightStrong !== leftStrong) return rightStrong - leftStrong;
+      if (right.tokenHits !== left.tokenHits) return right.tokenHits - left.tokenHits;
+      if (right.prefixLen !== left.prefixLen) return right.prefixLen - left.prefixLen;
+      if (right.suffixLen !== left.suffixLen) return right.suffixLen - left.suffixLen;
+      return right.promptNumber - left.promptNumber;
+    });
+  return {
+    features,
+    candidates
+  };
+}
+
+function matchCompanyPromptText(messageText, promptRecords, options = {}) {
+  const rawText = typeof messageText === 'string' ? messageText : '';
+  const messageSignatureRaw = extractLastTwoSentences(rawText || '');
+  const messageSignature = normalizeSentenceSignature(messageSignatureRaw);
+  const records = Array.isArray(promptRecords) ? promptRecords : [];
+  if (!rawText.trim()) {
+    return {
+      matched: false,
+      reason: 'no_user_message',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+  if (records.length === 0) {
+    return {
+      matched: false,
+      reason: 'catalog_empty',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const minScore = Number.isInteger(options?.minScore) && options.minScore > 0
+    ? options.minScore
+    : COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE;
+  const minGap = Number.isInteger(options?.minGap) && options.minGap > 0
+    ? options.minGap
+    : COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP;
+  const { features, candidates } = rankCompanyPromptCandidatesForText(rawText, records);
+  if (!features?.normalized) {
+    return {
+      matched: false,
+      reason: 'no_user_message',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const best = candidates[0] || null;
+  const second = candidates[1] || null;
+  if (!best || !Number.isFinite(best.score) || best.score < minScore) {
+    return {
+      matched: false,
+      reason: 'signature_not_found',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const scoreGap = second && Number.isFinite(second.score)
+    ? (best.score - second.score)
+    : best.score;
+  const highConfidence = (
+    hasStrongCompanyPromptSignal(best)
+    || best.prefixLen >= 140
+    || best.suffixLen >= 120
+    || best.tokenHits >= 5
+    || best.score >= (minScore + 180)
+    || scoreGap >= minGap
+  );
+
+  if (!highConfidence) {
+    const bestPromptText = `best=P${best.promptNumber},score=${Math.round(best.score)}`;
+    const secondPromptText = second
+      ? `second=P${second.promptNumber},score=${Math.round(second.score)}`
+      : 'second=n/a';
+    return {
+      matched: false,
+      reason: `ambiguous_candidates(${bestPromptText};${secondPromptText})`,
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  return {
+    matched: true,
+    method: best.primarySignal ? `score_${best.primarySignal}` : 'score_match',
+    index: best.index,
+    promptNumber: best.promptNumber,
+    stageName: best.stageName,
+    messageSignatureRaw,
+    messageSignature,
+    score: best.score,
+    scoreGap,
+    tokenHits: best.tokenHits,
+    signals: Array.isArray(best.signals) ? best.signals : [],
+    prefixLen: best.prefixLen,
+    suffixLen: best.suffixLen
+  };
 }
 
 function buildConversationMessageMatchFeatures(text) {
@@ -11093,6 +11425,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     : 18000;
   const scanned = await readFullConversationFromTab(tabId, {
     maxWaitMs,
+    maxCharsPerMessage: 32000,
     transferUserMetaLimit: 1200,
     hardForce: true,
     restoreScroll: true
@@ -11575,14 +11908,15 @@ function detectLastPromptMatch(userMessages, promptRecords) {
       ? entry
       : (typeof entry?.text === 'string' ? entry.text : '');
     if (typeof text !== 'string' || text.trim().length === 0) continue;
-    const signature = buildTwoSentenceSignature(text);
-    const normalizedPromptText = normalizeSignatureText(text).slice(0, 360);
-    const matched = matchPromptBySignature(signature, normalizedPromptText, promptRecords);
-    if (matched) {
+    const matched = matchCompanyPromptText(text, promptRecords, {
+      minScore: COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE,
+      minGap: COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP
+    });
+    if (matched?.matched) {
       return {
         ...matched,
         messageIndex: i,
-        signature,
+        signature: matched.messageSignature || '',
         hasAssistantReplyAfter: typeof entry?.hasAssistantReplyAfter === 'boolean'
           ? entry.hasAssistantReplyAfter
           : null,
@@ -13389,6 +13723,139 @@ function withWatchlistOutboxMutationLock(task) {
   return next;
 }
 
+function normalizeWatchlistVerifyQueuePayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const responseId = typeof rawPayload.responseId === 'string' && rawPayload.responseId.trim()
+    ? rawPayload.responseId.trim()
+    : '';
+  if (!responseId) return null;
+  const normalized = {
+    runId: typeof rawPayload.runId === 'string' ? rawPayload.runId.trim() : '',
+    responseId,
+    source: typeof rawPayload.source === 'string' ? rawPayload.source.trim() : '',
+    analysisType: typeof rawPayload.analysisType === 'string' ? rawPayload.analysisType.trim() : '',
+    conversationUrl: normalizeChatConversationUrl(
+      typeof rawPayload.conversationUrl === 'string' ? rawPayload.conversationUrl : ''
+    )
+  };
+  if (Number.isInteger(rawPayload.conversationLogCount) && rawPayload.conversationLogCount >= 0) {
+    normalized.conversationLogCount = rawPayload.conversationLogCount;
+  } else if (Array.isArray(rawPayload.conversationLogs)) {
+    normalized.conversationLogCount = rawPayload.conversationLogs.length;
+  }
+  if (rawPayload.stage && typeof rawPayload.stage === 'object' && !Array.isArray(rawPayload.stage)) {
+    normalized.stage = {};
+  }
+  return normalized;
+}
+
+function getWatchlistVerifyQueueDedupKey(item) {
+  const payload = item?.payload && typeof item.payload === 'object' ? item.payload : null;
+  return typeof payload?.responseId === 'string' ? payload.responseId.trim() : '';
+}
+
+function sanitizeWatchlistVerifyQueueItems(rawItems) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const deduped = new Map();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const payload = normalizeWatchlistVerifyQueuePayload(item.payload);
+    if (!payload) continue;
+    const key = payload.responseId;
+    deduped.set(key, {
+      payload,
+      eventId: Number.isInteger(item.eventId) ? item.eventId : null,
+      intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl.trim() : '',
+      status: Number.isInteger(item.status) ? item.status : null,
+      queuedAt: Number.isInteger(item.queuedAt) ? item.queuedAt : Date.now(),
+      attemptCount: Number.isInteger(item.attemptCount) && item.attemptCount >= 0 ? item.attemptCount : 0,
+      nextAttemptAt: Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0,
+      lastError: typeof item.lastError === 'string' ? item.lastError : ''
+    });
+  }
+  const normalized = Array.from(deduped.values());
+  if (normalized.length <= WATCHLIST_VERIFY_QUEUE.maxItems) {
+    return normalized;
+  }
+  return normalized.slice(normalized.length - WATCHLIST_VERIFY_QUEUE.maxItems);
+}
+
+async function readWatchlistVerifyQueue() {
+  const result = await chrome.storage.local.get([WATCHLIST_VERIFY_QUEUE.storageKey]);
+  return sanitizeWatchlistVerifyQueueItems(result?.[WATCHLIST_VERIFY_QUEUE.storageKey]);
+}
+
+async function writeWatchlistVerifyQueue(items) {
+  const normalized = sanitizeWatchlistVerifyQueueItems(items);
+  await chrome.storage.local.set({
+    [WATCHLIST_VERIFY_QUEUE.storageKey]: normalized
+  });
+  return normalized;
+}
+
+function withWatchlistVerifyQueueMutationLock(task) {
+  const taskFn = typeof task === 'function' ? task : null;
+  if (!taskFn) {
+    return Promise.reject(new Error('verify_queue_mutation_task_required'));
+  }
+  const next = watchlistVerifyQueueMutationQueue.then(
+    () => taskFn(),
+    () => taskFn()
+  );
+  watchlistVerifyQueueMutationQueue = next.catch(() => {});
+  return next;
+}
+
+function shouldRetryWatchlistDbVerification(rawVerification) {
+  const verification = normalizeWatchlistDbVerification(rawVerification);
+  if (!verification || isWatchlistDbVerificationSuccessful(verification)) return false;
+  const state = typeof verification.state === 'string' ? verification.state.trim().toLowerCase() : '';
+  if (!state || state === 'verify_error' || state === 'verify_unavailable' || state === 'verify_invalid_response') {
+    return true;
+  }
+  if (state === 'not_found') return true;
+  const httpMatch = /^verify_http_(\d{3})$/.exec(state);
+  if (!httpMatch) return false;
+  const status = Number.parseInt(httpMatch[1], 10);
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+async function enqueueWatchlistDispatchVerification(rawPayload, details = {}) {
+  const payload = normalizeWatchlistVerifyQueuePayload(rawPayload);
+  if (!payload) {
+    return { skipped: true, reason: 'invalid_verify_payload' };
+  }
+  const trace = buildCopyTrace(payload.runId || '', payload.responseId || '');
+  const saved = await withWatchlistVerifyQueueMutationLock(async () => {
+    const current = await readWatchlistVerifyQueue();
+    const next = [
+      ...current.filter((item) => getWatchlistVerifyQueueDedupKey(item) !== payload.responseId),
+      {
+        payload,
+        eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+        intakeUrl: typeof details?.intakeUrl === 'string' ? details.intakeUrl.trim() : '',
+        status: Number.isInteger(details?.status) ? details.status : null,
+        queuedAt: Date.now(),
+        attemptCount: 0,
+        nextAttemptAt: 0,
+        lastError: ''
+      }
+    ];
+    return writeWatchlistVerifyQueue(next);
+  });
+  emitWatchlistDispatchProcessLog('info', 'verify_queue_queued', 'Dispatch verification queued for background processing', {
+    trace,
+    eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+    queueSize: saved.length
+  });
+  ensureWatchlistDispatchVerificationAlarm();
+  return {
+    queued: true,
+    responseId: payload.responseId,
+    queueSize: saved.length
+  };
+}
+
 function withResponseStorageMutationLock(task) {
   const taskFn = typeof task === 'function' ? task : null;
   if (!taskFn) {
@@ -14068,6 +14535,28 @@ function formatWatchlistDbVerificationSummary(rawVerification) {
   return `DB verify: ${details.length > 0 ? details.join(', ') : (verification.reason || 'failed')}`;
 }
 
+function buildQueuedWatchlistDbVerification(responseId = '', details = {}) {
+  const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+  return {
+    attempted: true,
+    success: false,
+    found: false,
+    state: typeof details?.state === 'string' && details.state.trim()
+      ? details.state.trim()
+      : 'verify_queued',
+    reason: typeof details?.reason === 'string' && details.reason.trim()
+      ? details.reason.trim()
+      : 'background_verify_queued',
+    responseId: normalizedResponseId,
+    eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+    ingestStatus: '',
+    requiredFields: [],
+    missingFields: [],
+    mismatchFields: [],
+    checkedAt: Date.now()
+  };
+}
+
 function parseRemoteProblemLogTimestamp(...values) {
   for (const rawValue of values) {
     if (Number.isInteger(rawValue) && rawValue > 0) {
@@ -14370,7 +14859,12 @@ async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispat
     typeof payload?.runId === 'string' ? payload.runId.trim() : '',
     verificationRequest.responseId || ''
   );
-  const timeoutMs = Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
+  const timeoutMs = Number.isInteger(details?.timeoutMs) && details.timeoutMs > 0
+    ? Math.max(1000, details.timeoutMs)
+    : Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
+  const verifyMaxAttempts = Number.isInteger(details?.maxAttempts) && details.maxAttempts > 0
+    ? Math.max(1, Math.min(details.maxAttempts, WATCHLIST_DB_VERIFY_MAX_ATTEMPTS))
+    : WATCHLIST_DB_VERIFY_MAX_ATTEMPTS;
   let lastVerification = {
     attempted: true,
     success: false,
@@ -14392,7 +14886,7 @@ async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispat
   });
 
   for (const candidate of urlCandidates) {
-    for (let attempt = 1; attempt <= WATCHLIST_DB_VERIFY_MAX_ATTEMPTS; attempt += 1) {
+    for (let attempt = 1; attempt <= verifyMaxAttempts; attempt += 1) {
       const controller = new AbortController();
       let timeoutId = null;
       try {
@@ -14412,7 +14906,7 @@ async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispat
         console.log('[copy-flow] [dispatch:verify-start]', {
           trace,
           attempt,
-          maxAttempts: WATCHLIST_DB_VERIFY_MAX_ATTEMPTS,
+          maxAttempts: verifyMaxAttempts,
           verifyUrl: endpoint.toString(),
           responseId: verificationRequest.responseId || '',
           eventId: verificationRequest.eventId ?? null
@@ -14500,7 +14994,7 @@ async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispat
         }
 
         const retryableNotFound = normalizedVerification.state === 'not_found'
-          && attempt < WATCHLIST_DB_VERIFY_MAX_ATTEMPTS;
+          && attempt < verifyMaxAttempts;
         if (retryableNotFound) {
           await sleep(WATCHLIST_DB_VERIFY_RETRY_DELAY_MS * attempt);
           continue;
@@ -14524,7 +15018,7 @@ async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispat
           mismatchFields: [],
           checkedAt: Date.now()
         };
-        if (attempt < WATCHLIST_DB_VERIFY_MAX_ATTEMPTS) {
+        if (attempt < verifyMaxAttempts) {
           await sleep(WATCHLIST_DB_VERIFY_RETRY_DELAY_MS * attempt);
           continue;
         }
@@ -16063,26 +16557,21 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
         const responseEventId = Number.isInteger(responseJson?.event_id)
           ? responseJson.event_id
           : null;
-        const dbVerification = await verifyWatchlistDispatchStoredRecord(
-          payloadForSend,
-          {
-            eventId: responseEventId,
-            intakeUrl: url
-          },
-          dispatchConfig
-        ).catch((error) => ({
-          attempted: true,
-          success: false,
-          state: 'verify_error',
-          reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_error',
-          found: false,
-          responseId: traceResponseId,
+        const verifyQueueResult = await enqueueWatchlistDispatchVerification(payloadForSend, {
           eventId: responseEventId,
-          requiredFields: [],
-          missingFields: [],
-          mismatchFields: [],
-          checkedAt: Date.now()
+          intakeUrl: url,
+          status: response.status
+        }).catch((error) => ({
+          queued: false,
+          reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_enqueue_failed'
         }));
+        const dbVerification = buildQueuedWatchlistDbVerification(traceResponseId, {
+          eventId: responseEventId,
+          state: verifyQueueResult?.queued === true ? 'verify_queued' : 'verify_enqueue_failed',
+          reason: verifyQueueResult?.queued === true
+            ? 'background_verify_queued'
+            : (verifyQueueResult?.reason || 'verify_enqueue_failed')
+        });
         console.log('[copy-flow] [dispatch:ok]', {
           trace: copyTrace,
           intakeUrl: url,
@@ -16112,7 +16601,8 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           requestId,
           eventId: responseJson?.event_id || null,
           dbVerifyState: dbVerification?.state || '',
-          dbVerifySuccess: dbVerification?.success === true
+          dbVerifySuccess: dbVerification?.success === true,
+          verifyQueued: verifyQueueResult?.queued === true
         });
         appendWatchlistDispatchHistory({
           ts: Date.now(),
@@ -16810,6 +17300,258 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   }
 }
 
+async function processWatchlistDispatchVerificationQueue(reason = 'manual') {
+  const normalizedReason = normalizeWatchlistFlushReason(reason, 'manual');
+  if (watchlistVerifyInProgress) {
+    watchlistVerifyPending = true;
+    if (!watchlistVerifyPendingReason) {
+      watchlistVerifyPendingReason = normalizedReason;
+    }
+    emitWatchlistDispatchProcessLog('info', 'verify_queue_skipped_in_progress', 'Verification queue skipped because another run is active', {
+      reason: normalizedReason
+    });
+    return {
+      skipped: true,
+      reason: 'verify_in_progress'
+    };
+  }
+
+  watchlistVerifyInProgress = true;
+  try {
+    const dispatchConfig = await resolveWatchlistDispatchConfiguration();
+    if (!dispatchConfig?.ok) {
+      emitWatchlistDispatchProcessLog('warn', 'verify_queue_skipped_config', 'Verification queue skipped due to missing dispatch configuration', {
+        reason: normalizedReason,
+        configReason: dispatchConfig?.reason || 'missing_dispatch_credentials'
+      });
+      return {
+        skipped: true,
+        reason: dispatchConfig?.reason || 'missing_dispatch_credentials'
+      };
+    }
+
+    const queued = await readWatchlistVerifyQueue();
+    if (queued.length === 0) {
+      return {
+        success: true,
+        verified: 0,
+        deferred: 0,
+        remaining: 0
+      };
+    }
+
+    const remaining = [];
+    let verified = 0;
+    let deferred = 0;
+    let failed = 0;
+    let attemptedInThisRun = 0;
+    const startedAt = Date.now();
+
+    for (let index = 0; index < queued.length; index += 1) {
+      const item = queued[index];
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      const limitByItemsReached = attemptedInThisRun >= WATCHLIST_VERIFY_QUEUE.maxItemsPerRun;
+      const limitByRuntimeReached = elapsedMs >= WATCHLIST_VERIFY_QUEUE.maxRuntimeMs;
+      if (limitByItemsReached || limitByRuntimeReached) {
+        const carryOver = queued.slice(index);
+        remaining.push(...carryOver);
+        deferred += carryOver.length;
+        watchlistVerifyPending = true;
+        if (!watchlistVerifyPendingReason) {
+          watchlistVerifyPendingReason = normalizedReason;
+        }
+        emitWatchlistDispatchProcessLog('info', 'verify_queue_budget_stop', 'Verification queue budget reached', {
+          reason: normalizedReason,
+          carryOver: carryOver.length,
+          attemptedInThisRun,
+          elapsedMs
+        });
+        break;
+      }
+
+      if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
+        failed += 1;
+        continue;
+      }
+
+      const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
+      if (nextAttemptAt > Date.now()) {
+        remaining.push(item);
+        deferred += 1;
+        continue;
+      }
+
+      attemptedInThisRun += 1;
+      const payload = item.payload;
+      const trace = buildCopyTrace(payload.runId || '', payload.responseId || '');
+      const verification = await verifyWatchlistDispatchStoredRecord(
+        payload,
+        {
+          eventId: Number.isInteger(item.eventId) ? item.eventId : null,
+          intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+          timeoutMs: WATCHLIST_VERIFY_QUEUE.timeoutMs,
+          maxAttempts: 1
+        },
+        dispatchConfig
+      ).catch((error) => ({
+        attempted: true,
+        success: false,
+        state: 'verify_error',
+        reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_error',
+        found: false,
+        responseId: payload.responseId || '',
+        eventId: Number.isInteger(item.eventId) ? item.eventId : null,
+        requiredFields: [],
+        missingFields: [],
+        mismatchFields: [],
+        checkedAt: Date.now()
+      }));
+
+      if (isWatchlistDbVerificationSuccessful(verification)) {
+        verified += 1;
+        emitWatchlistDispatchProcessLog('info', 'verify_queue_ok', 'Background verification confirmed stored response', {
+          trace,
+          eventId: verification?.eventId ?? item.eventId ?? null,
+          ingestStatus: verification?.ingestStatus || ''
+        });
+        appendWatchlistDispatchHistory({
+          ts: Date.now(),
+          kind: 'verify',
+          reason: 'verify_ok',
+          success: true,
+          queued: 0,
+          sent: 0,
+          failed: 0,
+          deferred: 0,
+          remaining: 0,
+          trace,
+          runId: payload.runId || '',
+          responseId: payload.responseId || '',
+          eventId: verification?.eventId ?? item.eventId ?? '',
+          intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+          status: Number.isInteger(item.status) ? item.status : null
+        }).catch(() => {});
+        await updateProcessDispatchAfterSendSuccess(payload.runId || '', payload.responseId || '', {
+          status: Number.isInteger(item.status) ? item.status : 202,
+          eventId: verification?.eventId ?? item.eventId ?? null,
+          intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+          dbVerification: verification
+        }).catch((error) => {
+          console.warn('[copy-flow] [verify-queue:process-update-failed]', {
+            runId: payload.runId || '',
+            responseId: payload.responseId || '',
+            error: error?.message || String(error)
+          });
+        });
+        continue;
+      }
+
+      const attemptCount = (Number.isInteger(item.attemptCount) ? item.attemptCount : 0) + 1;
+      const retryable = shouldRetryWatchlistDbVerification(verification)
+        && attemptCount < WATCHLIST_VERIFY_QUEUE.maxAttempts;
+      if (retryable) {
+        const retryDelayMs = Math.min(
+          WATCHLIST_VERIFY_QUEUE.maxBackoffMs,
+          Math.max(1000, WATCHLIST_VERIFY_QUEUE.baseBackoffMs * attemptCount)
+        );
+        remaining.push({
+          ...item,
+          attemptCount,
+          nextAttemptAt: Date.now() + retryDelayMs,
+          lastError: verification?.reason || verification?.state || 'verify_retry_scheduled'
+        });
+        deferred += 1;
+        watchlistVerifyPending = true;
+        if (!watchlistVerifyPendingReason) {
+          watchlistVerifyPendingReason = normalizedReason;
+        }
+        emitWatchlistDispatchProcessLog('info', 'verify_queue_retry_scheduled', 'Background verification will be retried', {
+          trace,
+          state: verification?.state || '',
+          reason: verification?.reason || '',
+          retryDelayMs,
+          attemptCount
+        });
+        continue;
+      }
+
+      failed += 1;
+      emitWatchlistDispatchProcessLog('warn', 'verify_queue_failed', 'Background verification exhausted retries or is non-retryable', {
+        trace,
+        state: verification?.state || '',
+        reason: verification?.reason || '',
+        attemptCount
+      });
+      await updateProcessDispatchAfterSendSuccess(payload.runId || '', payload.responseId || '', {
+        status: Number.isInteger(item.status) ? item.status : 202,
+        eventId: verification?.eventId ?? item.eventId ?? null,
+        intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+        dbVerification: verification
+      }).catch(() => false);
+      appendWatchlistDispatchHistory({
+        ts: Date.now(),
+        kind: 'verify',
+        reason: verification?.state || verification?.reason || 'verify_failed',
+        success: false,
+        queued: 0,
+        sent: 0,
+        failed: 1,
+        deferred: 0,
+        remaining: 0,
+        trace,
+        runId: payload.runId || '',
+        responseId: payload.responseId || '',
+        eventId: verification?.eventId ?? item.eventId ?? '',
+        intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+        status: Number.isInteger(item.status) ? item.status : null,
+        error: verification?.reason || verification?.state || 'verify_failed'
+      }).catch(() => {});
+    }
+
+    const persisted = await withWatchlistVerifyQueueMutationLock(async () => {
+      const latest = await readWatchlistVerifyQueue();
+      const processedKeys = new Set(
+        queued
+          .map((item) => getWatchlistVerifyQueueDedupKey(item))
+          .filter((key) => key)
+      );
+      const merged = [...remaining];
+      for (const item of latest) {
+        const key = getWatchlistVerifyQueueDedupKey(item);
+        if (!key || processedKeys.has(key)) continue;
+        merged.push(item);
+      }
+      return writeWatchlistVerifyQueue(merged);
+    });
+
+    return {
+      success: true,
+      verified,
+      failed,
+      deferred,
+      remaining: Array.isArray(persisted) ? persisted.length : 0
+    };
+  } finally {
+    watchlistVerifyInProgress = false;
+    if (watchlistVerifyPending) {
+      const pendingReason = normalizeWatchlistFlushReason(
+        `follow_up:${watchlistVerifyPendingReason || normalizedReason}`,
+        'follow_up'
+      );
+      watchlistVerifyPending = false;
+      watchlistVerifyPendingReason = '';
+      Promise.resolve()
+        .then(() => processWatchlistDispatchVerificationQueue(pendingReason))
+        .catch((error) => {
+          console.warn('[copy-flow] [verify-queue:follow-up-failed]', {
+            reason: pendingReason,
+            error: error?.message || String(error)
+          });
+        });
+    }
+  }
+}
+
 function ensureWatchlistDispatchAlarm() {
   if (!WATCHLIST_DISPATCH.enabled) return;
   if (!chrome?.alarms?.create) return;
@@ -16819,6 +17561,21 @@ function ensureWatchlistDispatchAlarm() {
     });
   } catch (error) {
     console.warn('[copy-flow] [dispatch:alarm-failed]', error);
+  }
+}
+
+function ensureWatchlistDispatchVerificationAlarm() {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    clearAlarmSafe(WATCHLIST_VERIFY_QUEUE.alarmName).catch(() => {});
+    return;
+  }
+  if (!chrome?.alarms?.create) return;
+  try {
+    chrome.alarms.create(WATCHLIST_VERIFY_QUEUE.alarmName, {
+      periodInMinutes: WATCHLIST_VERIFY_QUEUE.alarmPeriodMinutes
+    });
+  } catch (error) {
+    console.warn('[copy-flow] [verify-queue:alarm-failed]', error);
   }
 }
 
@@ -17406,6 +18163,7 @@ markRunningUnfinishedResumeBatchInterruptedOnBoot().catch((error) => {
   console.warn('[unfinished-resume] initial state recovery failed:', error?.message || String(error));
 });
 ensureWatchlistDispatchAlarm();
+ensureWatchlistDispatchVerificationAlarm();
 ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
@@ -17425,6 +18183,9 @@ runRemoteRunnerMaintenance('service_worker_boot').catch((error) => {
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
 });
+processWatchlistDispatchVerificationQueue('service_worker_boot').catch((error) => {
+  console.warn('[copy-flow] [verify-queue:error] reason=service_worker_boot', error);
+});
 
 // Obsługiwane źródła artykułów
 const SUPPORTED_SOURCES = [
@@ -17439,8 +18200,6 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://the-ken.com/*", name: "The Ken" },
   { pattern: "https://*.lazard.com/*", name: "Lazard" },
   { pattern: "https://*.rand.org/*", name: "RAND Corporation" },
-  { pattern: "https://www.youtube.com/*", name: "YouTube" },
-  { pattern: "https://youtu.be/*", name: "YouTube" },
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
   { pattern: "https://*.barrons.com/*", name: "Barron's" },
   { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
@@ -17460,6 +18219,7 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
+  ensureWatchlistDispatchVerificationAlarm();
   ensureProcessMonitorHeartbeatAlarm();
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onInstalled failed:', error);
@@ -17478,10 +18238,14 @@ chrome.runtime.onInstalled.addListener(() => {
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
   });
+  processWatchlistDispatchVerificationQueue('on_installed').catch((error) => {
+    console.warn('[copy-flow] [verify-queue:error] reason=on_installed', error);
+  });
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureWatchlistDispatchAlarm();
+  ensureWatchlistDispatchVerificationAlarm();
   ensureProcessMonitorHeartbeatAlarm();
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onStartup failed:', error);
@@ -17499,6 +18263,9 @@ chrome.runtime.onStartup.addListener(() => {
   });
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
+  });
+  processWatchlistDispatchVerificationQueue('on_startup').catch((error) => {
+    console.warn('[copy-flow] [verify-queue:error] reason=on_startup', error);
   });
 });
 
@@ -17680,6 +18447,13 @@ if (chrome?.alarms?.onAlarm) {
       logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
       flushWatchlistDispatchOutbox('alarm').catch((error) => {
         console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
+      });
+      return;
+    }
+
+    if (alarm.name === WATCHLIST_VERIFY_QUEUE.alarmName) {
+      processWatchlistDispatchVerificationQueue('alarm').catch((error) => {
+        console.warn('[copy-flow] [verify-queue:error] reason=alarm', error);
       });
       return;
     }
@@ -18457,75 +19231,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   } else if (message.type === 'YT_FETCH_TRANSCRIPT_FOR_TAB') {
-    (async () => {
-      const targetTabId = Number.isInteger(message?.tabId)
-        ? message.tabId
-        : (Number.isInteger(sender?.tab?.id) ? sender.tab.id : null);
-
-      if (!Number.isInteger(targetTabId)) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'tab_id_missing',
-          error: 'Missing target tab id',
-        });
-        return;
-      }
-
-      let targetTab;
-      try {
-        targetTab = await chrome.tabs.get(targetTabId);
-      } catch (error) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'tab_not_found',
-          error: error?.message || 'Unable to get tab info',
-        });
-        return;
-      }
-
-      const targetUrl = typeof targetTab?.url === 'string' ? targetTab.url : '';
-      if (!isYouTubeTabUrl(targetUrl)) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'not_youtube_tab',
-          error: 'Active tab is not a YouTube page',
-          tabId: targetTabId,
-          tabUrl: targetUrl,
-        });
-        return;
-      }
-
-      const preferredLanguages = Array.isArray(message?.preferredLanguages) && message.preferredLanguages.length > 0
-        ? message.preferredLanguages
-        : YT_TRANSCRIPT_PREFERRED_LANGUAGES;
-      const timeoutMs = Number.isInteger(message?.timeoutMs) ? message.timeoutMs : YT_TRANSCRIPT_REQUEST_TIMEOUT_MS;
-      const maxRetries = Number.isInteger(message?.maxRetries) ? message.maxRetries : YT_TRANSCRIPT_MAX_RETRIES;
-      const result = await fetchYouTubeTranscriptForTab(targetTabId, preferredLanguages, { timeoutMs, maxRetries });
-      sendResponse({
-        ...result,
-        tabId: targetTabId,
-        tabUrl: targetUrl,
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        transcript: '',
-        lang: '',
-        method: 'none',
-        errorCode: 'runtime_error',
-        error: error?.message || 'runtime_error',
-      });
+    sendResponse({
+      success: false,
+      transcript: '',
+      lang: '',
+      method: 'none',
+      errorCode: 'youtube_disabled',
+      error: 'YouTube transcript fetch is disabled',
     });
-    return true;
+    return false;
   } else if (message.type === 'STOP_PROCESS') {
     (async () => {
       const actionOrigin = typeof message?.origin === 'string' && message.origin.trim()
@@ -18996,8 +19710,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const reason = normalizeWatchlistFlushReason(message?.reason, 'manual_popup');
       console.log('[copy-flow] [dispatch:manual-flush-requested]', { reason });
       const flushResult = await flushWatchlistDispatchOutbox(reason);
+      const verifyResult = await processWatchlistDispatchVerificationQueue(reason).catch((error) => ({
+        success: false,
+        error: error?.message || String(error)
+      }));
       const status = await getWatchlistDispatchStatus(Boolean(message?.forceReload));
-      await logWatchlistDispatchStatusSnapshot('manual_flush', false, { reason, flushResult });
+      await logWatchlistDispatchStatusSnapshot('manual_flush', false, { reason, flushResult, verifyResult });
       reportAdminActionEvent('flush_watchlist_dispatch', {
         level: flushResult?.success === true
           ? 'info'
@@ -19018,7 +19736,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         },
         error: typeof flushResult?.error === 'string' ? flushResult.error : ''
       });
-      sendResponse({ success: true, flushResult, status });
+      sendResponse({ success: true, flushResult, verifyResult, status });
     })().catch((error) => {
       console.warn('[copy-flow] [dispatch:manual-flush-failed]', error);
       reportAdminActionEvent('flush_watchlist_dispatch', {
@@ -19052,14 +19770,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        const [status, flushResult] = await Promise.all([
+        const [status, flushResult, verifyResult] = await Promise.all([
           getWatchlistDispatchStatus(true),
           flushWatchlistDispatchOutbox('credentials_updated').catch((error) => ({
             success: false,
             error: error?.message || String(error)
+          })),
+          processWatchlistDispatchVerificationQueue('credentials_updated').catch((error) => ({
+            success: false,
+            error: error?.message || String(error)
           }))
         ]);
-        await logWatchlistDispatchStatusSnapshot('credentials_updated', false, { flushResult });
+        await logWatchlistDispatchStatusSnapshot('credentials_updated', false, { flushResult, verifyResult });
         await logWatchlistRemoteConnectionState('set_watchlist_dispatch_token', true, {
           statusText: `flushSuccess=${flushResult?.success === true ? 'yes' : 'no'}`
         });
@@ -19074,7 +19796,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             queueSize: Number.isInteger(status?.queueSize) ? status.queueSize : null
           }
         });
-        sendResponse({ success: true, status, flushResult });
+        sendResponse({ success: true, status, flushResult, verifyResult });
       })
       .catch((error) => {
         console.warn('[copy-flow] [dispatch:set-token-failed]', error);
@@ -19197,12 +19919,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const resumeScope = typeof message?.scope === 'string' && message.scope.trim()
       ? message.scope.trim()
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+    const reloadBeforeResume = message?.reloadBeforeResume !== false;
     const forceRepeatLastPrompt = message?.forceRepeatLastPrompt === true;
     const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
     const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
     const monitorSessionId = typeof message?.monitorSessionId === 'string' && message.monitorSessionId.trim()
       ? message.monitorSessionId.trim()
-      : createReloadResumeMonitorSessionId('reload-resume');
+      : createReloadResumeMonitorSessionId(reloadBeforeResume ? 'reload-resume' : 'resume-no-reload');
     (async () => {
       let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
       if (resolvedComposerThinkingEffort) {
@@ -19216,6 +19939,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         forceRepeatLastPrompt,
         useStoredComposerThinkingEffort,
         composerThinkingEffort: resolvedComposerThinkingEffort,
+        reloadBeforeResume,
         monitorSessionId
       });
     })()
@@ -19224,11 +19948,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         reportAdminActionEvent('reload_resume_all', {
           level: success ? 'info' : 'warn',
           status: success ? 'completed' : 'failed',
-          reason: success ? 'reload_resume_all_completed' : 'reload_resume_all_failed',
+          reason: success
+            ? (reloadBeforeResume ? 'reload_resume_all_completed' : 'resume_all_no_reload_completed')
+            : (reloadBeforeResume ? 'reload_resume_all_failed' : 'resume_all_no_reload_failed'),
           origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
           error: success ? '' : (result?.error || ''),
           details: {
             scope: resumeScope,
+            reloadBeforeResume,
             scannedTabs: Number.isInteger(result?.scannedTabs) ? result.scannedTabs : 0,
             matchedTabs: Number.isInteger(result?.matchedTabs) ? result.matchedTabs : 0,
             startedTabs: Number.isInteger(result?.startedTabs) ? result.startedTabs : 0,
@@ -19246,11 +19973,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         reportAdminActionEvent('reload_resume_all', {
           level: 'error',
           status: 'failed',
-          reason: 'reload_resume_all_exception',
+          reason: reloadBeforeResume ? 'reload_resume_all_exception' : 'resume_all_no_reload_exception',
           origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
           error: error?.message || String(error),
           details: {
-            scope: resumeScope
+            scope: resumeScope,
+            reloadBeforeResume
           }
         });
         void updateReloadResumeMonitorSession(monitorSessionId, {
@@ -19269,14 +19997,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           startedTabs: 0,
           resumedTabs: 0,
           scope: resumeScope,
-        summary: {
-          started: 0,
-          detect_failed: 0,
-          reload_failed: 0,
-          skipped_outside_invest: 0,
-          final_stage_completed: 0,
-          start_failed: 0,
-          reload_ok: 0,
+          reloadBeforeResume,
+          summary: {
+            started: 0,
+            detect_failed: 0,
+            reload_failed: 0,
+            skipped_outside_invest: 0,
+            final_stage_completed: 0,
+            start_failed: 0,
+            reload_ok: 0,
             reload_total: 0,
             prompt_blocks: 0,
             response_blocks: 0,
@@ -20279,31 +21008,19 @@ async function extractArticleSourcePayload(tab, analysisType = 'company') {
         error: 'manual_source_empty'
       };
     }
+  } else if (isYouTubeTabUrl(tab?.url)) {
+    return {
+      success: false,
+      title: tab?.title || 'Bez tytulu',
+      reason: 'youtube_disabled',
+      error: 'youtube_disabled'
+    };
   } else {
-    const isYouTube = isYouTubeTabUrl(tab?.url);
-    if (isYouTube) {
-      const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
-        timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
-        maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
-      });
-      if (!transcriptResult.success || !transcriptResult.transcript) {
-        const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
-        return {
-          success: false,
-          title: tab?.title || 'Bez tytulu',
-          reason: `youtube_${ytReason}`,
-          error: transcriptResult.error || ytReason
-        };
-      }
-      extractedText = transcriptResult.transcript;
-      transcriptLang = transcriptResult.lang || 'unknown';
-    } else {
-      const results = await chrome.scripting.executeScript({
-        target: { tabId: tab.id },
-        function: extractText
-      });
-      extractedText = results?.[0]?.result || '';
-    }
+    const results = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      function: extractText
+    });
+    extractedText = results?.[0]?.result || '';
 
     if (!extractedText || extractedText.length < 50) {
       return {
@@ -23110,8 +23827,8 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
 // Uwaga: chrome.action.onClicked NIE działa gdy jest default_popup w manifest
 // Ikona uruchamia popup, a popup wysyła message RUN_ANALYSIS
 
-// Funkcja ekstrakcji tekstu (content script) - tylko dla non-YouTube sources
-// YouTube używa dedykowanego content script (youtube-content.js)
+// Funkcja ekstrakcji tekstu (content script) dla wspieranych źródeł webowych.
+// YouTube nie jest już wspieranym źródłem w runtime.
 async function extractText() {
   const hostname = window.location.hostname;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -24085,8 +24802,17 @@ async function injectToChat(
     const MANUAL_PDF_ATTACH_MAX_ATTEMPTS = 2;
     const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
     const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
-    // Keep interface-ready wait aligned with response wait; long "thinking" must not fail early.
-    const interfaceReadyWaitMs = WAIT_FOR_INTERFACE_READY_MS;
+    const DEFAULT_INTERFACE_READY_WAIT_MS = 30000;
+    const DEFAULT_SEND_ARM_WAIT_MS = 3500;
+    // Injected functions execute without access to background.js globals, so keep local defaults here.
+    const interfaceReadyWaitMs = Number.isInteger(progressContext?.interfaceReadyWaitMs)
+      && progressContext.interfaceReadyWaitMs > 0
+      ? progressContext.interfaceReadyWaitMs
+      : DEFAULT_INTERFACE_READY_WAIT_MS;
+    const sendArmWaitMs = Number.isInteger(progressContext?.sendArmWaitMs)
+      && progressContext.sendArmWaitMs > 0
+      ? progressContext.sendArmWaitMs
+      : DEFAULT_SEND_ARM_WAIT_MS;
     const manualPdfAttachment = (() => {
       const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
         ? manualPdfAttachmentContext
@@ -24398,10 +25124,68 @@ async function injectToChat(
       return stageIds;
     }
 
+    const injectedCompanyStageIdPromptIndexHints = new Map([
+      ['0', 0],
+      ['1', 1],
+      ['2', 2],
+      ['3', 3],
+      ['3.2', 4],
+      ['4', 5],
+      ['5', 6],
+      ['6', 7],
+      ['7', 8],
+      ['8', 9],
+      ['9', 10],
+      ['10', 11],
+      ['11', 11],
+      ['12', 12],
+      ['10.5', 11],
+      ['2.5', 5],
+      ['3.5', 7],
+      ['6.5', 7]
+    ]);
+
+    function escapeInjectedStageLookupRegExp(value) {
+      return String(value || '').replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+    }
+
+    function findInjectedCompanyPromptIndexByStageIdentifier(stageIdValue, prompts) {
+      const stageId = normalizeDataGapStageId(stageIdValue);
+      if (!stageId) {
+        return { stageId: '', index: -1, source: 'invalid_stage_id' };
+      }
+
+      const list = Array.isArray(prompts) ? prompts : [];
+      if (list.length === 0) {
+        return { stageId, index: -1, source: 'prompts_empty' };
+      }
+
+      const hintedIndex = injectedCompanyStageIdPromptIndexHints.get(stageId);
+      if (Number.isInteger(hintedIndex) && hintedIndex >= 0 && hintedIndex < list.length) {
+        return { stageId, index: hintedIndex, source: 'hint_map' };
+      }
+
+      const escapedStageId = escapeInjectedStageLookupRegExp(stageId);
+      const headingPattern = new RegExp(`\\b(?:STAGE|Stage)\\s*${escapedStageId}(?![0-9.])`, 'i');
+      for (let i = 0; i < list.length; i += 1) {
+        const promptText = typeof list[i] === 'string' ? list[i] : '';
+        if (!promptText) continue;
+        if (headingPattern.test(promptText.slice(0, 2400))) {
+          return { stageId, index: i, source: 'prompt_heading_scan' };
+        }
+      }
+
+      return { stageId, index: -1, source: 'not_found' };
+    }
+
     function findPromptNumberByStageIdInCanonicalPrompts(prompts, stageId) {
       if (!Array.isArray(prompts) || prompts.length === 0) return null;
       const normalizedStageId = normalizeDataGapStageId(stageId);
       if (!normalizedStageId) return null;
+      const resolved = findInjectedCompanyPromptIndexByStageIdentifier(normalizedStageId, prompts);
+      if (Number.isInteger(resolved?.index) && resolved.index >= 0 && resolved.index < prompts.length) {
+        return resolved.index + 1;
+      }
       for (let idx = 0; idx < prompts.length; idx += 1) {
         const stageIds = extractStageIdsFromPromptText(prompts[idx]);
         if (stageIds.includes(normalizedStageId)) {
@@ -24426,7 +25210,22 @@ async function injectToChat(
         if (textKey && !promptNumberByText.has(textKey)) {
           promptNumberByText.set(textKey, promptNumber);
         }
-        const stageIds = extractStageIdsFromPromptText(promptText);
+      }
+
+      for (const [stageId, promptIndex] of injectedCompanyStageIdPromptIndexHints.entries()) {
+        if (
+          !promptNumberByStageId.has(stageId)
+          && Number.isInteger(promptIndex)
+          && promptIndex >= 0
+          && promptIndex < normalizedPrompts.length
+        ) {
+          promptNumberByStageId.set(stageId, promptIndex + 1);
+        }
+      }
+
+      for (let idx = 0; idx < normalizedPrompts.length; idx += 1) {
+        const promptNumber = idx + 1;
+        const stageIds = extractStageIdsFromPromptText(normalizedPrompts[idx]);
         for (const stageId of stageIds) {
           if (!promptNumberByStageId.has(stageId)) {
             promptNumberByStageId.set(stageId, promptNumber);
@@ -25611,9 +26410,52 @@ async function injectToChat(
       return 'no_response_or_error';
     }
 
+    const PROCESS_PROGRESS_NOTIFY_MIN_INTERVAL_MS = 1500;
+    let lastProgressNotifyKey = '';
+    let lastProgressNotifyAt = 0;
+
+    function shouldDispatchProcessProgressUpdate(payload = {}) {
+      const status = typeof payload?.status === 'string'
+        ? payload.status.trim().toLowerCase()
+        : 'running';
+      const needsAction = payload?.needsAction === true;
+      const currentPrompt = Number.isInteger(payload?.currentPrompt) ? payload.currentPrompt : 0;
+      const totalPrompts = Number.isInteger(payload?.totalPrompts) ? payload.totalPrompts : 0;
+      const stageIndex = Number.isInteger(payload?.stageIndex) ? payload.stageIndex : '';
+      const reason = typeof payload?.reason === 'string' ? payload.reason.trim() : '';
+      const notifyKey = [
+        status,
+        needsAction ? '1' : '0',
+        currentPrompt,
+        totalPrompts,
+        stageIndex,
+        reason
+      ].join('|');
+      const now = Date.now();
+      const critical = needsAction
+        || status === 'failed'
+        || status === 'error'
+        || status === 'completed'
+        || status === 'stopped'
+        || status === 'interrupted'
+        || status === 'queued'
+        || status === 'starting';
+
+      if (!critical && notifyKey === lastProgressNotifyKey && (now - lastProgressNotifyAt) < PROCESS_PROGRESS_NOTIFY_MIN_INTERVAL_MS) {
+        return false;
+      }
+
+      lastProgressNotifyKey = notifyKey;
+      lastProgressNotifyAt = now;
+      return true;
+    }
+
     function notifyProcess(type, payload = {}) {
       if (!runId || !chrome?.runtime?.sendMessage) return;
       try {
+        if (type === 'PROCESS_PROGRESS' && !shouldDispatchProcessProgressUpdate(payload)) {
+          return;
+        }
         const outboundPayload = {
           type,
           runId,
@@ -25703,7 +26545,14 @@ async function injectToChat(
       if (id.includes('prompt')) score += 160;
       if (className.includes('composer')) score += 150;
       if (className.includes('prompt')) score += 90;
-      if (placeholder.includes('ask anything') || ariaLabel.includes('ask anything') || matchText.includes('ask anything')) {
+      if (
+        placeholder.includes('ask anything')
+        || ariaLabel.includes('ask anything')
+        || matchText.includes('ask anything')
+        || placeholder.includes('zapytaj o cokolwiek')
+        || ariaLabel.includes('zapytaj o cokolwiek')
+        || matchText.includes('zapytaj o cokolwiek')
+      ) {
         score += 260;
       }
       if (placeholder.includes('message') || ariaLabel.includes('message')) score += 80;
@@ -25720,6 +26569,20 @@ async function injectToChat(
       return score;
     }
 
+    function isRoleTextboxComposerCandidate(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const role = normalizeDomText(element.getAttribute('role') || '');
+      if (role !== 'textbox') return false;
+      const contenteditable = normalizeDomText(element.getAttribute('contenteditable') || '');
+      if (contenteditable === 'false') return false;
+      if (normalizeDomText(element.getAttribute('aria-disabled') || '') === 'true') return false;
+      const tag = String(element.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') {
+        return element.disabled !== true && element.readOnly !== true;
+      }
+      return true;
+    }
+
     function isUsableComposerEditorCandidate(element) {
       if (!(element instanceof HTMLElement)) return false;
       if (!isElementVisibleForInteraction(element)) return false;
@@ -25728,7 +26591,10 @@ async function injectToChat(
         if (element.disabled === true || element.readOnly === true) return false;
       } else {
         const contenteditable = normalizeDomText(element.getAttribute('contenteditable') || '');
-        if (!(contenteditable === 'true' || contenteditable === 'plaintext-only' || element.isContentEditable)) return false;
+        const editableByContentEditable = contenteditable === 'true'
+          || contenteditable === 'plaintext-only'
+          || element.isContentEditable;
+        if (!editableByContentEditable && !isRoleTextboxComposerCandidate(element)) return false;
       }
       return scoreComposerEditorCandidate(element) > 0;
     }
@@ -25743,6 +26609,7 @@ async function injectToChat(
         '[data-testid="composer-input"]',
         '[role="textbox"][contenteditable="plaintext-only"]',
         '[role="textbox"][contenteditable="true"]',
+        '[role="textbox"]',
         'form textarea',
         'form [contenteditable="plaintext-only"]',
         'form [role="textbox"][contenteditable="true"]',
@@ -25787,7 +26654,10 @@ async function injectToChat(
         return editor.disabled !== true && editor.readOnly !== true;
       }
       const contenteditable = normalizeDomText(editor.getAttribute('contenteditable') || '');
-      return contenteditable === 'true' || contenteditable === 'plaintext-only' || editor.isContentEditable;
+      if (contenteditable === 'true' || contenteditable === 'plaintext-only' || editor.isContentEditable) {
+        return true;
+      }
+      return isRoleTextboxComposerCandidate(editor);
     }
 
     function getComposerSubmitButtonDescriptor(button) {
@@ -25898,6 +26768,19 @@ async function injectToChat(
         || editorNode.closest('[data-testid*="composer" i]')
         || editorNode.closest('[id*="composer" i]')
         || editorNode.closest('footer')
+      ) {
+        return true;
+      }
+      if (scoreComposerEditorCandidate(editorNode) >= 180) {
+        return true;
+      }
+      if (
+        isRoleTextboxComposerCandidate(editorNode)
+        && editorNode.closest('main')
+        && !editorNode.closest('header')
+        && !editorNode.closest('nav')
+        && !editorNode.closest('aside')
+        && !editorNode.closest('[data-message-author-role]')
       ) {
         return true;
       }
@@ -28175,7 +29058,7 @@ async function injectToChat(
       clearContentEditableEditor(editorNode);
     }
 
-    async function waitForEnabledSubmitButton(editorNode, maxButtonWait = WAIT_FOR_SEND_ARM_MS) {
+    async function waitForEnabledSubmitButton(editorNode, maxButtonWait = sendArmWaitMs) {
       let waitTime = 0;
       let lastSeenButton = null;
       while (waitTime < maxButtonWait) {
@@ -28271,6 +29154,109 @@ async function injectToChat(
       return {
         success: compactText(getEditorCurrentText(editorNode, false)).length > 0,
         method: 'paste-event',
+        text: getEditorCurrentText(editorNode, false)
+      };
+    }
+
+    function moveContentEditableCaretToEnd(editorNode) {
+      if (!(editorNode instanceof HTMLElement)) return;
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editorNode);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch (error) {
+        console.warn("⚠️ Nie udało się przesunąć kursora:", error);
+      }
+    }
+
+    function dispatchContentEditableChangeEvents(editorNode, inputType = 'insertText') {
+      if (!(editorNode instanceof HTMLElement)) return;
+      try {
+        editorNode.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType }));
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        editorNode.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }));
+      } catch (_) {
+        // Best effort only.
+      }
+      editorNode.dispatchEvent(new Event('change', { bubbles: true }));
+      editorNode.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+    }
+
+    async function insertTextIntoContentEditableInChunks(editorNode, text, options = {}) {
+      if (!(editorNode instanceof HTMLElement)) {
+        return { success: false, method: 'invalid-editor', text: '' };
+      }
+
+      const normalizedText = typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : '';
+      if (!normalizedText) {
+        return { success: true, method: 'chunked-empty', text: '' };
+      }
+
+      const chunkSize = Number.isInteger(options?.chunkSize) && options.chunkSize > 0
+        ? options.chunkSize
+        : 900;
+      const yieldEvery = Number.isInteger(options?.yieldEvery) && options.yieldEvery > 0
+        ? options.yieldEvery
+        : 24;
+      const lines = normalizedText.split('\n');
+      let operationCount = 0;
+      let usedExecCommand = false;
+
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        const line = lines[lineIndex];
+        if (line.length > 0) {
+          for (let offset = 0; offset < line.length; offset += chunkSize) {
+            const chunk = line.slice(offset, offset + chunkSize);
+            let inserted = false;
+            if (typeof document.execCommand === 'function') {
+              try {
+                inserted = document.execCommand('insertText', false, chunk);
+              } catch (error) {
+                console.warn("⚠️ Chunk insertText failed:", error);
+              }
+            }
+            if (!inserted) {
+              editorNode.appendChild(document.createTextNode(chunk));
+            } else {
+              usedExecCommand = true;
+            }
+            operationCount += 1;
+            if (operationCount % yieldEvery === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          }
+        }
+
+        if (lineIndex < lines.length - 1) {
+          let lineBreakInserted = false;
+          if (typeof document.execCommand === 'function') {
+            try {
+              lineBreakInserted = document.execCommand('insertLineBreak', false, null);
+            } catch (error) {
+              console.warn("⚠️ Chunk insertLineBreak failed:", error);
+            }
+          }
+          if (!lineBreakInserted) {
+            editorNode.appendChild(document.createElement('br'));
+          } else {
+            usedExecCommand = true;
+          }
+          operationCount += 1;
+          if (operationCount % yieldEvery === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      }
+
+      return {
+        success: compactText(getEditorCurrentText(editorNode, false)).length > 0,
+        method: usedExecCommand ? 'chunked-exec-command' : 'chunked-dom',
         text: getEditorCurrentText(editorNode, false)
       };
     }
@@ -28415,22 +29401,26 @@ async function injectToChat(
         candidate.dispatchEvent(new Event('change', { bubbles: true }));
       } else {
         const newlineExpected = normalizedPromptText.includes('\n');
+        const promptLineCount = normalizedPromptText ? normalizedPromptText.split('\n').length : 0;
+        const shouldPreferChunkedInsert = normalizedPromptText.length > 4000 || promptLineCount > 80;
         clearContentEditableEditor(candidate);
         await new Promise(resolve => setTimeout(resolve, 120));
 
         let insertedByCommand = false;
-        if (typeof document.execCommand === 'function') {
+        if (!shouldPreferChunkedInsert && typeof document.execCommand === 'function') {
           try {
             insertedByCommand = document.execCommand('insertText', false, normalizedPromptText);
           } catch (e) {
             console.warn("⚠️ insertText failed:", e);
           }
+        } else if (shouldPreferChunkedInsert) {
+          console.log(`ℹ️ Pomijam bulk insertText dla dużego prompta (${normalizedPromptText.length} znaków, ${promptLineCount} linii)`);
         }
 
         let insertedText = getEditorCurrentText(candidate, false);
         let newlinePreserved = !newlineExpected || insertedText.includes('\n');
 
-        if (!insertedByCommand || !newlinePreserved || compactText(insertedText).length === 0) {
+        if (!shouldPreferChunkedInsert && (!insertedByCommand || !newlinePreserved || compactText(insertedText).length === 0)) {
           clearContentEditableEditor(candidate);
           await new Promise(resolve => setTimeout(resolve, 80));
           const pasteResult = await tryPasteIntoContentEditable(candidate, normalizedPromptText);
@@ -28444,25 +29434,12 @@ async function injectToChat(
         if (!insertedByCommand || !newlinePreserved) {
           clearContentEditableEditor(candidate);
           await new Promise(resolve => setTimeout(resolve, 80));
-          const lines = normalizedPromptText.split('\n');
-          lines.forEach((line, index) => {
-            if (typeof document.execCommand === 'function' && line.length > 0) {
-              document.execCommand('insertText', false, line);
-            } else if (line.length > 0) {
-              candidate.appendChild(document.createTextNode(line));
-            }
-            if (index < lines.length - 1) {
-              const lineBreakInserted = typeof document.execCommand === 'function'
-                ? document.execCommand('insertLineBreak', false, null)
-                : false;
-              if (!lineBreakInserted) {
-                candidate.appendChild(document.createElement('br'));
-              }
-            }
-          });
-
-          insertedText = getEditorCurrentText(candidate, false);
+          const chunkedInsertResult = await insertTextIntoContentEditableInChunks(candidate, normalizedPromptText);
+          insertedText = chunkedInsertResult.text || getEditorCurrentText(candidate, false);
           newlinePreserved = !newlineExpected || insertedText.includes('\n');
+          if (chunkedInsertResult.success) {
+            insertedByCommand = true;
+          }
         }
 
         if (!newlinePreserved) {
@@ -28476,21 +29453,8 @@ async function injectToChat(
           candidate.appendChild(fragment);
         }
 
-        try {
-          const selection = window.getSelection();
-          const range = document.createRange();
-          range.selectNodeContents(candidate);
-          range.collapse(false);
-          selection.removeAllRanges();
-          selection.addRange(range);
-        } catch (e) {
-          console.warn("⚠️ Nie udało się przesunąć kursora:", e);
-        }
-
-        candidate.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText' }));
-        candidate.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-        candidate.dispatchEvent(new Event('change', { bubbles: true }));
-        candidate.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+        moveContentEditableCaretToEnd(candidate);
+        dispatchContentEditableChangeEvents(candidate, 'insertText');
       }
 
       const postInsertText = getEditorCurrentText(candidate, candidateIsTextInput);
@@ -28506,7 +29470,7 @@ async function injectToChat(
       }
 
       updateCounter(counter, promptIndex, promptTotal, 'Uzbrajam wysylke...');
-      const buttonWaitResult = await waitForEnabledSubmitButton(candidate, WAIT_FOR_SEND_ARM_MS);
+      const buttonWaitResult = await waitForEnabledSubmitButton(candidate, sendArmWaitMs);
       if (buttonWaitResult?.aborted) return false;
       const fallbackForm = candidate.closest('form');
       if (buttonWaitResult?.button && !buttonWaitResult.button.disabled) {

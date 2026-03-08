@@ -130,8 +130,6 @@ function openReloadResumeMonitorWindow(sessionId, options = {}) {
 }
 
 const runStatus = document.getElementById('runStatus');
-const copyYouTubeTranscriptBtn = document.getElementById('copyYouTubeTranscriptBtn');
-const youtubeTranscriptStatus = document.getElementById('youtubeTranscriptStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
 const watchlistCredentialsHint = document.getElementById('watchlistCredentialsHint');
 const watchlistCredentialsForm = document.getElementById('watchlistCredentialsForm');
@@ -167,6 +165,7 @@ const remoteTransferFooter = document.getElementById('remoteTransferFooter');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
 const countCompanyMessagesBtn = document.getElementById('countCompanyMessagesBtn');
+const resumeAllNoReloadBtn = document.getElementById('resumeAllNoReloadBtn');
 const resumeAllExtendedBtn = document.getElementById('resumeAllExtendedBtn');
 const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
@@ -186,10 +185,10 @@ const POPUP_SHORTCUTS = Object.freeze({
   runRemote: 'z',
   resumeStage: '3',
   resumeAll: '4',
+  resumeAllNoReload: '8',
   responses: '5',
   processPanel: '6',
   stop: '7',
-  copyYouTube: '8',
   restoreWindows: '9',
   autoRestoreToggle: '0',
   unfinishedProcesses: 'n',
@@ -251,15 +250,6 @@ function setStatusElement(element, text, isError = false) {
 
 function setRunStatus(text, isError = false) {
   setStatusElement(runStatus, text, isError);
-}
-
-function setYouTubeTranscriptStatus(text, isError = false) {
-  const compactText = String(text || '').replace(/^YouTube transcript:\s*/i, 'YT: ');
-  if (youtubeTranscriptStatus) {
-    setStatusElement(youtubeTranscriptStatus, compactText, isError);
-    return;
-  }
-  setRunStatus(compactText, isError);
 }
 
 function setDispatchStatus(text, isError = false) {
@@ -1674,6 +1664,7 @@ function getResumeAllSummary(response) {
     ? response.summary
     : {};
   const rows = Array.isArray(response?.results) ? response.results : [];
+  const reloadBeforeResume = response?.reloadBeforeResume !== false;
   const scannedTabs = Number.isInteger(response?.scannedTabs)
     ? response.scannedTabs
     : Number.isInteger(response?.eligibleProcesses)
@@ -1749,14 +1740,18 @@ function getResumeAllSummary(response) {
   const recognizedUnresolved = Number.isInteger(summary?.recognized_unresolved)
     ? summary.recognized_unresolved
     : rows.filter((row) => row?.action === 'detect_failed').length;
+  const modePart = reloadBeforeResume
+    ? `reload_ok: ${reloadOk}/${reloadTotal}`
+    : 'tryb: bez_reloadu';
 
-  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, missing_reply_detected: ${missingRepliesDetected}, data_gaps: ${dataGapsDetected}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
+  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, ${modePart}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, missing_reply_detected: ${missingRepliesDetected}, data_gaps: ${dataGapsDetected}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
 }
 
 async function executeResumeAllFromPopup(button, options = {}) {
   if (!button) return;
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-resume-all';
+  const reloadBeforeResume = options?.reloadBeforeResume !== false;
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
@@ -1770,11 +1765,24 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  setShortcutButtonLabel(button, `Restart + wznawiam${effortSuffix}...`);
+  setShortcutButtonLabel(
+    button,
+    reloadBeforeResume
+      ? `Restart + wznawiam${effortSuffix}...`
+      : `Wznawiam bez reloadu${effortSuffix}...`
+  );
   setRunStatus(
-    composerThinkingEffort
-      ? `Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start, tryb: ${composerThinkingEffort}.`
-      : 'Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start.'
+    reloadBeforeResume
+      ? (
+        composerThinkingEffort
+          ? `Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start, tryb: ${composerThinkingEffort}.`
+          : 'Restart/reload + wznowienie aktywnych procesow company (INVEST): stop -> reload -> detekcja etapu -> start.'
+      )
+      : (
+        composerThinkingEffort
+          ? `Wznowienie aktywnych procesow company (INVEST) bez reloadu: stop -> detekcja etapu -> start, tryb: ${composerThinkingEffort}.`
+          : 'Wznowienie aktywnych procesow company (INVEST) bez reloadu: stop -> detekcja etapu -> start.'
+      )
   );
   openReloadResumeMonitorWindow(monitorSessionId, {
     origin,
@@ -1787,7 +1795,8 @@ async function executeResumeAllFromPopup(button, options = {}) {
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
       origin,
       scope: 'active_company_invest_processes',
-      monitorSessionId
+      monitorSessionId,
+      reloadBeforeResume
     };
     if (hasExplicitThinkingEffort) {
       message.composerThinkingEffort = composerThinkingEffort;
@@ -1796,15 +1805,26 @@ async function executeResumeAllFromPopup(button, options = {}) {
 
     if (!response || Object.keys(response).length === 0) {
       setRunStatus(
-        composerThinkingEffort
-          ? `Polecenie reload + wznowienia (${composerThinkingEffort}) zostalo wyslane.`
-          : 'Polecenie reload + wznowienia zostalo wyslane.'
+        reloadBeforeResume
+          ? (
+            composerThinkingEffort
+              ? `Polecenie reload + wznowienia (${composerThinkingEffort}) zostalo wyslane.`
+              : 'Polecenie reload + wznowienia zostalo wyslane.'
+          )
+          : (
+            composerThinkingEffort
+              ? `Polecenie wznowienia bez reloadu (${composerThinkingEffort}) zostalo wyslane.`
+              : 'Polecenie wznowienia bez reloadu zostalo wyslane.'
+          )
       );
       return;
     }
 
     if (response.success === false) {
-      setRunStatus(`Blad: ${response.error || 'Nie udalo sie wykonac reload + wznowienia procesow.'}`, true);
+      setRunStatus(
+        `Blad: ${response.error || (reloadBeforeResume ? 'Nie udalo sie wykonac reload + wznowienia procesow.' : 'Nie udalo sie wykonac wznowienia bez reloadu.')}`,
+        true
+      );
       return;
     }
 
@@ -2271,39 +2291,11 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
   }
 }
 
-function isYouTubeUrl(rawUrl) {
-  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
-  try {
-    const parsed = new URL(rawUrl);
-    const host = String(parsed.hostname || '').toLowerCase();
-    return host.includes('youtube.com') || host.includes('youtu.be');
-  } catch (error) {
-    return false;
-  }
-}
-
 async function getActiveTabInCurrentWindow() {
   const tabs = await new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (rows) => resolve(Array.isArray(rows) ? rows : []));
   });
   return tabs.length > 0 ? tabs[0] : null;
-}
-
-async function refreshYouTubeTranscriptHint() {
-  try {
-    const activeTab = await getActiveTabInCurrentWindow();
-    if (!activeTab || !Number.isInteger(activeTab.id)) {
-      setYouTubeTranscriptStatus('YouTube transcript: brak aktywnej karty.', false);
-      return;
-    }
-    if (!isYouTubeUrl(activeTab.url || '')) {
-      setYouTubeTranscriptStatus('YouTube transcript: otworz karte YouTube i kliknij "Kopiuj".', false);
-      return;
-    }
-    setYouTubeTranscriptStatus('YouTube transcript: gotowy do pobrania.', false);
-  } catch (error) {
-    setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
-  }
 }
 
 async function fallbackCopyText(text) {
@@ -2331,81 +2323,7 @@ async function copyTextToClipboard(text) {
   await fallbackCopyText(text);
 }
 
-function formatTranscriptFetchError(response) {
-  const errorCode = typeof response?.errorCode === 'string' ? response.errorCode.trim() : '';
-  const errorMessage = typeof response?.error === 'string' ? response.error.trim() : '';
-  if (errorCode === 'not_youtube_tab') return 'Aktywna karta nie jest YouTube.';
-  if (errorCode === 'tab_id_missing' || errorCode === 'tab_not_found') return 'Nie znaleziono aktywnej karty.';
-  if (errorCode === 'not_video_page') return 'To nie jest strona filmu YouTube (watch/shorts/live).';
-  if (errorCode === 'caption_tracks_missing') return 'Ten film nie ma dostepnych napisow.';
-  if (errorCode === 'caption_tracks_timeout' || errorCode === 'player_response_missing') return 'Nie udalo sie zaladowac napisow. Sprobuj ponownie za chwile.';
-  if (errorCode === 'timedtext_list_fetch_failed') return 'Nie udalo sie pobrac listy napisow z YouTube.';
-  if (errorCode === 'transcript_fetch_failed') return 'Nie udalo sie pobrac transkrypcji z YouTube.';
-  if (errorCode === 'transcript_too_short') return 'Pobrana transkrypcja jest zbyt krotka.';
-  if (errorCode === 'content_script_unreachable') return 'Content script YouTube nie jest gotowy. Odswiez karte i sproboj ponownie.';
-  if (errorCode === 'content_script_injection_failed') return 'Nie udalo sie uruchomic modulu YouTube na tej karcie.';
-  if (errorCode === 'content_script_injection_blocked') return 'Przegladarka zablokowala dostep do tej strony.';
-  if (errorCode === 'invalid_transcript_response') return 'Otrzymano niepoprawna odpowiedz z modulu YouTube.';
-  if (errorCode === 'runtime_timeout') return 'Przekroczono czas oczekiwania na transkrypcje.';
-  return errorMessage || errorCode || 'transcript_unavailable';
-}
-
-async function executeCopyYouTubeTranscriptFromPopup(button) {
-  if (!button) return;
-  const originalHtml = button.innerHTML;
-  button.disabled = true;
-  setShortcutButtonLabel(button, 'Pobieram...', POPUP_SHORTCUTS.copyYouTube);
-  setYouTubeTranscriptStatus('YouTube transcript: pobieram...', false);
-
-  try {
-    const activeTab = await getActiveTabInCurrentWindow();
-    if (!activeTab || !Number.isInteger(activeTab.id)) {
-      setYouTubeTranscriptStatus('YouTube transcript: brak aktywnej karty.', true);
-      return;
-    }
-    if (!isYouTubeUrl(activeTab.url || '')) {
-      setYouTubeTranscriptStatus('YouTube transcript: aktywna karta nie jest YouTube.', true);
-      return;
-    }
-
-    const response = await sendRuntimeMessage({
-      type: 'YT_FETCH_TRANSCRIPT_FOR_TAB',
-      tabId: activeTab.id,
-      preferredLanguages: ['pl', 'en'],
-    });
-
-    if (!response?.success || typeof response?.transcript !== 'string' || !response.transcript.trim()) {
-      setYouTubeTranscriptStatus(`YouTube transcript: ${formatTranscriptFetchError(response)}`, true);
-      return;
-    }
-
-    await copyTextToClipboard(response.transcript);
-    const transcriptLength = response.transcript.trim().length;
-    const transcriptLang = typeof response.lang === 'string' && response.lang.trim() ? response.lang.trim() : 'unknown';
-    const method = typeof response.method === 'string' && response.method.trim() ? response.method.trim() : 'unknown';
-    const cacheHint = response.cacheHit ? ', cache' : '';
-    const attemptHint = Number.isInteger(response.attemptUsed) && Number.isInteger(response.attempts)
-      ? `, proba ${response.attemptUsed}/${response.attempts}`
-      : '';
-    setYouTubeTranscriptStatus(
-      `YouTube transcript: skopiowano (${transcriptLang}, ${transcriptLength} znakow, ${method}${cacheHint}${attemptHint}).`,
-      false
-    );
-  } catch (error) {
-    setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
-  } finally {
-    button.disabled = false;
-    button.innerHTML = originalHtml;
-  }
-}
-
 const runBtn = document.getElementById('runBtn');
-if (copyYouTubeTranscriptBtn) {
-  copyYouTubeTranscriptBtn.addEventListener('click', () => {
-    void executeCopyYouTubeTranscriptFromPopup(copyYouTubeTranscriptBtn);
-  });
-}
-
 if (runBtn) {
   runBtn.addEventListener('click', () => {
     withActiveWindowContext(({ windowId }) => {
@@ -2510,6 +2428,15 @@ if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllBtn, {
       origin: 'popup-resume-all',
+    });
+  });
+}
+
+if (resumeAllNoReloadBtn) {
+  resumeAllNoReloadBtn.addEventListener('click', () => {
+    void executeResumeAllFromPopup(resumeAllNoReloadBtn, {
+      origin: 'popup-resume-all-no-reload',
+      reloadBeforeResume: false,
     });
   });
 }
@@ -2725,10 +2652,10 @@ const popupShortcutHandlers = {
   [POPUP_SHORTCUTS.runRemote]: () => clickIfEnabled(runRemoteBtn),
   [POPUP_SHORTCUTS.resumeStage]: () => clickIfEnabled(resumeStageBtn),
   [POPUP_SHORTCUTS.resumeAll]: () => clickIfEnabled(resumeAllBtn),
+  [POPUP_SHORTCUTS.resumeAllNoReload]: () => clickIfEnabled(resumeAllNoReloadBtn),
   [POPUP_SHORTCUTS.responses]: () => clickIfEnabled(responsesBtn),
   [POPUP_SHORTCUTS.processPanel]: () => clickIfEnabled(decisionPanelBtn),
   [POPUP_SHORTCUTS.stop]: () => clickIfEnabled(stopBtn),
-  [POPUP_SHORTCUTS.copyYouTube]: () => clickIfEnabled(copyYouTubeTranscriptBtn),
   [POPUP_SHORTCUTS.restoreWindows]: () => clickIfEnabled(restoreProcessWindowsBtn),
   [POPUP_SHORTCUTS.autoRestoreToggle]: () => clickIfEnabled(autoRestoreToggleBtn),
   [POPUP_SHORTCUTS.unfinishedProcesses]: () => clickIfEnabled(unfinishedProcessesBtn),

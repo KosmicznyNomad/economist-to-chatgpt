@@ -21,6 +21,7 @@ const metricProgressBar = document.getElementById('metric-progress-bar');
 const countingSummary = document.getElementById('counting-summary');
 const selectionSummary = document.getElementById('selection-summary');
 const UNFINISHED_RESUME_KEEPALIVE_INTERVAL_MS = 15000;
+const UNFINISHED_RESUME_POLL_INTERVAL_MS = 5000;
 
 const CLOSED_PROCESS_STATUSES = new Set([
   'completed',
@@ -76,6 +77,10 @@ const keepalivePageId = `unfinished-resume-page-${Date.now().toString(36)}-${Mat
 const serviceRecoveredRunIds = new Set();
 let serviceBatchState = null;
 let serviceAutoRunStarted = false;
+
+function isUnfinishedPageVisible() {
+  return document.visibilityState === 'visible';
+}
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
@@ -1725,8 +1730,14 @@ if (pollIntervalId) {
   window.clearInterval(pollIntervalId);
 }
 pollIntervalId = window.setInterval(() => {
+  if (!isUnfinishedPageVisible()) return;
   void refreshData({ silent: true });
-}, 5000);
+}, UNFINISHED_RESUME_POLL_INTERVAL_MS);
+
+document.addEventListener('visibilitychange', () => {
+  if (!isUnfinishedPageVisible()) return;
+  void refreshData({ silent: true });
+});
 
 if (STALE_RUNNING_RECOVERY_MODE) {
   document.title = `Stale Running Recovery > ${STALE_RUNNING_RECOVERY_HOURS}h`;

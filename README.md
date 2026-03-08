@@ -3,7 +3,7 @@
 Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
 
 ## What it does
-- Extracts text from supported news pages, Spotify transcripts, and YouTube transcripts.
+- Extracts text from supported news pages and Spotify transcripts.
 - Runs two flows:
   - `company` on all supported tabs.
   - `portfolio` on selected tabs.
@@ -20,14 +20,14 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - `process-monitor.js` - process control panel.
 - `problem-log.js` - diagnostics panel for runtime/process errors.
 - `responses.js` - responses view, copy/clear, storage migration.
-- `reload-resume-monitor.js` - monitored reload+resume workflow.
-- `youtube-content.js` - transcript extraction for YouTube.
+- `reload-resume-monitor.js` - monitored bulk resume workflow (with or without reload).
+- `youtube-content.js` - legacy YouTube transcript module (currently disabled).
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains.
 - `COMPANY_CHAIN_STAGE_MAP.md` - readable stage contract for `prompts-company.txt` + runtime mapping.
 - `MAINTENANCE_POPUP_RELOAD_RESTART_RESUME.md` - popup maintenance map: restore windows, restart/reload, resume and unfinished recovery.
 
 ## Popup shortcuts
-- Digits `1-0`: manual source, run, resume stage, reload+resume all, responses, process panel, stop, copy YouTube transcript, restore process windows, auto-recovery toggle.
+- Digits `1-9 / 0`: manual source, run, resume stage, reload+resume all, responses, process panel, stop, resume all without reload, restore process windows, auto-recovery toggle.
 - Letters `N / L / R / C / E / H`: unfinished recovery page, problem logs, repeat last prompt all, count company messages, reload+resume extended, reload+resume heavy.
 - `Esc` closes the popup.
 
@@ -56,19 +56,6 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 3. Choose tabs for portfolio analysis.
 4. Let both flows run.
 
-### YouTube transcript copy (one click)
-1. Open a YouTube video tab.
-2. Open popup and click `Kopiuj transkrypcje (YouTube)`.
-3. Transcript is copied to clipboard immediately (without running ChatGPT chain).
-
-Transcript fetch behavior:
-- Language priority: `pl` -> `en` -> next available track.
-- Within preferred language, manual captions are preferred over auto-generated (`asr`) tracks.
-- Fetch order: `json3` -> `srv3` -> default XML.
-- If content script is missing in an already-open YouTube tab, worker attempts runtime re-injection and retries automatically.
-- Short-lived transcript cache (`videoId + languages`) reduces duplicate fetches across repeated runs/copy actions.
-- If a video has no captions, popup shows a controlled error instead of fallbacking to external API.
-
 ### Manual source flow
 1. Open popup.
 2. Open manual source dialog.
@@ -89,6 +76,7 @@ Manual PDF mode behavior:
 ## Maintenance and recovery
 - `Wznow nastepny etap` acts on the current ChatGPT tab and resumes from the correct next prompt or repeats the same prompt when the previous assistant reply is missing/invalid.
 - `Restart/reload + wznow wszystkie` is the bulk maintenance path for active company INVEST tabs: stop -> reload -> detect stage -> restart from the correct prompt.
+- `Bez reloadu` runs the same bulk detection/resume path, but it first requires a confirmed stop signal and skips tab reload to reduce load on heavy sessions.
 - `Przywroc okna aktywnych procesow` only restores/focuses existing process windows and tabs; it does not restart the prompt chain.
 - `Auto-restore co 5 min` runs the periodic maintenance loop: restore windows, health-check active tabs, then trigger reload+resume only when issues are detected.
 - `Recovery niedokonczonych (batch)` resumes interrupted processes from the dedicated recovery page using saved process/chat context.
@@ -140,7 +128,6 @@ Keep these in sync when adding/removing domains:
 - `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
 - Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
 - Process monitor uses periodic heartbeat sweep (`chrome.alarms`) with stale TTL warnings to improve near-live remote state visibility.
-- YouTube transcript support is best-effort and depends on caption availability for a given video.
 - On restart/restore flows, ChatGPT tabs are automatically ungrouped from Chrome tab groups to keep workflow tabs independent.
 
 ## Quick validation (before commit)

@@ -18,8 +18,8 @@
 - `process-monitor.html` / `process-monitor.js` - process panel and decisions.
 - `problem-log.html` / `problem-log.js` - diagnostics panel for runtime/process issues.
 - `responses.html` / `responses.js` - local responses UI with copy/clear.
-- `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored reload+resume workflow.
-- `youtube-content.js` - YouTube transcript capture and fetch.
+- `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored bulk resume workflow, including reload and no-reload modes.
+- `youtube-content.js` - legacy YouTube transcript module kept only as disabled code.
 - `content-script.js` - separate Google Sheets bridge.
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains split by `◄PROMPT_SEPARATOR►`.
 - `COMPANY_CHAIN_STAGE_MAP.md` - stage-by-stage readable mapping for company chain (prompt index <-> stage id/name/description).
@@ -43,7 +43,7 @@ Process heartbeat flow (near-live Watchlist state):
 
 Detailed analysis steps:
 1. Worker scans supported tabs.
-2. Text is extracted (`extractText` for web, `GET_TRANSCRIPT` for YouTube).
+2. Text is extracted with `extractText()` for supported tabs.
 3. Prompt #1 receives `{{articlecontent}}` payload.
 4. Remaining prompts are executed in ChatGPT.
 5. Final chain response is saved and then dispatched to Watchlist intake queue.
@@ -98,7 +98,7 @@ Response fields in use:
 - `RESUME_STAGE_OPEN` opens stage picker.
 - `RESUME_STAGE_START` resumes company chain from selected index.
 - Inject path supports prompt offset and resume mode.
-- Reload + resume-all path performs detect/reload/start in a deterministic two-phase sequence.
+- Reload + resume-all path performs stop/detect/start with either hard reload or no-reload mode, using the same deterministic stage recognition rules.
 
 ## Auto-restore and health check behavior
 - Alarm period: 5 minutes.
@@ -166,7 +166,7 @@ Popup shortcuts:
 - `5` open responses
 - `6` open process panel
 - `7` stop in current window
-- `8` copy YouTube transcript
+- `8` resume all without reload
 - `9` restore process windows
 - `0` toggle auto-restore
 - `N` open unfinished recovery page
@@ -215,7 +215,7 @@ Global commands (`manifest.json`):
 - Verify session->local response migration in responses UI.
 - Verify auto-restore toggle and status details in popup.
 - Verify problem-log page shows new runtime issues and clear action works.
-- Verify popup shortcuts `1-0`, `N/L/R/C/E/H` and global commands (`Ctrl+Shift+R`, `Ctrl+Shift+M`).
+- Verify popup shortcuts `1-9 / 0`, `N/L/R/C/E/H` and global commands (`Ctrl+Shift+R`, `Ctrl+Shift+M`).
 
 ## Automated quick checks
 - JS parse check: `Get-ChildItem -Filter *.js | ForEach-Object { node --check $_.FullName }`

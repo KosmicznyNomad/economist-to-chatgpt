@@ -47,6 +47,24 @@ Wazna zasada:
 
 To jest glowny mechanizm "restartu od odpowiedniego miejsca".
 
+### `Bez reloadu` (`popup.html`, shortcut `8`)
+Scenariusz: ten sam zbiorczy maintenance, ale bez przeladowywania kart, gdy reload jest zbyt ciezki albo niepotrzebnie destabilizuje sesje.
+
+Flow:
+`popup.js -> DETECT_LAST_COMPANY_PROMPT_AND_RESUME(reloadBeforeResume=false) -> runResetScanStartAllTabs()`
+
+Co robi:
+- zbiera aktywne procesy company z kart INVEST,
+- wysyla stop do procesu z powodem `bulk_resume_no_reload`,
+- wymaga potwierdzonego stopa przed wznowieniem, zeby nie dublowac pracy,
+- tylko aktywuje karte i przygotowuje ja do detekcji bez hard reloadu,
+- wykrywa ostatni poprawny etap,
+- oblicza poprawny `nextStartIndex`,
+- odpala proces ponownie w trybie detached,
+- zapisuje szczegoly do `reload-resume-monitor.html` z metoda `no_reload`.
+
+To jest bezpieczna alternatywa dla trybu z reloadem, kiedy celem jest zatrzymanie i wznowienie procesu bez obciazania karty.
+
 ### `Przywroc okna aktywnych procesow` (`popup.html`, shortcut `9`)
 Scenariusz: okna sa zminimalizowane, schowane albo rozrzucone, ale nie chcemy jeszcze restartowac prompt chaina.
 
@@ -121,7 +139,7 @@ Pokazuje maintenance zbiorczy:
 - planowany start,
 - faktycznie wyslany start,
 - powod restartu,
-- metode reloadu,
+- metode reloadu albo tryb `bez reloadu`,
 - detekcje brakujacej odpowiedzi,
 - summary `started / detect_failed / reload_failed / start_failed`.
 
@@ -134,11 +152,13 @@ Pokazuje runtime decyzje dla pojedynczych procesow:
 Wazne rozroznienie:
 - `Nastepny etap we wszystkich` w panelu procesow nie robi hard reloadu kart,
 - `Restart/reload + wznow wszystkie` w popupie robi pelny maintenance z reloadem i ponownym startem.
+- `Bez reloadu` w popupie robi ten sam bulk maintenance, ale bez przeladowania kart i tylko po potwierdzonym zatrzymaniu procesu.
 
 ## Kiedy czego uzywac
 
 - Jedna aktywna karta utknela, ale okno nadal istnieje: `Wznow nastepny etap`.
 - Wiele aktywnych kart INVEST trzeba uporzadkowac i bezpiecznie zrestartowac: `Restart/reload + wznow wszystkie`.
+- Wiele aktywnych kart INVEST trzeba wznowic bez obciazajacego przeadowania: `Bez reloadu`.
 - Okna procesow zniknely z ekranu albo sa zminimalizowane: `Przywroc okna aktywnych procesow`.
 - Chcesz miec cykliczny self-healing: `Auto-restore co 5 min`.
 - Potrzebujesz batch recovery po crashu albo dluzszej przerwie: `Recovery niedokonczonych (batch)`.
@@ -148,5 +168,5 @@ Wazne rozroznienie:
 - `popup.js` - entry pointy z popupu.
 - `background.js` - `handleProcessResumeNextStageMessage()`, `runResetScanStartAllTabs()`, `restoreProcessWindows()`, `runAutoRestoreWindowsCycle()`, `startResumeUnfinishedProcessesBatch()`.
 - `resume-stage.js` - reczny picker etapu dla wznowienia.
-- `reload-resume-monitor.js` - monitor sesji restart/reload/resume.
+- `reload-resume-monitor.js` - monitor sesji bulk resume, z reloadem albo bez reloadu.
 - `unfinished-processes.js` - batch recovery niedokonczonych.

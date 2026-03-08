@@ -15,10 +15,10 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 | promptNumber | promptIndex | stageId | stageName | description |
 |---|---:|---|---|---|
 | 1 | 0 | 0 | Stage 0: Evidence Ledger + Thesis | Evidence ledger, worldview reconstruction, thesis selection, contract-form pass. |
-| 2 | 1 | setup | Pipeline Setup (Rules + Data Contract) | Stage inheritance, time-anchor rules, data discipline, and execution order lock. |
-| 3 | 2 | 1 | Stage 1: Sub-segment Validation | Invoice-first sub-segment map, gates, timing funnel, delivered pool. |
-| 4 | 3 | 2 | Stage 2: Stock Universe (15 names) | Exposure-based company mapping from invoice items to listed names. |
-| 5 | 4 | 3 | Stage 3: Thesis-Linked Traction Pack | Contract semantics, traction quality, and VOI objects for valuation handoff. |
+| 2 | 1 | 1 | Stage 1: Sub-segment Validation | Invoice-first sub-segment map, gates, timing funnel, and top sub-segment selection. |
+| 3 | 2 | 2 | Stage 2: Stock Universe (15 names) | Exposure-based company mapping from invoice items to listed names. |
+| 4 | 3 | 3 | Stage 3: Thesis-Linked Traction Pack | Contract semantics, traction quality, and Stage 4 handoff objects. |
+| 5 | 4 | 3.2 | Stage 3.2: Traction Scoring Pack (Light) | Lean traction scoring pass for 15 companies feeding the Stage 4 valuation screen. |
 | 6 | 5 | 4 | Stage 4: Reverse DCF Lite + Driver Screen | Core vs wedge vs total, asymmetry pre-filter, dominant valuation driver. |
 | 7 | 6 | 5 | Stage 5: Competitive Position (4 finalists) | Replaceability, moat durability, and S-curve timing selection. |
 | 8 | 7 | 6 | Stage 6: DuPont ROE Quality | ROE decomposition (margin x turnover x leverage) under thesis impact. |
@@ -31,8 +31,8 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 ## Legacy Stage Id Aliases
 These aliases are still accepted by `findCompanyPromptIndexByStageIdentifier()`:
 - `11` -> `promptIndex 11` (Stage 11 is implemented as a section inside the Stage 10 prompt)
+- `3.2` -> `promptIndex 4` (current light traction scoring prompt inserted between Stage 3 and Stage 4)
 - `2.5` -> `promptIndex 5` (legacy Reverse DCF Lite numbering)
-- `3.2` -> `promptIndex 5` (compatibility alias collapsed to Stage 4 prompt)
 - `3.5` -> `promptIndex 7` (legacy midpoint naming for DuPont)
 - `6.5` -> `promptIndex 7` (compatibility midpoint alias for DuPont)
 - `10.5` -> `promptIndex 11` (legacy midpoint naming for composite rank; now Stage 11 section in Stage 10 prompt)
