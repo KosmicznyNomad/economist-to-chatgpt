@@ -15,11 +15,19 @@ const rawAutoCloseAfterMs = Number.parseInt(searchParams.get('autoCloseAfterMs')
 const autoCloseAfterMs = Number.isInteger(rawAutoCloseAfterMs) && rawAutoCloseAfterMs > 0
   ? Math.min(rawAutoCloseAfterMs, 10 * 60 * 1000)
   : 0;
-const autoCloseDeadline = autoCloseAfterMs > 0 ? Date.now() + autoCloseAfterMs : 0;
+let autoCloseDeadline = 0;
 let autoCloseTimeoutId = null;
 let autoCloseIntervalId = null;
 let lastRenderedSessionId = '';
 let lastRenderedUpdatedAt = 0;
+let currentState = null;
+
+const TERMINAL_SESSION_STATUSES = new Set([
+  'completed',
+  'completed_with_errors',
+  'failed',
+  'interrupted'
+]);
 
 const ACTION_LABELS = {
   queued: 'Queued',
@@ -35,9 +43,17 @@ const ACTION_LABELS = {
 
 function renderAutoCloseInfo() {
   if (!autoCloseMeta) return;
-  if (!autoCloseDeadline) {
+  if (!autoCloseAfterMs) {
     autoCloseMeta.hidden = true;
     autoCloseMeta.textContent = '';
+    return;
+  }
+  if (!autoCloseDeadline) {
+    const graceSeconds = Math.ceil(autoCloseAfterMs / 1000);
+    autoCloseMeta.hidden = false;
+    autoCloseMeta.textContent = currentState && isTerminalSessionState(currentState)
+      ? `Auto-zamkniecie monitora za ${graceSeconds}s.`
+      : `Monitor pozostanie otwarty do zakonczenia sesji. Auto-zamkniecie: ${graceSeconds}s po zakonczeniu.`;
     return;
   }
   const remainingMs = Math.max(0, autoCloseDeadline - Date.now());
@@ -46,17 +62,35 @@ function renderAutoCloseInfo() {
   autoCloseMeta.textContent = `Auto-zamkniecie monitora za ${remainingSeconds}s.`;
 }
 
-function initializeAutoClose() {
-  if (!autoCloseAfterMs) {
+function clearAutoCloseSchedule() {
+  if (autoCloseTimeoutId !== null) {
+    window.clearTimeout(autoCloseTimeoutId);
+    autoCloseTimeoutId = null;
+  }
+  if (autoCloseIntervalId !== null) {
+    window.clearInterval(autoCloseIntervalId);
+    autoCloseIntervalId = null;
+  }
+  autoCloseDeadline = 0;
+}
+
+function isTerminalSessionState(state) {
+  const status = typeof state?.status === 'string'
+    ? state.status.trim().toLowerCase()
+    : '';
+  return TERMINAL_SESSION_STATUSES.has(status);
+}
+
+function armAutoCloseAfterCompletion() {
+  if (!autoCloseAfterMs || autoCloseDeadline > 0) {
     renderAutoCloseInfo();
     return;
   }
-
+  autoCloseDeadline = Date.now() + autoCloseAfterMs;
   renderAutoCloseInfo();
   autoCloseTimeoutId = window.setTimeout(() => {
     window.close();
   }, autoCloseAfterMs);
-
   autoCloseIntervalId = window.setInterval(() => {
     renderAutoCloseInfo();
     if (Date.now() >= autoCloseDeadline && autoCloseIntervalId !== null) {
@@ -64,6 +98,24 @@ function initializeAutoClose() {
       autoCloseIntervalId = null;
     }
   }, 1000);
+}
+
+function syncAutoCloseWithState(state) {
+  currentState = state && typeof state === 'object' ? state : null;
+  if (!autoCloseAfterMs) {
+    renderAutoCloseInfo();
+    return;
+  }
+  if (isTerminalSessionState(currentState)) {
+    armAutoCloseAfterCompletion();
+    return;
+  }
+  clearAutoCloseSchedule();
+  renderAutoCloseInfo();
+}
+
+function initializeAutoClose() {
+  renderAutoCloseInfo();
 }
 
 function sendRuntimeMessage(payload) {
@@ -220,14 +272,16 @@ function renderSessionMeta(state) {
 
   const statusBadge = document.createElement('span');
   const status = typeof state.status === 'string' ? state.status.trim().toLowerCase() : 'idle';
-  const badgeClass = (
-    status === 'running'
-    || status === 'completed'
-    || status === 'failed'
-    || status === 'idle'
-  ) ? status : 'idle';
+  const badgeClass = ({
+    running: 'running',
+    completed: 'completed',
+    completed_with_errors: 'completed',
+    failed: 'failed',
+    interrupted: 'failed',
+    idle: 'idle'
+  })[status] || 'idle';
   statusBadge.className = `badge badge-${badgeClass}`;
-  statusBadge.textContent = badgeClass;
+  statusBadge.textContent = status;
   sessionMeta.appendChild(statusBadge);
 
   const detail = document.createElement('div');
@@ -532,6 +586,7 @@ function applyState(state) {
   lastRenderedSessionId = typeof state?.sessionId === 'string' ? state.sessionId : '';
   lastRenderedUpdatedAt = Number.isInteger(state?.updatedAt) ? state.updatedAt : Date.now();
   renderState(state);
+  syncAutoCloseWithState(state);
 }
 
 async function fetchState() {
@@ -566,14 +621,7 @@ if (refreshBtn) {
 }
 
 window.addEventListener('beforeunload', () => {
-  if (autoCloseTimeoutId !== null) {
-    window.clearTimeout(autoCloseTimeoutId);
-    autoCloseTimeoutId = null;
-  }
-  if (autoCloseIntervalId !== null) {
-    window.clearInterval(autoCloseIntervalId);
-    autoCloseIntervalId = null;
-  }
+  clearAutoCloseSchedule();
 });
 
 initializeAutoClose();

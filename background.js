@@ -17,12 +17,15 @@ const INVEST_GPT_PATH_BASE = (() => {
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
+const WAIT_FOR_INTERFACE_READY_MS = 30000; // max 30s na gotowość composera przed wstawieniem
+const WAIT_FOR_SEND_ARM_MS = 3500; // max 3.5s na aktywację przycisku Send po wstawieniu
 const RETRY_INTERVAL_MS = 500;
 // Auto start over active process contexts.
 const RESET_SCAN_DEFAULT_PASSES = 3;
 const RESET_SCAN_PASS_DELAY_MS = 500;
 const RESET_SCAN_PER_TAB_BUDGET_MS = 6000;
 const RESET_SCAN_MIN_RUNTIME_MS = 90 * 1000;
+const RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 const RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST = 'active_company_invest_processes';
 const AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const AUTO_RECOVERY_DELAY_MS = 2000;
@@ -39,7 +42,7 @@ const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
-const PROCESS_QUEUE_MAX_CONCURRENCY = 5;
+const PROCESS_QUEUE_MAX_CONCURRENCY = 8;
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
@@ -108,6 +111,13 @@ const LOCAL_REMOTE_RUNNER = Object.freeze({
   heartbeatPath: '/api/v1/local-runner/runner/heartbeat',
   remoteJobsPath: '/api/v1/local-runner/remote-jobs',
   claimPath: '/api/v1/local-runner/remote-jobs/claim'
+});
+const REMOTE_RUNNER_JOB_KIND = Object.freeze({
+  ANALYSIS: 'analysis',
+  COMMAND: 'command'
+});
+const REMOTE_RUNNER_COMMAND = Object.freeze({
+  RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES: 'reload_resume_active_company_processes'
 });
 
 const AUTO_RESTORE_WINDOWS = {
@@ -230,9 +240,10 @@ let unfinishedResumePageKeepaliveLastLogTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerMaintenanceInProgress = false;
 let remoteRunnerExecutionInProgress = false;
-let analysisProcessQueueActiveCount = 0;
 let analysisProcessQueueSequence = 0;
+let analysisProcessQueueRecordSync = Promise.resolve();
 const analysisProcessQueuePending = [];
+const analysisProcessQueueActiveSlots = new Map();
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -496,6 +507,26 @@ function normalizeProcessRecord(record) {
   if (typeof normalized.statusText !== 'string') delete normalized.statusText;
   if (typeof normalized.stageName !== 'string') delete normalized.stageName;
   if (!Number.isInteger(normalized.stageIndex)) delete normalized.stageIndex;
+  if (!Number.isInteger(normalized.queuePosition) || normalized.queuePosition <= 0) delete normalized.queuePosition;
+  if (!Number.isInteger(normalized.queueTotal) || normalized.queueTotal <= 0) delete normalized.queueTotal;
+  if (!Number.isInteger(normalized.queueSlot) || normalized.queueSlot <= 0) delete normalized.queueSlot;
+  if (!Number.isInteger(normalized.queueLimit) || normalized.queueLimit <= 0) delete normalized.queueLimit;
+  if (!Number.isInteger(normalized.queueAssignedAt) || normalized.queueAssignedAt <= 0) delete normalized.queueAssignedAt;
+  if (typeof normalized.queueState !== 'string' || !normalized.queueState.trim()) {
+    delete normalized.queueState;
+  } else {
+    normalized.queueState = normalized.queueState.trim().toLowerCase();
+  }
+  if (status !== 'queued') {
+    delete normalized.queuePosition;
+    delete normalized.queueTotal;
+    delete normalized.queueState;
+  }
+  if (!(status === 'starting' || status === 'started' || status === 'running')) {
+    delete normalized.queueSlot;
+    delete normalized.queueLimit;
+    delete normalized.queueAssignedAt;
+  }
   const normalizedChatUrl = normalizeChatConversationUrl(
     typeof normalized.chatUrl === 'string' ? normalized.chatUrl : ''
   );
@@ -1841,6 +1872,42 @@ function hasUnfinishedProcessExecutionEvidence(process) {
   }
 
   return false;
+}
+
+function getProcessMeaningfulActivityTimestamp(process) {
+  if (!process || typeof process !== 'object') return 0;
+  const candidates = [
+    process.startedAt,
+    process.updatedAt,
+    process.autoRecovery?.updatedAt,
+    process.persistenceStatus?.updatedAt,
+    process.finalStagePersistence?.updatedAt,
+    process.completedResponseSavedAt,
+    process.completedResponseDispatch?.dbVerification?.checkedAt,
+    process.persistenceStatus?.dispatch?.dbVerification?.checkedAt
+  ];
+  return candidates.reduce((maxTs, value) => (
+    Number.isInteger(value) && value > maxTs ? value : maxTs
+  ), 0);
+}
+
+function isFreshActiveProcessForResetScan(process, options = {}) {
+  if (!process || typeof process !== 'object') return false;
+  if (isClosedProcessStatus(process?.status)) return false;
+
+  const nowTs = Number.isInteger(options?.nowTs) ? options.nowTs : Date.now();
+  const maxAgeMs = Number.isInteger(options?.maxAgeMs) && options.maxAgeMs > 0
+    ? options.maxAgeMs
+    : RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS;
+  const activityTs = getProcessMeaningfulActivityTimestamp(process);
+  if (!Number.isInteger(activityTs) || activityTs <= 0) return false;
+  if ((nowTs - activityTs) > maxAgeMs) return false;
+
+  if (hasUnfinishedProcessExecutionEvidence(process)) return true;
+
+  const status = normalizeProcessStatus(process?.status || '');
+  const hasContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+  return hasContext && (status === 'queued' || status === 'starting' || status === 'started' || status === 'running');
 }
 
 function isRecoverableUnfinishedProcess(process) {
@@ -5877,71 +5944,76 @@ async function readFullConversationFromTab(tabId, options = {}) {
     : 320;
   const hardForce = options?.hardForce !== false;
   const restoreScroll = options?.restoreScroll !== false;
+  const executionTimeoutMs = Number.isInteger(options?.executionTimeoutMs) && options.executionTimeoutMs > 0
+    ? Math.max(maxWaitMs, Math.min(options.executionTimeoutMs, 90000))
+    : Math.max(maxWaitMs + 5000, 10000);
+  const executionTimeoutMarker = { __conversationScanTimeout__: true };
 
   try {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId },
-      function: async (cfg) => {
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
-        const countWords = (text) => {
-          const normalized = compact(text).toLowerCase();
-          if (!normalized) return 0;
-          return normalized
-            .split(/[\s,.;:!?()[\]{}"'<>\-_/\\|]+/)
-            .map((token) => token.trim())
-            .filter((token) => token.length > 0)
-            .length;
-        };
-        const countSentences = (text) => {
-          const normalized = compact(text);
-          if (!normalized) return 0;
-          const parts = normalized.match(/[^.!?\n]+(?:[.!?]+|$)/g) || [];
-          return parts
-            .map((part) => compact(part))
-            .filter((part) => part.length > 0 && countWords(part) > 0)
-            .length;
-        };
-        const isElement = (node) => (
-          !!node
-          && typeof node === 'object'
-          && typeof node.nodeType === 'number'
-          && node.nodeType === 1
-        );
-
-        function readConversationEntries() {
-          const nodes = Array.from(
-            document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+    const result = await Promise.race([
+      chrome.scripting.executeScript({
+        target: { tabId },
+        function: async (cfg) => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
+          const countWords = (text) => {
+            const normalized = compact(text).toLowerCase();
+            if (!normalized) return 0;
+            return normalized
+              .split(/[\s,.;:!?()[\]{}"'<>\-_/\\|]+/)
+              .map((token) => token.trim())
+              .filter((token) => token.length > 0)
+              .length;
+          };
+          const countSentences = (text) => {
+            const normalized = compact(text);
+            if (!normalized) return 0;
+            const parts = normalized.match(/[^.!?\n]+(?:[.!?]+|$)/g) || [];
+            return parts
+              .map((part) => compact(part))
+              .filter((part) => part.length > 0 && countWords(part) > 0)
+              .length;
+          };
+          const isElement = (node) => (
+            !!node
+            && typeof node === 'object'
+            && typeof node.nodeType === 'number'
+            && node.nodeType === 1
           );
-          const entries = [];
-          for (const node of nodes) {
-            const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
-            if (role !== 'user' && role !== 'assistant') continue;
-            const textRaw = compact(node?.innerText || node?.textContent || '');
-            if (!textRaw) continue;
-            entries.push({
-              role,
-              text: textRaw.length > cfg.maxCharsPerMessage
-                ? textRaw.slice(0, cfg.maxCharsPerMessage)
-                : textRaw
-            });
-          }
-          return entries;
-        }
 
-        function isScrollableElement(node) {
-          if (!isElement(node)) return false;
-          let style = null;
-          try {
-            style = window.getComputedStyle(node);
-          } catch (error) {
-            return false;
+          function readConversationEntries() {
+            const nodes = Array.from(
+              document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+            );
+            const entries = [];
+            for (const node of nodes) {
+              const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
+              if (role !== 'user' && role !== 'assistant') continue;
+              const textRaw = compact(node?.innerText || node?.textContent || '');
+              if (!textRaw) continue;
+              entries.push({
+                role,
+                text: textRaw.length > cfg.maxCharsPerMessage
+                  ? textRaw.slice(0, cfg.maxCharsPerMessage)
+                  : textRaw
+              });
+            }
+            return entries;
           }
-          const overflowY = String(style?.overflowY || '').toLowerCase();
-          const canScroll = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
-          if (!canScroll) return false;
-          return (node.scrollHeight - node.clientHeight) > 12;
-        }
+
+          function isScrollableElement(node) {
+            if (!isElement(node)) return false;
+            let style = null;
+            try {
+              style = window.getComputedStyle(node);
+            } catch (error) {
+              return false;
+            }
+            const overflowY = String(style?.overflowY || '').toLowerCase();
+            const canScroll = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+            if (!canScroll) return false;
+            return (node.scrollHeight - node.clientHeight) > 12;
+          }
 
         function getScrollRef() {
           const firstMessage = document.querySelector('[data-message-author-role="assistant"], [data-message-author-role="user"]');
@@ -6146,35 +6218,46 @@ async function readFullConversationFromTab(tabId, options = {}) {
           ? compact(lastAssistantEntry.text || '')
           : '';
 
-        return {
-          success: true,
-          url: location.href || '',
-          title: document.title || '',
-          text: lastUserMessageText,
-          count: userCountTotal,
-          assistantCount: assistantCountTotal,
-          totalMessages,
-          latestUserCount,
-          latestAssistantCount,
-          latestTotalMessages,
-          hardForceApplied: !!cfg.hardForce,
-          scanDurationMs: Date.now() - startedAt,
-          userMetaTotal: allUserMeta.length,
-          userMetaTruncated: allUserMeta.length > transferLimit,
-          lastAssistantText,
-          messages,
-          messageMeta: userMeta
-        };
-      },
-      args: [{
-        maxWaitMs,
-        stepDelayMs,
-        maxCharsPerMessage,
-        transferUserMetaLimit,
-        hardForce,
-        restoreScroll
-      }]
-    });
+          return {
+            success: true,
+            url: location.href || '',
+            title: document.title || '',
+            text: lastUserMessageText,
+            count: userCountTotal,
+            assistantCount: assistantCountTotal,
+            totalMessages,
+            latestUserCount,
+            latestAssistantCount,
+            latestTotalMessages,
+            hardForceApplied: !!cfg.hardForce,
+            scanDurationMs: Date.now() - startedAt,
+            userMetaTotal: allUserMeta.length,
+            userMetaTruncated: allUserMeta.length > transferLimit,
+            lastAssistantText,
+            messages,
+            messageMeta: userMeta
+          };
+        },
+        args: [{
+          maxWaitMs,
+          stepDelayMs,
+          maxCharsPerMessage,
+          transferUserMetaLimit,
+          hardForce,
+          restoreScroll
+        }]
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => resolve(executionTimeoutMarker), executionTimeoutMs);
+      })
+    ]);
+
+    if (result && result.__conversationScanTimeout__ === true) {
+      return {
+        success: false,
+        error: `conversation_scan_timeout_after_${executionTimeoutMs}ms`
+      };
+    }
 
     const payload = result?.[0]?.result || {};
     if (payload?.success) {
@@ -6758,13 +6841,46 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   const includeInvestTabs = options?.includeInvestTabs !== false;
   const includeProcessContextFallback = options?.includeProcessContextFallback !== false;
   const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses === true;
+  const restrictToFreshProcesses = options?.restrictToFreshProcesses === true;
+  const recentProcessMaxAgeMs = Number.isInteger(options?.recentProcessMaxAgeMs) && options.recentProcessMaxAgeMs > 0
+    ? options.recentProcessMaxAgeMs
+    : RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS;
+  const nowTs = Date.now();
+  const tabsRaw = (includeInvestTabs || includeProcessContextFallback) ? await chrome.tabs.query({}) : [];
+  const liveTabsById = new Map();
+  const liveTabsByWindowId = new Map();
+  tabsRaw.forEach((tab) => {
+    if (!tab || typeof tab !== 'object') return;
+    if (Number.isInteger(tab?.id)) {
+      liveTabsById.set(tab.id, tab);
+    }
+    if (Number.isInteger(tab?.windowId)) {
+      const current = liveTabsByWindowId.get(tab.windowId) || [];
+      current.push(tab);
+      liveTabsByWindowId.set(tab.windowId, current);
+    }
+  });
 
   const processSnapshot = await getProcessSnapshot();
   const allProcessCandidates = processSnapshot
     .filter((process) => {
       if (!process || typeof process !== 'object') return false;
       if (!includeClosedProcesses && isClosedProcessStatus(process?.status)) return false;
-      return Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+      if (
+        restrictToFreshProcesses
+        && !isFreshActiveProcessForResetScan(process, {
+          nowTs,
+          maxAgeMs: recentProcessMaxAgeMs
+        })
+      ) {
+        return false;
+      }
+      const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+      const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+      if (Number.isInteger(processTabId) && liveTabsById.has(processTabId)) return true;
+      if (!Number.isInteger(processWindowId)) return false;
+      const tabsInWindow = liveTabsByWindowId.get(processWindowId) || [];
+      return !!findPreferredProcessTabInWindow(tabsInWindow, process);
     })
     .sort(compareProcessesForRestore);
 
@@ -6793,7 +6909,6 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     }
   });
 
-  const tabsRaw = includeInvestTabs ? await chrome.tabs.query({}) : [];
   const investTabs = tabsRaw
     .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
     .sort(compareTabsByWindowAndIndex);
@@ -6801,6 +6916,7 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   const targets = [];
   const handledContextKeys = new Set();
   let skipped = 0;
+  const restrictBareInvestTabs = restrictToFreshProcesses && allProcessCandidates.length > 0;
 
   investTabs.forEach((tab) => {
     const tabId = Number.isInteger(tab?.id) ? tab.id : null;
@@ -6814,6 +6930,10 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
 
     const linkedProcess = allProcessByTabId.get(tabId) || allProcessByWindowId.get(windowId) || null;
     if (excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(linkedProcess)) {
+      skipped += 1;
+      return;
+    }
+    if (restrictBareInvestTabs && !linkedProcess) {
       skipped += 1;
       return;
     }
@@ -6834,10 +6954,16 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     processCandidates.forEach((process) => {
       const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
       const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
-      if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
-      const contextKey = Number.isInteger(processTabId)
-        ? `tab:${processTabId}`
-        : `window:${processWindowId}`;
+      const liveTab = Number.isInteger(processTabId) ? liveTabsById.get(processTabId) : null;
+      const tabsInWindow = Number.isInteger(processWindowId)
+        ? (liveTabsByWindowId.get(processWindowId) || [])
+        : [];
+      const contextTab = liveTab || findPreferredProcessTabInWindow(tabsInWindow, process);
+      if (!contextTab || !Number.isInteger(contextTab?.id) || !Number.isInteger(contextTab?.windowId)) {
+        skipped += 1;
+        return;
+      }
+      const contextKey = `tab:${contextTab.id}`;
       if (handledContextKeys.has(contextKey)) {
         skipped += 1;
         return;
@@ -6845,12 +6971,16 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       handledContextKeys.add(contextKey);
       targets.push({
         source: 'process_context',
-        tabId: processTabId,
-        windowId: processWindowId,
-        url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
-          ? process.chatUrl.trim()
-          : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
-        title: typeof process?.title === 'string' ? process.title : '',
+        tabId: contextTab.id,
+        windowId: contextTab.windowId,
+        url: getTabEffectiveUrl(contextTab) || (
+          typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+            ? process.chatUrl.trim()
+            : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : '')
+        ),
+        title: typeof contextTab?.title === 'string' && contextTab.title.trim()
+          ? contextTab.title
+          : (typeof process?.title === 'string' ? process.title : ''),
         process
       });
     });
@@ -6970,9 +7100,11 @@ async function runResetScanStartAllTabs(options = {}) {
     const contextSnapshot = await collectCompanyInvestContextSnapshot({
       includeClosedProcesses: options?.includeClosedProcesses === true,
       includeInvestTabs: true,
-      // Reload+resume should operate on currently open INVEST tabs only.
-      includeProcessContextFallback: false,
-      excludeRemoteRunnerProcesses: true
+      // Remote-runner processes live on standard ChatGPT tabs, so include process-context fallback here.
+      includeProcessContextFallback: true,
+      excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true,
+      restrictToFreshProcesses: scope === RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+      recentProcessMaxAgeMs: RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS
     });
     const activeProcesses = contextSnapshot.processCandidates;
     const processContexts = contextSnapshot.targets;
@@ -7003,6 +7135,22 @@ async function runResetScanStartAllTabs(options = {}) {
       const compact = text.replace(/\s+/g, ' ').trim();
       if (compact.length <= maxLen) return compact;
       return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
+    };
+    const settleWithTimeout = async (taskFactory, timeoutMs) => {
+      const safeTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : 30000;
+      return Promise.race([
+        Promise.resolve()
+          .then(() => taskFactory())
+          .then(
+            (value) => ({ ok: true, value }),
+            (error) => ({ ok: false, error })
+          ),
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ ok: false, timeout: true }), safeTimeoutMs);
+        })
+      ]);
     };
     const appendRecognitionStep = (row, stage, status, detail = '') => {
       if (!row || typeof row !== 'object') return;
@@ -7351,9 +7499,9 @@ async function runResetScanStartAllTabs(options = {}) {
       if (!tab && Number.isInteger(row.windowId)) {
         try {
           const tabsInWindow = await chrome.tabs.query({ windowId: row.windowId });
-          const investTab = tabsInWindow.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate)));
-          if (investTab && Number.isInteger(investTab.id)) {
-            tab = investTab;
+          const candidateTab = findPreferredProcessTabInWindow(tabsInWindow, process);
+          if (candidateTab && Number.isInteger(candidateTab.id)) {
+            tab = candidateTab;
           }
         } catch (error) {
           // Best effort only.
@@ -7367,7 +7515,7 @@ async function runResetScanStartAllTabs(options = {}) {
         row.url = getTabEffectiveUrl(tab) || row.url;
       }
 
-      if (!isInvestGptUrl(row.url)) {
+      if (!isResumeEligibleProcessUrl(row.url, process)) {
         row.action = 'skipped_outside_invest';
         row.reason = `outside_invest:${row.url || 'empty'}`;
         appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
@@ -7492,6 +7640,7 @@ async function runResetScanStartAllTabs(options = {}) {
 
       for (const target of scanTargets) {
         if (!pendingKeys.has(target.key)) continue;
+        const process = target?.process || null;
 
         const previous = resultsByKey.get(target.key) || null;
         const row = {
@@ -7531,10 +7680,44 @@ async function runResetScanStartAllTabs(options = {}) {
           row.stopSignalAck = stopResult?.acknowledged === true;
           row.stopSignalReason = stopResult?.reason || '';
 
-          const prepareResult = await prepareTabForResume(row.tabId, row.windowId, {
-            timeoutMs: 15000,
-            bypassCache: true
-          });
+          const prepareAttempt = await settleWithTimeout(
+            () => prepareTabForResume(row.tabId, row.windowId, {
+              timeoutMs: 15000,
+              bypassCache: true
+            }),
+            35000
+          );
+          if (prepareAttempt?.timeout) {
+            row.action = 'reload_failed';
+            row.reason = 'prepare_tab_timeout';
+            row.reloadDetails = 'prepareTabForResume timed out';
+            appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            console.warn('[reset-scan-start] Prepare timed out for process context', {
+              runId: row.runId || '',
+              tabId: row.tabId,
+              windowId: row.windowId,
+              reason: row.reason
+            });
+            continue;
+          }
+          if (!prepareAttempt?.ok) {
+            row.action = 'reload_failed';
+            row.reason = prepareAttempt?.error?.message || 'prepare_tab_exception';
+            row.reloadDetails = prepareAttempt?.error?.stack || '';
+            appendRecognitionStep(row, 'reload_prepare', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            console.warn('[reset-scan-start] Prepare threw for process context', {
+              runId: row.runId || '',
+              tabId: row.tabId,
+              windowId: row.windowId,
+              reason: row.reason
+            });
+            continue;
+          }
+          const prepareResult = prepareAttempt.value;
           if (!prepareResult?.ok) {
             row.action = 'reload_failed';
             row.reason = prepareResult?.reason || 'reload_failed';
@@ -7569,7 +7752,28 @@ async function runResetScanStartAllTabs(options = {}) {
             });
           }
         } else {
-          await prepareTabForDetection(row.tabId, row.windowId);
+          const detectionPrepareAttempt = await settleWithTimeout(
+            () => prepareTabForDetection(row.tabId, row.windowId),
+            20000
+          );
+          if (detectionPrepareAttempt?.timeout) {
+            row.action = 'detect_failed';
+            row.reason = 'prepare_detection_timeout';
+            setRecognitionSource(row, 'detect_unresolved');
+            appendRecognitionStep(row, 'precheck', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            continue;
+          }
+          if (!detectionPrepareAttempt?.ok) {
+            row.action = 'detect_failed';
+            row.reason = detectionPrepareAttempt?.error?.message || 'prepare_detection_exception';
+            setRecognitionSource(row, 'detect_unresolved');
+            appendRecognitionStep(row, 'precheck', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            continue;
+          }
         }
 
         const currentTab = await getTabByIdSafe(row.tabId);
@@ -7587,7 +7791,7 @@ async function runResetScanStartAllTabs(options = {}) {
         row.url = getTabEffectiveUrl(currentTab) || row.url;
         row.windowId = Number.isInteger(currentTab?.windowId) ? currentTab.windowId : row.windowId;
 
-        if (!isInvestGptUrl(row.url)) {
+        if (!isResumeEligibleProcessUrl(row.url, process)) {
           row.action = 'skipped_outside_invest';
           row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
           appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
@@ -8349,18 +8553,44 @@ async function runResetScanStartAllTabs(options = {}) {
         autoStartTitle,
         composerThinkingEffort: composerThinkingEffort || ''
       });
-      const startResult = await resumeFromStageOnTab(row.tabId, row.windowId, row.nextStartIndex, {
-        processTitle: autoStartTitle,
-        detach: true,
-        // Tab is already hard-reloaded in the detection phase.
-        reloadBeforeResume: false,
-        composerThinkingEffort,
-        forceRepeatLastPrompt,
-        minStartIndex: PROMPTS_COMPANY.length > 1 ? 1 : 0,
-        precomputedStagePlan
-      });
+      const startAttempt = await settleWithTimeout(
+        () => resumeFromStageOnTab(row.tabId, row.windowId, row.nextStartIndex, {
+          processTitle: autoStartTitle,
+          detach: true,
+          // Tab is already hard-reloaded in the detection phase.
+          reloadBeforeResume: false,
+          // The start queue already ran stage planning for this tab. Re-running preflight here
+          // can hang the whole batch on a single slow tab and is unnecessary.
+          skipStagePreflight: true,
+          composerThinkingEffort,
+          forceRepeatLastPrompt,
+          minStartIndex: PROMPTS_COMPANY.length > 1 ? 1 : 0,
+          precomputedStagePlan
+        }),
+        60000
+      );
+      const startResult = startAttempt?.ok ? startAttempt.value : null;
 
-      if (startResult.success) {
+      if (startAttempt?.timeout) {
+        row.action = 'start_failed';
+        row.reason = 'start_dispatch_timeout';
+        appendRecognitionStep(row, 'start_dispatch', 'failed', row.reason);
+        console.warn('[reset-scan-start] Start timed out', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          nextStartIndex: row.nextStartIndex
+        });
+      } else if (!startAttempt?.ok) {
+        row.action = 'start_failed';
+        row.reason = startAttempt?.error?.message || 'start_dispatch_exception';
+        appendRecognitionStep(row, 'start_dispatch', 'failed', row.reason);
+        console.warn('[reset-scan-start] Start threw', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          nextStartIndex: row.nextStartIndex,
+          reason: row.reason
+        });
+      } else if (startResult.success) {
         startedKeys.add(row.key);
         row.action = 'started';
         row.restartDispatchStatus = startResult.detached ? 'start_dispatched' : 'start_started';
@@ -8718,6 +8948,36 @@ function isRemoteRunnerManagedProcess(process) {
   return remoteJobId.length > 0;
 }
 
+function isResumeEligibleProcessUrl(url, process = null) {
+  if (isInvestGptUrl(url)) return true;
+  return isRemoteRunnerManagedProcess(process) && isChatGptUrl(url);
+}
+
+function findPreferredProcessTabInWindow(tabsInWindow, process = null) {
+  const candidates = Array.isArray(tabsInWindow)
+    ? tabsInWindow.filter((candidate) => candidate && typeof candidate === 'object').sort(compareTabsByWindowAndIndex)
+    : [];
+  if (candidates.length === 0) return null;
+
+  const preferredUrls = [
+    normalizeChatConversationUrl(typeof process?.chatUrl === 'string' ? process.chatUrl : ''),
+    normalizeChatConversationUrl(typeof process?.sourceUrl === 'string' ? process.sourceUrl : '')
+  ].filter(Boolean);
+
+  for (const preferredUrl of preferredUrls) {
+    const matched = candidates.find((candidate) => (
+      normalizeChatConversationUrl(getTabEffectiveUrl(candidate)) === preferredUrl
+    ));
+    if (matched) return matched;
+  }
+
+  if (isRemoteRunnerManagedProcess(process)) {
+    return candidates.find((candidate) => isChatGptUrl(getTabEffectiveUrl(candidate))) || null;
+  }
+
+  return candidates.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate))) || null;
+}
+
 async function restoreProcessWindows(options = {}) {
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
@@ -8760,7 +9020,7 @@ async function restoreProcessWindows(options = {}) {
     const runId = process?.id ? String(process.id) : '';
 
     let tab = targetTabId ? await getTabByIdSafe(targetTabId) : null;
-    if (tab && !isInvestGptUrl(getTabEffectiveUrl(tab))) {
+    if (tab && !isResumeEligibleProcessUrl(getTabEffectiveUrl(tab), process)) {
       tab = null;
     }
     const targetWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : targetWindowIdInput;
@@ -8784,14 +9044,14 @@ async function restoreProcessWindows(options = {}) {
     if (!tab && Number.isInteger(targetWindowId)) {
       try {
         const tabsInWindow = await chrome.tabs.query({ windowId: targetWindowId });
-        const investTab = tabsInWindow.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate)));
-        if (investTab && Number.isInteger(investTab.id)) {
-          tab = investTab;
+        const candidateTab = findPreferredProcessTabInWindow(tabsInWindow, process);
+        if (candidateTab && Number.isInteger(candidateTab.id)) {
+          tab = candidateTab;
           if (runId && process) {
             await upsertProcess(runId, {
-              tabId: investTab.id,
+              tabId: candidateTab.id,
               windowId: targetWindowId,
-              chatUrl: getTabEffectiveUrl(investTab) || (typeof process?.chatUrl === 'string' ? process.chatUrl : '')
+              chatUrl: getTabEffectiveUrl(candidateTab) || (typeof process?.chatUrl === 'string' ? process.chatUrl : '')
             });
           }
         }
@@ -8987,20 +9247,34 @@ function requestTabReload(tabId, reloadProperties = {}) {
       return;
     }
 
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        reason: 'reload_command_timeout'
+      });
+    }, 4000);
+
     try {
       chrome.tabs.reload(tabId, reloadProperties, () => {
         if (chrome.runtime.lastError) {
-          resolve({
+          finish({
             ok: false,
             reason: 'reload_command_failed',
             error: chrome.runtime.lastError.message || 'runtime_last_error'
           });
           return;
         }
-        resolve({ ok: true, reason: 'reload_command_sent' });
+        finish({ ok: true, reason: 'reload_command_sent' });
       });
     } catch (error) {
-      resolve({
+      finish({
         ok: false,
         reason: 'reload_exception',
         error: error?.message || String(error)
@@ -9020,20 +9294,34 @@ function requestTabNavigate(tabId, url) {
       return;
     }
 
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        reason: 'navigate_command_timeout'
+      });
+    }, 4000);
+
     try {
       chrome.tabs.update(tabId, { url: url.trim() }, () => {
         if (chrome.runtime.lastError) {
-          resolve({
+          finish({
             ok: false,
             reason: 'navigate_command_failed',
             error: chrome.runtime.lastError.message || 'runtime_last_error'
           });
           return;
         }
-        resolve({ ok: true, reason: 'navigate_command_sent' });
+        finish({ ok: true, reason: 'navigate_command_sent' });
       });
     } catch (error) {
-      resolve({
+      finish({
         ok: false,
         reason: 'navigate_exception',
         error: error?.message || String(error)
@@ -12783,13 +13071,14 @@ function normalizeLocalRemoteRunnerBaseUrl(rawUrl) {
 }
 
 function resolveRemoteRunnerLocalBaseUrl(settings = {}, options = {}) {
-  const rawValue = typeof options?.baseUrl === 'string'
-    ? options.baseUrl
-    : (
-      typeof settings?.localBaseUrl === 'string'
-        ? settings.localBaseUrl
-        : ''
-    );
+  const requestedBaseUrl = typeof options?.baseUrl === 'string'
+    ? options.baseUrl.trim()
+    : '';
+  const rawValue = requestedBaseUrl || (
+    typeof settings?.localBaseUrl === 'string'
+      ? settings.localBaseUrl
+      : ''
+  );
   const normalized = normalizeLocalRemoteRunnerBaseUrl(rawValue);
   if (normalized) return normalized;
   return options?.allowDefault === true ? LOCAL_REMOTE_RUNNER.defaultBaseUrl : '';
@@ -14233,6 +14522,7 @@ async function setRemoteRunnerJobBinding(jobId, patch = {}) {
   const next = {
     ...current,
     [safeJobId]: {
+      jobId: safeJobId,
       ...(current?.[safeJobId] && typeof current[safeJobId] === 'object' ? current[safeJobId] : {}),
       ...(patch && typeof patch === 'object' ? patch : {}),
       updatedAt: Date.now()
@@ -14586,6 +14876,189 @@ function normalizeRemotePreparedJobPayload(rawPayload) {
     promptHash,
     usesRunnerPrompts,
     preparedSources
+  };
+}
+
+function getRemoteRunnerCommandLabel(commandType = '') {
+  const normalized = typeof commandType === 'string' ? commandType.trim().toLowerCase() : '';
+  if (normalized === REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES) {
+    return 'restart + wznow';
+  }
+  return normalized || 'polecenie runnera';
+}
+
+function normalizeRemoteRunnerCommandPayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const jobType = typeof rawPayload.job_type === 'string'
+    ? rawPayload.job_type.trim().toLowerCase()
+    : (typeof rawPayload.jobType === 'string' ? rawPayload.jobType.trim().toLowerCase() : '');
+  if (jobType && jobType !== REMOTE_RUNNER_JOB_KIND.COMMAND) return null;
+
+  const commandType = typeof rawPayload.command_type === 'string'
+    ? rawPayload.command_type.trim().toLowerCase()
+    : (typeof rawPayload.commandType === 'string' ? rawPayload.commandType.trim().toLowerCase() : '');
+  if (commandType !== REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES) {
+    return null;
+  }
+
+  const requestedScope = typeof rawPayload.scope === 'string' && rawPayload.scope.trim()
+    ? rawPayload.scope.trim()
+    : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+
+  return {
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    commandLabel: getRemoteRunnerCommandLabel(commandType),
+    scope: requestedScope === RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
+      ? requestedScope
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+    forceRepeatLastPrompt: rawPayload.force_repeat_last_prompt === true || rawPayload.forceRepeatLastPrompt === true,
+    composerThinkingEffort: normalizeComposerThinkingEffort(
+      typeof rawPayload.composer_thinking_effort === 'string'
+        ? rawPayload.composer_thinking_effort
+        : rawPayload.composerThinkingEffort
+    ),
+    createdAtUtc: typeof rawPayload.created_at_utc === 'string'
+      ? rawPayload.created_at_utc
+      : (typeof rawPayload.createdAtUtc === 'string' ? rawPayload.createdAtUtc : '')
+  };
+}
+
+function buildRemoteReloadResumeResultPayload(result = {}, options = {}) {
+  const commandPayload = options?.commandPayload && typeof options.commandPayload === 'object'
+    ? options.commandPayload
+    : {};
+  const commandType = typeof commandPayload.commandType === 'string'
+    ? commandPayload.commandType
+    : REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES;
+  return {
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    commandLabel: getRemoteRunnerCommandLabel(commandType),
+    scope: typeof commandPayload.scope === 'string' && commandPayload.scope.trim()
+      ? commandPayload.scope.trim()
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+    monitorSessionId: typeof options?.monitorSessionId === 'string' ? options.monitorSessionId : '',
+    scannedTabs: Number.isInteger(result?.scannedTabs) ? result.scannedTabs : 0,
+    matchedTabs: Number.isInteger(result?.matchedTabs) ? result.matchedTabs : 0,
+    startedTabs: Number.isInteger(result?.startedTabs) ? result.startedTabs : 0,
+    resumedTabs: Number.isInteger(result?.resumedTabs) ? result.resumedTabs : 0,
+    requestedProcesses: Number.isInteger(result?.requestedProcesses) ? result.requestedProcesses : 0,
+    eligibleProcesses: Number.isInteger(result?.eligibleProcesses) ? result.eligibleProcesses : 0,
+    summary: normalizeReloadResumeSummary(result?.summary || {}),
+    finishedAtUtc: new Date().toISOString()
+  };
+}
+
+async function executeRemoteRunnerCommand(commandPayload, options = {}) {
+  const normalizedCommand = normalizeRemoteRunnerCommandPayload(commandPayload);
+  if (!normalizedCommand) {
+    return {
+      success: false,
+      error: 'remote_runner_command_not_supported',
+      runIds: [],
+      resultPayload: null
+    };
+  }
+
+  if (normalizedCommand.commandType === REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES) {
+    const monitorSessionId = createReloadResumeMonitorSessionId('remote-reload-resume');
+    const result = await runResetScanStartAllTabs({
+      origin: typeof options?.origin === 'string' && options.origin.trim()
+        ? options.origin.trim()
+        : `remote-runner:${normalizedCommand.commandType}`,
+      scope: normalizedCommand.scope,
+      forceRepeatLastPrompt: normalizedCommand.forceRepeatLastPrompt === true,
+      ...(normalizedCommand.composerThinkingEffort
+        ? { composerThinkingEffort: normalizedCommand.composerThinkingEffort }
+        : {}),
+      monitorSessionId,
+      excludeRemoteRunnerProcesses: false
+    });
+    return {
+      success: result?.success === true,
+      error: result?.success === true ? '' : (result?.error || 'remote_reload_resume_failed'),
+      runIds: [],
+      resultPayload: buildRemoteReloadResumeResultPayload(result, {
+        monitorSessionId,
+        commandPayload: normalizedCommand
+      })
+    };
+  }
+
+  return {
+    success: false,
+    error: 'remote_runner_command_not_supported',
+    runIds: [],
+    resultPayload: null
+  };
+}
+
+function trimRemotePreviewText(value, maxLength = 120) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 3))}...` : text;
+}
+
+function deriveRemoteSourceHostLabel(sourceUrl, sourceName) {
+  const normalizedUrl = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
+  if (normalizedUrl) {
+    if (normalizedUrl.startsWith('manual://')) {
+      return 'manual';
+    }
+    try {
+      const parsed = new URL(normalizedUrl);
+      const hostname = String(parsed.hostname || '').trim().replace(/^www\./i, '');
+      if (hostname) return hostname;
+    } catch (_) {
+      // Ignore invalid preview URLs.
+    }
+  }
+  return trimRemotePreviewText(sourceName || 'source', 32) || 'source';
+}
+
+function buildRemoteTransferPreview(preparedSources = [], options = {}) {
+  const safeSources = Array.isArray(preparedSources)
+    ? preparedSources.filter((item) => item && typeof item === 'object')
+    : [];
+  const previewLimit = Number.isInteger(options?.previewLimit) && options.previewLimit > 0
+    ? Math.min(options.previewLimit, 8)
+    : 5;
+  const totalChars = safeSources.reduce((sum, item) => {
+    const text = typeof item?.text === 'string' ? item.text.trim() : '';
+    return sum + text.length;
+  }, 0);
+  const items = safeSources.slice(0, previewLimit).map((item, index) => {
+    const title = trimRemotePreviewText(item?.title || `Artykul ${index + 1}`, 96) || `Artykul ${index + 1}`;
+    const sourceUrl = typeof item?.source_url === 'string'
+      ? item.source_url
+      : (typeof item?.sourceUrl === 'string' ? item.sourceUrl : '');
+    const sourceName = typeof item?.source_name === 'string'
+      ? item.source_name
+      : (typeof item?.sourceName === 'string' ? item.sourceName : '');
+    const rawText = typeof item?.text === 'string' ? item.text.trim() : '';
+    return {
+      sourceId: typeof item?.source_id === 'string'
+        ? item.source_id
+        : (typeof item?.sourceId === 'string' ? item.sourceId : ''),
+      title,
+      sourceUrl,
+      sourceName: trimRemotePreviewText(sourceName || '', 40),
+      hostLabel: deriveRemoteSourceHostLabel(sourceUrl, sourceName),
+      charCount: rawText.length,
+      extractedAtUtc: typeof item?.extracted_at_utc === 'string'
+        ? item.extracted_at_utc
+        : (typeof item?.extractedAtUtc === 'string' ? item.extractedAtUtc : ''),
+    };
+  });
+  return {
+    sourceCount: safeSources.length,
+    totalChars,
+    previewCount: items.length,
+    hiddenCount: Math.max(0, safeSources.length - items.length),
+    usesRunnerPrompts: options?.usesRunnerPrompts === true,
+    sourceMode: typeof options?.sourceMode === 'string' ? options.sourceMode : '',
+    items,
   };
 }
 
@@ -15774,7 +16247,7 @@ async function collectTabConversationMetricsForAutoRestore(tabId) {
 
 async function collectAutoRestoreProcessHealthSnapshot(options = {}) {
   await ensureProcessRegistryReady();
-  const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses !== false;
+  const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses === true;
   const processSnapshot = await getProcessSnapshot();
   const activeProcesses = processSnapshot
     .filter((process) => (
@@ -15991,11 +16464,11 @@ async function runAutoRestoreWindowsCycle(options = {}) {
     const cycleStartedAt = Date.now();
     const restoreResult = await restoreProcessWindows({
       origin,
-      excludeRemoteRunnerProcesses: true
+      excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true
     });
     const healthCheck = await collectAutoRestoreProcessHealthSnapshot({
       origin,
-      excludeRemoteRunnerProcesses: true
+      excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true
     });
 
     let scanResult = null;
@@ -17002,6 +17475,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         success: false,
         error: error?.message || 'run_remote_analysis_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'RUN_REMOTE_RELOAD_RESUME') {
+    (async () => {
+      const response = await runRemoteReloadResumeCommand({
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
+        forceRepeatLastPrompt: message?.forceRepeatLastPrompt === true,
+        composerThinkingEffort: typeof message?.composerThinkingEffort === 'string' ? message.composerThinkingEffort : ''
+      });
+      sendResponse(response);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'run_remote_reload_resume_failed'
       });
     });
     return true;
@@ -19622,8 +20110,12 @@ async function executeClaimedRemoteRunnerJob(jobRecord) {
   }
 
   const supportId = await ensureExtensionInstallationId().catch(() => '');
-  const requestPayload = normalizeRemotePreparedJobPayload(job.requestPayload);
-  if (!requestPayload) {
+  const rawRequestPayload = job.requestPayload && typeof job.requestPayload === 'object'
+    ? job.requestPayload
+    : null;
+  const commandPayload = normalizeRemoteRunnerCommandPayload(rawRequestPayload);
+  const analysisPayload = commandPayload ? null : normalizeRemotePreparedJobPayload(rawRequestPayload);
+  if (!commandPayload && !analysisPayload) {
     const invalidPayloadError = 'invalid_remote_job_payload';
     const failedEvent = await sendRemoteJobEventRecord(job.jobId, {
       runnerId: supportId,
@@ -19647,16 +20139,28 @@ async function executeClaimedRemoteRunnerJob(jobRecord) {
     return { success: false, error: invalidPayloadError };
   }
 
+  const jobKind = commandPayload ? REMOTE_RUNNER_JOB_KIND.COMMAND : REMOTE_RUNNER_JOB_KIND.ANALYSIS;
+  const commandType = commandPayload?.commandType || '';
+  const commandLabel = commandPayload?.commandLabel || (commandType ? getRemoteRunnerCommandLabel(commandType) : '');
   remoteRunnerExecutionInProgress = true;
   await setRemoteRunnerExecutionState({
     activeJobId: job.jobId,
     status: 'claimed',
     controllerId: job.controllerId,
-    runIds: []
+    jobKind,
+    commandType,
+    commandLabel,
+    runIds: [],
+    pendingFinalEvent: null,
+    lastError: ''
   });
   await setRemoteRunnerJobBinding(job.jobId, {
     controllerId: job.controllerId,
-    status: 'claimed'
+    status: 'claimed',
+    jobKind,
+    commandType,
+    commandLabel,
+    ...(commandPayload ? { requestPayload: rawRequestPayload } : {})
   });
 
   try {
@@ -19668,7 +20172,12 @@ async function executeClaimedRemoteRunnerJob(jobRecord) {
       activeJobId: job.jobId,
       status: 'received',
       controllerId: job.controllerId,
-      runIds: []
+      jobKind,
+      commandType,
+      commandLabel,
+      runIds: [],
+      pendingFinalEvent: null,
+      lastError: ''
     });
     await sendRemoteJobEventRecord(job.jobId, {
       runnerId: supportId,
@@ -19678,40 +20187,77 @@ async function executeClaimedRemoteRunnerJob(jobRecord) {
       activeJobId: job.jobId,
       status: 'started',
       controllerId: job.controllerId,
-      runIds: []
+      jobKind,
+      commandType,
+      commandLabel,
+      runIds: [],
+      pendingFinalEvent: null,
+      lastError: ''
     });
 
-    const execution = await executePreparedRemoteCompanyBatch(requestPayload, {
-      jobId: job.jobId,
-      controllerId: job.controllerId,
-      runnerId: supportId
-    });
+    let execution = null;
+    let finalEvent = 'completed';
+    let executionError = '';
+    if (commandPayload) {
+      const commandExecution = await executeRemoteRunnerCommand(commandPayload, {
+        origin: `remote-runner:${commandType || 'command'}`
+      });
+      execution = {
+        runIds: Array.isArray(commandExecution?.runIds) ? commandExecution.runIds : [],
+        resultPayload: commandExecution?.resultPayload && typeof commandExecution.resultPayload === 'object'
+          ? commandExecution.resultPayload
+          : null
+      };
+      finalEvent = commandExecution?.success === true ? 'completed' : 'failed';
+      executionError = commandExecution?.error || '';
+    } else {
+      const analysisExecution = await executePreparedRemoteCompanyBatch(analysisPayload, {
+        jobId: job.jobId,
+        controllerId: job.controllerId,
+        runnerId: supportId
+      });
+      execution = {
+        runIds: analysisExecution.runIds,
+        resultPayload: {
+          jobType: REMOTE_RUNNER_JOB_KIND.ANALYSIS,
+          analysisType: 'company',
+          runIds: analysisExecution.runIds,
+          successCount: analysisExecution.successCount,
+          failureCount: analysisExecution.failureCount,
+          sourceCount: analysisPayload.preparedSources.length,
+          finishedAtUtc: new Date().toISOString()
+        }
+      };
+      finalEvent = analysisExecution.failureCount > 0 ? 'failed' : 'completed';
+      executionError = finalEvent === 'failed' ? 'remote_job_execution_failed' : '';
+    }
+
     await setRemoteRunnerExecutionState({
       activeJobId: job.jobId,
-      status: execution.failureCount > 0 ? 'failed' : 'completed',
+      status: finalEvent,
       controllerId: job.controllerId,
-      runIds: execution.runIds
+      jobKind,
+      commandType,
+      commandLabel,
+      runIds: execution.runIds,
+      pendingFinalEvent: null,
+      lastError: executionError
     });
     await setRemoteRunnerJobBinding(job.jobId, {
       controllerId: job.controllerId,
-      status: execution.failureCount > 0 ? 'failed' : 'completed',
-      runIds: execution.runIds
+      status: finalEvent,
+      jobKind,
+      commandType,
+      commandLabel,
+      runIds: execution.runIds,
+      resultPayload: execution.resultPayload
     });
 
-    const resultPayload = {
-      analysisType: 'company',
-      runIds: execution.runIds,
-      successCount: execution.successCount,
-      failureCount: execution.failureCount,
-      sourceCount: requestPayload.preparedSources.length,
-      finishedAtUtc: new Date().toISOString()
-    };
-    const finalEvent = execution.failureCount > 0 ? 'failed' : 'completed';
     const finalResponse = await sendRemoteJobEventRecord(job.jobId, {
       runnerId: supportId,
       event: finalEvent,
-      resultPayload,
-      ...(finalEvent === 'failed' ? { error: execution.failureCount > 0 ? 'remote_job_execution_failed' : '' } : {})
+      resultPayload: execution.resultPayload,
+      ...(finalEvent === 'failed' ? { error: executionError || 'remote_job_execution_failed' } : {})
     });
 
     if (!finalResponse.success) {
@@ -19719,12 +20265,16 @@ async function executeClaimedRemoteRunnerJob(jobRecord) {
         activeJobId: job.jobId,
         status: finalEvent,
         controllerId: job.controllerId,
+        jobKind,
+        commandType,
+        commandLabel,
         runIds: execution.runIds,
         pendingFinalEvent: {
           event: finalEvent,
-          resultPayload,
-          error: finalEvent === 'failed' ? 'remote_job_execution_failed' : ''
-        }
+          resultPayload: execution.resultPayload,
+          error: finalEvent === 'failed' ? (executionError || 'remote_job_execution_failed') : ''
+        },
+        lastError: executionError
       });
       return {
         success: finalEvent === 'completed',
@@ -19750,11 +20300,15 @@ async function executeClaimedRemoteRunnerJob(jobRecord) {
         activeJobId: job.jobId,
         status: 'failed',
         controllerId: job.controllerId,
+        jobKind,
+        commandType,
+        commandLabel,
         pendingFinalEvent: {
           event: 'failed',
           error: errorText,
           resultPayload: null
-        }
+        },
+        lastError: errorText
       });
     } else {
       await clearRemoteRunnerExecutionState();
@@ -19909,6 +20463,21 @@ async function getRemoteRunnerPopupStatus(options = {}) {
     if (controllerJobResult.success) {
       controllerJob = controllerJobResult.job || null;
       if (controllerJob?.jobId) {
+        if (controllerLastJob?.transferPreview && !controllerJob.transferPreview) {
+          controllerJob.transferPreview = controllerLastJob.transferPreview;
+        }
+        if (controllerLastJob?.sourceMode && !controllerJob.sourceMode) {
+          controllerJob.sourceMode = controllerLastJob.sourceMode;
+        }
+        if (controllerLastJob?.jobType && !controllerJob.jobType) {
+          controllerJob.jobType = controllerLastJob.jobType;
+        }
+        if (controllerLastJob?.commandType && !controllerJob.commandType) {
+          controllerJob.commandType = controllerLastJob.commandType;
+        }
+        if (controllerLastJob?.commandLabel && !controllerJob.commandLabel) {
+          controllerJob.commandLabel = controllerLastJob.commandLabel;
+        }
         await setRemoteControllerLastJobState({
           ...controllerLastJob,
           jobId: controllerJob.jobId,
@@ -19959,6 +20528,101 @@ async function getRemoteRunnerPopupStatus(options = {}) {
     runnerJob,
     runnerJobError,
     runnerState
+  };
+}
+
+async function runRemoteReloadResumeCommand(options = {}) {
+  const settings = await getRemoteRunnerSettings();
+  const requestedRunnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
+    ? options.runnerId.trim()
+    : '';
+  const controllerId = await ensureExtensionInstallationId().catch(() => '');
+  if (!controllerId) {
+    return { success: false, error: 'support_id_unavailable' };
+  }
+
+  const targetResolution = await resolveRemoteRunnerSelection({
+    supportId: controllerId,
+    settings,
+    requestedRunnerId
+  });
+  const runnerId = typeof targetResolution?.targetRunner?.runnerId === 'string'
+    ? targetResolution.targetRunner.runnerId.trim()
+    : '';
+  if (!runnerId) {
+    return {
+      success: false,
+      error: targetResolution.targetRunnerError || targetResolution.discoveredRunnersError || 'runner_id_missing',
+      discoveredRunners: Array.isArray(targetResolution.discoveredRunners) ? targetResolution.discoveredRunners : []
+    };
+  }
+
+  const runnerStatusResult = await fetchRemoteRunnerStatusRecord(runnerId, { settings });
+  if (!runnerStatusResult.success || !runnerStatusResult.runner) {
+    return {
+      success: false,
+      error: runnerStatusResult.error || 'remote_runner_status_failed'
+    };
+  }
+  if (runnerStatusResult.runner.status !== 'ready' || runnerStatusResult.runner.acceptsRemoteJobs !== true) {
+    return {
+      success: false,
+      error: `runner_${runnerStatusResult.runner.status || 'not_ready'}`,
+      runner: runnerStatusResult.runner
+    };
+  }
+
+  const commandType = REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES;
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
+  const requestPayload = {
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+    forceRepeatLastPrompt: options?.forceRepeatLastPrompt === true,
+    ...(composerThinkingEffort
+      ? { composerThinkingEffort }
+      : {}),
+    createdAtUtc: new Date().toISOString()
+  };
+  const createResult = await createRemoteAnalysisJobRecord({
+    controllerId,
+    runnerId,
+    requestPayload,
+    settings
+  });
+  if (!createResult.success || !createResult.job) {
+    return {
+      success: false,
+      error: createResult.error || 'remote_job_create_failed',
+      runner: createResult.runner || runnerStatusResult.runner
+    };
+  }
+
+  const settingsPatch = {
+    controllerRunnerNameCached: runnerStatusResult.runner.runnerName || settings.controllerRunnerNameCached
+  };
+  if (requestedRunnerId || settings.controllerRunnerId) {
+    settingsPatch.controllerRunnerId = runnerId;
+  }
+  await saveRemoteRunnerSettings(settingsPatch);
+  await setRemoteControllerLastJobState({
+    jobId: createResult.job.jobId,
+    runnerId,
+    status: createResult.job.status,
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    commandLabel: getRemoteRunnerCommandLabel(commandType),
+    scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
+  });
+
+  return {
+    success: true,
+    job: createResult.job,
+    runner: runnerStatusResult.runner,
+    targetSource: targetResolution.targetRunnerSource || '',
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    commandLabel: getRemoteRunnerCommandLabel(commandType)
   };
 }
 
@@ -20028,12 +20692,17 @@ async function runRemoteAnalysis(options = {}) {
   }
 
   const requestPayload = {
+    jobType: REMOTE_RUNNER_JOB_KIND.ANALYSIS,
     analysisType: 'company',
     promptHash: typeof preparedBatch.promptHash === 'string' ? preparedBatch.promptHash : '',
     usesRunnerPrompts: preparedBatch.usesRunnerPrompts === true,
     preparedSources: preparedBatch.preparedSources,
     createdAtUtc: new Date().toISOString()
   };
+  const transferPreview = buildRemoteTransferPreview(preparedBatch.preparedSources, {
+    usesRunnerPrompts: preparedBatch.usesRunnerPrompts === true,
+    sourceMode: typeof preparedBatch.sourceMode === 'string' ? preparedBatch.sourceMode : '',
+  });
   const createResult = await createRemoteAnalysisJobRecord({
     controllerId,
     runnerId,
@@ -20059,8 +20728,11 @@ async function runRemoteAnalysis(options = {}) {
     jobId: createResult.job.jobId,
     runnerId,
     status: createResult.job.status,
+    jobType: REMOTE_RUNNER_JOB_KIND.ANALYSIS,
+    sourceMode: typeof preparedBatch.sourceMode === 'string' ? preparedBatch.sourceMode : '',
     sourceCount: preparedBatch.preparedSources.length,
-    skippedCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0
+    skippedCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0,
+    transferPreview,
   });
 
   return {
@@ -20070,26 +20742,76 @@ async function runRemoteAnalysis(options = {}) {
     targetSource: targetResolution.targetRunnerSource || '',
     sourceMode: typeof preparedBatch.sourceMode === 'string' ? preparedBatch.sourceMode : 'tab_extract',
     preparedSourceCount: preparedBatch.preparedSources.length,
-    skippedSourceCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0
+    skippedSourceCount: Array.isArray(preparedBatch.skipped) ? preparedBatch.skipped.length : 0,
+    transferPreview
   };
 }
 
 function getAnalysisProcessQueueSnapshot() {
+  const queueLimit = Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1);
   return {
-    active: analysisProcessQueueActiveCount,
+    active: analysisProcessQueueActiveSlots.size,
     pending: analysisProcessQueuePending.length,
-    limit: Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1
+    limit: queueLimit
   };
+}
+
+function allocateAnalysisProcessQueueSlot(limit) {
+  const safeLimit = Math.max(1, Number.isInteger(limit) ? limit : 1);
+  for (let slotId = 1; slotId <= safeLimit; slotId += 1) {
+    if (!analysisProcessQueueActiveSlots.has(slotId)) return slotId;
+  }
+  return null;
+}
+
+async function syncQueuedAnalysisProcessRecords() {
+  const queueTotal = analysisProcessQueuePending.length;
+  const syncTimestamp = Date.now();
+  const queueLimit = Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1);
+  for (let index = 0; index < analysisProcessQueuePending.length; index += 1) {
+    const entry = analysisProcessQueuePending[index];
+    const processId = typeof entry?.processId === 'string' ? entry.processId.trim() : '';
+    if (!processId) continue;
+    await upsertProcess(processId, {
+      status: 'queued',
+      queueState: 'pending',
+      queuePosition: index + 1,
+      queueTotal,
+      queueLimit,
+      statusText: 'W kolejce do uruchomienia',
+      needsAction: false,
+      timestamp: syncTimestamp
+    });
+  }
+}
+
+function scheduleQueuedAnalysisProcessRecordSync() {
+  analysisProcessQueueRecordSync = analysisProcessQueueRecordSync
+    .then(() => syncQueuedAnalysisProcessRecords())
+    .catch((error) => {
+      console.warn('[process-queue] queued record sync failed:', error?.message || String(error));
+    });
+  return analysisProcessQueueRecordSync;
 }
 
 function pumpAnalysisProcessQueue() {
   const queueLimit = Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1);
-  while (analysisProcessQueueActiveCount < queueLimit && analysisProcessQueuePending.length > 0) {
+  while (analysisProcessQueueActiveSlots.size < queueLimit && analysisProcessQueuePending.length > 0) {
     const entry = analysisProcessQueuePending.shift();
     if (!entry || typeof entry.runner !== 'function') continue;
 
-    analysisProcessQueueActiveCount += 1;
-    const slotId = analysisProcessQueueActiveCount;
+    const slotId = allocateAnalysisProcessQueueSlot(queueLimit);
+    if (!Number.isInteger(slotId)) {
+      analysisProcessQueuePending.unshift(entry);
+      break;
+    }
+    analysisProcessQueueActiveSlots.set(slotId, {
+      queueId: entry.queueId,
+      processId: entry.processId,
+      analysisType: entry.analysisType,
+      title: entry.title,
+      startedAt: Date.now()
+    });
     console.log('[process-queue] start', {
       queueId: entry.queueId,
       analysisType: entry.analysisType,
@@ -20097,18 +20819,34 @@ function pumpAnalysisProcessQueue() {
       slotId,
       ...getAnalysisProcessQueueSnapshot()
     });
+    if (typeof entry.processId === 'string' && entry.processId.trim()) {
+      void upsertProcess(entry.processId.trim(), {
+        status: 'starting',
+        queueSlot: slotId,
+        queueLimit,
+        queueAssignedAt: Date.now(),
+        statusText: `Przydzielono slot ${slotId}/${queueLimit}`,
+        needsAction: false,
+        timestamp: Date.now()
+      }).catch((error) => {
+        console.warn('[process-queue] active slot sync failed:', error?.message || String(error));
+      });
+    }
+    void scheduleQueuedAnalysisProcessRecordSync();
 
     Promise.resolve()
       .then(() => entry.runner(slotId))
       .then(entry.resolve, entry.reject)
       .finally(() => {
-        analysisProcessQueueActiveCount = Math.max(0, analysisProcessQueueActiveCount - 1);
+        analysisProcessQueueActiveSlots.delete(slotId);
         console.log('[process-queue] finish', {
           queueId: entry.queueId,
           analysisType: entry.analysisType,
           title: entry.title,
+          slotId,
           ...getAnalysisProcessQueueSnapshot()
         });
+        void scheduleQueuedAnalysisProcessRecordSync();
         pumpAnalysisProcessQueue();
       });
   }
@@ -20120,9 +20858,11 @@ function enqueueAnalysisProcessTask(runner, options = {}) {
   }
 
   const queueId = `apq-${Date.now()}-${analysisProcessQueueSequence += 1}`;
+  const processId = typeof options?.processId === 'string' ? options.processId.trim() : '';
   return new Promise((resolve, reject) => {
     analysisProcessQueuePending.push({
       queueId,
+      processId,
       runner,
       resolve,
       reject,
@@ -20135,6 +20875,7 @@ function enqueueAnalysisProcessTask(runner, options = {}) {
       title: typeof options?.title === 'string' ? options.title : '',
       ...getAnalysisProcessQueueSnapshot()
     });
+    void scheduleQueuedAnalysisProcessRecordSync();
     pumpAnalysisProcessQueue();
   });
 }
@@ -20148,21 +20889,67 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
   const invocationWindowId = Number.isInteger(options?.invocationWindowId)
     ? options.invocationWindowId
     : null;
+  const processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
   console.log(`[${analysisType}] Dodaję ${tabs.length} artykułów do kolejki procesów`, {
     requested: tabs.length,
     ...getAnalysisProcessQueueSnapshot()
   });
 
-  const runSingleProcess = async (tab, index, slotId) => {
-    const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+  const queuedDescriptors = tabs.map((tab, index) => ({
+    tab,
+    index,
+    processId: `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    initialTitle: tab?.title || 'Bez tytulu'
+  }));
+
+  await Promise.all(queuedDescriptors.map(async ({ tab, processId, initialTitle }) => {
+    const sourceWindowId = Number.isInteger(tab?.windowId)
+      ? tab.windowId
+      : (Number.isInteger(options?.sourceWindowId) ? options.sourceWindowId : null);
+    await upsertProcess(processId, {
+      title: initialTitle,
+      analysisType,
+      status: 'queued',
+      queueState: 'pending',
+      queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
+      statusText: 'W kolejce do uruchomienia',
+      currentPrompt: 0,
+      totalPrompts: processTotalPrompts,
+      needsAction: false,
+      startedAt: Date.now(),
+      timestamp: Date.now(),
+      sourceUrl: typeof tab?.url === 'string' ? tab.url : '',
+      ...(invocationWindowId !== null ? { invocationWindowId } : {}),
+      ...(sourceWindowId !== null ? { sourceWindowId } : {})
+    });
+  }));
+
+  const runSingleProcess = async (tab, index, slotId, processId) => {
     let processTitle = tab?.title || 'Bez tytulu';
-    let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
+    let processTotalPromptsForRun = Array.isArray(promptChain) ? promptChain.length : 0;
     const sourceWindowId = Number.isInteger(tab?.windowId)
       ? tab.windowId
       : (Number.isInteger(options?.sourceWindowId) ? options.sourceWindowId : null);
     try {
       console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] [slot ${slotId}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
       console.log(`URL: ${tab.url}`);
+
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType,
+        status: 'starting',
+        queueSlot: slotId,
+        queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
+        queueAssignedAt: Date.now(),
+        statusText: 'Przygotowanie procesu',
+        currentPrompt: 0,
+        totalPrompts: processTotalPromptsForRun,
+        needsAction: false,
+        sourceUrl: typeof tab?.url === 'string' ? tab.url : '',
+        ...(invocationWindowId !== null ? { invocationWindowId } : {}),
+        ...(sourceWindowId !== null ? { sourceWindowId } : {}),
+        timestamp: Date.now()
+      });
 
       // Lekko rozsuń start aktywnych slotów, ale bez blokowania kolejki globalnej.
       const startDelayMs = Math.max(0, (slotId - 1) * 300);
@@ -20197,21 +20984,23 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       
       // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
       const restOfPrompts = promptChain.slice(1);
-      processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
-      const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
+      processTotalPromptsForRun = Array.isArray(promptChain) ? promptChain.length : 0;
+      const processPromptOffset = processTotalPromptsForRun > 0 ? 1 : 0;
       await upsertProcess(processId, {
         title,
         analysisType,
         status: 'starting',
+        queueSlot: slotId,
+        queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
+        queueAssignedAt: Date.now(),
         statusText: 'Przygotowanie procesu',
         currentPrompt: 0,
-        totalPrompts: processTotalPrompts,
+        totalPrompts: processTotalPromptsForRun,
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
         sourceUrl: processSourceUrl,
         sourceName,
-        chatUrl,
         ...(typeof tab?.remoteSourceName === 'string' && tab.remoteSourceName.trim()
           ? { remoteSourceName: tab.remoteSourceName.trim() }
           : {}),
@@ -20272,6 +21061,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
 
       await upsertProcess(processId, {
         status: 'running',
+        queueSlot: slotId,
+        queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
         statusText: 'Okno ChatGPT gotowe',
         windowId: window.id,
         tabId: chatTabId,
@@ -20340,14 +21131,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             onRetry: async ({ attempt, maxAttempts, errorText }) => {
               await upsertProcess(processId, {
                 title: processTitle,
-                analysisType,
-                status: 'running',
-                needsAction: false,
-                statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
-                reason: 'execute_script_retry',
-                error: errorText || '',
-                timestamp: Date.now()
-              });
+            analysisType,
+            status: 'running',
+            needsAction: false,
+            statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
+            reason: 'execute_script_retry',
+            error: errorText || '',
+            timestamp: Date.now()
+          });
             }
           });
           console.log(`✅ executeScript zakończony pomyślnie`);
@@ -20419,7 +21210,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           status: 'running',
           needsAction: false,
           currentPrompt: recoveryCurrentPrompt,
-          totalPrompts: processTotalPrompts,
+          totalPrompts: processTotalPromptsForRun,
           statusText: `Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
           reason: recoveryReason,
           autoRecovery: {
@@ -20788,12 +21579,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           : {}),
         ...(finalStatus === 'completed'
           ? {
-            currentPrompt: processTotalPrompts,
-            totalPrompts: processTotalPrompts,
-            ...(processTotalPrompts > 0
+            currentPrompt: processTotalPromptsForRun,
+            totalPrompts: processTotalPromptsForRun,
+            ...(processTotalPromptsForRun > 0
               ? {
-                stageIndex: processTotalPrompts - 1,
-                stageName: `Prompt ${processTotalPrompts}`
+                stageIndex: processTotalPromptsForRun - 1,
+                stageName: `Prompt ${processTotalPromptsForRun}`
               }
               : {
                 stageName: 'Start'
@@ -20836,11 +21627,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     }
   };
 
-  const processingPromises = tabs.map((tab, index) => enqueueAnalysisProcessTask(
-    (slotId) => runSingleProcess(tab, index, slotId),
+  const processingPromises = queuedDescriptors.map(({ tab, index, processId, initialTitle }) => enqueueAnalysisProcessTask(
+    (slotId) => runSingleProcess(tab, index, slotId, processId),
     {
       analysisType,
-      title: tab?.title || 'Bez tytulu'
+      title: initialTitle,
+      processId
     }
   ));
   const results = await Promise.allSettled(processingPromises);
@@ -22220,9 +23012,7 @@ async function injectToChat(
     const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
     const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
     // Keep interface-ready wait aligned with response wait; long "thinking" must not fail early.
-    const interfaceReadyWaitMs = Number.isFinite(responseWaitMs) && responseWaitMs > 0
-      ? Math.max(15000, responseWaitMs)
-      : WAIT_FOR_RESPONSE_MS;
+    const interfaceReadyWaitMs = WAIT_FOR_INTERFACE_READY_MS;
     const manualPdfAttachment = (() => {
       const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
         ? manualPdfAttachmentContext
@@ -23730,6 +24520,243 @@ async function injectToChat(
       return normalizeDomText(parts.join(' '));
     }
 
+    function getComposerEditorDescriptor(element) {
+      if (!(element instanceof HTMLElement)) return 'invalid-editor';
+      const parts = [
+        String(element.tagName || '').toLowerCase(),
+        element.id ? `#${element.id}` : '',
+        element.getAttribute('data-testid') ? `[data-testid="${element.getAttribute('data-testid')}"]` : '',
+        element.getAttribute('role') ? `[role="${element.getAttribute('role')}"]` : '',
+        element.getAttribute('placeholder') ? `placeholder="${element.getAttribute('placeholder')}"` : '',
+        element.getAttribute('aria-label') ? `aria-label="${element.getAttribute('aria-label')}"` : ''
+      ].filter(Boolean);
+      return parts.join(' ');
+    }
+
+    function scoreComposerEditorCandidate(element) {
+      if (!(element instanceof HTMLElement)) return Number.NEGATIVE_INFINITY;
+      let score = 0;
+      const tag = String(element.tagName || '').toLowerCase();
+      const testId = normalizeDomText(element.getAttribute('data-testid') || '');
+      const id = normalizeDomText(element.id || '');
+      const className = normalizeDomText(element.className || '');
+      const placeholder = normalizeDomText(element.getAttribute('placeholder') || '');
+      const ariaLabel = normalizeDomText(element.getAttribute('aria-label') || '');
+      const role = normalizeDomText(element.getAttribute('role') || '');
+      const matchText = getElementMatchText(element);
+
+      if (tag === 'textarea') score += 140;
+      if (tag === 'input') score -= 60;
+      if (role === 'textbox') score += 100;
+      if (element.matches('textarea#prompt-textarea, #prompt-textarea')) score += 560;
+      if (testId === 'composer-input') score += 560;
+      if (testId.includes('composer')) score += 260;
+      if (testId.includes('prompt')) score += 200;
+      if (id.includes('composer')) score += 200;
+      if (id.includes('prompt')) score += 160;
+      if (className.includes('composer')) score += 150;
+      if (className.includes('prompt')) score += 90;
+      if (placeholder.includes('ask anything') || ariaLabel.includes('ask anything') || matchText.includes('ask anything')) {
+        score += 260;
+      }
+      if (placeholder.includes('message') || ariaLabel.includes('message')) score += 80;
+      if (element.closest('form')) score += 220;
+      if (element.closest('[data-testid*="composer" i]')) score += 220;
+      if (element.closest('[id*="composer" i]')) score += 180;
+      if (element.closest('footer')) score += 120;
+      if (element.closest('main')) score += 30;
+      if (element.closest('header') || element.closest('nav') || element.closest('aside')) score -= 260;
+      if (element.closest('article') || element.closest('[data-message-author-role]')) score -= 260;
+      if (element.closest('[role="dialog"]')) score -= 80;
+      if (!isElementVisibleForInteraction(element)) score -= 220;
+
+      return score;
+    }
+
+    function isUsableComposerEditorCandidate(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      if (!isElementVisibleForInteraction(element)) return false;
+      const tag = String(element.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input') {
+        if (element.disabled === true || element.readOnly === true) return false;
+      } else {
+        const contenteditable = normalizeDomText(element.getAttribute('contenteditable') || '');
+        if (!(contenteditable === 'true' || contenteditable === 'plaintext-only' || element.isContentEditable)) return false;
+      }
+      return scoreComposerEditorCandidate(element) > 0;
+    }
+
+    function getComposerEditorCandidates() {
+      const selectors = [
+        '#prompt-textarea',
+        'textarea#prompt-textarea',
+        'form #prompt-textarea',
+        '[data-testid="composer-input"][contenteditable="true"]',
+        '[data-testid="composer-input"][contenteditable="plaintext-only"]',
+        '[data-testid="composer-input"]',
+        '[role="textbox"][contenteditable="plaintext-only"]',
+        '[role="textbox"][contenteditable="true"]',
+        'form textarea',
+        'form [contenteditable="plaintext-only"]',
+        'form [role="textbox"][contenteditable="true"]',
+        'footer textarea',
+        'footer [contenteditable="plaintext-only"]',
+        'footer [role="textbox"][contenteditable="true"]',
+        '[contenteditable="plaintext-only"]',
+        'div[contenteditable="true"]',
+        '[contenteditable]'
+      ];
+      const seen = new Set();
+      const collected = [];
+      selectors.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((node) => {
+          if (!(node instanceof HTMLElement)) return;
+          if (seen.has(node)) return;
+          seen.add(node);
+          if (!isUsableComposerEditorCandidate(node)) return;
+          collected.push(node);
+        });
+      });
+      return collected.sort((left, right) => {
+        const scoreDiff = scoreComposerEditorCandidate(right) - scoreComposerEditorCandidate(left);
+        if (scoreDiff !== 0) return scoreDiff;
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        const verticalDiff = Math.round(rightRect.top - leftRect.top);
+        if (verticalDiff !== 0) return verticalDiff;
+        return Math.round(leftRect.left - rightRect.left);
+      });
+    }
+
+    function findPreferredComposerEditor() {
+      const candidates = getComposerEditorCandidates();
+      return candidates.length > 0 ? candidates[0] : null;
+    }
+
+    function isComposerEditorReadyForInput(editor) {
+      if (!(editor instanceof HTMLElement)) return false;
+      const tag = String(editor.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input') {
+        return editor.disabled !== true && editor.readOnly !== true;
+      }
+      const contenteditable = normalizeDomText(editor.getAttribute('contenteditable') || '');
+      return contenteditable === 'true' || contenteditable === 'plaintext-only' || editor.isContentEditable;
+    }
+
+    function getComposerSubmitButtonDescriptor(button) {
+      if (!(button instanceof HTMLElement)) return 'invalid-submit';
+      const parts = [
+        String(button.tagName || '').toLowerCase(),
+        button.id ? `#${button.id}` : '',
+        button.getAttribute('data-testid') ? `[data-testid="${button.getAttribute('data-testid')}"]` : '',
+        button.getAttribute('type') ? `[type="${button.getAttribute('type')}"]` : '',
+        button.getAttribute('aria-label') ? `aria-label="${button.getAttribute('aria-label')}"` : ''
+      ].filter(Boolean);
+      return parts.join(' ');
+    }
+
+    function collectComposerSubmitButtonCandidates(editorNode = null) {
+      const roots = [];
+      const registerRoot = (root) => {
+        if (!root || roots.includes(root)) return;
+        roots.push(root);
+      };
+      if (editorNode instanceof HTMLElement) {
+        registerRoot(editorNode.closest('form'));
+        registerRoot(editorNode.closest('[data-testid*="composer" i]'));
+        registerRoot(editorNode.closest('[id*="composer" i]'));
+        registerRoot(editorNode.closest('footer'));
+      }
+      registerRoot(document);
+
+      const selectors = [
+        'button[data-testid="send-button"]',
+        '#composer-submit-button',
+        'button[type="submit"]',
+        'button[aria-label="Send"]',
+        'button[aria-label*="Send"]',
+        'button[data-testid*="send"]'
+      ];
+      const seen = new Set();
+      const collected = [];
+      roots.forEach((root) => {
+        selectors.forEach((selector) => {
+          root.querySelectorAll(selector).forEach((node) => {
+            if (!(node instanceof HTMLElement)) return;
+            if (seen.has(node)) return;
+            seen.add(node);
+            if (!isElementVisibleForInteraction(node)) return;
+            collected.push(node);
+          });
+        });
+      });
+      return collected;
+    }
+
+    function scoreComposerSubmitButtonCandidate(button, editorNode = null) {
+      if (!(button instanceof HTMLElement)) return Number.NEGATIVE_INFINITY;
+      const text = getElementMatchText(button);
+      const testId = normalizeDomText(button.getAttribute('data-testid') || '');
+      let score = 0;
+
+      if (testId === 'send-button') score += 420;
+      if (button.id === 'composer-submit-button') score += 380;
+      if (button.matches('button[type="submit"]')) score += 220;
+      if (text.includes('send') || text.includes('wyslij') || text.includes('submit')) score += 180;
+      if (
+        text.includes('voice')
+        || text.includes('microphone')
+        || text.includes('record')
+        || text.includes('audio')
+        || text.includes('listen')
+        || text.includes('read aloud')
+      ) {
+        score -= 320;
+      }
+      if (text.includes('stop')) score -= 180;
+      if (!button.disabled) score += 40;
+
+      if (editorNode instanceof HTMLElement) {
+        const editorForm = editorNode.closest('form');
+        const buttonForm = button.closest('form');
+        if (editorForm && buttonForm && editorForm === buttonForm) score += 260;
+        const editorComposer = editorNode.closest('[data-testid*="composer" i]') || editorNode.closest('[id*="composer" i]');
+        const buttonComposer = button.closest('[data-testid*="composer" i]') || button.closest('[id*="composer" i]');
+        if (editorComposer && buttonComposer && editorComposer === buttonComposer) score += 160;
+        const editorFooter = editorNode.closest('footer');
+        const buttonFooter = button.closest('footer');
+        if (editorFooter && buttonFooter && editorFooter === buttonFooter) score += 90;
+      }
+
+      return score;
+    }
+
+    function findPreferredComposerSubmitButton(editorNode = null, options = {}) {
+      const enabledOnly = options?.enabledOnly === true;
+      const candidates = collectComposerSubmitButtonCandidates(editorNode)
+        .sort((left, right) => scoreComposerSubmitButtonCandidate(right, editorNode) - scoreComposerSubmitButtonCandidate(left, editorNode));
+      for (const candidate of candidates) {
+        if (scoreComposerSubmitButtonCandidate(candidate, editorNode) <= 0) continue;
+        if (enabledOnly && candidate.disabled) continue;
+        return candidate;
+      }
+      return null;
+    }
+
+    function hasComposerSubmitContext(editorNode = null) {
+      if (!(editorNode instanceof HTMLElement)) return false;
+      if (findPreferredComposerSubmitButton(editorNode, { enabledOnly: false })) return true;
+      if (
+        editorNode.closest('form')
+        || editorNode.closest('[data-testid*="composer" i]')
+        || editorNode.closest('[id*="composer" i]')
+        || editorNode.closest('footer')
+      ) {
+        return true;
+      }
+      return editorNode.matches('#prompt-textarea, [data-testid="composer-input"]');
+    }
+
     function containsWord(text, word) {
       const normalizedText = normalizeDomText(text);
       const normalizedWord = normalizeDomText(word);
@@ -24961,9 +25988,8 @@ async function injectToChat(
     }
     
     // 6. Editor disabled (fallback - mniej pewny)
-    const editor = document.querySelector('[role="textbox"]') ||
-                  document.querySelector('[contenteditable]');
-    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+    const editor = findPreferredComposerEditor();
+    const editorDisabled = editor && !isComposerEditorReadyForInput(editor);
     if (editorDisabled) {
       return { generating: true, reason: 'editorDisabled', element: editor };
     }
@@ -25054,14 +26080,9 @@ async function injectToChat(
         return false;
       }
 
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]') ||
-                     document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
+      const editor = findPreferredComposerEditor();
 
-      const sendButton = document.querySelector('[data-testid="send-button"]') ||
-                        document.querySelector('#composer-submit-button') ||
-                        document.querySelector('button[aria-label="Send"]') ||
-                        document.querySelector('button[aria-label*="Send"]');
+      const sendButton = findPreferredComposerSubmitButton(editor, { enabledOnly: false });
 
       const genStatus = isGenerating();
 
@@ -25173,6 +26194,15 @@ async function injectToChat(
     console.log("🔍 Sprawdzam połączenie z ChatGPT...");
     
     try {
+      const href = String(window.location?.href || '');
+      const hostname = String(window.location?.hostname || '');
+      if (!/(\.|^)chatgpt\.com$/i.test(hostname)) {
+        return { healthy: false, error: `Nieprawidlowy host: ${hostname || 'unknown'}` };
+      }
+      if (href.startsWith('chrome-error://') || href.startsWith('edge-error://')) {
+        return { healthy: false, error: `Karta bledu przegladarki: ${href}` };
+      }
+
       // Sprawdź czy są błędy w konsoli (HTTP2, 404, itp.)
       const hasConnectionErrors = await checkForConnectionErrors();
       if (hasConnectionErrors) {
@@ -25180,10 +26210,15 @@ async function injectToChat(
       }
       
       // Sprawdź czy interfejs ChatGPT jest responsywny
-      const editor = document.querySelector('[role="textbox"]') || 
-                   document.querySelector('[contenteditable]');
+      const editor = findPreferredComposerEditor();
       if (!editor) {
         return { healthy: false, error: "Nie znaleziono edytora ChatGPT" };
+      }
+      if (!isComposerEditorReadyForInput(editor)) {
+        return { healthy: false, error: "Composer istnieje, ale nie jest gotowy do wpisywania" };
+      }
+      if (!hasComposerSubmitContext(editor)) {
+        return { healthy: false, error: "Wykryty textbox nie wyglada na prawdziwy composer ChatGPT" };
       }
       
       // Sprawdź czy nie ma komunikatów o błędach na stronie
@@ -25564,9 +26599,8 @@ async function injectToChat(
     if (isNewConversation) {
       console.log("✅ Nowa konwersacja - pomijam czekanie na gotowość (nie powinno być generowania)");
       // Sprawdź tylko czy editor istnieje i jest enabled
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]');
-      if (editor) {
+      const editor = findPreferredComposerEditor();
+      if (editor && isComposerEditorReadyForInput(editor) && hasComposerSubmitContext(editor)) {
         console.log("✅ Editor gotowy - kontynuuję natychmiast");
         return true;
       } else {
@@ -25611,8 +26645,7 @@ async function injectToChat(
     while (true) {
       if (shouldStopNow()) return false;
       // Sprawdź wszystkie elementy interfejsu
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]');
+      const editor = findPreferredComposerEditor();
       
       // POPRAWKA: Użyj isGenerating() zamiast tylko sprawdzania stopButton
       const genStatus = isGenerating();
@@ -25620,7 +26653,8 @@ async function injectToChat(
       // Interface jest gotowy gdy:
       // 1. BRAK wskaźników generowania (isGenerating() == false)
       // 2. Editor ISTNIEJE i jest ENABLED
-      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const editorReady = editor && isComposerEditorReadyForInput(editor);
+      const hasSubmitContext = editor && hasComposerSubmitContext(editor);
       const noGeneration = !genStatus.generating;
       const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
@@ -25644,7 +26678,7 @@ async function injectToChat(
         readyIdleSince = Date.now();
       }
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const isReady = noGeneration && editorReady && textStable && !hasProgressText;
+      const isReady = noGeneration && editorReady && hasSubmitContext && textStable && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -25679,6 +26713,7 @@ async function injectToChat(
           reason: genStatus.reason,
           reasonDesc: reason,
           editorReady: editorReady,
+          hasSubmitContext: hasSubmitContext,
           textStable: textStable,
           hasProgressText: hasProgressText,
           consecutiveReady: consecutiveReady,
@@ -25939,46 +26974,6 @@ async function injectToChat(
     }
     console.log("✅ Połączenie z ChatGPT OK - wysyłam prompt");
     
-    function isVisibleEditorCandidate(element) {
-      if (!element || !(element instanceof Element)) return false;
-      const style = window.getComputedStyle(element);
-      if (!style) return false;
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    }
-
-    function isUsableEditorCandidate(element) {
-      if (!isVisibleEditorCandidate(element)) return false;
-      const tag = String(element.tagName || '').toLowerCase();
-      if (tag === 'textarea' || tag === 'input') {
-        return element.disabled !== true && element.readOnly !== true;
-      }
-      const contenteditable = element.getAttribute('contenteditable');
-      return contenteditable === 'true' || element.isContentEditable;
-    }
-
-    function collectEditorCandidates() {
-      const selectors = [
-        'textarea#prompt-textarea',
-        '[role="textbox"][contenteditable="true"]',
-        'div[contenteditable="true"]',
-        '[data-testid="composer-input"]',
-        '[contenteditable]'
-      ];
-      const seen = new Set();
-      const collected = [];
-      selectors.forEach((selector) => {
-        const nodes = document.querySelectorAll(selector);
-        nodes.forEach((node) => {
-          if (seen.has(node)) return;
-          seen.add(node);
-          collected.push(node);
-        });
-      });
-      return collected;
-    }
-
     function clearContentEditableEditor(editorNode) {
       try {
         const selection = window.getSelection();
@@ -26007,190 +27002,410 @@ async function injectToChat(
       return domText.replace(/\r\n?/g, '\n');
     }
 
+    function clearEditorCandidate(editorNode, textInputMode = false) {
+      if (!(editorNode instanceof HTMLElement)) return;
+      if (textInputMode) {
+        try {
+          const valueDescriptor = editorNode.tagName.toLowerCase() === 'textarea'
+            ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+            : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
+            ? valueDescriptor.set
+            : null;
+          if (nativeSetter) {
+            nativeSetter.call(editorNode, '');
+          } else {
+            editorNode.value = '';
+          }
+        } catch (_) {
+          editorNode.value = '';
+        }
+        editorNode.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+        editorNode.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      clearContentEditableEditor(editorNode);
+    }
+
+    async function waitForEnabledSubmitButton(editorNode, maxButtonWait = WAIT_FOR_SEND_ARM_MS) {
+      let waitTime = 0;
+      let lastSeenButton = null;
+      while (waitTime < maxButtonWait) {
+        if (shouldStopNow()) return { button: null, waitTime, aborted: true };
+        const enabledButton = findPreferredComposerSubmitButton(editorNode, { enabledOnly: true });
+        if (enabledButton) {
+          return { button: enabledButton, waitTime, aborted: false };
+        }
+        lastSeenButton = findPreferredComposerSubmitButton(editorNode, { enabledOnly: false }) || lastSeenButton;
+        if (waitTime > 0 && waitTime % 2000 === 0) {
+          console.log(`⏳ Czekam na przycisk Send dla ${getComposerEditorDescriptor(editorNode)}... (${waitTime}ms / ${maxButtonWait}ms)`, {
+            lastSeenButton: lastSeenButton ? getComposerSubmitButtonDescriptor(lastSeenButton) : 'none'
+          });
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+        waitTime += 100;
+      }
+      return { button: lastSeenButton, waitTime, aborted: false };
+    }
+
+    async function tryPasteIntoContentEditable(editorNode, text) {
+      if (!(editorNode instanceof HTMLElement)) {
+        return { success: false, method: 'invalid-editor', text: '' };
+      }
+
+      const dataTransfer = typeof DataTransfer === 'function' ? new DataTransfer() : null;
+      if (dataTransfer) {
+        try {
+          dataTransfer.setData('text/plain', text);
+          dataTransfer.setData('text', text);
+        } catch (_) {
+          // Best effort only.
+        }
+      }
+
+      let beforePaste = null;
+      try {
+        beforePaste = new InputEvent('beforeinput', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertFromPaste',
+          data: text
+        });
+      } catch (_) {
+        beforePaste = null;
+      }
+      if (beforePaste && dataTransfer) {
+        try {
+          Object.defineProperty(beforePaste, 'dataTransfer', {
+            configurable: true,
+            value: dataTransfer
+          });
+        } catch (_) {
+          // Ignore defineProperty failures.
+        }
+      }
+
+      let pasteEvent = null;
+      try {
+        pasteEvent = new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer
+        });
+      } catch (_) {
+        pasteEvent = null;
+      }
+      if (pasteEvent && dataTransfer && !pasteEvent.clipboardData) {
+        try {
+          Object.defineProperty(pasteEvent, 'clipboardData', {
+            configurable: true,
+            value: dataTransfer
+          });
+        } catch (_) {
+          // Ignore defineProperty failures.
+        }
+      }
+
+      if (beforePaste) {
+        editorNode.dispatchEvent(beforePaste);
+      }
+      if (pasteEvent) {
+        editorNode.dispatchEvent(pasteEvent);
+      }
+      editorNode.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertFromPaste',
+        data: text
+      }));
+      editorNode.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 160));
+
+      return {
+        success: compactText(getEditorCurrentText(editorNode, false)).length > 0,
+        method: 'paste-event',
+        text: getEditorCurrentText(editorNode, false)
+      };
+    }
+
+    async function dispatchSubmitAction(editorNode, submitButtonNode = null, submitFormNode = null) {
+      if (submitButtonNode instanceof HTMLElement && submitButtonNode.disabled !== true) {
+        try {
+          await activateElement(submitButtonNode);
+          return 'activateElement';
+        } catch (error) {
+          console.warn('⚠️ activateElement(send) failed:', error);
+        }
+
+        try {
+          submitButtonNode.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
+          submitButtonNode.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          submitButtonNode.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
+          submitButtonNode.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        } catch (_) {
+          // Ignore pointer synthesis issues.
+        }
+
+        try {
+          submitButtonNode.click();
+          return 'click';
+        } catch (error) {
+          console.warn('⚠️ click(send) failed:', error);
+        }
+      }
+
+      if (submitFormNode && typeof submitFormNode.requestSubmit === 'function') {
+        try {
+          if (submitButtonNode instanceof HTMLElement) {
+            submitFormNode.requestSubmit(submitButtonNode);
+          } else {
+            submitFormNode.requestSubmit();
+          }
+          return 'requestSubmit';
+        } catch (error) {
+          console.warn('⚠️ requestSubmit(send) failed:', error);
+        }
+      }
+
+      if (editorNode instanceof HTMLElement) {
+        try {
+          editorNode.focus({ preventScroll: true });
+        } catch (_) {
+          // Best effort only.
+        }
+        const enterInit = {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        };
+        editorNode.dispatchEvent(new KeyboardEvent('keydown', enterInit));
+        editorNode.dispatchEvent(new KeyboardEvent('keypress', enterInit));
+        editorNode.dispatchEvent(new KeyboardEvent('keyup', enterInit));
+        return 'keyboard-enter';
+      }
+
+      return 'none';
+    }
+
     // KROK 2: Szukaj edytora
-    console.log("🔍 Szukam edytora contenteditable...");
-    
-    // ChatGPT używa contenteditable div, NIE textarea!
+    console.log("🔍 Szukam composera ChatGPT...");
+
     let editor = null;
+    let submitButton = null;
+    let submitForm = null;
+    let isTextInputEditor = false;
     const maxWait = 15000; // Zwiększono z 10s na 15s
     const startTime = Date.now();
-    
+    let editorCandidates = [];
+
     while (Date.now() - startTime < maxWait) {
       if (shouldStopNow()) return false;
-      const candidates = collectEditorCandidates();
-      editor = candidates.find((node) => isUsableEditorCandidate(node))
-        || candidates.find((node) => isVisibleEditorCandidate(node))
-        || candidates[0]
-        || null;
-      if (editor) {
+      editorCandidates = getComposerEditorCandidates();
+      if (editorCandidates.length > 0) {
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    
-    if (!editor) {
-      console.error("❌ Nie znaleziono edytora contenteditable po " + maxWait + "ms");
+
+    if (editorCandidates.length === 0) {
+      console.error("❌ Nie znaleziono composera ChatGPT po " + maxWait + "ms");
       return false;
     }
-    
-    console.log("✓ Znaleziono edytor");
+
+    console.log('✓ Znaleziono kandydatów composera', editorCandidates.slice(0, 5).map((node) => ({
+      descriptor: getComposerEditorDescriptor(node),
+      score: scoreComposerEditorCandidate(node)
+    })));
     const normalizedPromptText = typeof promptText === 'string'
       ? promptText.replace(/\r\n?/g, '\n')
       : '';
-    const editorTagName = String(editor.tagName || '').toLowerCase();
-    const isTextInputEditor = editorTagName === 'textarea' || editorTagName === 'input';
-    
-    // Focus i wyczyść - ulepszona wersja
-    editor.focus();
-    await new Promise(resolve => setTimeout(resolve, 300));
+    updateCounter(counter, promptIndex, promptTotal, 'Wstawiam prompt...');
 
-    if (isTextInputEditor) {
-      // ChatGPT często używa textarea sterowanego przez React - użyj natywnego setter-a value.
-      try {
-        const valueDescriptor = editorTagName === 'textarea'
-          ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
-          : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
-          ? valueDescriptor.set
-          : null;
-        if (nativeSetter) {
-          nativeSetter.call(editor, normalizedPromptText);
-        } else {
-          editor.value = normalizedPromptText;
-        }
-      } catch (e) {
-        console.warn("⚠️ Fallback ustawiania value:", e);
-        editor.value = normalizedPromptText;
-      }
-
-      try {
-        if (typeof editor.setSelectionRange === 'function') {
-          const caretPos = normalizedPromptText.length;
-          editor.setSelectionRange(caretPos, caretPos);
-        }
-      } catch (e) {
-        console.warn("⚠️ Nie udało się ustawić kursora:", e);
-      }
-
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
-      editor.dispatchEvent(new Event('change', { bubbles: true }));
-    } else {
-      const newlineExpected = normalizedPromptText.includes('\n');
-      clearContentEditableEditor(editor);
-      await new Promise(resolve => setTimeout(resolve, 120));
-
-      let insertedByCommand = false;
-      if (typeof document.execCommand === 'function') {
-        try {
-          insertedByCommand = document.execCommand('insertText', false, normalizedPromptText);
-        } catch (e) {
-          console.warn("⚠️ insertText failed:", e);
-        }
-      }
-
-      let insertedText = getEditorCurrentText(editor, false);
-      let newlinePreserved = !newlineExpected || insertedText.includes('\n');
-
-      if (!insertedByCommand || !newlinePreserved) {
-        clearContentEditableEditor(editor);
-        await new Promise(resolve => setTimeout(resolve, 80));
-        const lines = normalizedPromptText.split('\n');
-        lines.forEach((line, index) => {
-          if (typeof document.execCommand === 'function' && line.length > 0) {
-            document.execCommand('insertText', false, line);
-          } else if (line.length > 0) {
-            editor.appendChild(document.createTextNode(line));
-          }
-          if (index < lines.length - 1) {
-            const lineBreakInserted = typeof document.execCommand === 'function'
-              ? document.execCommand('insertLineBreak', false, null)
-              : false;
-            if (!lineBreakInserted) {
-              editor.appendChild(document.createElement('br'));
-            }
-          }
-        });
-
-        insertedText = getEditorCurrentText(editor, false);
-        newlinePreserved = !newlineExpected || insertedText.includes('\n');
-      }
-
-      if (!newlinePreserved) {
-        clearContentEditableEditor(editor);
-        const fragment = document.createDocumentFragment();
-        const lines = normalizedPromptText.split('\n');
-        lines.forEach((line, index) => {
-          if (index > 0) fragment.appendChild(document.createElement('br'));
-          fragment.appendChild(document.createTextNode(line));
-        });
-        editor.appendChild(fragment);
-      }
-
-      // Przesuń kursor na koniec
-      try {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      } catch (e) {
-        console.warn("⚠️ Nie udało się przesunąć kursora:", e);
-      }
-
-      // Triggeruj więcej eventów dla pewności
-      editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText' }));
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-      editor.dispatchEvent(new Event('change', { bubbles: true }));
-      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
-    }
-
-    const postInsertText = getEditorCurrentText(editor, isTextInputEditor);
-    const postInsertLines = postInsertText.split('\n').length;
-    console.log(`✓ Tekst wstawiony (${normalizedPromptText.length} znaków, linie=${postInsertLines}): "${normalizedPromptText.substring(0, 50)}..."`);
-    
-    // Czekaj aż przycisk Send będzie enabled - zwiększony timeout
-    let submitButton = null;
-    let waitTime = 0;
-    const maxButtonWait = 10000; // Zwiększono z 3s na 10s
-    
-    while (waitTime < maxButtonWait) {
+    const editorCandidatesToTry = editorCandidates.slice(0, 5);
+    for (const candidate of editorCandidatesToTry) {
       if (shouldStopNow()) return false;
-      submitButton = document.querySelector('[data-testid="send-button"]') ||
-                     document.querySelector('#composer-submit-button') ||
-                     document.querySelector('button[aria-label="Send"]') ||
-                     document.querySelector('button[aria-label*="Send"]') ||
-                     document.querySelector('button[data-testid*="send"]');
-      
-      if (submitButton && !submitButton.disabled) {
-        console.log(`✅ Przycisk Send gotowy (${waitTime}ms)`);
+      const candidateTagName = String(candidate.tagName || '').toLowerCase();
+      const candidateIsTextInput = candidateTagName === 'textarea' || candidateTagName === 'input';
+      console.log(`🔍 Próba composera: ${getComposerEditorDescriptor(candidate)}`, {
+        score: scoreComposerEditorCandidate(candidate),
+        textInput: candidateIsTextInput
+      });
+
+      candidate.focus();
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      if (candidateIsTextInput) {
+        try {
+          const valueDescriptor = candidateTagName === 'textarea'
+            ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+            : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
+            ? valueDescriptor.set
+            : null;
+          if (nativeSetter) {
+            nativeSetter.call(candidate, normalizedPromptText);
+          } else {
+            candidate.value = normalizedPromptText;
+          }
+        } catch (e) {
+          console.warn("⚠️ Fallback ustawiania value:", e);
+          candidate.value = normalizedPromptText;
+        }
+
+        try {
+          if (typeof candidate.setSelectionRange === 'function') {
+            const caretPos = normalizedPromptText.length;
+            candidate.setSelectionRange(caretPos, caretPos);
+          }
+        } catch (e) {
+          console.warn("⚠️ Nie udało się ustawić kursora:", e);
+        }
+
+        candidate.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
+        candidate.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        const newlineExpected = normalizedPromptText.includes('\n');
+        clearContentEditableEditor(candidate);
+        await new Promise(resolve => setTimeout(resolve, 120));
+
+        let insertedByCommand = false;
+        if (typeof document.execCommand === 'function') {
+          try {
+            insertedByCommand = document.execCommand('insertText', false, normalizedPromptText);
+          } catch (e) {
+            console.warn("⚠️ insertText failed:", e);
+          }
+        }
+
+        let insertedText = getEditorCurrentText(candidate, false);
+        let newlinePreserved = !newlineExpected || insertedText.includes('\n');
+
+        if (!insertedByCommand || !newlinePreserved || compactText(insertedText).length === 0) {
+          clearContentEditableEditor(candidate);
+          await new Promise(resolve => setTimeout(resolve, 80));
+          const pasteResult = await tryPasteIntoContentEditable(candidate, normalizedPromptText);
+          insertedText = pasteResult.text || getEditorCurrentText(candidate, false);
+          newlinePreserved = !newlineExpected || insertedText.includes('\n');
+          if (pasteResult.success) {
+            insertedByCommand = true;
+          }
+        }
+
+        if (!insertedByCommand || !newlinePreserved) {
+          clearContentEditableEditor(candidate);
+          await new Promise(resolve => setTimeout(resolve, 80));
+          const lines = normalizedPromptText.split('\n');
+          lines.forEach((line, index) => {
+            if (typeof document.execCommand === 'function' && line.length > 0) {
+              document.execCommand('insertText', false, line);
+            } else if (line.length > 0) {
+              candidate.appendChild(document.createTextNode(line));
+            }
+            if (index < lines.length - 1) {
+              const lineBreakInserted = typeof document.execCommand === 'function'
+                ? document.execCommand('insertLineBreak', false, null)
+                : false;
+              if (!lineBreakInserted) {
+                candidate.appendChild(document.createElement('br'));
+              }
+            }
+          });
+
+          insertedText = getEditorCurrentText(candidate, false);
+          newlinePreserved = !newlineExpected || insertedText.includes('\n');
+        }
+
+        if (!newlinePreserved) {
+          clearContentEditableEditor(candidate);
+          const fragment = document.createDocumentFragment();
+          const lines = normalizedPromptText.split('\n');
+          lines.forEach((line, index) => {
+            if (index > 0) fragment.appendChild(document.createElement('br'));
+            fragment.appendChild(document.createTextNode(line));
+          });
+          candidate.appendChild(fragment);
+        }
+
+        try {
+          const selection = window.getSelection();
+          const range = document.createRange();
+          range.selectNodeContents(candidate);
+          range.collapse(false);
+          selection.removeAllRanges();
+          selection.addRange(range);
+        } catch (e) {
+          console.warn("⚠️ Nie udało się przesunąć kursora:", e);
+        }
+
+        candidate.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText' }));
+        candidate.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
+        candidate.dispatchEvent(new Event('change', { bubbles: true }));
+        candidate.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+      }
+
+      const postInsertText = getEditorCurrentText(candidate, candidateIsTextInput);
+      const compactInsertedText = compactText(postInsertText);
+      const hasInsertedText = compactInsertedText.length > 0;
+      const postInsertLines = postInsertText.split('\n').length;
+      console.log(`✓ Tekst wstawiony do ${getComposerEditorDescriptor(candidate)} (${normalizedPromptText.length} znaków, linie=${postInsertLines}, inserted=${compactInsertedText.length})`);
+
+      if (!hasInsertedText) {
+        console.warn(`⚠️ Kandydat composera nie przyjął tekstu: ${getComposerEditorDescriptor(candidate)}`);
+        clearEditorCandidate(candidate, candidateIsTextInput);
+        continue;
+      }
+
+      updateCounter(counter, promptIndex, promptTotal, 'Uzbrajam wysylke...');
+      const buttonWaitResult = await waitForEnabledSubmitButton(candidate, WAIT_FOR_SEND_ARM_MS);
+      if (buttonWaitResult?.aborted) return false;
+      const fallbackForm = candidate.closest('form');
+      if (buttonWaitResult?.button && !buttonWaitResult.button.disabled) {
+        editor = candidate;
+        submitButton = buttonWaitResult.button;
+        submitForm = fallbackForm;
+        isTextInputEditor = candidateIsTextInput;
+        console.log(`✅ Przycisk Send gotowy (${buttonWaitResult.waitTime}ms)`, {
+          editor: getComposerEditorDescriptor(editor),
+          submit: getComposerSubmitButtonDescriptor(submitButton)
+        });
         break;
       }
-      
-      // Loguj co 2s
-      if (waitTime > 0 && waitTime % 2000 === 0) {
-        console.log(`⏳ Czekam na przycisk Send... (${waitTime}ms / ${maxButtonWait}ms)`);
+
+      if (fallbackForm) {
+        editor = candidate;
+        submitButton = buttonWaitResult?.button || null;
+        submitForm = fallbackForm;
+        isTextInputEditor = candidateIsTextInput;
+        console.warn(`⚠️ Przycisk Send nie uzbroił się w czasie - użyję fallback submit dla ${getComposerEditorDescriptor(candidate)}`, {
+          submitCandidate: buttonWaitResult?.button ? getComposerSubmitButtonDescriptor(buttonWaitResult.button) : 'none'
+        });
+        break;
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 100));
-      waitTime += 100;
+
+      console.warn(`⚠️ Kandydat composera nie uzbroił wysyłki: ${getComposerEditorDescriptor(candidate)}`, {
+        submitCandidate: buttonWaitResult?.button ? getComposerSubmitButtonDescriptor(buttonWaitResult.button) : 'none'
+      });
+      clearEditorCandidate(candidate, candidateIsTextInput);
     }
-    
-    if (!submitButton) {
-      console.error("❌ Nie znaleziono przycisku Send po " + maxButtonWait + "ms");
-      return false;
-    }
-    
-    if (submitButton.disabled) {
-      console.error("❌ Przycisk Send jest disabled po " + maxButtonWait + "ms");
+
+    if (!editor || (!submitButton && !submitForm)) {
+      console.error("❌ Nie udało się znaleźć composera z aktywnym przyciskiem Send");
       return false;
     }
     
     // Poczekaj dłużej przed kliknięciem - daj czas na stabilizację UI
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    console.log("✓ Klikam Send...");
-    submitButton.click();
+    console.log("✓ Wysyłam prompt...");
+    let submitMethod = await dispatchSubmitAction(editor, submitButton, submitForm);
+    let submitRetried = false;
+    console.log("✓ Submit dispatched", {
+      method: submitMethod,
+      submit: submitButton ? getComposerSubmitButtonDescriptor(submitButton) : 'form-only',
+      form: !!submitForm
+    });
     
     // WERYFIKACJA: Sprawdź czy kliknięcie zadziałało
     console.log("🔍 Weryfikuję czy prompt został wysłany...");
@@ -26204,16 +27419,12 @@ async function injectToChat(
       // 1. Pokazać stopButton (zacząć generować) - NAJBARDZIEJ PEWNY wskaźnik
       // 2. LUB wyczyścić/disabled editor + disabled sendButton + nowa wiadomość w DOM
       
-      const editorNow = document.querySelector('[role="textbox"]') ||
-                        document.querySelector('[contenteditable]');
+      const editorNow = findPreferredComposerEditor();
       
       // Fallbacki dla stopButton z dokumentacji
       const stopBtn = findActiveStopButton();
       
-      const sendBtn = document.querySelector('[data-testid="send-button"]') ||
-                      document.querySelector('#composer-submit-button') ||
-                      document.querySelector('button[aria-label="Send"]') ||
-                      document.querySelector('button[aria-label*="Send"]');
+      const sendBtn = findPreferredComposerSubmitButton(editorNow, { enabledOnly: false });
       
       const editorDisabled = editorNow && editorNow.getAttribute('contenteditable') === 'false';
       const editorEmpty = editorNow && (editorNow.textContent || '').trim().length === 0;
@@ -26257,6 +27468,12 @@ async function injectToChat(
         verified = true;
         break;
       }
+
+      if (!submitRetried && verifyTime >= 1500) {
+        submitRetried = true;
+        console.warn('⚠️ Brak potwierdzenia po pierwszym submit - ponawiam fallback wysylki');
+        submitMethod = await dispatchSubmitAction(editorNow || editor, sendBtn || submitButton, submitForm);
+      }
       
       await new Promise(resolve => setTimeout(resolve, 100));
       verifyTime += 100;
@@ -26289,9 +27506,7 @@ async function injectToChat(
     if (shouldStopNow()) {
       return forceStopResult();
     }
-    const editor = document.querySelector('[role="textbox"]') ||
-                   document.querySelector('[contenteditable]') ||
-                   document.querySelector('[data-testid="composer-input"]');
+    const editor = findPreferredComposerEditor();
     
     if (editor) {
       console.log("=== ROZPOCZYNAM PRZETWARZANIE ===");
