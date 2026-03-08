@@ -8,6 +8,10 @@ const historyList = document.getElementById('history-list');
 const resumeAllBtn = document.getElementById('resume-all-btn');
 const unfinishedProcessesBtn = document.getElementById('unfinished-processes-btn');
 const processSummary = document.getElementById('process-summary');
+const queueLive = document.getElementById('queue-live');
+const queueLiveMeta = document.getElementById('queue-live-meta');
+const queueLiveActive = document.getElementById('queue-live-active');
+const queueLivePending = document.getElementById('queue-live-pending');
 const viewFilterSelect = document.getElementById('view-filter');
 const viewQueryInput = document.getElementById('view-query');
 const viewHint = document.getElementById('view-hint');
@@ -112,6 +116,7 @@ if (viewQueryInput) {
 }
 
 const reasonLabels = {
+  queue_waiting: 'Oczekuje w kolejce uruchomien',
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
   invalid_response: 'Za krotka odpowiedz',
@@ -694,6 +699,144 @@ function isCompletedStatus(status) {
   return status === 'completed';
 }
 
+function isQueuedStatus(status) {
+  return status === 'queued';
+}
+
+function getQueuePositionLabel(process) {
+  const queuePosition = Number.isInteger(process?.queuePosition) ? process.queuePosition : null;
+  const queueTotal = Number.isInteger(process?.queueTotal) ? process.queueTotal : null;
+  if (queuePosition && queueTotal) {
+    return `Kolejka ${queuePosition}/${queueTotal}`;
+  }
+  if (queuePosition) {
+    return `Kolejka ${queuePosition}`;
+  }
+  return 'Kolejka';
+}
+
+function getQueueSlotLabel(process) {
+  const queueSlot = Number.isInteger(process?.queueSlot) ? process.queueSlot : null;
+  const queueLimit = Number.isInteger(process?.queueLimit) ? process.queueLimit : null;
+  if (queueSlot && queueLimit) {
+    return `Slot ${queueSlot}/${queueLimit}`;
+  }
+  if (queueSlot) {
+    return `Slot ${queueSlot}`;
+  }
+  return '';
+}
+
+function isQueueActiveProcess(process) {
+  const status = getNormalizedStatus(process);
+  const queueSlot = Number.isInteger(process?.queueSlot) ? process.queueSlot : null;
+  return !!queueSlot && (status === 'starting' || status === 'started' || status === 'running');
+}
+
+function resolveQueueLiveLimit(processes) {
+  const items = Array.isArray(processes) ? processes : [];
+  const explicitLimits = items
+    .map((process) => (Number.isInteger(process?.queueLimit) ? process.queueLimit : null))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  if (explicitLimits.length > 0) {
+    return Math.max(...explicitLimits);
+  }
+  const activeSlots = items
+    .map((process) => (Number.isInteger(process?.queueSlot) ? process.queueSlot : null))
+    .filter((value) => Number.isInteger(value) && value > 0);
+  return activeSlots.length > 0 ? Math.max(...activeSlots) : 0;
+}
+
+function createQueueLiveItem(primaryText, secondaryText, tone = 'pending') {
+  const item = document.createElement('div');
+  item.className = `queue-live-item ${tone}`.trim();
+  const line = document.createElement('div');
+  line.className = 'queue-live-line';
+  line.textContent = primaryText;
+  item.appendChild(line);
+  if (secondaryText) {
+    const sub = document.createElement('div');
+    sub.className = 'queue-live-sub';
+    sub.textContent = secondaryText;
+    item.appendChild(sub);
+  }
+  return item;
+}
+
+function createQueueLiveEmpty(text) {
+  const empty = document.createElement('div');
+  empty.className = 'queue-live-empty';
+  empty.textContent = text;
+  return empty;
+}
+
+function renderQueueLive(processes) {
+  if (!queueLive || !queueLiveMeta || !queueLiveActive || !queueLivePending) return;
+  const items = Array.isArray(processes) ? processes.slice() : [];
+  const queueLimit = resolveQueueLiveLimit(items);
+  const active = items
+    .filter((process) => isQueueActiveProcess(process))
+    .sort((left, right) => {
+      const leftSlot = Number.isInteger(left?.queueSlot) ? left.queueSlot : Number.MAX_SAFE_INTEGER;
+      const rightSlot = Number.isInteger(right?.queueSlot) ? right.queueSlot : Number.MAX_SAFE_INTEGER;
+      if (leftSlot !== rightSlot) return leftSlot - rightSlot;
+      return getProcessSortKey(right) - getProcessSortKey(left);
+    });
+  const pending = items
+    .filter((process) => isQueuedStatus(getNormalizedStatus(process)))
+    .sort((left, right) => {
+      const leftPos = Number.isInteger(left?.queuePosition) ? left.queuePosition : Number.MAX_SAFE_INTEGER;
+      const rightPos = Number.isInteger(right?.queuePosition) ? right.queuePosition : Number.MAX_SAFE_INTEGER;
+      if (leftPos !== rightPos) return leftPos - rightPos;
+      return getProcessSortKey(left) - getProcessSortKey(right);
+    });
+
+  queueLiveMeta.textContent = `Teraz ${active.length}/${queueLimit || 0} | Czeka ${pending.length}`;
+  clearNode(queueLiveActive);
+  clearNode(queueLivePending);
+
+  if (active.length === 0) {
+    queueLiveActive.appendChild(createQueueLiveEmpty('Brak aktywnych slotow.'));
+  } else {
+    active.forEach((process) => {
+      const title = shortenText(process?.title || 'Bez tytulu', 52);
+      const promptText = `Prompt ${process?.currentPrompt || 0}/${process?.totalPrompts || 0}`;
+      const statusText = typeof process?.statusText === 'string' && process.statusText.trim()
+        ? shortenText(process.statusText, 70)
+        : 'Proces jest wykonywany';
+      queueLiveActive.appendChild(
+        createQueueLiveItem(
+          `${getQueueSlotLabel(process) || 'Slot'} | ${title}`,
+          `${promptText} | ${statusText}`,
+          'active'
+        )
+      );
+    });
+  }
+
+  if (pending.length === 0) {
+    queueLivePending.appendChild(createQueueLiveEmpty('Brak oczekujacych pozycji.'));
+  } else {
+    pending.slice(0, 8).forEach((process) => {
+      const title = shortenText(process?.title || 'Bez tytulu', 52);
+      const promptText = `Prompt ${process?.currentPrompt || 0}/${process?.totalPrompts || 0}`;
+      const statusText = typeof process?.statusText === 'string' && process.statusText.trim()
+        ? shortenText(process.statusText, 70)
+        : 'Czeka na wolny slot';
+      queueLivePending.appendChild(
+        createQueueLiveItem(
+          `${getQueuePositionLabel(process)} | ${title}`,
+          `${promptText} | ${statusText}`,
+          'pending'
+        )
+      );
+    });
+    if (pending.length > 8) {
+      queueLivePending.appendChild(createQueueLiveEmpty(`+${pending.length - 8} dalej w kolejce.`));
+    }
+  }
+}
+
 const priorityReasonWeights = Object.freeze({
   data_gap_unresolved: 42,
   missing_assistant_reply: 34,
@@ -732,6 +875,16 @@ function getProcessPriorityModel(process) {
   }
 
   const status = getNormalizedStatus(process);
+  if (isQueuedStatus(status)) {
+    return {
+      code: 'P4',
+      label: 'Niski',
+      score: 0,
+      className: 'priority-p4',
+      drivers: ['queued'],
+      summary: 'oczekuje w kolejce'
+    };
+  }
   if (isCompletedStatus(status)) {
     return {
       code: 'P4',
@@ -845,6 +998,8 @@ function isDefaultViewScope() {
 
 function getViewScopeLabel() {
   switch (viewFilterMode) {
+    case 'queued':
+      return 'kolejka';
     case 'needs_action':
       return 'wymaga akcji';
     case 'p1p2':
@@ -862,6 +1017,8 @@ function matchesViewFilter(process) {
   if (!process || typeof process !== 'object') return false;
 
   switch (viewFilterMode) {
+    case 'queued':
+      return isQueuedStatus(getNormalizedStatus(process));
     case 'needs_action':
       return !!process.needsAction;
     case 'p1p2': {
@@ -1003,6 +1160,8 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const historyItems = Array.isArray(historyProcesses) ? historyProcesses : [];
 
   const activeCount = activeItems.length;
+  const queuedCount = activeItems.filter((process) => isQueuedStatus(getNormalizedStatus(process))).length;
+  const runningCount = Math.max(0, activeCount - queuedCount);
   const needsActionCount = activeItems.filter((process) => !!process?.needsAction).length;
   const completedCount = allItems.filter((process) => isCompletedStatus(getNormalizedStatus(process))).length;
   const failedCount = allItems.filter((process) => isFailedStatus(getNormalizedStatus(process))).length;
@@ -1011,6 +1170,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const totalCount = allItems.length;
   const consistencyIssues = ensureCountConsistency(allItems, activeItems, historyItems);
   const activeProgress = activeItems
+    .filter((process) => !isQueuedStatus(getNormalizedStatus(process)))
     .map((process) => getProgressPercent(process?.currentPrompt, process?.totalPrompts))
     .filter((value) => Number.isInteger(value));
   const avgProgress = activeProgress.length > 0
@@ -1034,8 +1194,9 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const stageInfo = stageNamesLoaded ? `Etapy: ${stageNamesCompany.length}` : 'Etapy: ladowanie...';
 
   if (processSummary) {
-    const summary = `Aktywne ${activeCount} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
+    const summary = `Aktywne ${activeCount} | W trakcie ${runningCount} | Kolejka ${queuedCount} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
     const details = [
+      `W kolejce: ${queuedCount}`,
       `DATA_GAPS: ${dataGapCount}`,
       `Braki odpowiedzi: ${missingReplyCount}`,
       `Sredni postep aktywnych: ${avgProgress}%`,
@@ -1717,7 +1878,9 @@ function updateProcessCard(entry, process, isSelected) {
     card.classList.add('process-card');
   }
   const hasDataGap = isDataGapProcess(process);
+  const status = getNormalizedStatus(process);
   card.classList.toggle('needs-action', !!process.needsAction);
+  card.classList.toggle('queued', isQueuedStatus(status));
   card.classList.toggle('data-gap', hasDataGap);
   card.classList.toggle('selected', !!isSelected);
 
@@ -1736,12 +1899,21 @@ function updateProcessCard(entry, process, isSelected) {
   const tabLabel = Number.isInteger(process.tabId) ? String(process.tabId) : '-';
   const windowLabel = Number.isInteger(process.windowId) ? String(process.windowId) : '-';
 
-  refs.statusLine.textContent = `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`;
+  const queueLabel = isQueuedStatus(status) ? getQueuePositionLabel(process) : '';
+  const queueSlotLabel = getQueueSlotLabel(process);
+  const queuePrefix = isQueuedStatus(status)
+    ? queueLabel
+    : queueSlotLabel;
+  refs.statusLine.textContent = queuePrefix
+    ? `${queuePrefix} | Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`
+    : `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`;
 
-  const status = getNormalizedStatus(process);
   let statusBadgeText = 'W trakcie';
   let statusBadgeClass = 'status-running';
-  if (process.needsAction) {
+  if (isQueuedStatus(status)) {
+    statusBadgeText = 'W kolejce';
+    statusBadgeClass = 'status-queued';
+  } else if (process.needsAction) {
     statusBadgeText = 'WYMAGA AKCJI';
     statusBadgeClass = 'status-needs-action';
   } else if (isCompletedStatus(status)) {
@@ -1805,6 +1977,12 @@ function updateProcessCard(entry, process, isSelected) {
 
   if (needsAction) {
     refs.hint.textContent = 'Wybierz akcje lub otworz okno ChatGPT.';
+    refs.hint.style.display = 'block';
+  } else if (isQueuedStatus(status)) {
+    refs.hint.textContent = `${queueLabel} | Proces czeka na wolny slot uruchomienia.`;
+    refs.hint.style.display = 'block';
+  } else if (queueSlotLabel) {
+    refs.hint.textContent = `${queueSlotLabel} | Proces jest wykonywany w tej chwili.`;
     refs.hint.style.display = 'block';
   } else {
     refs.hint.textContent = '';
@@ -1884,6 +2062,11 @@ async function filterActiveProcesses(processes) {
   if (active.length === 0) return [];
 
   const decisions = await Promise.all(active.map(async (process) => {
+    const status = getNormalizedStatus(process);
+    if (isQueuedStatus(status)) {
+      return { process, keep: true, reason: 'queued_pending' };
+    }
+
     const tabId = Number.isInteger(process.tabId) ? process.tabId : null;
     const windowId = Number.isInteger(process.windowId) ? process.windowId : null;
 
@@ -2367,6 +2550,7 @@ function scheduleDecisionButtonRecovery(processId, waitBtn, skipBtn, delayMs = 1
 
 function updateUI(processes, options = {}) {
   const sourceItems = Array.isArray(processes) ? processes.slice() : [];
+  renderQueueLive(sourceItems);
   if (sourceItems.length === 0) {
     processList.innerHTML = '';
     emptyState.style.display = 'block';
@@ -2465,7 +2649,11 @@ function updateUI(processes, options = {}) {
       const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}`;
       const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}`;
+      const queuePosition = Number.isInteger(process?.queuePosition) ? process.queuePosition : '';
+      const queueTotal = Number.isInteger(process?.queueTotal) ? process.queueTotal : '';
+      const queueSlot = Number.isInteger(process?.queueSlot) ? process.queueSlot : '';
+      const queueLimit = Number.isInteger(process?.queueLimit) ? process.queueLimit : '';
+      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}|${queuePosition}|${queueTotal}|${queueSlot}|${queueLimit}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -2872,14 +3060,21 @@ function renderDetails() {
   const subtitle = document.createElement('div');
   subtitle.className = 'details-subtitle';
   const selectedStatus = getNormalizedStatus(selected);
-  const statusLabel = isCompletedStatus(selectedStatus)
+  const statusLabel = isQueuedStatus(selectedStatus)
+    ? 'W kolejce'
+    : isCompletedStatus(selectedStatus)
     ? 'Zakonczono'
     : isFailedStatus(selectedStatus)
       ? 'Blad'
       : selected.needsAction
         ? 'Wymaga akcji'
         : 'W trakcie';
-    subtitle.textContent = `Status: ${statusLabel}`;
+  const detailsQueueLabel = isQueuedStatus(selectedStatus)
+    ? getQueuePositionLabel(selected)
+    : getQueueSlotLabel(selected);
+  subtitle.textContent = detailsQueueLabel
+    ? `Status: ${statusLabel} | ${detailsQueueLabel}`
+    : `Status: ${statusLabel}`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
 
@@ -2896,7 +3091,8 @@ function renderDetails() {
   const detailsProgress = getProgressPercent(selected.currentPrompt, selected.totalPrompts);
   const detailsStage = resolveStageLabel(selected);
   const detailsUpdatedAt = Number.isInteger(selected.timestamp) ? selected.timestamp : selected.startedAt;
-  metaWrap.textContent = `Etap ${detailsStage} | Prompt ${selected.currentPrompt || 0}/${selected.totalPrompts || 0} (${detailsProgress}%) | ${formatRelativeTime(detailsUpdatedAt)}`;
+  const queuePrefix = detailsQueueLabel ? `${detailsQueueLabel} | ` : '';
+  metaWrap.textContent = `${queuePrefix}Etap ${detailsStage} | Prompt ${selected.currentPrompt || 0}/${selected.totalPrompts || 0} (${detailsProgress}%) | ${formatRelativeTime(detailsUpdatedAt)}`;
   const priorityMeta = document.createElement('div');
   priorityMeta.className = 'details-subtitle';
   const priorityModel = getProcessPriorityModel(selected);

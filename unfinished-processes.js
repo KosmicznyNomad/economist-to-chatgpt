@@ -22,6 +22,17 @@ const countingSummary = document.getElementById('counting-summary');
 const selectionSummary = document.getElementById('selection-summary');
 const UNFINISHED_RESUME_KEEPALIVE_INTERVAL_MS = 15000;
 
+const CLOSED_PROCESS_STATUSES = new Set([
+  'completed',
+  'failed',
+  'closed',
+  'error',
+  'cancelled',
+  'canceled',
+  'aborted',
+  'stopped',
+  'interrupted'
+]);
 const FAILED_PROCESS_STATUSES = new Set([
   'failed',
   'error',
@@ -31,6 +42,25 @@ const FAILED_PROCESS_STATUSES = new Set([
   'stopped',
   'crashed'
 ]);
+const urlParams = new URLSearchParams(window.location.search);
+const serviceMode = typeof urlParams.get('mode') === 'string'
+  ? urlParams.get('mode').trim().toLowerCase()
+  : '';
+const STALE_RUNNING_RECOVERY_MODE = serviceMode === 'stale-running-recovery';
+const staleHoursParam = Number.parseFloat(urlParams.get('staleHours'));
+const STALE_RUNNING_RECOVERY_HOURS = Number.isFinite(staleHoursParam) && staleHoursParam > 0
+  ? Math.max(0.25, Math.min(staleHoursParam, 168))
+  : 4;
+const STALE_RUNNING_RECOVERY_THRESHOLD_MS = Math.round(STALE_RUNNING_RECOVERY_HOURS * 60 * 60 * 1000);
+const serviceLimitParam = Number.parseInt(urlParams.get('limit'), 10);
+const STALE_RUNNING_RECOVERY_LIMIT = Number.isInteger(serviceLimitParam) && serviceLimitParam > 0
+  ? Math.min(serviceLimitParam, 1000)
+  : null;
+const STALE_RUNNING_RECOVERY_AUTORUN = (
+  urlParams.get('autorun') === '1'
+  || urlParams.get('autorun') === 'true'
+  || urlParams.get('autorun') === 'yes'
+);
 
 let lastListResult = null;
 let lastBatchState = null;
@@ -43,6 +73,9 @@ let keepaliveTimerId = null;
 let keepaliveReconnectTimerId = null;
 let pageIsClosing = false;
 const keepalivePageId = `unfinished-resume-page-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+const serviceRecoveredRunIds = new Set();
+let serviceBatchState = null;
+let serviceAutoRunStarted = false;
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
@@ -308,6 +341,326 @@ function formatPercent(part, total) {
 
 function isFailedProcessStatus(status) {
   return FAILED_PROCESS_STATUSES.has(normalizeProcessStatusToken(status));
+}
+
+function isClosedProcessStatus(status) {
+  return CLOSED_PROCESS_STATUSES.has(normalizeProcessStatusToken(status));
+}
+
+function hasRecoverableExecutionEvidence(process) {
+  if (!process || typeof process !== 'object') return false;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const stageIndex = Number.isInteger(process?.stageIndex) ? process.stageIndex : -1;
+  if (currentPrompt > 0 || stageIndex >= 0) return true;
+
+  const messages = Array.isArray(process?.messages) ? process.messages : [];
+  return messages.some((entry) => {
+    if (!entry || typeof entry !== 'object') return false;
+    const text = typeof entry.text === 'string' ? entry.text.trim() : '';
+    return text.length > 0;
+  });
+}
+
+function extractProcessChatUrl(process) {
+  if (!process || typeof process !== 'object') return '';
+  const direct = typeof process?.chatUrl === 'string' ? process.chatUrl.trim() : '';
+  if (direct) return direct;
+  const history = Array.isArray(process?.conversationUrls) ? process.conversationUrls : [];
+  for (let index = history.length - 1; index >= 0; index -= 1) {
+    const value = typeof history[index] === 'string' ? history[index].trim() : '';
+    if (value) return value;
+  }
+  return '';
+}
+
+function deriveSourceMeta(process) {
+  const sourceUrl = typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : '';
+  if (!sourceUrl) {
+    return { sourceKey: 'unknown', sourceLabel: 'unknown', sourceUrl: '' };
+  }
+  if (sourceUrl.startsWith('manual://')) {
+    return { sourceKey: 'manual', sourceLabel: 'manual', sourceUrl };
+  }
+  try {
+    const parsed = new URL(sourceUrl);
+    const hostname = (parsed.hostname || '').replace(/^www\./i, '').toLowerCase();
+    if (!hostname) {
+      return { sourceKey: 'unknown', sourceLabel: 'unknown', sourceUrl };
+    }
+    return {
+      sourceKey: hostname,
+      sourceLabel: hostname,
+      sourceUrl
+    };
+  } catch (_) {
+    return { sourceKey: 'unknown', sourceLabel: 'unknown', sourceUrl };
+  }
+}
+
+function getLastMeaningfulProcessUpdateAt(process) {
+  const persistenceUpdatedAt = Number.isInteger(process?.persistenceStatus?.updatedAt)
+    ? process.persistenceStatus.updatedAt
+    : 0;
+  if (persistenceUpdatedAt > 0) return persistenceUpdatedAt;
+
+  const autoRecoveryUpdatedAt = Number.isInteger(process?.autoRecovery?.updatedAt)
+    ? process.autoRecovery.updatedAt
+    : 0;
+  if (autoRecoveryUpdatedAt > 0) return autoRecoveryUpdatedAt;
+
+  const finishedAt = Number.isInteger(process?.finishedAt) ? process.finishedAt : 0;
+  if (finishedAt > 0) return finishedAt;
+
+  const startedAt = Number.isInteger(process?.startedAt) ? process.startedAt : 0;
+  if (startedAt > 0) return startedAt;
+
+  return Number.isInteger(process?.timestamp) ? process.timestamp : 0;
+}
+
+function compareRecoveryItemsByProgressDesc(left, right) {
+  const leftProgress = Number.isFinite(left?.progressShare) ? left.progressShare : 0;
+  const rightProgress = Number.isFinite(right?.progressShare) ? right.progressShare : 0;
+  if (rightProgress !== leftProgress) {
+    return rightProgress - leftProgress;
+  }
+  const leftPrompt = Number.isInteger(left?.currentPrompt) ? left.currentPrompt : 0;
+  const rightPrompt = Number.isInteger(right?.currentPrompt) ? right.currentPrompt : 0;
+  if (rightPrompt !== leftPrompt) {
+    return rightPrompt - leftPrompt;
+  }
+  const leftTs = Number.isInteger(left?.timestamp) ? left.timestamp : 0;
+  const rightTs = Number.isInteger(right?.timestamp) ? right.timestamp : 0;
+  if (rightTs !== leftTs) {
+    return rightTs - leftTs;
+  }
+  const leftId = typeof left?.runId === 'string' ? left.runId : '';
+  const rightId = typeof right?.runId === 'string' ? right.runId : '';
+  return leftId.localeCompare(rightId, 'en', { sensitivity: 'base' });
+}
+
+function isStaleRunningRecoveryCandidate(process, nowTs = Date.now()) {
+  if (!process || typeof process !== 'object') return false;
+  if (isClosedProcessStatus(process?.status)) return false;
+  if (!hasRecoverableExecutionEvidence(process)) return false;
+  const lastMeaningfulUpdateAt = getLastMeaningfulProcessUpdateAt(process);
+  if (!Number.isInteger(lastMeaningfulUpdateAt) || lastMeaningfulUpdateAt <= 0) return false;
+  return (nowTs - lastMeaningfulUpdateAt) >= STALE_RUNNING_RECOVERY_THRESHOLD_MS;
+}
+
+function buildStaleRunningRecoveryItem(process, nowTs = Date.now()) {
+  const sourceMeta = deriveSourceMeta(process);
+  const chatUrl = extractProcessChatUrl(process);
+  const runId = typeof process?.id === 'string' ? process.id : '';
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const stageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
+  const lastMeaningfulUpdateAt = getLastMeaningfulProcessUpdateAt(process);
+  const ageMs = lastMeaningfulUpdateAt > 0 ? Math.max(0, nowTs - lastMeaningfulUpdateAt) : 0;
+  const progressShare = totalPrompts > 0 && currentPrompt > 0
+    ? Math.max(0, Math.min(1, currentPrompt / totalPrompts))
+    : 0;
+  const reason = typeof process?.reason === 'string' && process.reason.trim()
+    ? process.reason.trim()
+    : 'stale_running_gt_threshold';
+  const statusTextBase = typeof process?.statusText === 'string' && process.statusText.trim()
+    ? process.statusText.trim()
+    : 'Brak nowego postepu';
+
+  return {
+    runId,
+    title: typeof process?.title === 'string' ? process.title : '',
+    status: 'failed',
+    isFailedStatus: true,
+    needsAction: process?.needsAction === true,
+    currentPrompt,
+    totalPrompts,
+    progressShare,
+    stageName: stageName || (currentPrompt > 0 ? `Prompt ${currentPrompt}` : ''),
+    timestamp: lastMeaningfulUpdateAt,
+    chatUrl,
+    hasChatUrl: !!chatUrl,
+    sourceUrl: sourceMeta.sourceUrl,
+    sourceKey: sourceMeta.sourceKey,
+    sourceLabel: sourceMeta.sourceLabel,
+    reason,
+    statusText: `${statusTextBase} | stale>${STALE_RUNNING_RECOVERY_HOURS}h`,
+    lastError: typeof process?.error === 'string' ? process.error : '',
+    staleAgeHours: ageMs > 0 ? Math.round((ageMs / 3600000) * 100) / 100 : 0,
+    originalStatus: normalizeProcessStatusToken(process?.status || ''),
+    hasExecutionEvidence: true
+  };
+}
+
+function buildServiceModeSourceCatalog(items) {
+  const safeItems = Array.isArray(items) ? items : [];
+  const byKey = new Map();
+  safeItems.forEach((item) => {
+    const key = normalizeSourceFilter(item?.sourceKey || 'unknown');
+    const label = typeof item?.sourceLabel === 'string' && item.sourceLabel.trim()
+      ? item.sourceLabel.trim()
+      : (key || 'unknown');
+    const existing = byKey.get(key) || {
+      key,
+      label,
+      total: 0,
+      runnable: 0
+    };
+    existing.total += 1;
+    if (item?.hasChatUrl === true) existing.runnable += 1;
+    byKey.set(key, existing);
+  });
+  return Array.from(byKey.values()).sort((left, right) => {
+    if ((right.total || 0) !== (left.total || 0)) {
+      return (right.total || 0) - (left.total || 0);
+    }
+    return String(left.label || '').localeCompare(String(right.label || ''), 'en', { sensitivity: 'base' });
+  });
+}
+
+function buildStaleRunningRecoveryListResult(processes) {
+  const nowTs = Date.now();
+  const requestedFilter = normalizeSourceFilter(selectedSourceFilter);
+  const staleItems = (Array.isArray(processes) ? processes : [])
+    .filter((process) => isStaleRunningRecoveryCandidate(process, nowTs))
+    .map((process) => buildStaleRunningRecoveryItem(process, nowTs))
+    .filter((item) => !serviceRecoveredRunIds.has(item.runId))
+    .sort((left, right) => (right.timestamp || 0) - (left.timestamp || 0));
+  const availableSources = buildServiceModeSourceCatalog(staleItems);
+  const filteredItems = requestedFilter === 'all'
+    ? staleItems
+    : staleItems.filter((item) => item.sourceKey === requestedFilter);
+  const runnable = filteredItems.filter((item) => item?.hasChatUrl === true).length;
+  const blockedMissingUrl = Math.max(0, filteredItems.length - runnable);
+  const sourceFilterMatched = requestedFilter === 'all'
+    ? true
+    : availableSources.some((entry) => entry?.key === requestedFilter);
+
+  return {
+    success: true,
+    generatedAt: nowTs,
+    total: filteredItems.length,
+    runnable,
+    skippedMissingUrl: blockedMissingUrl,
+    sourceFilter: requestedFilter,
+    sourceFilterApplied: requestedFilter !== 'all',
+    sourceFilterMatched,
+    recoverOnly: false,
+    countingModel: {
+      listSource: `running stale >${STALE_RUNNING_RECOVERY_HOURS}h`,
+      listStageMeaning: 'last meaningful update from process snapshot',
+      resumeStageMeaning: 'PROCESS_RESUME_NEXT_STAGE with live detect',
+      batchLimitMeaning: 'top progress among stale running items'
+    },
+    summary: {
+      total: filteredItems.length,
+      runnable,
+      blockedMissingChatUrl: blockedMissingUrl,
+      failedStatuses: filteredItems.length,
+      needsAction: filteredItems.filter((item) => item?.needsAction === true).length,
+      withStageSnapshot: filteredItems.filter((item) => (
+        Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
+      )).length,
+      latestUpdatedAt: filteredItems.reduce((maxTs, item) => Math.max(maxTs, item?.timestamp || 0), 0),
+      runnableSharePct: filteredItems.length > 0
+        ? Math.round((runnable / filteredItems.length) * 100)
+        : 0,
+      statusCounts: {
+        failed: filteredItems.length
+      }
+    },
+    availableSources,
+    items: filteredItems
+  };
+}
+
+function buildServiceBatchState(selection, candidates) {
+  const safeCandidates = Array.isArray(candidates) ? candidates : [];
+  const runnable = safeCandidates.filter((item) => item?.hasChatUrl === true).length;
+  const blocked = Math.max(0, safeCandidates.length - runnable);
+  return {
+    jobId: `stale-running-recovery-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`,
+    status: 'running',
+    startedAt: Date.now(),
+    updatedAt: Date.now(),
+    finishedAt: null,
+    selection,
+    totals: {
+      total: safeCandidates.length,
+      runnable,
+      skippedMissingUrl: blocked,
+      processed: 0,
+      resumed: 0,
+      skipped_missing_chat_url: 0,
+      skipped_not_found: 0,
+      skipped_already_completed: 0,
+      failed: 0
+    },
+    rows: [],
+    activeRunId: '',
+    error: ''
+  };
+}
+
+function applyServiceBatchRowToTotals(totals, row) {
+  const nextTotals = {
+    total: Number.isInteger(totals?.total) ? totals.total : 0,
+    runnable: Number.isInteger(totals?.runnable) ? totals.runnable : 0,
+    skippedMissingUrl: Number.isInteger(totals?.skippedMissingUrl) ? totals.skippedMissingUrl : 0,
+    processed: Number.isInteger(totals?.processed) ? totals.processed : 0,
+    resumed: Number.isInteger(totals?.resumed) ? totals.resumed : 0,
+    skipped_missing_chat_url: Number.isInteger(totals?.skipped_missing_chat_url) ? totals.skipped_missing_chat_url : 0,
+    skipped_not_found: Number.isInteger(totals?.skipped_not_found) ? totals.skipped_not_found : 0,
+    skipped_already_completed: Number.isInteger(totals?.skipped_already_completed) ? totals.skipped_already_completed : 0,
+    failed: Number.isInteger(totals?.failed) ? totals.failed : 0
+  };
+  nextTotals.processed += 1;
+
+  const outcome = typeof row?.outcome === 'string' ? row.outcome : '';
+  if (outcome === 'resumed') nextTotals.resumed += 1;
+  if (outcome === 'skipped_missing_chat_url') nextTotals.skipped_missing_chat_url += 1;
+  if (outcome === 'skipped_not_found') nextTotals.skipped_not_found += 1;
+  if (outcome === 'skipped_already_completed') nextTotals.skipped_already_completed += 1;
+  if (outcome === 'failed') nextTotals.failed += 1;
+  return nextTotals;
+}
+
+function reportServiceModeEvent({
+  reason = '',
+  status = '',
+  message = '',
+  runId = '',
+  title = '',
+  statusText = '',
+  error = ''
+} = {}) {
+  if (!STALE_RUNNING_RECOVERY_MODE) return;
+  const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+  const normalizedStatus = typeof status === 'string' ? status.trim() : '';
+  const normalizedMessage = typeof message === 'string' ? message.trim() : '';
+  void sendRuntimeMessage({
+    type: 'REPORT_PROBLEM_LOG',
+    entry: {
+      source: 'unfinished-processes-service-mode',
+      level: normalizedStatus === 'failed' ? 'error' : 'info',
+      category: 'admin',
+      analysisType: 'admin',
+      runId: typeof runId === 'string' ? runId.trim() : '',
+      title: typeof title === 'string' ? title.trim() : '',
+      status: normalizedStatus || 'ok',
+      reason: normalizedReason || 'service_mode_event',
+      statusText: typeof statusText === 'string' ? statusText.trim() : '',
+      error: typeof error === 'string' ? error.trim() : '',
+      message: normalizedMessage || normalizedReason || 'service_mode_event',
+      signature: [
+        'unfinished-processes-service-mode',
+        normalizedReason || 'service_mode_event',
+        normalizedStatus || 'ok',
+        typeof runId === 'string' ? runId.trim() : '',
+        Date.now(),
+        Math.random().toString(36).slice(2, 8)
+      ].join('|')
+    }
+  }).catch(() => {});
 }
 
 function formatStatusText(status) {
@@ -898,13 +1251,15 @@ function updateRunButtonState(state) {
   const total = Number.isInteger(lastListResult?.total) ? lastListResult.total : 0;
   const runnable = Number.isInteger(lastListResult?.runnable) ? lastListResult.runnable : 0;
   const noRunnable = total === 0 || runnable === 0;
+  const runLabel = STALE_RUNNING_RECOVERY_MODE ? 'Wznow stale' : 'Uruchom wszystkie';
+  const run10Label = STALE_RUNNING_RECOVERY_MODE ? 'Wznow 10 stale' : 'Uruchom 10';
   if (runBtn) {
     runBtn.disabled = running || noRunnable;
-    runBtn.textContent = running ? 'Batch w toku...' : 'Uruchom wszystkie';
+    runBtn.textContent = running ? 'Batch w toku...' : runLabel;
   }
   if (run10Btn) {
     run10Btn.disabled = running || noRunnable;
-    run10Btn.textContent = running ? 'Top 10 w toku...' : 'Uruchom 10';
+    run10Btn.textContent = running ? 'Top 10 w toku...' : run10Label;
   }
   if (sourceFilterSelect) {
     sourceFilterSelect.disabled = running;
@@ -924,7 +1279,62 @@ function applyData(listResult, batchState) {
   updateRunButtonState(lastBatchState);
 }
 
+async function refreshStaleRunningRecoveryData(options = {}) {
+  if (refreshInProgress) {
+    pendingRefresh = true;
+    return;
+  }
+  refreshInProgress = true;
+  const silent = options?.silent === true;
+  if (!silent) {
+    setStatus('Odswiezam stale running recovery...', {
+      meta: `threshold=${STALE_RUNNING_RECOVERY_HOURS}h | source=${selectedSourceFilter}`,
+      hints: ['GET_PROCESSES', 'last meaningful update', 'PROCESS_RESUME_NEXT_STAGE']
+    });
+  }
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_PROCESSES'
+    });
+    const listResult = buildStaleRunningRecoveryListResult(response?.processes);
+    applyData(listResult, serviceBatchState);
+    const summary = getListSummary(listResult);
+    setStatus('Lista stale running policzona', {
+      meta: `threshold=${STALE_RUNNING_RECOVERY_HOURS}h | filtered=${summary.total || 0} | source=${selectedSourceFilter}`,
+      hints: [
+        `${summary.runnable || 0} gotowych do live resume`,
+        `${summary.blockedMissingChatUrl || 0} bez chatUrl`,
+        'stale by persistenceStatus.updatedAt'
+      ]
+    });
+
+    if (STALE_RUNNING_RECOVERY_AUTORUN && !serviceAutoRunStarted) {
+      serviceAutoRunStarted = true;
+      window.setTimeout(() => {
+        void startStaleRunningRecoveryBatch(STALE_RUNNING_RECOVERY_LIMIT);
+      }, 250);
+    }
+  } catch (error) {
+    setStatus('Blad odswiezania stale running recovery', {
+      meta: error?.message || String(error),
+      hints: ['sprawdz worker service', 'sprawdz process monitor'],
+      isError: true
+    });
+  } finally {
+    refreshInProgress = false;
+    if (pendingRefresh) {
+      pendingRefresh = false;
+      void refreshData({ silent: true });
+    }
+  }
+}
+
 async function refreshData(options = {}) {
+  if (STALE_RUNNING_RECOVERY_MODE) {
+    await refreshStaleRunningRecoveryData(options);
+    return;
+  }
   if (refreshInProgress) {
     pendingRefresh = true;
     return;
@@ -986,7 +1396,231 @@ async function refreshData(options = {}) {
   }
 }
 
+async function startStaleRunningRecoveryBatch(limit = null) {
+  const currentItems = Array.isArray(lastListResult?.items) ? lastListResult.items.slice() : [];
+  const rankedItems = Number.isInteger(limit) && limit > 0
+    ? currentItems.slice().sort(compareRecoveryItemsByProgressDesc)
+    : currentItems.slice();
+  const limitApplied = Number.isInteger(limit) && limit > 0
+    ? Math.min(limit, rankedItems.length)
+    : null;
+  const candidates = Number.isInteger(limitApplied)
+    ? rankedItems.slice(0, limitApplied)
+    : rankedItems;
+
+  if (candidates.length === 0) {
+    setStatus('Brak stale running kandydatow', {
+      meta: `threshold=${STALE_RUNNING_RECOVERY_HOURS}h | source=${selectedSourceFilter}`,
+      hints: ['GET_PROCESSES returned 0 stale rows']
+    });
+    updateRunButtonState(serviceBatchState);
+    return;
+  }
+
+  const selection = {
+    sourceFilter: selectedSourceFilter,
+    sourceLabel: selectedSourceFilter,
+    strategy: Number.isInteger(limitApplied)
+      ? 'most_advanced_incomplete_first'
+      : 'latest_update_first',
+    limitRequested: Number.isInteger(limit) && limit > 0 ? limit : null,
+    limitApplied,
+    filteredTotal: Number.isInteger(lastListResult?.total) ? lastListResult.total : candidates.length
+  };
+  serviceBatchState = buildServiceBatchState(selection, candidates);
+  applyData(lastListResult, serviceBatchState);
+  setStatus('Uruchamiam stale running recovery...', {
+    meta: `threshold=${STALE_RUNNING_RECOVERY_HOURS}h | source=${selectedSourceFilter} | limit=${limitApplied || 'all'}`,
+    hints: ['fresh tab for each stale run', 'live detect on chat', 'no LevelDB edits']
+  });
+  reportServiceModeEvent({
+    reason: 'stale_running_recovery_batch_started',
+    status: 'started',
+    message: 'stale_running_recovery_batch_started',
+    statusText: `selected=${candidates.length} threshold_h=${STALE_RUNNING_RECOVERY_HOURS} source=${selectedSourceFilter} limit=${limitApplied || 'all'}`
+  });
+
+  for (const [candidateIndex, candidate] of candidates.entries()) {
+    serviceBatchState = {
+      ...serviceBatchState,
+      activeRunId: candidate?.runId || '',
+      updatedAt: Date.now()
+    };
+    applyData(lastListResult, serviceBatchState);
+
+    let row = {
+      runId: typeof candidate?.runId === 'string' ? candidate.runId : '',
+      title: typeof candidate?.title === 'string' ? candidate.title : '',
+      startedAt: Date.now(),
+      finishedAt: Date.now(),
+      outcome: 'failed',
+      reason: 'resume_failed',
+      error: '',
+      detectedPromptNumber: null,
+      startPromptNumber: null,
+      detectedMethod: '',
+      retrySamePrompt: false,
+      retryReason: '',
+      chatUrl: typeof candidate?.chatUrl === 'string' ? candidate.chatUrl : ''
+    };
+
+    if (!row.runId) {
+      row = {
+        ...row,
+        outcome: 'skipped_not_found',
+        reason: 'missing_run_id'
+      };
+    } else if (!candidate?.hasChatUrl) {
+      row = {
+        ...row,
+        outcome: 'skipped_missing_chat_url',
+        reason: 'missing_chat_url'
+      };
+    } else if (serviceRecoveredRunIds.has(row.runId)) {
+      row = {
+        ...row,
+        outcome: 'skipped_already_completed',
+        reason: 'already_processed_in_service_mode'
+      };
+    } else {
+      try {
+        const result = await sendRuntimeMessage({
+          type: 'PROCESS_RESUME_NEXT_STAGE',
+          runId: row.runId,
+          preferFreshTab: true,
+          origin: 'unfinished-processes-stale-running-recovery'
+        });
+
+        const detectedPromptNumber = Number.isInteger(result?.detectedPromptNumber)
+          ? result.detectedPromptNumber
+          : null;
+        const startPromptNumber = Number.isInteger(result?.startPromptNumber)
+          ? result.startPromptNumber
+          : null;
+        const detectedMethod = typeof result?.detectedMethod === 'string'
+          ? result.detectedMethod
+          : '';
+        const retrySamePrompt = result?.retrySamePrompt === true;
+        const retryReason = typeof result?.retryReason === 'string' ? result.retryReason : '';
+
+        if (result?.success === true) {
+          row = {
+            ...row,
+            finishedAt: Date.now(),
+            outcome: 'resumed',
+            reason: 'resume_dispatched',
+            detectedPromptNumber,
+            startPromptNumber,
+            detectedMethod,
+            retrySamePrompt,
+            retryReason
+          };
+          serviceRecoveredRunIds.add(row.runId);
+        } else if ((result?.error || '') === 'already_at_last_prompt') {
+          row = {
+            ...row,
+            finishedAt: Date.now(),
+            outcome: 'skipped_already_completed',
+            reason: 'already_at_last_prompt',
+            detectedPromptNumber,
+            startPromptNumber,
+            detectedMethod,
+            retrySamePrompt,
+            retryReason
+          };
+          serviceRecoveredRunIds.add(row.runId);
+        } else {
+          row = {
+            ...row,
+            finishedAt: Date.now(),
+            outcome: 'failed',
+            reason: typeof result?.error === 'string' && result.error.trim()
+              ? result.error.trim()
+              : 'resume_failed',
+            error: typeof result?.error === 'string' && result.error.trim()
+              ? result.error.trim()
+              : 'resume_failed',
+            detectedPromptNumber,
+            startPromptNumber,
+            detectedMethod,
+            retrySamePrompt,
+            retryReason
+          };
+        }
+      } catch (error) {
+        row = {
+          ...row,
+          finishedAt: Date.now(),
+          outcome: 'failed',
+          reason: 'resume_exception',
+          error: error?.message || String(error)
+        };
+      }
+    }
+
+    const nextRows = (Array.isArray(serviceBatchState?.rows) ? serviceBatchState.rows : [])
+      .concat([row])
+      .slice(-500);
+    const nextTotals = applyServiceBatchRowToTotals(serviceBatchState?.totals, row);
+    serviceBatchState = {
+      ...serviceBatchState,
+      rows: nextRows,
+      totals: nextTotals,
+      activeRunId: '',
+      updatedAt: Date.now()
+    };
+    applyData(lastListResult, serviceBatchState);
+    reportServiceModeEvent({
+      reason: `stale_running_recovery_${row.outcome || 'unknown'}`,
+      status: row.outcome || 'unknown',
+      message: row.reason || row.outcome || 'stale_running_recovery_row',
+      runId: row.runId || '',
+      title: row.title || '',
+      statusText: `idx=${candidateIndex + 1}/${candidates.length} detected=${row.detectedPromptNumber || '-'} start=${row.startPromptNumber || '-'} method=${row.detectedMethod || '-'}`,
+      error: row.error || ''
+    });
+    setStatus('Batch wznowienia trwa', {
+      meta: `processed=${nextTotals.processed}/${nextTotals.total} | current=${candidate?.runId || '-'} | idx=${candidateIndex + 1}/${candidates.length}`,
+      hints: ['PROCESS_RESUME_NEXT_STAGE', 'fresh tab', 'live detect']
+    });
+  }
+
+  const totalIssues = (serviceBatchState?.totals?.failed || 0)
+    + (serviceBatchState?.totals?.skipped_missing_chat_url || 0)
+    + (serviceBatchState?.totals?.skipped_not_found || 0);
+  serviceBatchState = {
+    ...serviceBatchState,
+    status: totalIssues > 0 ? 'completed_with_errors' : 'completed',
+    finishedAt: Date.now(),
+    updatedAt: Date.now(),
+    activeRunId: ''
+  };
+  applyData(lastListResult, serviceBatchState);
+  setStatus(
+    totalIssues > 0 ? 'Batch stale running zakonczony z bledami' : 'Batch stale running zakonczony',
+    {
+      meta: `processed=${serviceBatchState?.totals?.processed || 0}/${serviceBatchState?.totals?.total || 0} | resumed=${serviceBatchState?.totals?.resumed || 0} | failed=${serviceBatchState?.totals?.failed || 0}`,
+      hints: ['odswiez liste, aby zobaczyc pozostale stale runy']
+    }
+  );
+  reportServiceModeEvent({
+    reason: totalIssues > 0
+      ? 'stale_running_recovery_batch_completed_with_errors'
+      : 'stale_running_recovery_batch_completed',
+    status: totalIssues > 0 ? 'completed_with_errors' : 'completed',
+    message: totalIssues > 0
+      ? 'stale_running_recovery_batch_completed_with_errors'
+      : 'stale_running_recovery_batch_completed',
+    statusText: `processed=${serviceBatchState?.totals?.processed || 0}/${serviceBatchState?.totals?.total || 0} resumed=${serviceBatchState?.totals?.resumed || 0} failed=${serviceBatchState?.totals?.failed || 0}`
+  });
+  await refreshData({ silent: true });
+}
+
 async function startBatch(limit = null) {
+  if (STALE_RUNNING_RECOVERY_MODE) {
+    await startStaleRunningRecoveryBatch(limit);
+    return;
+  }
   updateRunButtonState({ status: 'running' });
   const limitText = Number.isInteger(limit) && limit > 0 ? `${limit}` : 'all';
   const modeText = Number.isInteger(limit) && limit > 0 ? 'top-progress snapshot' : 'latest update';
@@ -1093,6 +1727,20 @@ if (pollIntervalId) {
 pollIntervalId = window.setInterval(() => {
   void refreshData({ silent: true });
 }, 5000);
+
+if (STALE_RUNNING_RECOVERY_MODE) {
+  document.title = `Stale Running Recovery > ${STALE_RUNNING_RECOVERY_HOURS}h`;
+  setStatus('Tryb serwisowy: stale running recovery', {
+    meta: `threshold=${STALE_RUNNING_RECOVERY_HOURS}h | autorun=${STALE_RUNNING_RECOVERY_AUTORUN ? 'on' : 'off'} | limit=${STALE_RUNNING_RECOVERY_LIMIT || 'all'}`,
+    hints: ['GET_PROCESSES', 'filter stale running', 'PROCESS_RESUME_NEXT_STAGE']
+  });
+  reportServiceModeEvent({
+    reason: 'stale_running_recovery_page_loaded',
+    status: 'loaded',
+    message: 'stale_running_recovery_page_loaded',
+    statusText: `threshold_h=${STALE_RUNNING_RECOVERY_HOURS} autorun=${STALE_RUNNING_RECOVERY_AUTORUN ? 'on' : 'off'} limit=${STALE_RUNNING_RECOVERY_LIMIT || 'all'}`
+  });
+}
 
 startWorkerKeepalive();
 void refreshData();

@@ -258,6 +258,13 @@
       padding: 10px;
     }
 
+    .section-note {
+      margin: 0 0 8px;
+      color: var(--muted);
+      font-size: 10px;
+      line-height: 1.35;
+    }
+
     .advanced-grid {
       display: grid;
       grid-template-columns: repeat(2, minmax(0, 1fr));
@@ -292,6 +299,236 @@
       padding-right: 10px;
       text-align: center;
     }
+
+    .remote-transfer-card {
+      margin-top: 8px;
+      padding: 10px;
+      border: 1px solid var(--border);
+      border-radius: 12px;
+      background: linear-gradient(180deg, #f8fbff 0%, #eef5ff 100%);
+      overflow: hidden;
+    }
+
+    .remote-transfer-card[hidden] {
+      display: none;
+    }
+
+    .remote-transfer-card.is-error {
+      background: linear-gradient(180deg, #fff7f7 0%, #fef2f2 100%);
+      border-color: #fecaca;
+    }
+
+    .remote-transfer-card.is-success {
+      background: linear-gradient(180deg, #f5fff9 0%, #ecfdf5 100%);
+      border-color: #bbf7d0;
+    }
+
+    .remote-transfer-kicker {
+      margin: 0 0 8px;
+      font-size: 10px;
+      font-weight: 700;
+      letter-spacing: 0.08em;
+      text-transform: uppercase;
+      color: #4b5563;
+    }
+
+    .remote-transfer-hero {
+      display: grid;
+      grid-template-columns: minmax(0, 1fr) 92px minmax(0, 1fr);
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .remote-device {
+      display: grid;
+      gap: 4px;
+      padding: 9px 10px;
+      border: 1px solid rgba(148, 163, 184, 0.32);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.9);
+      box-shadow: inset 0 1px 0 rgba(255, 255, 255, 0.6);
+    }
+
+    .remote-device-label {
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .remote-device-name {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+      word-break: break-word;
+    }
+
+    .remote-device-subtitle {
+      font-size: 10px;
+      color: #475569;
+      word-break: break-word;
+    }
+
+    .remote-transfer-lane {
+      position: relative;
+      height: 54px;
+      border-radius: 999px;
+      border: 1px dashed rgba(100, 116, 139, 0.4);
+      background:
+        linear-gradient(90deg, rgba(31, 41, 55, 0.05) 0%, rgba(31, 41, 55, 0) 100%),
+        repeating-linear-gradient(
+          90deg,
+          rgba(148, 163, 184, 0.22) 0,
+          rgba(148, 163, 184, 0.22) 10px,
+          rgba(148, 163, 184, 0) 10px,
+          rgba(148, 163, 184, 0) 20px
+        );
+      overflow: hidden;
+    }
+
+    .remote-transfer-arrow {
+      position: absolute;
+      top: 50%;
+      left: 50%;
+      transform: translate(-50%, -50%);
+      font-size: 16px;
+      font-weight: 800;
+      color: #475569;
+      letter-spacing: 0.12em;
+    }
+
+    .remote-transfer-packet {
+      position: absolute;
+      top: 50%;
+      left: 10px;
+      width: 18px;
+      height: 18px;
+      margin-top: -9px;
+      border-radius: 999px;
+      background: linear-gradient(135deg, #2563eb 0%, #38bdf8 100%);
+      box-shadow: 0 4px 12px rgba(37, 99, 235, 0.35);
+      opacity: 0;
+    }
+
+    .remote-transfer-card.is-sending .remote-transfer-packet {
+      opacity: 1;
+      animation: remote-transfer-move 1.25s ease-in-out infinite;
+    }
+
+    .remote-transfer-card.is-success .remote-transfer-packet {
+      opacity: 1;
+      left: calc(100% - 28px);
+      background: linear-gradient(135deg, #16a34a 0%, #4ade80 100%);
+      box-shadow: 0 4px 12px rgba(34, 197, 94, 0.28);
+    }
+
+    .remote-transfer-card.is-error .remote-transfer-packet {
+      opacity: 1;
+      left: 10px;
+      background: linear-gradient(135deg, #dc2626 0%, #fb7185 100%);
+      box-shadow: 0 4px 12px rgba(220, 38, 38, 0.26);
+    }
+
+    @keyframes remote-transfer-move {
+      0% {
+        left: 10px;
+        transform: translateY(0);
+      }
+      50% {
+        left: calc(50% - 9px);
+        transform: translateY(-2px);
+      }
+      100% {
+        left: calc(100% - 28px);
+        transform: translateY(0);
+      }
+    }
+
+    .remote-transfer-meta {
+      display: grid;
+      grid-template-columns: repeat(3, minmax(0, 1fr));
+      gap: 8px;
+      margin-bottom: 10px;
+    }
+
+    .remote-transfer-metric {
+      display: grid;
+      gap: 2px;
+      padding: 8px;
+      border: 1px solid rgba(148, 163, 184, 0.22);
+      border-radius: 10px;
+      background: rgba(255, 255, 255, 0.82);
+    }
+
+    .remote-transfer-metric span {
+      font-size: 10px;
+      color: var(--muted);
+      text-transform: uppercase;
+      letter-spacing: 0.04em;
+    }
+
+    .remote-transfer-metric strong {
+      font-size: 13px;
+      color: var(--text);
+      line-height: 1.2;
+    }
+
+    .remote-transfer-note {
+      margin: 0 0 8px;
+      font-size: 11px;
+      line-height: 1.4;
+      color: #334155;
+    }
+
+    .remote-transfer-list {
+      display: grid;
+      gap: 6px;
+    }
+
+    .remote-transfer-item {
+      display: grid;
+      gap: 3px;
+      padding: 8px 9px;
+      border-radius: 10px;
+      border: 1px solid rgba(148, 163, 184, 0.2);
+      background: rgba(255, 255, 255, 0.84);
+    }
+
+    .remote-transfer-item-top {
+      display: flex;
+      justify-content: space-between;
+      gap: 8px;
+      align-items: flex-start;
+    }
+
+    .remote-transfer-item-title {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.3;
+      word-break: break-word;
+    }
+
+    .remote-transfer-item-size {
+      flex: 0 0 auto;
+      font-size: 10px;
+      color: #1d4ed8;
+      font-weight: 700;
+    }
+
+    .remote-transfer-item-subtitle {
+      font-size: 10px;
+      color: #64748b;
+      word-break: break-word;
+    }
+
+    .remote-transfer-footer {
+      margin-top: 8px;
+      font-size: 10px;
+      color: #64748b;
+      line-height: 1.35;
+    }
   </style>
 </head>
 <body>
@@ -306,7 +543,7 @@
         class="btn btn-primary btn-span-2"
         id="runBtn"
         data-shortcut-key="2"
-        data-shortcut-detail="Start dla aktywnej karty lub wybranych tabow"
+        data-shortcut-detail="Uruchom analize lokalnie dla aktywnej karty lub wybranych tabow"
       >
         <span class="btn-copy">
           <span class="btn-label">Uruchom</span>
@@ -318,10 +555,10 @@
         class="btn btn-tonal"
         id="runRemoteBtn"
         data-shortcut-key="Z"
-        data-shortcut-detail="Start zdalny przez Remote Runner"
+        data-shortcut-detail="Uruchom analize zdalnie na drugim komputerze"
       >
         <span class="btn-copy">
-          <span class="btn-label">Zdalnie</span>
+          <span class="btn-label">Zdalny</span>
         </span>
         <span class="shortcut">Z</span>
       </button>
@@ -354,7 +591,7 @@
       <button
         class="btn btn-tonal"
         id="resumeAllBtn"
-        title="Aktywne procesy company (INVEST): stop, reload, detekcja etapu i start od poprawnego promptu"
+        title="Aktywne procesy company (INVEST i zdalne ChatGPT): stop, reload, detekcja etapu i start od poprawnego promptu"
         data-shortcut-key="4"
         data-shortcut-detail="Masowy reload, detekcja etapu i start od poprawnego promptu"
       >
@@ -576,44 +813,88 @@
   <details class="details">
     <summary>
       <span class="summary-copy">
-        <span class="summary-title">Remote Runner</span>
+        <span class="summary-title">Zdalny start</span>
       </span>
     </summary>
     <div class="details-content">
+      <p class="section-note">
+        Tutaj ustawiasz drugi komputer do analizy. Przycisk "Uruchom" startuje lokalnie,
+        przycisk "Zdalny" wysyla artykuly na inny komputer, a "Restart + wznow zdalnie"
+        wysyla samo polecenie uruchomienia systemu restart + wznow na runnerze.
+      </p>
       <select class="dispatch-input" id="remoteRunnerTransportModeInput">
-        <option value="watchlist">Transport: Watchlist API (HMAC)</option>
-        <option value="local">Transport: Local relay (bez key)</option>
+        <option value="watchlist">Polaczenie: Watchlist API</option>
+        <option value="local">Polaczenie: relay lokalny (LAN/Tailscale)</option>
       </select>
       <input
         class="dispatch-input"
         id="remoteRunnerBaseUrlInput"
         type="url"
-        placeholder="Relay URL local mode (np. http://127.0.0.1:8787)"
+        placeholder="Adres relay lokalnego, np. http://127.0.0.1:8787"
         autocomplete="off"
       />
       <input
         class="dispatch-input"
         id="remoteRunnerNameInput"
         type="text"
-        placeholder="Nazwa tego runnera"
+        placeholder="Nazwa tego komputera"
         autocomplete="off"
       />
       <div class="dispatch-actions">
-        <button class="btn" id="remoteRunnerToggleBtn">Runner: OFF</button>
-        <button class="btn" id="copySupportIdBtn">Kopiuj Runner ID</button>
+        <button class="btn" id="remoteRunnerToggleBtn">Ten komputer: OFF</button>
+        <button class="btn" id="copySupportIdBtn">Kopiuj ID</button>
       </div>
       <input
         class="dispatch-input"
         id="remoteTargetRunnerIdInput"
         type="text"
-        placeholder="Runner ID drugiego komputera (opcjonalnie)"
+        placeholder="ID drugiego komputera (opcjonalnie)"
         autocomplete="off"
       />
       <div class="dispatch-actions">
-        <button class="btn btn-full" id="checkRemoteRunnerBtn">Sprawdz runner</button>
+        <button class="btn btn-full" id="checkRemoteRunnerBtn">Sprawdz cel</button>
       </div>
-      <p class="status" id="remoteRunnerStatus" aria-live="polite">Sprawdzam status runnera...</p>
+      <div class="dispatch-actions">
+        <button class="btn btn-tonal btn-full" id="runRemoteResumeAllBtn">Restart + wznow zdalnie</button>
+      </div>
+      <p class="status" id="remoteRunnerStatus" aria-live="polite">Sprawdzam ustawienia zdalnego startu...</p>
       <p class="status" id="remoteRunnerJobStatus" aria-live="polite" hidden></p>
+      <div class="remote-transfer-card" id="remoteTransferCard" hidden>
+        <p class="remote-transfer-kicker" id="remoteTransferKicker">Transfer</p>
+        <div class="remote-transfer-hero">
+          <div class="remote-device">
+            <span class="remote-device-label">Ten laptop</span>
+            <strong class="remote-device-name" id="remoteTransferSourceName">Kontroler</strong>
+            <span class="remote-device-subtitle" id="remoteTransferSourceSubtitle">wybor artykulow</span>
+          </div>
+          <div class="remote-transfer-lane" aria-hidden="true">
+            <span class="remote-transfer-arrow">--&gt;</span>
+            <span class="remote-transfer-packet"></span>
+          </div>
+          <div class="remote-device">
+            <span class="remote-device-label">Drugi laptop</span>
+            <strong class="remote-device-name" id="remoteTransferTargetName">Runner</strong>
+            <span class="remote-device-subtitle" id="remoteTransferTargetSubtitle">uruchomienie procesu</span>
+          </div>
+        </div>
+        <div class="remote-transfer-meta">
+          <div class="remote-transfer-metric">
+            <span>Artykuly</span>
+            <strong id="remoteTransferSourceCount">-</strong>
+          </div>
+          <div class="remote-transfer-metric">
+            <span>Tekst</span>
+            <strong id="remoteTransferCharCount">-</strong>
+          </div>
+          <div class="remote-transfer-metric">
+            <span>Status</span>
+            <strong id="remoteTransferPhase">-</strong>
+          </div>
+        </div>
+        <p class="remote-transfer-note" id="remoteTransferNote">W popupie zobaczysz, co polecialo na drugi laptop.</p>
+        <div class="remote-transfer-list" id="remoteTransferList"></div>
+        <div class="remote-transfer-footer" id="remoteTransferFooter"></div>
+      </div>
     </div>
   </details>
 
