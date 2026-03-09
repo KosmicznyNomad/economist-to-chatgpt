@@ -20,18 +20,49 @@ let autoCloseTimeoutId = null;
 let autoCloseIntervalId = null;
 let lastRenderedSessionId = '';
 let lastRenderedUpdatedAt = 0;
+let latestState = null;
 
 const ACTION_LABELS = {
   queued: 'Queued',
   queued_for_detection: 'Queued for detection',
   ready_to_start: 'Ready to start',
   started: 'Started',
+  already_running: 'Already running',
   detect_failed: 'Detect failed',
   reload_failed: 'Prepare failed',
   start_failed: 'Start failed',
   skipped_outside_invest: 'Skipped outside INVEST',
   final_stage_already_sent: 'Final stage already done'
 };
+
+function getAutoCloseState(state = latestState) {
+  if (!state || typeof state !== 'object') return null;
+  if (!state.autoClose || typeof state.autoClose !== 'object') return null;
+  return state.autoClose;
+}
+
+function clearAutoCloseTimers() {
+  if (autoCloseTimeoutId !== null) {
+    window.clearTimeout(autoCloseTimeoutId);
+    autoCloseTimeoutId = null;
+  }
+  if (autoCloseIntervalId !== null) {
+    window.clearInterval(autoCloseIntervalId);
+    autoCloseIntervalId = null;
+  }
+}
+
+function attemptAutoClose() {
+  if (!autoCloseAfterMs) return false;
+  if (Date.now() < autoCloseDeadline) return false;
+  const autoCloseState = getAutoCloseState();
+  if (autoCloseState?.ready === true) {
+    clearAutoCloseTimers();
+    window.close();
+    return true;
+  }
+  return false;
+}
 
 function renderAutoCloseInfo() {
   if (!autoCloseMeta) return;
@@ -40,10 +71,29 @@ function renderAutoCloseInfo() {
     autoCloseMeta.textContent = '';
     return;
   }
+  const autoCloseState = getAutoCloseState();
   const remainingMs = Math.max(0, autoCloseDeadline - Date.now());
   const remainingSeconds = Math.ceil(remainingMs / 1000);
+  const openInvestTabs = Number.isInteger(autoCloseState?.openInvestTabs) ? autoCloseState.openInvestTabs : 0;
+  const satisfiedTabs = Number.isInteger(autoCloseState?.satisfiedTabs) ? autoCloseState.satisfiedTabs : 0;
+  const launchConfirmed = Number.isInteger(autoCloseState?.launchConfirmed) ? autoCloseState.launchConfirmed : 0;
+  const launchRequired = Number.isInteger(autoCloseState?.launchRequired) ? autoCloseState.launchRequired : 0;
+  const pendingSummary = typeof autoCloseState?.pendingSummary === 'string'
+    ? autoCloseState.pendingSummary.trim()
+    : '';
+  const verificationText = autoCloseState
+    ? `Karty OK ${satisfiedTabs}/${openInvestTabs}, procesy potwierdzone ${launchConfirmed}/${launchRequired}.`
+    : 'Czekam na status potwierdzenia kart.';
   autoCloseMeta.hidden = false;
-  autoCloseMeta.textContent = `Auto-zamkniecie monitora za ${remainingSeconds}s.`;
+  if (remainingMs > 0) {
+    autoCloseMeta.textContent = `Auto-zamkniecie po potwierdzeniu startu wszystkich kart. Minimum za ${remainingSeconds}s. ${verificationText}${pendingSummary ? ` Oczekuje: ${pendingSummary}` : ''}`;
+    return;
+  }
+  if (autoCloseState?.ready === true) {
+    autoCloseMeta.textContent = `Wszystkie otwarte karty ChatGPT Invest maja potwierdzony start procesu. Zamykanie monitora...`;
+    return;
+  }
+  autoCloseMeta.textContent = `Minelo ${Math.ceil(autoCloseAfterMs / 1000)}s. Wstrzymuje auto-zamkniecie do czasu potwierdzenia wszystkich kart. ${verificationText}${pendingSummary ? ` Oczekuje: ${pendingSummary}` : ''}`;
 }
 
 function initializeAutoClose() {
@@ -54,14 +104,14 @@ function initializeAutoClose() {
 
   renderAutoCloseInfo();
   autoCloseTimeoutId = window.setTimeout(() => {
-    window.close();
+    renderAutoCloseInfo();
+    void attemptAutoClose();
   }, autoCloseAfterMs);
 
   autoCloseIntervalId = window.setInterval(() => {
     renderAutoCloseInfo();
-    if (Date.now() >= autoCloseDeadline && autoCloseIntervalId !== null) {
-      window.clearInterval(autoCloseIntervalId);
-      autoCloseIntervalId = null;
+    if (attemptAutoClose()) {
+      return;
     }
   }, 1000);
 }
@@ -106,7 +156,7 @@ function actionLabel(action) {
 function actionStatusClass(action) {
   const normalized = typeof action === 'string' ? action.trim() : '';
   if (!normalized) return '';
-  if (normalized === 'started' || normalized === 'final_stage_already_sent') return 'status-ok';
+  if (normalized === 'started' || normalized === 'final_stage_already_sent' || normalized === 'already_running') return 'status-ok';
   if (normalized === 'detect_failed' || normalized === 'reload_failed' || normalized === 'start_failed') return 'status-err';
   if (normalized === 'skipped_outside_invest') return 'status-warn';
   return 'status-running';
@@ -116,6 +166,9 @@ function resolveResumeState(row) {
   const action = typeof row?.action === 'string' ? row.action.trim() : '';
   if (action === 'started') {
     return { label: 'TAK', className: 'status-ok' };
+  }
+  if (action === 'already_running') {
+    return { label: 'JUZ DZIALA', className: 'status-ok' };
   }
   if (action === 'final_stage_already_sent') {
     return { label: 'NIE (final)', className: 'status-ok' };
@@ -278,6 +331,10 @@ function renderSummaryMeta(state) {
     || (typeof row?.reloadMethod === 'string' && row.reloadMethod.trim())
   )).length;
   const preparedTotal = eligible;
+  const autoCloseState = getAutoCloseState(state);
+  const autoCloseLine = autoCloseState
+    ? `Auto-close verify: open_tabs=${autoCloseState.openInvestTabs || 0}, matched=${autoCloseState.matchedTabs || 0}, satisfied=${autoCloseState.satisfiedTabs || 0}, waiting=${autoCloseState.waitingTabs || 0}, confirmed_launch=${autoCloseState.launchConfirmed || 0}/${autoCloseState.launchRequired || 0}, ready=${autoCloseState.ready === true ? 'yes' : 'no'}`
+    : 'Auto-close verify: pending';
 
   summaryMeta.textContent = [
     `Strony: requested=${requested}, eligible=${eligible}`,
@@ -285,6 +342,7 @@ function renderSummaryMeta(state) {
     `Summary: started=${summary.started || 0}, detect_failed=${summary.detect_failed || 0}, final=${summary.final_stage_completed || 0}, start_failed=${summary.start_failed || 0}`,
     `Liczniki: prepare_ok=${preparedOk}/${preparedTotal}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, missing_reply=${missingRepliesDetected}, data_gaps=${dataGapsDetected}, detected_prompts=${summary.detected_prompts || 0}`,
     `Rozpoznanie: saved=${summary.recognized_saved_stage || 0}, chat=${summary.recognized_chat_detection || 0}, counter_fb=${summary.recognized_chat_counter_fallback || 0}, progress_fb=${summary.recognized_progress_last_resort || 0}, unresolved=${summary.recognized_unresolved || 0}`,
+    autoCloseLine,
     'Pipeline: saved_stage -> chat_extract -> chat_direct_signature -> chat_recent_history -> chat_resolution -> decision -> fallback_* -> start_dispatch'
   ].join('\n');
 }
@@ -533,14 +591,18 @@ function shouldRenderState(state) {
   return false;
 }
 
-function applyState(state) {
-  if (!shouldRenderState(state)) return;
+function applyState(state, options = {}) {
+  const forceRender = options?.forceRender === true;
+  if (!forceRender && !shouldRenderState(state)) return;
   if (!sessionId && typeof state?.sessionId === 'string' && state.sessionId.trim()) {
     sessionId = state.sessionId.trim();
   }
+  latestState = state;
   lastRenderedSessionId = typeof state?.sessionId === 'string' ? state.sessionId : '';
   lastRenderedUpdatedAt = Number.isInteger(state?.updatedAt) ? state.updatedAt : Date.now();
   renderState(state);
+  renderAutoCloseInfo();
+  void attemptAutoClose();
 }
 
 async function fetchState() {
@@ -552,7 +614,7 @@ async function fetchState() {
     if (response?.success === false) return;
     const state = response?.state;
     if (!state) return;
-    applyState(state);
+    applyState(state, { forceRender: true });
   } catch (error) {
     // Keep polling silently.
   }
@@ -575,14 +637,7 @@ if (refreshBtn) {
 }
 
 window.addEventListener('beforeunload', () => {
-  if (autoCloseTimeoutId !== null) {
-    window.clearTimeout(autoCloseTimeoutId);
-    autoCloseTimeoutId = null;
-  }
-  if (autoCloseIntervalId !== null) {
-    window.clearInterval(autoCloseIntervalId);
-    autoCloseIntervalId = null;
-  }
+  clearAutoCloseTimers();
 });
 
 initializeAutoClose();

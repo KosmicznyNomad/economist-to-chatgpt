@@ -1323,6 +1323,26 @@ function sanitizeReloadResumeMonitorEvent(rawEvent) {
   };
 }
 
+function sanitizeReloadResumeMonitorAutoCloseStatus(rawStatus) {
+  const source = rawStatus && typeof rawStatus === 'object' ? rawStatus : {};
+  return {
+    ready: source.ready === true,
+    sessionCompleted: source.sessionCompleted === true,
+    openInvestTabs: toNonNegativeInt(source.openInvestTabs, 0),
+    matchedTabs: toNonNegativeInt(source.matchedTabs, 0),
+    satisfiedTabs: toNonNegativeInt(source.satisfiedTabs, 0),
+    waitingTabs: toNonNegativeInt(source.waitingTabs, 0),
+    blockingTabs: toNonNegativeInt(source.blockingTabs, 0),
+    launchRequired: toNonNegativeInt(source.launchRequired, 0),
+    launchConfirmed: toNonNegativeInt(source.launchConfirmed, 0),
+    reason: typeof source.reason === 'string' ? source.reason : '',
+    pendingSummary: typeof source.pendingSummary === 'string'
+      ? source.pendingSummary.slice(0, 420)
+      : '',
+    updatedAt: Number.isInteger(source.updatedAt) ? source.updatedAt : 0
+  };
+}
+
 function normalizeReloadResumeMonitorCounts(rawCounts) {
   const source = rawCounts && typeof rawCounts === 'object' ? rawCounts : {};
   const normalized = {};
@@ -1493,6 +1513,7 @@ function sanitizeReloadResumeMonitorState(rawState) {
     counts: normalizeReloadResumeMonitorCounts(source.counts),
     summary: normalizeReloadResumeSummary(source.summary),
     summaryCheck,
+    autoClose: sanitizeReloadResumeMonitorAutoCloseStatus(source.autoClose),
     stageSnapshot,
     rows,
     events,
@@ -1562,7 +1583,259 @@ async function setReloadResumeMonitorState(nextState) {
   return normalized;
 }
 
-async function getReloadResumeMonitorState(sessionId = '') {
+function getReloadResumeMonitorRowIdentity(row, fallbackIndex = 0) {
+  if (typeof row?.key === 'string' && row.key.trim()) return row.key.trim();
+  if (typeof row?.runId === 'string' && row.runId.trim()) return row.runId.trim();
+  if (Number.isInteger(row?.tabId)) return `tab:${row.tabId}`;
+  if (Number.isInteger(row?.windowId)) return `window:${row.windowId}`;
+  return `row:${fallbackIndex}`;
+}
+
+function isReloadResumeRowLaunchConfirmed(process) {
+  if (!process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process.status || '');
+  return (
+    status === 'starting'
+    || status === 'started'
+    || status === 'running'
+    || status === 'completed'
+  );
+}
+
+function buildReloadResumeAutoCloseTabLabel(tab, row = null) {
+  const rowTitle = typeof row?.title === 'string' ? row.title.trim() : '';
+  const tabTitle = typeof tab?.title === 'string' ? tab.title.trim() : '';
+  const base = rowTitle || tabTitle || `Tab ${Number.isInteger(tab?.id) ? tab.id : '?'}`;
+  return base.replace(/\s+/g, ' ').slice(0, 80);
+}
+
+function evaluateReloadResumeAutoCloseForTab(tab, row, sessionCompleted) {
+  const process = typeof row?.runId === 'string' && row.runId.trim()
+    ? (processRegistry.get(row.runId.trim()) || null)
+    : null;
+  const processStatus = normalizeProcessStatus(process?.status || '');
+  const action = typeof row?.action === 'string' ? row.action.trim() : '';
+  const label = buildReloadResumeAutoCloseTabLabel(tab, row);
+  const buildResult = (overrides = {}) => ({
+    matched: !!row,
+    satisfied: false,
+    blocking: false,
+    requiresLaunch: false,
+    launchConfirmed: false,
+    detail: label,
+    reason: '',
+    ...(overrides && typeof overrides === 'object' ? overrides : {})
+  });
+
+  if (!row || typeof row !== 'object') {
+    return buildResult({
+      matched: false,
+      blocking: sessionCompleted,
+      requiresLaunch: true,
+      reason: 'missing_monitor_row'
+    });
+  }
+
+  if (action === 'final_stage_already_sent') {
+    return buildResult({
+      matched: true,
+      satisfied: true,
+      reason: 'final_stage_already_sent'
+    });
+  }
+
+  if (action === 'already_running') {
+    const launchConfirmed = isReloadResumeRowLaunchConfirmed(process);
+    return buildResult({
+      matched: true,
+      satisfied: launchConfirmed,
+      blocking: false,
+      requiresLaunch: true,
+      launchConfirmed,
+      reason: launchConfirmed
+        ? `already_running_${processStatus || 'running'}`
+        : 'already_running_unconfirmed'
+    });
+  }
+
+  if (action === 'started') {
+    const launchConfirmed = isReloadResumeRowLaunchConfirmed(process);
+    return buildResult({
+      matched: true,
+      satisfied: launchConfirmed,
+      blocking: false,
+      requiresLaunch: true,
+      launchConfirmed,
+      reason: launchConfirmed
+        ? `process_${processStatus || 'started'}`
+        : 'waiting_for_process_start'
+    });
+  }
+
+  if (
+    action === 'detect_failed'
+    || action === 'reload_failed'
+    || action === 'start_failed'
+  ) {
+    return buildResult({
+      matched: true,
+      blocking: true,
+      requiresLaunch: true,
+      reason: action
+    });
+  }
+
+  if (
+    action === 'queued'
+    || action === 'queued_for_detection'
+    || action === 'ready_to_start'
+  ) {
+    return buildResult({
+      matched: true,
+      blocking: sessionCompleted,
+      requiresLaunch: true,
+      reason: action || 'waiting'
+    });
+  }
+
+  if (action === 'skipped_outside_invest') {
+    return buildResult({
+      matched: true,
+      blocking: sessionCompleted,
+      reason: action
+    });
+  }
+
+  return buildResult({
+    matched: true,
+    blocking: sessionCompleted,
+    requiresLaunch: !!action,
+    reason: action || 'unknown_action'
+  });
+}
+
+async function buildReloadResumeMonitorAutoCloseStatus(state) {
+  const baseStatus = {
+    ready: false,
+    sessionCompleted: false,
+    openInvestTabs: 0,
+    matchedTabs: 0,
+    satisfiedTabs: 0,
+    waitingTabs: 0,
+    blockingTabs: 0,
+    launchRequired: 0,
+    launchConfirmed: 0,
+    reason: '',
+    pendingSummary: '',
+    updatedAt: Date.now()
+  };
+  if (!state || typeof state !== 'object') {
+    return sanitizeReloadResumeMonitorAutoCloseStatus(baseStatus);
+  }
+
+  await ensureProcessRegistryReady();
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (error) {
+    return sanitizeReloadResumeMonitorAutoCloseStatus({
+      ...baseStatus,
+      reason: 'tabs_query_failed',
+      pendingSummary: error?.message || String(error)
+    });
+  }
+
+  const sessionCompleted = String(state.status || '').trim().toLowerCase() === 'completed';
+  const investTabs = tabs
+    .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
+    .sort(compareTabsByWindowAndIndex);
+  const rows = Array.isArray(state.rows) ? state.rows : [];
+  const rowByTabId = new Map();
+  const rowsByWindowId = new Map();
+  rows.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    if (Number.isInteger(row.tabId) && !rowByTabId.has(row.tabId)) {
+      rowByTabId.set(row.tabId, row);
+    }
+    if (Number.isInteger(row.windowId)) {
+      const key = row.windowId;
+      const existing = rowsByWindowId.get(key) || [];
+      existing.push({ row, index });
+      rowsByWindowId.set(key, existing);
+    }
+  });
+
+  const usedRowIds = new Set();
+  const pendingDetails = [];
+  let matchedTabs = 0;
+  let satisfiedTabs = 0;
+  let waitingTabs = 0;
+  let blockingTabs = 0;
+  let launchRequired = 0;
+  let launchConfirmed = 0;
+
+  for (const tab of investTabs) {
+    const tabId = Number.isInteger(tab?.id) ? tab.id : null;
+    const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
+    let row = tabId !== null ? (rowByTabId.get(tabId) || null) : null;
+    if (!row && windowId !== null) {
+      const windowRows = rowsByWindowId.get(windowId) || [];
+      const candidate = windowRows.find((item) => {
+        const identity = getReloadResumeMonitorRowIdentity(item?.row, item?.index ?? 0);
+        return !usedRowIds.has(identity);
+      });
+      row = candidate?.row || null;
+    }
+
+    const rowIdentity = row ? getReloadResumeMonitorRowIdentity(row) : '';
+    if (rowIdentity) usedRowIds.add(rowIdentity);
+
+    const evaluation = evaluateReloadResumeAutoCloseForTab(tab, row, sessionCompleted);
+    if (evaluation.matched) matchedTabs += 1;
+    if (evaluation.satisfied) {
+      satisfiedTabs += 1;
+    } else {
+      waitingTabs += 1;
+    }
+    if (evaluation.blocking) blockingTabs += 1;
+    if (evaluation.requiresLaunch) launchRequired += 1;
+    if (evaluation.launchConfirmed) launchConfirmed += 1;
+    if (!evaluation.satisfied && pendingDetails.length < 6) {
+      pendingDetails.push(`${evaluation.detail} [${evaluation.reason}]`);
+    }
+  }
+
+  const ready = sessionCompleted
+    && investTabs.length === satisfiedTabs
+    && waitingTabs === 0
+    && blockingTabs === 0;
+  let reason = 'waiting_for_confirmation';
+  if (!sessionCompleted) {
+    reason = 'session_running';
+  } else if (ready) {
+    reason = 'ready';
+  } else if (blockingTabs > 0) {
+    reason = 'blocking_rows_present';
+  }
+
+  return sanitizeReloadResumeMonitorAutoCloseStatus({
+    ready,
+    sessionCompleted,
+    openInvestTabs: investTabs.length,
+    matchedTabs,
+    satisfiedTabs,
+    waitingTabs,
+    blockingTabs,
+    launchRequired,
+    launchConfirmed,
+    reason,
+    pendingSummary: pendingDetails.join(' | '),
+    updatedAt: Date.now()
+  });
+}
+
+async function getStoredReloadResumeMonitorState(sessionId = '') {
   await ensureReloadResumeMonitorReady();
   if (!sessionId) {
     return cloneReloadResumeMonitorState(reloadResumeMonitorState);
@@ -1570,7 +1843,17 @@ async function getReloadResumeMonitorState(sessionId = '') {
   if (reloadResumeMonitorState?.sessionId && reloadResumeMonitorState.sessionId !== sessionId) {
     return null;
   }
-  return cloneReloadResumeMonitorState(reloadResumeMonitorState);
+  const cloned = cloneReloadResumeMonitorState(reloadResumeMonitorState);
+  return cloned;
+}
+
+async function getReloadResumeMonitorState(sessionId = '') {
+  const cloned = await getStoredReloadResumeMonitorState(sessionId);
+  if (!cloned) return null;
+  return sanitizeReloadResumeMonitorState({
+    ...cloned,
+    autoClose: await buildReloadResumeMonitorAutoCloseStatus(cloned)
+  });
 }
 
 async function startReloadResumeMonitorSession(payload = {}) {
@@ -1607,7 +1890,7 @@ async function startReloadResumeMonitorSession(payload = {}) {
 
 async function appendReloadResumeMonitorEvent(sessionId, rawEvent = {}) {
   if (!sessionId) return null;
-  const current = await getReloadResumeMonitorState(sessionId);
+  const current = await getStoredReloadResumeMonitorState(sessionId);
   if (!current) return null;
   const nextEvents = current.events.concat([sanitizeReloadResumeMonitorEvent(rawEvent)]);
   return setReloadResumeMonitorState({
@@ -1618,7 +1901,7 @@ async function appendReloadResumeMonitorEvent(sessionId, rawEvent = {}) {
 
 async function updateReloadResumeMonitorSession(sessionId, patch = {}) {
   if (!sessionId) return null;
-  const current = await getReloadResumeMonitorState(sessionId);
+  const current = await getStoredReloadResumeMonitorState(sessionId);
   if (!current) return null;
   const next = {
     ...current,
@@ -7214,6 +7497,19 @@ async function runResetScanStartAllTabs(options = {}) {
         return false;
       }
     };
+    const shouldPreserveLiveProcessDuringResume = (process, row = null) => {
+      if (!process || typeof process !== 'object') return false;
+      const status = normalizeProcessStatus(process?.status || '');
+      if (!(status === 'starting' || status === 'started' || status === 'running')) return false;
+      if (isQueuedProcessStatus(status) || isClosedProcessStatus(status) || isFailedProcessStatus(status)) return false;
+      if (process?.needsAction === true) return false;
+      if (row?.dataGapDetected === true) return false;
+      if (shouldRecordIssueForProcess(process)) return false;
+      const processTs = Number.isInteger(process?.timestamp) ? process.timestamp : 0;
+      const ageMs = processTs > 0 ? Math.max(0, Date.now() - processTs) : Number.MAX_SAFE_INTEGER;
+      if (ageMs > PROCESS_MONITOR_HEARTBEAT.staleTtlMs) return false;
+      return true;
+    };
     const computeResumePlanFromSavedStage = (row) => {
       const promptCount = PROMPTS_COMPANY.length;
       if (!Number.isInteger(promptCount) || promptCount <= 1) return null;
@@ -7478,6 +7774,44 @@ async function runResetScanStartAllTabs(options = {}) {
         appendRecognitionStep(row, 'precheck', 'failed', row.reason);
         orderedResultKeys.push(key);
         resultsByKey.set(key, row);
+        continue;
+      }
+
+      const liveProcess = row.runId
+        ? (processRegistry.get(row.runId) || process)
+        : process;
+      if (liveProcess && typeof liveProcess === 'object') {
+        row.progressPromptNumber = Number.isInteger(liveProcess?.currentPrompt) ? liveProcess.currentPrompt : row.progressPromptNumber;
+        row.progressStageIndex = Number.isInteger(liveProcess?.stageIndex) ? liveProcess.stageIndex : row.progressStageIndex;
+        row.totalPrompts = Number.isInteger(liveProcess?.totalPrompts) ? liveProcess.totalPrompts : row.totalPrompts;
+        row.progressStageName = typeof liveProcess?.stageName === 'string' ? liveProcess.stageName : row.progressStageName;
+        row.progressStatus = normalizeProcessStatus(liveProcess?.status || row.progressStatus || '');
+        row.progressNeedsAction = liveProcess?.needsAction === true;
+      }
+      if (shouldPreserveLiveProcessDuringResume(liveProcess, row)) {
+        const processStatus = normalizeProcessStatus(liveProcess?.status || '');
+        const processTs = Number.isInteger(liveProcess?.timestamp) ? liveProcess.timestamp : 0;
+        const ageMs = processTs > 0 ? Math.max(0, Date.now() - processTs) : null;
+        row.action = 'already_running';
+        row.reason = 'healthy_process_running';
+        row.restartDispatchStatus = 'already_running';
+        row.eligibleForReload = false;
+        appendRecognitionStep(
+          row,
+          'precheck',
+          'kept_running',
+          `status=${processStatus}, prompt=${Number.isInteger(row.progressPromptNumber) ? `P${row.progressPromptNumber}` : '?'}${Number.isInteger(ageMs) ? `, age_ms=${ageMs}` : ''}`
+        );
+        orderedResultKeys.push(key);
+        resultsByKey.set(key, row);
+        console.log('[reset-scan-start] Keeping live process running', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          windowId: row.windowId,
+          status: processStatus,
+          currentPrompt: row.progressPromptNumber,
+          ageMs
+        });
         continue;
       }
 
@@ -23679,6 +24013,102 @@ async function injectToChat(
     return false; // Na razie zwracamy false - można dodać bardziej zaawansowaną logikę
   }
 
+  function parseStructuredDecisionLineParts(text = '') {
+    const normalized = typeof text === 'string'
+      ? text.replace(/\r/g, '').trim()
+      : '';
+    if (!normalized) return null;
+    const parts = normalized
+      .split(';')
+      .map((part) => part.trim());
+    while (parts.length > 0 && parts[parts.length - 1] === '') {
+      parts.pop();
+    }
+    if (parts.length === 12 || parts.length === 13 || parts.length === 15) {
+      return parts;
+    }
+    return null;
+  }
+
+  function analyzeStructuredDecisionText(text = '') {
+    const normalized = typeof text === 'string'
+      ? text.replace(/\r/g, '').trim()
+      : '';
+    if (!normalized) {
+      return {
+        totalLines: 0,
+        validLineCount: 0,
+        preferredRoleRows: false
+      };
+    }
+
+    const nonEmptyLines = normalized
+      .split('\n')
+      .map((line) => line.trim())
+      .filter((line) => line.length > 0);
+    if (nonEmptyLines.length === 0) {
+      return {
+        totalLines: 0,
+        validLineCount: 0,
+        preferredRoleRows: false
+      };
+    }
+
+    let validLineCount = 0;
+    let roleLineCount = 0;
+    for (const line of nonEmptyLines) {
+      const parts = parseStructuredDecisionLineParts(line);
+      if (!parts) continue;
+      validLineCount += 1;
+      const role = typeof parts[2] === 'string' ? parts[2].trim().toUpperCase() : '';
+      if (role === 'PRIMARY' || role === 'SECONDARY') {
+        roleLineCount += 1;
+      }
+    }
+
+    return {
+      totalLines: nonEmptyLines.length,
+      validLineCount,
+      preferredRoleRows: nonEmptyLines.length === 2 && validLineCount === 2 && roleLineCount === 2
+    };
+  }
+
+  function findPreferredStructuredAssistantResponse(messages, extractMainContent) {
+    if (!Array.isArray(messages) || messages.length === 0) return null;
+    if (typeof extractMainContent !== 'function') return null;
+
+    let bestCandidate = null;
+    const startIndex = Math.max(0, messages.length - 6);
+    for (let index = messages.length - 1; index >= startIndex; index -= 1) {
+      const message = messages[index];
+      if (!message) continue;
+      const text = extractMainContent(message);
+      if (!text) continue;
+
+      const analysis = analyzeStructuredDecisionText(text);
+      if (analysis.validLineCount === 0) continue;
+
+      const score = (analysis.preferredRoleRows ? 1000 : 0)
+        + (analysis.validLineCount * 10)
+        + (index === messages.length - 1 ? 1 : 0);
+
+      if (!bestCandidate || score > bestCandidate.score) {
+        bestCandidate = {
+          text,
+          index,
+          score,
+          analysis
+        };
+      }
+
+      if (analysis.preferredRoleRows && index === messages.length - 1) {
+        break;
+      }
+    }
+
+    return bestCandidate;
+  }
+  
   // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
   async function getLastResponseText() {
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
@@ -23772,6 +24202,28 @@ async function injectToChat(
       }
       
       if (messages.length > 0) {
+        const preferredStructured = findPreferredStructuredAssistantResponse(
+          Array.from(messages),
+          extractMainContent
+        );
+        if (preferredStructured && preferredStructured.text) {
+          if (preferredStructured.index !== messages.length - 1) {
+            console.log('[copy-flow] [capture:structured-fallback]', {
+              selectedAssistantIndex: preferredStructured.index + 1,
+              assistantCount: messages.length,
+              validLineCount: preferredStructured.analysis.validLineCount,
+              preferredRoleRows: preferredStructured.analysis.preferredRoleRows
+            });
+          } else {
+            console.log('[copy-flow] [capture:structured-current]', {
+              assistantCount: messages.length,
+              validLineCount: preferredStructured.analysis.validLineCount,
+              preferredRoleRows: preferredStructured.analysis.preferredRoleRows
+            });
+          }
+          return preferredStructured.text;
+        }
+
         const lastMessage = messages[messages.length - 1];
         
         // Sprawdź czy to nie jest tylko thinking indicator

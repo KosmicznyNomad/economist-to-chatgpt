@@ -193,6 +193,21 @@ Score each candidate 1-5 on:
 
 For each candidate, explicitly note the score for each dimension (e.g., "Explicitness: 4/5, Agency clarity: 3/5...").
 
+EVIDENCE TIER PROPAGATION (mandatory for Layer 3+ discoveries):
+
+When a Layer 3+ opportunity is identified in Step 3 and carried into the selected winners, assign it an Evidence Tier based on the E-grade of its supporting anchors:
+
+- TIER A (strong): The Layer 3+ opportunity is supported by at least 2 E1/E2 anchors that directly connect to the company's invoice items. Example: article explicitly mentions the company or its product category.
+- TIER B (moderate): The opportunity is supported by E2/E3 anchors. The connection from article to company requires one inferential step. Example: article mentions "restocking interceptors" and the Layer 3+ company supplies energetics for those interceptors.
+- TIER C (inference-only): The opportunity is supported primarily by E3/E4 anchors. The connection requires 2+ inferential steps or relies on analyst external knowledge. Example: article mentions "more drones" and the Layer 3+ company operates T&E infrastructure that would be needed to validate those drones.
+
+DOWNSTREAM IMPACT OF EVIDENCE TIER:
+- TIER A companies: no penalty in downstream stages
+- TIER B companies: TQ gets -1 penalty in Stage 3 (per existing E3/E4 penalty rule)
+- TIER C companies: TQ gets -1 AND Composite Score in Stage 11 gets -0.3 penalty. This company can still be selected but must compensate with stronger traction or better price.
+
+Label each Layer 3+ company with its Evidence Tier in the Layer Discovery output. This label propagates through all subsequent stages.
+
 Select ONE winning thesis and justify in 2-4 sentences why it wins.
 
 ## Step 0.7 — Contract-Form Test (Mandatory Gate)
@@ -427,6 +442,7 @@ At the END of your Stage 0 output, include a clearly marked block:
 WINNING_THESIS: [single sentence]
 THESIS_RATIONALE: [2-4 sentences]
 CONTROL_TOKENS: [comma-separated list of 12-20 author tokens]
+LAYER3_EVIDENCE_TIERS: [list opportunity/company -> Tier A/B/C, or None]
 CONTRACT_MAP:
   Payer: [entity]
   Contract vehicle: [type]
@@ -517,6 +533,8 @@ For each critical gate:
 [At least ONE opportunity; use Step 3 winners only]
 
 **Opportunity**: [Descriptive name]
+
+**Evidence Tier**: [TIER A / TIER B / TIER C + one-line justification]
 
 [Follow the detailed format from Step 4, including all subsections: full causal chain, weakest link, required capabilities, market structure, value capture mechanism, pricing power, revenue model, window, why non-obvious, mispricing mechanism, company identification criteria, critical dependencies & breakpoints, investability]
 
@@ -801,6 +819,20 @@ For each of the top 2–3 selected sub-segments, create a complete handoff pack 
 - Delivered Y1–Y3 (with feasibility constraints)
 - 2–3 **measurable VOI/falsifiers** in 6–18 month horizon (leading indicators that would confirm or disconfirm the sub-segment's viability)
 
+Additionally, create one shared thesis-source line for downstream company records:
+- **THESIS_SOURCE**: the original source from which the company thesis was taken at the start of the pipeline
+- Format: one natural sentence, max 15 words, readable by humans
+- Purpose: answer "where did the company thesis originally come from?"
+- Required content order:
+  1. provider/source name
+  2. channel, series, or short title
+  3. author or 1-2 main participants if known
+  4. source character label: `artykul ogolny`, `artykul specyficzny`, `rozmowa ogolna`, `rozmowa specyficzna`, `wywiad specyficzny`, `dokument specyficzny`, or `raport specyficzny`
+- Do not include analysis, valuation, Stage 9 references, or later-stage process notes
+- Do not use semicolons
+- If an element is unknown, omit it instead of inventing detail
+- Keep the sentence compact and natural, not machine-formatted
+
 ## Downstream Integration Context
 
 Your outputs feed directly into these subsequent stages:
@@ -904,6 +936,7 @@ block:
 
 === STAGE 1 HANDOFF ===
 WINNING_THESIS: [single sentence]
+THESIS_SOURCE: [one natural sentence, max 15 words, naming the original thesis source]
 SELECTED_SUB-SEGMENTS: [list names of top 2-3]
 [For each selected sub-segment, repeat the 6-component invoice-first 
 definition]
@@ -2257,6 +2290,29 @@ B) Implied FCF margin (holding growth and WACC constant)
 Compute divergence versus your Base assumptions.
 Large divergence indicates real mispricing fuel.
 
+TERMINAL SHARE CONSTRAINT (mandatory, applies to all paths):
+
+After computing reverse DCF, report TerminalShare =
+PV_TV / (PV_FCF + PV_TV) for the Base scenario.
+
+TerminalShare thresholds:
+- <= 50%: NORMAL. Proceed without adjustment.
+- 50%-65%: ELEVATED. Flag DURATION_SENSITIVE. Apply a
+  -100 bps adjustment to divergence_growth before
+  interpreting. Rationale: duration-sensitive valuations
+  carry model risk that is not captured in scenario ranges.
+- > 65%: HIGH. Flag TERMINAL_DOMINATED. Apply -200 bps
+  adjustment to divergence_growth. Additionally:
+  - Cap Value Asymmetry dimension at score 3 in Stage 11
+  - Require Traction_Rank top 3 to classify as ADVANCE
+  - If DominantDriver is also WACC: hard cap at WATCH
+
+Rationale: when two-thirds of the valuation comes from a
+terminal value computed using parameters nobody can verify,
+the "mispricing" signal from reverse DCF is unreliable.
+The pipeline should weight contract-grade evidence more
+heavily for these companies, not less.
+
 ---
 
 PHASE 8 — DRIVER-OF-VALUE TEST
@@ -2305,13 +2361,58 @@ Also assign the Stage 8 modeling template (how Stage 8 should compute the wedge 
 
 ---
 
+TRACTION RANK (parallel decision axis, mandatory)
+
+Purpose: provide a DCF-free ranking of companies based on
+contract-grade evidence. This ranking has co-equal authority
+with the DCF-based asymmetry ranking. When rankings conflict,
+the conflict itself is the signal — it means either the price
+is wrong (DCF says cheap but traction is weak) or the model
+is wrong (DCF says expensive but traction is strong).
+
+For each company, compute:
+  Traction_Rank_Score = CP × Floor_Traction × Gate_Quality_Multiplier
+
+Where:
+  Floor_Traction = min(TS, TQ) / 5  (inherited from Stage 3)
+  Gate_Quality_Multiplier:
+    1.5 if company controls >= 1 Quality-A gate
+    1.2 if company controls >= 1 Quality-B gate (no A gates)
+    1.0 otherwise
+
+Sort all companies by Traction_Rank_Score descending.
+Report as a table alongside the DCF-based ranking.
+
+CONFLICT RESOLUTION:
+If a company ranks top 3 in Traction Rank but FAILS Gate 2
+Value in Stage 10:
+  - Do NOT classify as AVOID or DROP
+  - Classify as WATCH / PRICE_CONTINGENT
+  - Compute price trigger = Base_TOTAL × 0.95
+  - Carry forward with full sizing rights contingent on price
+
+If a company ranks top 3 in DCF asymmetry but bottom 3 in
+Traction Rank:
+  - Flag TRACTION_DEFICIT
+  - Cap at WATCH regardless of asymmetry
+  - Require next VOI to confirm traction before advancing
+
+---
+
 DECISION RULES (ALWAYS-RUN with Uncertainty Tax)
 
 Baseline thresholds (calibrated by Stage 3 TractionClass):
 
 HARD_TRACTION (TS>=3 AND TQ>=3):
-  ADVANCE if: Total asymmetry >= 3:1 AND market below base AND wedge realism PASS or WARN
+  ADVANCE if: Total asymmetry >= 3:1 AND market below base
+    AND wedge realism PASS or WARN
+    AND DominantDriver is NOT WACC
   WATCH if: Asymmetry 2:1-3:1 or market near base
+  WATCH (WACC_CAP) if: DominantDriver = WACC AND asymmetry >= 3:1
+    AND market below base. Rationale: WACC-dominated asymmetry
+    is model-dependent, not thesis-dependent. Cap at WATCH
+    regardless of headline asymmetry. To override, company must
+    rank in top 3 of Traction Rank (see new section above).
   DROP if: Market above base or asymmetry < 2:1
 
 SOFT_TRACTION:
@@ -2329,7 +2430,7 @@ LOW_QUALITY (TS<=1 AND TQ<=1 AND CP<=2):
   DROP by default. Override to WATCH only if asymmetry >= 6:1 with VOI within 6 months.
 
 Additional conditions (apply to all classes):
-- Mispricing must be driven by growth or thesis-linked economics (not WACC)
+- If DominantDriver = WACC, apply WACC_CAP and Traction Rank conflict rules before any ADVANCE decision.
 - If PrimaryTractionKPI has DILUTION_RISK flag (proxy, not thesis-specific):
   raise asymmetry threshold by +1.0 for all TractionClass categories
   (e.g., HARD_TRACTION requires 4:1 instead of 3:1).
@@ -2345,7 +2446,7 @@ WATCH if:
 
 DROP if:
 - Market is already in base
-- Value is dominated by WACC
+- Value is dominated by WACC and Traction_Rank is not top 3
 - Thesis may be true but stock lacks economic torque
 - Wedge realism = FAIL with Medium/High pool confidence
 - TractionClass = LOW_QUALITY without extraordinary asymmetry
@@ -2363,15 +2464,18 @@ REQUIRED OUTPUT FORMAT
 
 1. One comparison table covering all candidates, including:
    Core values, Wedge values, Total values, % priced-in, implied expectations,
-   asymmetry, dominant driver, monetization path, Stage 8 template, wedge realism (PASS/WARN/FAIL), data proxy level (A–E), and decision.
+   asymmetry, dominant driver, monetization path, Stage 8 template, wedge realism (PASS/WARN/FAIL), data proxy level (A–E), Traction_Rank_Score, TerminalShare, key flags, and decision.
 
-2. Three short lists:
+2. One Traction Rank table showing all companies, Traction_Rank_Score, rank, and any TRACTION_DEFICIT / WACC_CAP / PRICE_CONTINGENT implications.
+
+3. Three short lists:
    • ADVANCE (with one-sentence economic rationale)
    • WATCH (with explicit entry conditions)
    • DROP (brief diagnosis of why value fails to convert into returns)
 
-3. A short process summary:
+4. A short process summary:
    • Distribution of growth vs margin vs WACC-dominated names
+   • Distribution of NORMAL / DURATION_SENSITIVE / TERMINAL_DOMINATED names
    • How many names failed wedge realism and why
    • How many names used proxy level D/E and how that changed thresholds
    • Implications for Stage 8 and where full monetization work is justified
@@ -2533,6 +2637,32 @@ Define specific, measurable conditions that would invalidate the upside thesis:
 - Time horizon: quarters or specific date
 - Implication: how asymmetry ratio changes if threshold is breached
 
+**D) TRACTION-WEIGHTED ASYMMETRY (mandatory additional metric):**
+
+After computing Actual Asymmetry Ratio, also compute:
+
+Traction_Weighted_Asymmetry = Actual_Asymmetry
+  × Floor_Traction
+  × (1 + 0.2 × max(0, CP - 3))
+
+Where Floor_Traction and CP are inherited from Stage 3.
+
+Report BOTH ratios. When they diverge significantly
+(Traction_Weighted differs from Actual by more than 50%),
+flag ASYMMETRY_QUALITY_GAP and note which direction:
+
+- If Traction_Weighted > Actual: the company has better
+  contract-grade evidence than the price suggests.
+  This is a positive signal for conviction.
+
+- If Traction_Weighted < Actual: the high asymmetry ratio
+  may be inflated by model parameters rather than supported
+  by real traction. Reduce confidence in the asymmetry signal.
+
+In Phase 7 (Final Selection), use Traction_Weighted_Asymmetry
+for the 30% "Actual asymmetry ratio" ranking weight, not
+raw Actual Asymmetry.
+
 **PHASE 6: VALUATION ADJUSTMENT**
 Apply current valuation context to determine actual asymmetry:
 
@@ -2559,7 +2689,7 @@ Primary Filters (must pass all):
 3. Not in maturity phase (>60% TAM adoption)
 
 Ranking Criteria (apply in order):
-1. **Actual asymmetry ratio** (30% weight)
+1. **Traction-Weighted Asymmetry** (30% weight)
 2. **S-curve position** (25% weight)
 3. **Thesis capture potential** (20% weight) — use CP score from Stage 3,
    weighted by gate quality: CP with A-type gates scores 1.5×, B-type 1.0×, C-type 0.7×
@@ -2580,7 +2710,7 @@ In your analysis:
 3. **Systematic Application**: Work through each phase sequentially for every company, showing your calculations and decision-making process step by step
 4. **Quantitative Calculations**: Show specific numbers for TAM adoption percentages, asymmetry ratios, and valuation metrics with your mathematical work
 5. **Probability Reasoning**: Document your reasoning for probability estimates using the calibration framework rather than arbitrary numbers
-6. **Intrinsic vs Actual Analysis**: Calculate and show both intrinsic asymmetry (business quality) and actual asymmetry (after valuation adjustment) for each qualifying company
+6. **Intrinsic vs Actual Analysis**: Calculate and show intrinsic asymmetry, actual asymmetry, and traction-weighted asymmetry (after valuation adjustment) for each qualifying company
 oints based on industry category rather than using rigid 15-25% assumption
 - Apply stress testing to downside floor calculations (assume revenue churn and distressed multiples)
 - Include sensitivity analysis showing how asymmetry ratios change if key assumptions vary
@@ -2604,7 +2734,8 @@ After completing your analysis, provide your results using this structure:
 **ASYMMETRY PROFILE:**
 • Intrinsic Asymmetry: [X]:1 (business quality independent of valuation)
 • Actual Asymmetry: [Y]:1 (adjusted for current entry price)
-• Upside Potential: +[Z]% over 3 years (primary driver: [specific mechanism])
+• Traction-Weighted Asymmetry: [Z]:1 (quality-adjusted signal using Floor_Traction and CP)
+• Upside Potential: +[U]% over 3 years (primary driver: [specific mechanism])
 • Downside Risk: -[W]% (floor based on: [methodology])
 • Confidence Level: [High/Medium + reasoning]
 
@@ -3221,8 +3352,9 @@ Horizon selection rubric (use the best-fitting archetype):
 * N = 10: regulated or multi-cycle infrastructure where capex programs and backlog conversion extend beyond 7 years.
 
 Mandatory stability check:
-* Compute an N-sensitivity diagnostic at N_minus = max(3, N-2) and N_plus = min(10, N+2).
-* If market-implied results materially change across N_minus, N, N_plus, flag MODEL-RISK and downgrade confidence.
+* Do not treat horizon sensitivity as a soft note.
+* The formal hard-gate procedure is defined in Step 4.5 and must use the full N set {3, 5, 7, 10}.
+* Step 4.5 output governs any HORIZON_DEPENDENT / RANK_UNSTABLE constraint downstream.
 
 NON-NEGOTIABLE MODELING RULES
 
@@ -3325,10 +3457,39 @@ You must solve directly, not interpolate.
 * Within the thesis incremental DCF, solve for one implied thesis driver (preferably capture rate or thesis CAGR) such that ThesisNPVPerShare == implied thesis value per share.
 * Do not compare thesis-only NPV to full price.
 
-NEW — Step 4.5 HORIZON STABILITY DIAGNOSTIC (MANDATORY)
+Step 4.5 HORIZON STABILITY DIAGNOSTIC (MANDATORY, HARD GATE)
+
 Using N_minus, N, N_plus from Step 0.2:
-* Repeat Step 4.1 and Step 4.2 at N_minus and N_plus.
-* If implied CAGR or implied margin materially changes across horizons, flag MODEL-RISK and explicitly downgrade confidence and tier strength.
+* Repeat Step 4.1 and Step 4.2 at ALL of N = {3, 5, 7, 10}.
+* Report the FULL RANGE of implied CAGR and implied margin
+  across all four horizons in a table.
+* Compute Horizon_Spread = max(implied_CAGR) - min(implied_CAGR)
+  across the four N values.
+
+HARD GATE (not just a flag):
+* If Horizon_Spread > 500 bps: flag HORIZON_DEPENDENT.
+  This is a BINDING constraint, not informational.
+  HORIZON_DEPENDENT companies:
+  - Cannot receive Tier 1 or Tier 2 classification
+  - Cannot be classified as ADVANCE in Stage 4
+  - Maximum classification: WATCH
+  - In Stage 11 Composite Score, Value Asymmetry dimension
+    is capped at score 2 regardless of headline asymmetry
+
+* If Horizon_Spread <= 500 bps: the result is horizon-stable.
+  Proceed normally.
+
+* If the RANKING of companies changes between any two adjacent
+  N values (e.g., Company A is cheaper than B at N=5 but more
+  expensive at N=7): flag RANK_UNSTABLE for both companies.
+  RANK_UNSTABLE carries the same constraints as
+  HORIZON_DEPENDENT.
+
+Rationale: a thesis whose attractiveness depends on which
+horizon you choose is not a thesis about the company — it is
+a thesis about the discount rate. The pipeline must not select
+companies based on duration bets disguised as fundamental
+analysis.
 
 STEP 5 — RISK-REWARD METRICS (TOTAL EQUITY VALUE PER SHARE, PYTHON)
 Precondition: Price, Bear, Base, Bull are all TOTAL Equity Value per share (EV›Equity bridge already applied).
@@ -3355,6 +3516,51 @@ NEW — Terminal share diagnostic (mandatory reporting):
 • TerminalShare = PV_TV / (PV_FCF + PV_TV)
 If TerminalShare is very high, state explicitly that the result is WACC-sensitive and resembles a duration/regime bet.
 
+Step 5.5 CONTRACT-BASED BEAR FLOOR (mandatory stress test)
+
+Purpose: provide a DCF-independent downside estimate to
+prevent asymmetry inflation from narrow DCF Bear scenarios.
+
+For each company, compute an alternative Bear equity value
+using ONLY contract-grade data (no DCF, no WACC, no terminal
+value):
+
+1) Revenue_floor = min(funded_backlog_annual_conversion,
+   last_12m_revenue × 0.85)
+   Source: Stage 3 PrimaryTractionKPI + Semantics Verdict.
+   Use only Obligated-Funded or Delivered-Cash portions.
+   Exclude Ceiling and Unfunded amounts.
+
+2) Bear_EV = Revenue_floor × Distressed_Industry_Multiple
+   Distressed multiples by business type:
+   - Defense equipment/industrial: 0.8x-1.2x EV/Sales
+   - Defense services/T&E: 0.6x-1.0x EV/Sales
+   - Defense electronics/subsystems: 1.0x-1.5x EV/Sales
+   Use the LOW end of the range.
+
+3) Bear_Equity_Contract = Bear_EV - Net_Debt
+   Bear_Per_Share_Contract = Bear_Equity_Contract / Diluted_Shares
+
+RECONCILIATION RULE:
+If |Bear_DCF - Bear_Contract| / Bear_DCF > 15%:
+  Use MAX(Bear_DCF, Bear_Contract) as the effective Bear
+  for asymmetry calculation and downstream Bear_TOTAL handoff.
+  This takes the MORE CONSERVATIVE floor.
+  Flag BEAR_FLOOR_DIVERGENCE and report both values.
+
+If Bear_Contract > Price (contract-based floor is above
+current price): the downside scenario implies the company is
+currently undervalued even on distressed metrics. This is a
+STRONG positive signal. Report it explicitly.
+
+Rationale: DCF Bear scenarios are model outputs that share
+the same WACC and terminal assumptions as Base and Bull.
+A narrow gap between Bear and Price can be an artifact of
+the model rather than a reflection of genuine downside
+protection. The contract-based floor provides an independent
+anchor grounded in what the company has actually sold and
+what customers have actually committed to pay.
+
 STEP 6 — DIVERGENCE DIAGNOSIS (EXPLAIN THE GAP)
 Explain precisely why your Base case differs from market-implied assumptions. Anchor to mechanisms, not vibes:
 * TAM/pool size
@@ -3371,8 +3577,9 @@ Tier 2 — Attractive: Market-implied CAGR > 300 bps below Base, Expected value 
 Tier 3 — Fair Value: Market within ±200 bps of Base, Expected value 10–30% above current, Asymmetry 2–3:1
 Tier 4 — Avoid: Market at/above Base, Expected value < 10% above current, Asymmetry < 2:1, Bear downside > 50%
 
-NEW — Tier integrity guard:
-If MODEL-RISK is flagged from Step 4.5 (horizon instability), cap the output signal at Tier 3 pending additional VOI confirmation.
+Tier integrity guard:
+If HORIZON_DEPENDENT or RANK_UNSTABLE is flagged from Step 4.5,
+cap the output signal at Tier 3. Tier 1 and Tier 2 are not allowed.
 
 REQUIRED OUTPUT FORMAT
 Your final response must include:
@@ -3384,8 +3591,8 @@ Your final response must include:
 * %PricedIn using whole-company scenarios (or SoP with implied thesis value separated)
 
 NEW (additional required reporting):
-* Horizon N selection (from Step 0.2) and N_minus/N_plus sensitivity summary
-* TerminalShare diagnostic
+* Horizon table across N = {3, 5, 7, 10}, full implied CAGR/implied margin ranges, Horizon_Spread, and any HORIZON_DEPENDENT / RANK_UNSTABLE flags
+* TerminalShare diagnostic and any DURATION_SENSITIVE / TERMINAL_DOMINATED adjustment
 
 2. Scenario Comparison Table (4 rows)
 Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per share, % vs current price
@@ -3393,6 +3600,7 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 3. Risk-Reward Analysis
 * Expected value and % vs current price
 * Asymmetry ratio (and check via multiples)
+* Bear_DCF vs Bear_Contract vs Effective_Bear_TOTAL (and BEAR_FLOOR_DIVERGENCE if triggered)
 * 5-year returns (multiples and CAGRs, Python)
 * Threshold checks: Bull > 5×, Base > 2×, Bear survivable
 
@@ -3408,7 +3616,7 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 
 6. Cross-Company Comparison Table (MANDATORY — after completing all 4)
 
-| Company | Ticker | Price | Bear_TOTAL | Base_TOTAL | Bull_TOTAL | EV_TOTAL | %PricedIn | Implied_CAGR | Base_CAGR | Divergence_bps | Asymmetry_TOTAL | Tier | Wedge_to_Price |
+| Company | Ticker | Price | Bear_TOTAL | Bear_Contract | Base_TOTAL | Bull_TOTAL | EV_TOTAL | %PricedIn | Implied_CAGR | Base_CAGR | Divergence_bps | Horizon_Spread | TerminalShare | Asymmetry_TOTAL | Tier | Wedge_to_Price | Flags |
 
 This table enables Stage 11 Composite Rank by providing directly comparable metrics.
 
@@ -3416,15 +3624,16 @@ This table enables Stage 11 Composite Rank by providing directly comparable metr
 [For each of the 4 finalists:]
   COMPANY: [Name] | TICKER: [Ticker]
   PRICE: [current with date]
-  BEAR_TOTAL: [value/share] | BASE_TOTAL: [value/share] | BULL_TOTAL: [value/share]
+  BEAR_TOTAL: [effective value/share] | BEAR_DCF: [value/share] | BEAR_CONTRACT: [value/share] | BASE_TOTAL: [value/share] | BULL_TOTAL: [value/share]
   EXPECTED_VALUE: [probability-weighted]
   ASYMMETRY_TOTAL: [ratio]
   PRICED_IN: [%]
   IMPLIED_CAGR: [%] | BASE_CAGR: [%] | DIVERGENCE_GROWTH: [bps]
   IMPLIED_MARGIN_Y3: [%] | BASE_MARGIN_Y3: [%] | DIVERGENCE_MARGIN: [bps]
+  HORIZON_SPREAD: [bps] | TERMINAL_SHARE: [%]
   TIER: [1/2/3/4]
   WEDGE_TO_PRICE: [ratio from Stage 8]
-  FLAGS: [MODEL-RISK if horizon unstable, etc.]
+  FLAGS: [HORIZON_DEPENDENT / RANK_UNSTABLE / DURATION_SENSITIVE / TERMINAL_DOMINATED / BEAR_FLOOR_DIVERGENCE / None]
 === END HANDOFF ===
 
 Style: concise, decision-oriented, auditable. No generic filler. No linear interpolation. No object mismatch.
@@ -3510,6 +3719,8 @@ Stage 4 — Reverse DCF Lite + Driver-of-Value Screen
 - TOTAL values (Bear/Base/Bull if available)
 - Dominant driver (growth vs margin vs WACC)
 - Monetization path A/B/C
+- Traction_Rank_Score and whether the company is top 3 / bottom 3 in Traction Rank
+- TerminalShare and any DURATION_SENSITIVE / TERMINAL_DOMINATED flags
 
 Stage 5 — Competitive Position
 - Replaceability test results
@@ -3539,6 +3750,8 @@ Stage 9 — Reverse DCF (WHOLE COMPANY / TOTAL)
 - Consistent TOTAL Bear/Base/Bull values
 - “Priced-in” diagnostics
 - Sensitivities: ±growth, ±margin, ±WACC
+- Horizon_Spread and any HORIZON_DEPENDENT / RANK_UNSTABLE flags
+- Contract-based Bear floor and any BEAR_FLOOR_DIVERGENCE flag
 
 ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
 THE DECISION PROCESS (follow strictly)
@@ -3610,7 +3823,28 @@ Thresholds:
 - PASS: Asymmetry_TOTAL ? 3.0 and divergence is meaningful
 - RISK: Asymmetry_TOTAL 2.0–3.0 or divergence is small/uncertain
 - FAIL: Asymmetry_TOTAL < 2.0 or market is already pricing Base or better
-Important: Gate 2 FAIL means “too expensive / insufficient asymmetry,” not “bad company.”
+
+CRITICAL OVERRIDE — TRACTION-PROTECTED COMPANIES:
+If Gate 2 = FAIL but ALL of the following are true:
+  (a) Gate 1 = PASS (no structural quality issues)
+  (b) Gate 3 >= MEDIUM (proof exists)
+  (c) Traction_Rank_Score is in top 3 of the universe
+Then:
+  - Do NOT classify as TOO_EXPENSIVE
+  - Classify as WATCH / PRICE_CONTINGENT
+  - Compute price_trigger = Base_TOTAL × 0.95
+  - In Stage 11 Composite Score, the Value Asymmetry
+    dimension scores 1 (not 0). This preserves the company
+    in the ranking at reduced weight rather than eliminating it.
+  - The execution plan must include the price_trigger as
+    Tranche 1 entry condition.
+
+Rationale: a company with the strongest contract-grade
+traction, the most durable gates, and clean quality should
+never be eliminated from the pipeline solely because a
+WACC-sensitive DCF model says the price is 10% above Base.
+The correct response is a price-contingent position plan,
+not exclusion.
 
 ¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
 GATE 3 - PROOF & VOI (is the thesis showing up in reality?)
@@ -3665,7 +3899,10 @@ Provide:
 FINAL DECISION LOGIC
 1) If Gate 0 fails: WATCH / DATA_GAPS
 2) If Gate 1 has any FAIL: AVOID / STRUCTURAL
-3) If Gate 1 PASS and Gate 2 FAIL: WATCH / TOO_EXPENSIVE
+3a) If Gate 1 PASS and Gate 2 FAIL and Traction_Rank top 3:
+    WATCH / PRICE_CONTINGENT (with explicit price trigger)
+3b) If Gate 1 PASS and Gate 2 FAIL and Traction_Rank NOT
+    top 3: WATCH / TOO_EXPENSIVE
 4) If Gate 1 PASS, Gate 2 PASS, and Gate 3 is not LOW: WATCH / OK
 5) Otherwise: WATCH / INSUFFICIENT_PROOF or TIMING (choose the real blocker)
 
@@ -3673,7 +3910,7 @@ FINAL DECISION LOGIC
 OUTPUT FORMAT (per company — repeat for all 4 finalists)
 [Company] (Ticker:Exchange)
 DECISION: WATCH / AVOID
-CATEGORY: OK / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
+CATEGORY: OK / PRICE_CONTINGENT / TOO_EXPENSIVE / STRUCTURAL / DATA_GAPS / INSUFFICIENT_PROOF / TIMING
 
 Gate 0 — Integrity: PASS/FAIL
 - If FAIL after applying DataGap Rule steps 1-2: STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number> (last resort).
@@ -3689,6 +3926,7 @@ Gate 2 — Value: PASS/RISK/FAIL
 - Asymmetry_TOTAL (show arithmetic)
 - Divergence vs market (Stage 9 implied vs Base)
 - Wedge_to_Price (Stage 8) as a diagnostic only
+- If PRICE_CONTINGENT override applies: show price_trigger = Base_TOTAL × 0.95
 
 Gate 3 — Proof & VOI: X/5 › LOW/MEDIUM/HIGH
 - KPI confirm / warn / falsify (Stage 5/8)
@@ -3716,34 +3954,16 @@ Remove any company with AVOID decision. If fewer than 2 remain, flag SHORTFALL a
 
 STEP 2 — COMPUTE COMPOSITE SCORE (6 dimensions, 0-5 each)
 
-Dimension 1: Value Asymmetry (weight 25%)
-Source: Stage 9 Asymmetry_TOTAL
-  5: Asymmetry > 5:1
-  4: 4:1–5:1
-  3: 3:1–4:1
-  2: 2:1–3:1
-  1: 1.5:1–2:1
-  0: < 1.5:1
-
-Dimension 2: Traction Quality (weight 20%)
-Source: Stage 3 Floor_Traction = min(TS,TQ)/5 + TractionClass
-  5: HARD_TRACTION + Floor_Traction >= 0.6
+Dimension 1: Traction Quality (weight 30%)
+Source: Stage 3 Floor_Traction + TractionClass + Semantics Verdict
+  5: HARD_TRACTION + Floor_Traction >= 0.6 + Semantics Obligated-Funded or Delivered-Cash
   4: HARD_TRACTION + Floor_Traction < 0.6
   3: SOFT_TRACTION + CP >= 3
   2: SOFT_TRACTION + CP < 3
   1: OPTION_ONLY
   0: LOW_QUALITY
 
-Dimension 3: Revaluation Imminence (weight 20%)
-Source: Stage 7 REI_SCORE
-  5: REI > 15% AND VOI < 6 months
-  4: REI 10-15% OR VOI 6-9 months
-  3: REI 5-10% AND VOI < 12 months
-  2: REI 5-10% AND VOI 12-18 months
-  1: REI < 5% OR VOI > 18 months
-  0: No measurable RP or priced-in
-
-Dimension 4: Competitive Position (weight 15%)
+Dimension 2: Competitive Position / Gate Control (weight 20%)
 Source: Stage 5 moat score + Stage 3 CP gate-weighted
   5: Moat >= 8/12 + CP >= 4 with A-type gate
   4: Moat 6-7 + CP >= 4
@@ -3751,6 +3971,27 @@ Source: Stage 5 moat score + Stage 3 CP gate-weighted
   2: Moat 3-5 + CP 3
   1: Moat 3-5 + CP <= 2
   0: Moat < 3
+
+Dimension 3: Value Asymmetry (weight 15%)
+Source: Stage 9 Asymmetry_TOTAL
+  IMPORTANT: If HORIZON_DEPENDENT flag is set, cap at score 2.
+  If DominantDriver = WACC, cap at score 3.
+  If company is WATCH / PRICE_CONTINGENT from Stage 10, minimum score = 1.
+  5: Asymmetry > 5:1 AND DominantDriver is NOT WACC
+  4: 4:1–5:1 AND DominantDriver is NOT WACC
+  3: 3:1–4:1, OR any asymmetry with DominantDriver = WACC
+  2: 2:1–3:1, OR HORIZON_DEPENDENT cap
+  1: 1.5:1–2:1
+  0: < 1.5:1
+
+Dimension 4: Revaluation Imminence (weight 15%)
+Source: Stage 7 REI_SCORE
+  5: REI > 15% AND VOI < 6 months
+  4: REI 10-15% OR VOI 6-9 months
+  3: REI 5-10% AND VOI < 12 months
+  2: REI 5-10% AND VOI 12-18 months
+  1: REI < 5% OR VOI > 18 months
+  0: No measurable RP or priced-in
 
 Dimension 5: ROE Quality (weight 10%)
 Source: Stage 6 DuPont thesis-adjusted
@@ -3772,6 +4013,7 @@ Source: Stage 10 gate results + Stage 2 overheating score
 
 Composite Score = SUM(dimension_score × weight)
 Scale 0-5.
+If company carries Evidence Tier C from Stage 0 Layer Discovery output, subtract 0.3 from final Composite Score.
 
 STEP 3 — RANK AND SELECT TOP 2
 
@@ -3797,7 +4039,7 @@ If CONCENTRATION_RISK: cap combined at 6%.
 STEP 5 — OUTPUT
 
 Comparison Table (all 4):
-| Company | Ticker | Decision | Category | D1 (25%) | D2 (20%) | D3 (20%) | D4 (15%) | D5 (10%) | D6 (10%) | Composite | Rank | Role | Sizing |
+| Company | Ticker | Decision | Category | D1 (30%) | D2 (20%) | D3 (15%) | D4 (15%) | D5 (10%) | D6 (10%) | Composite | Rank | Role | Sizing |
 
 Selection Summary:
 PRIMARY: [Company] — Composite [X.XX]/5.0 — Sizing [X%]
@@ -3859,7 +4101,7 @@ Wewnątrz pola używaj:
 | 2       | Status decyzji         | WATCH / AVOID                                      |
 | 3       | Rola                   | PRIMARY / SECONDARY                                |
 | 4       | Spolka                 | Richemont (CFR:SW)                                 |
-| 5       | Material zrodlowy      | Podcast: The Economist Money Talks                 |
+| 5       | Material zrodlowy      | The Economist, Money Talks, Alice Fulwood, rozmowa ogolna. |
 | 6       | Teza inwestycyjna      | (pelny opis, 4-6 zdan)                             |
 | 7       | Bear scenario (TOTAL)  | Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%       |
 | 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
@@ -3878,7 +4120,7 @@ Wewnątrz pola używaj:
 - Jesli Stage 11 wyprodukowal tylko 1 spolke (SHORTFALL): generuj 1 linie i dopisz na koncu: # SHORTFALL: only 1 company passed Stage 10 gates
 - Nie dodawaj ani nie usuwaj pol.
 - Nie przesuwaj tresci miedzy polami: kazda kolumna ma stale znaczenie.
-- Pole 5 (`Material zrodlowy`) ma zawierac **tylko zrodlo i kontekst zrodla**, nie analize.
+- Pole 5 (`Material zrodlowy`) ma zawierac `THESIS_SOURCE` ze Stage 1 HANDOFF, nie analize.
 - Pole 6 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
 - Pola 7-9 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
 - Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ...`.
@@ -3934,25 +4176,53 @@ Zasady:
 
 ### 5. Material zrodlowy / podcast
 
-Zrodlo, z ktorego pochodzi teza lub inspiracja.
+To pole ma wskazywac **pierwotne zrodlo tezy o spolce z poczatku pipeline**, czyli `THESIS_SOURCE` ze **Stage 1 HANDOFF**.
 
-**Co ma byc w tym polu:**
+Nie opisuj tu:
 
-- Typ zrodla + nazwa + waski kontekst (max 1 krotkie zdanie).
-- Mozesz dopisac techniczne zrodlo liczb scenariuszowych, np. Stage 9/4.
+- biezacej analizy
+- procesu selekcji z pozniejszych stage'y
+- Stage 9 / Stage 4 / Reverse DCF
+- asymetrii, VOI, falsifierow ani risku
 
-**Czego nie wpisywac:**
+**Wymagany format:**
 
-- Opisu rynku
-- Opisu modelu biznesowego spolki
-- Asymetrii/dywergencji
-- VOI/Fals/Primary risk
+- jedno naturalne zdanie
+- maksymalnie 15 slow
+- bez srednikow `;`
+- czytelne po ludzku, nie techniczny slug ani lista metadanych
+
+**Co ma byc w zdaniu i w jakiej kolejnosci:**
+
+1. dostawca / zrodlo
+2. kanal, seria lub krotki tytul
+3. autor albo 1-2 glownych uczestnikow rozmowy, jesli znani
+4. etykieta charakteru zrodla
+
+**Dopuszczalne etykiety koncowe:**
+
+- `artykul ogolny`
+- `artykul specyficzny`
+- `rozmowa ogolna`
+- `rozmowa specyficzna`
+- `wywiad specyficzny`
+- `dokument specyficzny`
+- `raport specyficzny`
+
+**Zasady:**
+
+- odpowiedz ma brzmiec naturalnie, jak krotka notatka dla czlowieka
+- jesli znasz kanal lub serie, podaj ja po nazwie dostawcy
+- jesli znasz autora lub rozmowcow, podaj tylko najwazniejsze 1-2 nazwiska
+- jesli czegos nie wiesz, pomijaj to zamiast zgadywac
+- nie dodawaj informacji z pozniejszych stage'y
 
 Przyklady:
 
-- Podcast: The Economist Money Talks  De Beers i diamenty laboratoryjne (teza popytowo-podazowa)
-- Raport spolki: FactSet FY2025 10-K + prezentacja IR (segmenty, marze, retencja)
-- Artykul + model: YouTube transcript Inside Robinhood Ventures Fund I Bill Ackman with Vlad Tenev + Stage 9 Reverse DCF
+- The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.
+- Bloomberg, Odd Lots, Joe Weisenthal i Tracy Alloway, rozmowa ogolna.
+- SEC, 20-F Dynagas LNG Partners, dokument specyficzny.
+- WSJ, wywiad z CEO Cheniere, wywiad specyficzny.
 
 ---
 
@@ -4118,8 +4388,8 @@ Przyklady: USD, CHF, EUR, PLN
 ### Bez numeracji (finalna forma):
 
 ```
-2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); Podcast: The Economist Money Talks – De Beers i diamenty laboratoryjne + Stage 9 Reverse DCF; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Handel & zachowania konsumenta; Szwajcaria; CHF
-2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); Podcast: The Economist Money Talks + Stage 9; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Handel & zachowania konsumenta; Szwajcaria; CHF
+2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Handel & zachowania konsumenta; Szwajcaria; CHF
+2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Handel & zachowania konsumenta; Szwajcaria; CHF
 ```
 
 ---
@@ -4140,6 +4410,7 @@ Przyklady: USD, CHF, EUR, PLN
 - Sprawdz liczbe separatorow: rekord ma miec dokladnie **12** srednikow separatora (13 pol).
 - Generuj dokladnie 2 linie (chyba ze SHORTFALL).
 - PRIMARY jest zawsze pierwsza linia.
+- Pole 5 ma byc zgodne z `THESIS_SOURCE` ze Stage 1 HANDOFF i miec max 15 slow.
 - Sprawdz prefiksy:
 - Pole 3: PRIMARY lub SECONDARY
 - Pole 7 zaczyna sie od `Bear_TOTAL:`
