@@ -18,7 +18,7 @@
 - `process-monitor.html` / `process-monitor.js` - process panel and decisions.
 - `problem-log.html` / `problem-log.js` - diagnostics panel for runtime/process issues.
 - `responses.html` / `responses.js` - local responses UI with copy/clear.
-- `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored reload+resume workflow.
+- `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored resume-all workflow.
 - `youtube-content.js` - YouTube transcript capture and fetch.
 - `content-script.js` - separate Google Sheets bridge.
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains split by `◄PROMPT_SEPARATOR►`.
@@ -98,7 +98,7 @@ Response fields in use:
 - `RESUME_STAGE_OPEN` opens stage picker.
 - `RESUME_STAGE_START` resumes company chain from selected index.
 - Inject path supports prompt offset and resume mode.
-- Reload + resume-all path performs detect/reload/start in a deterministic two-phase sequence.
+- Resume-all path performs detect/start in a deterministic two-phase sequence without a forced reload.
 
 ## Auto-restore and health check behavior
 - Alarm period: 5 minutes.
@@ -162,7 +162,7 @@ Popup numeric shortcuts:
 - `1` manual source
 - `2` run analysis
 - `3` resume from stage
-- `4` reload + resume all
+- `4` resume all
 - `5` open responses
 - `6` open process panel
 - `7` stop in current window

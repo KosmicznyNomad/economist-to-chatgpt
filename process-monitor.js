@@ -16,6 +16,7 @@ let selectedProcessId = null;
 let currentProcesses = [];
 let activeProcessesCache = [];
 let allProcessesCache = [];
+let analysisQueueSnapshot = null;
 let lastSignature = '';
 let lastHistorySignature = '';
 let historyOpen = false;
@@ -63,7 +64,7 @@ void initializeMonitor();
 // Nasluchuj na aktualizacje
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'PROCESSES_UPDATE') {
-    applyProcessesUpdate(message.processes);
+    applyProcessesUpdate(message.processes, { queue: message.queue || null });
   }
 });
 
@@ -987,9 +988,15 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
     return Math.min(oldest, ts);
   }, null);
   const stageInfo = stageNamesLoaded ? `Etapy: ${stageNamesCompany.length}` : 'Etapy: ladowanie...';
+  const queue = analysisQueueSnapshot && typeof analysisQueueSnapshot === 'object'
+    ? analysisQueueSnapshot
+    : null;
+  const queueSlots = Number.isInteger(queue?.activeSlots) ? queue.activeSlots : 0;
+  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 7;
+  const queueSize = Number.isInteger(queue?.queueSize) ? queue.queueSize : 0;
 
   if (processSummary) {
-    const summary = `Aktywne ${activeCount} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
+    const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
     const details = [
       `DATA_GAPS: ${dataGapCount}`,
       `Braki odpowiedzi: ${missingReplyCount}`,
@@ -1682,7 +1689,9 @@ function updateProcessCard(entry, process, isSelected) {
   const tabLabel = Number.isInteger(process.tabId) ? String(process.tabId) : '-';
   const windowLabel = Number.isInteger(process.windowId) ? String(process.windowId) : '-';
 
-  refs.statusLine.textContent = `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`;
+  refs.statusLine.textContent = getNormalizedStatus(process) === 'queued'
+    ? 'W kolejce'
+    : `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`;
 
   const status = getNormalizedStatus(process);
   let statusBadgeText = 'W trakcie';
@@ -1690,6 +1699,9 @@ function updateProcessCard(entry, process, isSelected) {
   if (process.needsAction) {
     statusBadgeText = 'WYMAGA AKCJI';
     statusBadgeClass = 'status-needs-action';
+  } else if (status === 'queued') {
+    statusBadgeText = 'W kolejce';
+    statusBadgeClass = 'status-queued';
   } else if (isCompletedStatus(status)) {
     statusBadgeText = 'Zakonczono';
     statusBadgeClass = 'status-completed';
@@ -1728,7 +1740,9 @@ function updateProcessCard(entry, process, isSelected) {
   }
 
   refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni: ${formatClock(updatedAt)}`;
-  refs.locationMeta.textContent = `Tab ${tabLabel} | Okno ${windowLabel}`;
+  refs.locationMeta.textContent = status === 'queued' && tabLabel === '-' && windowLabel === '-'
+    ? 'Oczekuje na wolny slot'
+    : `Tab ${tabLabel} | Okno ${windowLabel}`;
 
   const reasonText = buildProcessReasonLine(process);
 
@@ -1828,6 +1842,9 @@ async function filterActiveProcesses(processes) {
   if (active.length === 0) return [];
 
   const decisions = await Promise.all(active.map(async (process) => {
+    if (getNormalizedStatus(process) === 'queued') {
+      return { process, keep: true, reason: 'queued' };
+    }
     const tabId = Number.isInteger(process.tabId) ? process.tabId : null;
     const windowId = Number.isInteger(process.windowId) ? process.windowId : null;
 
@@ -1920,6 +1937,9 @@ function getWindowExists(windowId) {
 async function applyProcessesUpdate(processes, options = {}) {
   const requestId = ++updateSequence;
   const items = dedupeProcessesById(Array.isArray(processes) ? processes.slice() : []);
+  analysisQueueSnapshot = options?.queue && typeof options.queue === 'object'
+    ? options.queue
+    : analysisQueueSnapshot;
   allProcessesCache = items.slice();
   try {
     const active = await filterActiveProcesses(items);
@@ -2066,7 +2086,7 @@ function refreshProcesses() {
         return;
       }
       const processes = Array.isArray(response?.processes) ? response.processes : [];
-      applyProcessesUpdate(processes);
+      applyProcessesUpdate(processes, { queue: response?.queue || null });
       resolve(processes);
     });
   });

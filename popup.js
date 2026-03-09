@@ -105,31 +105,8 @@ function createReloadResumeMonitorSessionId(origin = 'popup') {
   return `${normalizedOrigin || 'popup'}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
-function openReloadResumeMonitorWindow(sessionId, options = {}) {
-  if (typeof sessionId !== 'string' || !sessionId.trim()) return;
-  const params = new URLSearchParams();
-  params.set('sessionId', sessionId.trim());
-  params.set('openedAt', String(Date.now()));
-  if (typeof options?.origin === 'string' && options.origin.trim()) {
-    params.set('origin', options.origin.trim());
-  }
-  if (typeof options?.composerThinkingEffort === 'string' && options.composerThinkingEffort.trim()) {
-    params.set('composerThinkingEffort', options.composerThinkingEffort.trim());
-  }
-  if (Number.isInteger(options?.autoCloseAfterMs) && options.autoCloseAfterMs > 0) {
-    params.set('autoCloseAfterMs', String(options.autoCloseAfterMs));
-  }
-  const targetUrl = chrome.runtime.getURL(`reload-resume-monitor.html?${params.toString()}`);
-  chrome.windows.create({
-    url: targetUrl,
-    type: 'popup',
-    width: 1280,
-    height: 900,
-    focused: true
-  });
-}
-
 const runStatus = document.getElementById('runStatus');
+const analysisQueueStatus = document.getElementById('analysisQueueStatus');
 const copyYouTubeTranscriptBtn = document.getElementById('copyYouTubeTranscriptBtn');
 const youtubeTranscriptStatus = document.getElementById('youtubeTranscriptStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
@@ -197,6 +174,10 @@ function setRunStatus(text, isError = false) {
   setStatusElement(runStatus, text, isError);
 }
 
+function setAnalysisQueueStatus(text, isError = false) {
+  setStatusElement(analysisQueueStatus, text, isError);
+}
+
 function setYouTubeTranscriptStatus(text, isError = false) {
   const compactText = String(text || '').replace(/^YouTube transcript:\s*/i, 'YT: ');
   if (youtubeTranscriptStatus) {
@@ -220,6 +201,26 @@ function setRestoreProcessWindowsStatus(text, isError = false) {
 
 function setAutoRestoreStatus(text, isError = false) {
   setStatusElement(autoRestoreStatus, text, isError);
+}
+
+function formatAnalysisQueueStatus(status) {
+  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 7;
+  const activeSlots = Number.isInteger(status?.activeSlots) ? status.activeSlots : 0;
+  const queueSize = Number.isInteger(status?.queueSize) ? status.queueSize : 0;
+  return `Kolejka analiz: sloty ${activeSlots}/${maxConcurrent}, oczekuje ${queueSize}.`;
+}
+
+async function refreshAnalysisQueueStatus() {
+  try {
+    const response = await sendRuntimeMessage({ type: 'GET_ANALYSIS_QUEUE_STATUS' });
+    if (response?.success === false) {
+      setAnalysisQueueStatus(`Kolejka analiz: blad (${response.error || 'unknown'}).`, true);
+      return;
+    }
+    setAnalysisQueueStatus(formatAnalysisQueueStatus(response), false);
+  } catch (error) {
+    setAnalysisQueueStatus(`Kolejka analiz: blad (${error?.message || String(error)}).`, true);
+  }
 }
 
 function applyAutoRestoreUi(status) {
@@ -799,7 +800,7 @@ function formatCompanyConversationCountStatus(response) {
   lines.push(`Brakujace odpowiedzi (instancje): ${missingReplyItemsText || 'brak'}${missingReplyRows.length > 6 ? ' | ...' : ''}`);
   lines.push(`Brakujace odpowiedzi (etapy): ${missingReplyStagesText}`);
   if ((totals.promptRepliesMissing || 0) > 0) {
-    lines.push('Akcja procesu: uruchom "Powtorz ostatni prompt (wszystkie)" albo "Reload + wznow wszystkie".');
+    lines.push('Akcja procesu: uruchom "Powtorz ostatni prompt (wszystkie)" albo "Wznow wszystkie".');
   }
   if (dataGapStopDetected) {
     lines.push(`Akcja data gaps: uzupelnij brakujace dane (${dataGapMissingInputsResolved}), potem wznow pipeline od etapu data-gap.`);
@@ -983,14 +984,22 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
       const runError = response.error || 'Nie udalo sie uruchomic analiz.';
       const runMessage = runError === 'prompts_not_loaded'
         ? 'Blad: Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.'
+        : runError === 'no_supported_tabs'
+          ? 'Blad: Brak otwartych kart z obslugiwanych zrodel.'
         : `Blad: ${runError}`;
       setRunStatus(runMessage, true);
+      void refreshAnalysisQueueStatus();
       return;
     }
 
-    setRunStatus('Uruchomiono analizy.');
+    const queuedCount = Number.isInteger(response?.queuedCount) ? response.queuedCount : 0;
+    const queueSize = Number.isInteger(response?.queueSize) ? response.queueSize : 0;
+    const activeSlots = Number.isInteger(response?.activeSlots) ? response.activeSlots : 0;
+    setRunStatus(`Zakolejkowano ${queuedCount} analiz. Sloty ${activeSlots}/7, kolejka ${queueSize}.`);
+    void refreshAnalysisQueueStatus();
   } catch (error) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
+    void refreshAnalysisQueueStatus();
   } finally {
     button.disabled = false;
     button.innerHTML = originalHtml;
@@ -1017,9 +1026,6 @@ function getResumeAllSummary(response) {
   const detectFailed = Number.isInteger(summary?.detect_failed)
     ? summary.detect_failed
     : rows.filter((row) => row?.action === 'detect_failed').length;
-  const reloadFailed = Number.isInteger(summary?.reload_failed)
-    ? summary.reload_failed
-    : rows.filter((row) => row?.action === 'reload_failed').length;
   const skippedOutsideInvest = Number.isInteger(summary?.skipped_outside_invest)
     ? summary.skipped_outside_invest
     : rows.filter((row) => row?.action === 'skipped_outside_invest').length;
@@ -1029,12 +1035,11 @@ function getResumeAllSummary(response) {
   const startFailed = Number.isInteger(summary?.start_failed)
     ? summary.start_failed
     : rows.filter((row) => row?.action === 'start_failed').length;
-  const reloadOk = Number.isInteger(summary?.reload_ok)
-    ? summary.reload_ok
-    : rows.filter((row) => typeof row?.reloadMethod === 'string' && row.reloadMethod.trim()).length;
-  const reloadTotal = Number.isInteger(summary?.reload_total)
-    ? summary.reload_total
-    : rows.length;
+  const preparedOk = rows.filter((row) => (
+    (typeof row?.prepareStatus === 'string' && row.prepareStatus.trim())
+    || (typeof row?.reloadMethod === 'string' && row.reloadMethod.trim())
+  )).length;
+  const preparedTotal = scannedTabs;
   const promptBlocks = Number.isInteger(summary?.prompt_blocks)
     ? summary.prompt_blocks
     : rows.reduce((sum, row) => sum + (Number.isInteger(row?.userMessageCount) ? row.userMessageCount : 0), 0);
@@ -1078,7 +1083,7 @@ function getResumeAllSummary(response) {
     ? summary.recognized_unresolved
     : rows.filter((row) => row?.action === 'detect_failed').length;
 
-  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, reload_failed: ${reloadFailed}, reload_ok: ${reloadOk}/${reloadTotal}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, missing_reply_detected: ${missingRepliesDetected}, data_gaps: ${dataGapsDetected}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
+  return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, prepare_ok: ${preparedOk}/${preparedTotal}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, missing_reply_detected: ${missingRepliesDetected}, data_gaps: ${dataGapsDetected}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
 }
 
 async function executeResumeAllFromPopup(button, options = {}) {
@@ -1098,24 +1103,21 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = `Reload + wznawiam${effortSuffix}...`;
+  button.textContent = `Wznawiam${effortSuffix}...`;
   setRunStatus(
     composerThinkingEffort
-      ? `Reload + wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
-      : 'Reload + wznowienie aktywnych procesow company (INVEST)...'
+      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
+      : 'Wznowienie aktywnych procesow company (INVEST)...'
   );
-  openReloadResumeMonitorWindow(monitorSessionId, {
-    origin,
-    composerThinkingEffort,
-    autoCloseAfterMs: 40_000
-  });
 
   try {
     const message = {
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
       origin,
       scope: 'active_company_invest_processes',
-      monitorSessionId
+      monitorSessionId,
+      openMonitorWindow: true,
+      monitorAutoCloseAfterMs: 40_000
     };
     if (hasExplicitThinkingEffort) {
       message.composerThinkingEffort = composerThinkingEffort;
@@ -1125,14 +1127,14 @@ async function executeResumeAllFromPopup(button, options = {}) {
     if (!response || Object.keys(response).length === 0) {
       setRunStatus(
         composerThinkingEffort
-          ? `Polecenie reload + wznowienia (${composerThinkingEffort}) zostalo wyslane.`
-          : 'Polecenie reload + wznowienia zostalo wyslane.'
+          ? `Polecenie wznowienia (${composerThinkingEffort}) zostalo wyslane.`
+          : 'Polecenie wznowienia zostalo wyslane.'
       );
       return;
     }
 
     if (response.success === false) {
-      setRunStatus(`Blad: ${response.error || 'Nie udalo sie wykonac reload + wznowienia procesow.'}`, true);
+      setRunStatus(`Blad: ${response.error || 'Nie udalo sie wznowic procesow.'}`, true);
       return;
     }
 
@@ -1158,10 +1160,6 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   button.disabled = true;
   button.textContent = 'Powtarzam...';
   setRunStatus('Powtarzam ostatni prompt we wszystkich aktywnych procesach company...');
-  openReloadResumeMonitorWindow(monitorSessionId, {
-    origin,
-    forceRepeatLastPrompt: true
-  });
 
   try {
     const response = await sendRuntimeMessage({
@@ -1169,7 +1167,8 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
       origin,
       scope: 'active_company_invest_processes',
       forceRepeatLastPrompt: true,
-      monitorSessionId
+      monitorSessionId,
+      openMonitorWindow: true
     });
 
     if (!response || Object.keys(response).length === 0) {
@@ -1316,6 +1315,17 @@ function formatSmartResumeStatus(response) {
       const persistenceSummary = formatFinalStagePersistenceStatus(response?.finalStagePersistence);
       return `Proces zakonczony. Zapisano odpowiedz koncowa. ${persistenceSummary}`;
     }
+    if (response?.mode === 'queued') {
+      const queueSize = Number.isInteger(response?.queueSize) ? response.queueSize : 0;
+      const activeSlots = Number.isInteger(response?.activeSlots) ? response.activeSlots : 0;
+      if (startPromptNumber && detectedPromptNumber) {
+        return `Wznowienie zakolejkowane od Prompt ${startPromptNumber} (wykryto ostatni: ${detectedPromptNumber}). Sloty ${activeSlots}/7, kolejka ${queueSize}.`;
+      }
+      if (startPromptNumber) {
+        return `Wznowienie zakolejkowane od Prompt ${startPromptNumber}. Sloty ${activeSlots}/7, kolejka ${queueSize}.`;
+      }
+      return `Wznowienie zakolejkowane. Sloty ${activeSlots}/7, kolejka ${queueSize}.`;
+    }
     if (retrySamePrompt && startPromptNumber) {
       if (retryReason === 'assistant_reply_too_short') {
         return `Wznowiono ponownie Prompt ${startPromptNumber} (odpowiedz byla za krotka).`;
@@ -1370,6 +1380,7 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
 
     if (response?.success) {
       setRunStatus(formatSmartResumeStatus(response), false);
+      void refreshAnalysisQueueStatus();
       return;
     }
 
@@ -1389,11 +1400,13 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
         title: typeof options?.title === 'string' ? options.title : ''
       });
       setRunStatus(statusText, true);
+      void refreshAnalysisQueueStatus();
       window.close();
       return;
     }
 
     setRunStatus(statusText, true);
+    void refreshAnalysisQueueStatus();
   } catch (error) {
     chrome.runtime.sendMessage({
       type: 'RESUME_STAGE_OPEN',
@@ -1402,6 +1415,7 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
       title: typeof options?.title === 'string' ? options.title : ''
     });
     setRunStatus(`Blad auto-wznowienia: ${error?.message || String(error)}. Otwieram wybor etapu...`, true);
+    void refreshAnalysisQueueStatus();
     window.close();
   } finally {
     button.disabled = false;
@@ -1950,8 +1964,10 @@ installPopupRuntimeProblemLogging();
 void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
+  refreshAnalysisQueueStatus(),
 ]);
 
 setInterval(() => {
   void refreshAutoRestoreStatus(false);
+  void refreshAnalysisQueueStatus();
 }, 15000);

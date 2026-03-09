@@ -27,7 +27,7 @@ const ACTION_LABELS = {
   ready_to_start: 'Ready to start',
   started: 'Started',
   detect_failed: 'Detect failed',
-  reload_failed: 'Reload failed',
+  reload_failed: 'Prepare failed',
   start_failed: 'Start failed',
   skipped_outside_invest: 'Skipped outside INVEST',
   final_stage_already_sent: 'Final stage already done'
@@ -272,13 +272,18 @@ function renderSummaryMeta(state) {
     : rows.length;
   const eligible = Number.isInteger(state?.counts?.eligibleProcesses)
     ? state.counts.eligibleProcesses
-    : (Number.isInteger(summary.reload_total) ? summary.reload_total : rows.length);
+    : rows.length;
+  const preparedOk = rows.filter((row) => (
+    (typeof row?.prepareStatus === 'string' && row.prepareStatus.trim())
+    || (typeof row?.reloadMethod === 'string' && row.reloadMethod.trim())
+  )).length;
+  const preparedTotal = eligible;
 
   summaryMeta.textContent = [
     `Strony: requested=${requested}, eligible=${eligible}`,
     `Wznowione: ${resumed}, pending: ${pending}, bledy: ${failed}`,
-    `Summary: started=${summary.started || 0}, detect_failed=${summary.detect_failed || 0}, reload_failed=${summary.reload_failed || 0}, final=${summary.final_stage_completed || 0}, start_failed=${summary.start_failed || 0}`,
-    `Liczniki: reload_ok=${summary.reload_ok || 0}/${summary.reload_total || 0}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, missing_reply=${missingRepliesDetected}, data_gaps=${dataGapsDetected}, detected_prompts=${summary.detected_prompts || 0}`,
+    `Summary: started=${summary.started || 0}, detect_failed=${summary.detect_failed || 0}, final=${summary.final_stage_completed || 0}, start_failed=${summary.start_failed || 0}`,
+    `Liczniki: prepare_ok=${preparedOk}/${preparedTotal}, prompt_bloki=${summary.prompt_blocks || 0}, odpowiedz_bloki=${summary.response_blocks || 0}, missing_reply=${missingRepliesDetected}, data_gaps=${dataGapsDetected}, detected_prompts=${summary.detected_prompts || 0}`,
     `Rozpoznanie: saved=${summary.recognized_saved_stage || 0}, chat=${summary.recognized_chat_detection || 0}, counter_fb=${summary.recognized_chat_counter_fallback || 0}, progress_fb=${summary.recognized_progress_last_resort || 0}, unresolved=${summary.recognized_unresolved || 0}`,
     'Pipeline: saved_stage -> chat_extract -> chat_direct_signature -> chat_recent_history -> chat_resolution -> decision -> fallback_* -> start_dispatch'
   ].join('\n');
@@ -404,9 +409,13 @@ function renderRows(state) {
       : 'NIE';
     const recognitionSource = formatRecognitionSource(item);
     const recognitionPipeline = formatRecognitionPipeline(item);
-    const reloadMethod = typeof item?.reloadMethod === 'string' && item.reloadMethod.trim()
-      ? item.reloadMethod.trim()
-      : '-';
+    const prepareStatus = typeof item?.prepareStatus === 'string' && item.prepareStatus.trim()
+      ? item.prepareStatus.trim()
+      : (
+        typeof item?.reloadMethod === 'string' && item.reloadMethod.trim()
+          ? item.reloadMethod.trim()
+          : '-'
+      );
     const action = actionLabel(item?.action);
     const actionClass = actionStatusClass(item?.action);
     const resumeState = resolveResumeState(item);
@@ -434,7 +443,7 @@ function renderRows(state) {
       startFrom,
       missingReply,
       dataGapLabel,
-      reloadMethod,
+      prepareStatus,
       action,
       resumeState.label,
       reason
@@ -502,7 +511,7 @@ function updateDocumentTitle(state) {
     ? state.status.toUpperCase()
     : 'IDLE';
   const sessionPart = state?.sessionId ? ` ${state.sessionId}` : '';
-  document.title = `[${status}] Reload + Resume${sessionPart}`;
+  document.title = `[${status}] Resume Monitor${sessionPart}`;
 }
 
 function renderState(state) {

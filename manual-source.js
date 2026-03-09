@@ -386,12 +386,18 @@ submitBtn.addEventListener('click', () => {
       setQueueUiLocked(true);
       submitBtn.disabled = true;
       submitBtn.textContent = 'Kolejka uruchomiona';
-      setProviderStatus('Provider aktywny, kolejka PDF w toku. Nie zamykaj tego okna.', 'info');
+      setProviderStatus(
+        `Provider aktywny. Zakolejkowano ${response?.queuedCount || response?.queued || 0} zadan, sloty ${response?.activeSlots || 0}/7, kolejka ${response?.queueSize || 0}.`,
+        'info'
+      );
       return;
     }
 
     submitBtn.textContent = 'Uruchomiono';
-    setProviderStatus('Analiza uruchomiona. Okno pozostaje otwarte.', 'success');
+    setProviderStatus(
+      `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz. Sloty ${response?.activeSlots || 0}/7, kolejka ${response?.queueSize || 0}.`,
+      'success'
+    );
     setTimeout(() => {
       submitBtn.textContent = 'Uruchom';
       updateSubmitButton();

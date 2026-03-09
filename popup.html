@@ -239,7 +239,7 @@
     </div>
     <div class="row row-2">
       <button class="btn" id="resumeStageBtn">Wznow (auto) <span class="shortcut">3</span></button>
-      <button class="btn" id="resumeAllBtn">Reload + wznow wszystkie <span class="shortcut">4</span></button>
+      <button class="btn" id="resumeAllBtn">Wznow wszystkie <span class="shortcut">4</span></button>
     </div>
   </div>
 
@@ -260,6 +260,7 @@
     </div>
   </div>
   <p class="status status-compact" id="runStatus" aria-live="polite" hidden></p>
+  <p class="status status-compact" id="analysisQueueStatus" aria-live="polite" hidden></p>
 
   <details class="details">
     <summary>Watchlist</summary>
@@ -307,8 +308,8 @@
         <button class="btn btn-center" id="countCompanyMessagesBtn">Policz wszystkie wiadomosci (company)</button>
       </div>
       <div class="row row-2">
-        <button class="btn btn-center" id="resumeAllExtendedBtn">Reload + wznow (extended)</button>
-        <button class="btn btn-center" id="resumeAllHeavyBtn">Reload + wznow (heavy)</button>
+        <button class="btn btn-center" id="resumeAllExtendedBtn">Wznow (extended)</button>
+        <button class="btn btn-center" id="resumeAllHeavyBtn">Wznow (heavy)</button>
       </div>
       <div class="row">
         <button class="btn btn-center" id="restoreProcessWindowsBtn">Przywroc okna procesow <span class="shortcut">9</span></button>
