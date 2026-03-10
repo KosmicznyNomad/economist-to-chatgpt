@@ -14607,10 +14607,6 @@ function normalizeWatchlistDispatchPayload(response) {
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
-  const sourceUrl = typeof response.sourceUrl === 'string' ? response.sourceUrl.trim() : '';
-  if (sourceUrl) {
-    payload.sourceUrl = sourceUrl;
-  }
   const conversationLogs = normalizeConversationLogSnapshot(
     response.conversationLogs,
     RESPONSE_CONVERSATION_LOG_MAX_ITEMS
@@ -14660,10 +14656,6 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
-  }
-  const sourceUrl = typeof rawPayload.sourceUrl === 'string' ? rawPayload.sourceUrl.trim() : '';
-  if (sourceUrl) {
-    payload.sourceUrl = sourceUrl;
   }
   const conversationLogs = normalizeConversationLogSnapshot(
     rawPayload.conversationLogs,
