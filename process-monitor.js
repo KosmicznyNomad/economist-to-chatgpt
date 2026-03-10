@@ -116,6 +116,10 @@ const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
   invalid_response: 'Za krotka odpowiedz',
+  missing_process: 'Proces chwilowo niewidoczny',
+  tab_not_found: 'Karta procesu nieznaleziona',
+  chat_tab_not_found: 'Karta ChatGPT nieznaleziona',
+  target_tab_not_found: 'Wskazana karta nieznaleziona',
   missing_assistant_reply: 'Brak odpowiedzi asystenta',
   textarea_not_found: 'Nie znaleziono pola wpisywania',
   execute_script_failed: 'Blad executeScript',
@@ -278,6 +282,9 @@ function buildProcessReasonLine(process) {
   if (!process || typeof process !== 'object') return '';
   const reasonCode = normalizeCodeToken(process?.reason);
   const reasonLabel = getReasonLabel(reasonCode);
+  const slotHoldReasonCode = normalizeCodeToken(process?.slotHoldReason);
+  const slotReleaseReasonCode = normalizeCodeToken(process?.slotReleaseReason);
+  const slotHoldUntil = Number.isInteger(process?.slotHoldUntil) ? process.slotHoldUntil : null;
   const errorText = shortenText(process?.error || '', 180);
   const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
     ? process.persistenceStatus
@@ -286,6 +293,16 @@ function buildProcessReasonLine(process) {
   const bridgeErrorCode = normalizeCodeToken(persistenceStatus?.bridgeError || '');
 
   const details = [];
+  if (slotHoldReasonCode) {
+    const remainingSeconds = Number.isInteger(slotHoldUntil)
+      ? Math.max(0, Math.ceil((slotHoldUntil - Date.now()) / 1000))
+      : null;
+    details.push(
+      `slot=${getReasonLabel(slotHoldReasonCode)}${remainingSeconds !== null ? ` (${remainingSeconds}s)` : ''}`
+    );
+  } else if (slotReleaseReasonCode) {
+    details.push(`slot=${getReasonLabel(slotReleaseReasonCode)}`);
+  }
   if (saveErrorCode && saveErrorCode !== 'empty_response') {
     details.push(`save=${getPersistenceErrorLabel(saveErrorCode)}`);
   }

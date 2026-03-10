@@ -39,10 +39,12 @@ const YT_TRANSCRIPT_CACHE_MAX_ITEMS = 60;
 const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
-const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
 const ANALYSIS_QUEUE_MAX_CONCURRENT = 7;
+const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = ANALYSIS_QUEUE_MAX_CONCURRENT;
 const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 60 * 1000;
+const ANALYSIS_QUEUE_MISSING_PROCESS_GRACE_MS = 90 * 1000;
+const ANALYSIS_QUEUE_TRANSIENT_FAILURE_HOLD_MS = 2 * 60 * 1000;
 const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
@@ -733,7 +735,10 @@ function sanitizeAnalysisQueueJob(rawJob) {
     chatUrl: typeof rawJob.chatUrl === 'string' ? rawJob.chatUrl.trim() : '',
     startedAt: Number.isInteger(rawJob.startedAt) ? rawJob.startedAt : null,
     slotReservedAt: Number.isInteger(rawJob.slotReservedAt) ? rawJob.slotReservedAt : null,
-    dispatchDeadlineAt: Number.isInteger(rawJob.dispatchDeadlineAt) ? rawJob.dispatchDeadlineAt : null
+    dispatchDeadlineAt: Number.isInteger(rawJob.dispatchDeadlineAt) ? rawJob.dispatchDeadlineAt : null,
+    slotHoldReason: typeof rawJob.slotHoldReason === 'string' ? rawJob.slotHoldReason.trim() : '',
+    slotHoldStartedAt: Number.isInteger(rawJob.slotHoldStartedAt) ? rawJob.slotHoldStartedAt : null,
+    slotHoldUntil: Number.isInteger(rawJob.slotHoldUntil) ? rawJob.slotHoldUntil : null
   };
 
   if (Number.isInteger(rawJob.invocationWindowId)) sanitized.invocationWindowId = rawJob.invocationWindowId;
@@ -848,14 +853,17 @@ function scheduleAnalysisQueueDeadlineTimerFromState(state = null) {
   clearAnalysisQueueDeadlineTimer();
   const snapshot = sanitizeAnalysisQueueState(state || analysisQueueState || createEmptyAnalysisQueueState());
   const deadlines = snapshot.activeJobs
-    .map((job) => Number.isInteger(job.dispatchDeadlineAt) ? job.dispatchDeadlineAt : null)
+    .flatMap((job) => [
+      Number.isInteger(job.dispatchDeadlineAt) ? job.dispatchDeadlineAt : null,
+      Number.isInteger(job.slotHoldUntil) ? job.slotHoldUntil : null
+    ])
     .filter((value) => Number.isInteger(value) && value > Date.now())
     .sort((left, right) => left - right);
   if (deadlines.length === 0) return;
   const nextDelayMs = Math.max(500, deadlines[0] - Date.now());
   analysisQueueDeadlineTimer = setTimeout(() => {
     analysisQueueDeadlineTimer = null;
-    requestAnalysisQueueReconcile('dispatch_deadline_timer');
+    requestAnalysisQueueReconcile('queue_deadline_timer');
   }, nextDelayMs);
 }
 
@@ -2826,6 +2834,38 @@ function normalizeProblemLogSourceUrl(rawUrl) {
   }
 }
 
+function normalizeStoredSourceUrl(rawUrl) {
+  const normalized = normalizeProblemLogSourceUrl(rawUrl);
+  if (!normalized) return '';
+  if (/^manual:\/\//i.test(normalized)) return normalized;
+  if (isChatGptUrl(normalized)) return '';
+  return normalized;
+}
+
+function extractProcessSourceUrl(process) {
+  if (!process || typeof process !== 'object') return '';
+  return normalizeStoredSourceUrl(
+    typeof process?.sourceUrl === 'string'
+      ? process.sourceUrl
+      : (typeof process?.source_url === 'string' ? process.source_url : '')
+  );
+}
+
+async function resolveResponseSourceUrl(runId = '', explicitSourceUrl = '') {
+  const direct = normalizeStoredSourceUrl(explicitSourceUrl);
+  if (direct) return direct;
+
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) return '';
+
+  try {
+    await ensureProcessRegistryReady();
+    return extractProcessSourceUrl(processRegistry.get(normalizedRunId) || null);
+  } catch {
+    return '';
+  }
+}
+
 function sanitizeProblemLogEntry(rawEntry) {
   if (!rawEntry || typeof rawEntry !== 'object') return null;
   const timestamp = Number.isInteger(rawEntry.timestamp) && rawEntry.timestamp > 0
@@ -4348,19 +4388,80 @@ function getProcessQueueDeliveryState(process) {
   };
 }
 
+function normalizeAnalysisQueueSlotHoldReason(value) {
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+function resolveAnalysisQueueTransientHoldReason(process) {
+  if (!process || typeof process !== 'object') return '';
+  const markers = [
+    'chat_tab_not_found',
+    'target_tab_not_found',
+    'tab_not_found_for_process',
+    'tab_not_found'
+  ];
+  const candidates = [
+    typeof process.reason === 'string' ? process.reason : '',
+    typeof process.error === 'string' ? process.error : '',
+    typeof process.statusText === 'string' ? process.statusText : ''
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeAnalysisQueueSlotHoldReason(candidate);
+    if (!normalized) continue;
+    for (const marker of markers) {
+      if (normalized.includes(marker)) return marker;
+    }
+  }
+  return '';
+}
+
+function createAnalysisQueueSlotGuardDecision(job, reason, nowTs, ttlMs, queueState = 'waiting_slot_guard') {
+  const normalizedReason = normalizeAnalysisQueueSlotHoldReason(reason);
+  if (!normalizedReason || !Number.isInteger(ttlMs) || ttlMs <= 0) return null;
+  const existingReason = normalizeAnalysisQueueSlotHoldReason(job?.slotHoldReason);
+  const existingUntil = Number.isInteger(job?.slotHoldUntil) ? job.slotHoldUntil : null;
+  const existingStartedAt = Number.isInteger(job?.slotHoldStartedAt) ? job.slotHoldStartedAt : null;
+  if (existingReason === normalizedReason && Number.isInteger(existingUntil)) {
+    if (existingUntil > nowTs) {
+      return {
+        action: 'keep',
+        queueState,
+        slotHoldReason: normalizedReason,
+        slotHoldStartedAt: Number.isInteger(existingStartedAt) ? existingStartedAt : Math.max(0, existingUntil - ttlMs),
+        slotHoldUntil: existingUntil
+      };
+    }
+    return null;
+  }
+  return {
+    action: 'keep',
+    queueState,
+    slotHoldReason: normalizedReason,
+    slotHoldStartedAt: nowTs,
+    slotHoldUntil: nowTs + ttlMs
+  };
+}
+
 function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   if (!job || typeof job !== 'object') {
-    return { action: 'release', closeWindow: false, reason: 'invalid_job' };
+    return { action: 'release', reason: 'invalid_job', queueState: 'slot_released' };
   }
   if (!process || typeof process !== 'object') {
-    return { action: 'release', closeWindow: false, reason: 'missing_process' };
+    const guard = createAnalysisQueueSlotGuardDecision(
+      job,
+      'missing_process',
+      nowTs,
+      ANALYSIS_QUEUE_MISSING_PROCESS_GRACE_MS
+    );
+    if (guard) return guard;
+    return { action: 'release', reason: 'missing_process', queueState: 'slot_released' };
   }
 
   const status = normalizeProcessStatus(process.status);
   if (status === 'completed') {
     const delivery = getProcessQueueDeliveryState(process);
     if (delivery.confirmed) {
-      return { action: 'release', closeWindow: true, reason: 'dispatch_confirmed' };
+      return { action: 'release', reason: 'dispatch_confirmed', queueState: 'dispatch_confirmed' };
     }
     if (delivery.saveOk === true) {
       const dispatchDeadlineAt = Number.isInteger(job.dispatchDeadlineAt)
@@ -4369,8 +4470,8 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
       if (nowTs >= dispatchDeadlineAt) {
         return {
           action: 'release',
-          closeWindow: false,
           reason: 'pending_dispatch_timeout',
+          queueState: 'slot_released',
           dispatchDeadlineAt
         };
       }
@@ -4382,46 +4483,34 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     }
     return {
       action: 'release',
-      closeWindow: false,
-      reason: delivery.saveOk === false ? 'local_save_failed' : 'completed_without_dispatch_confirmation'
+      reason: delivery.saveOk === false ? 'local_save_failed' : 'completed_without_dispatch_confirmation',
+      queueState: 'slot_released'
     };
   }
 
   if (isClosedProcessStatus(status)) {
-    return { action: 'release', closeWindow: false, reason: status || 'closed' };
+    const transientHoldReason = resolveAnalysisQueueTransientHoldReason(process);
+    if (transientHoldReason) {
+      const guard = createAnalysisQueueSlotGuardDecision(
+        job,
+        transientHoldReason,
+        nowTs,
+        ANALYSIS_QUEUE_TRANSIENT_FAILURE_HOLD_MS
+      );
+      if (guard) return guard;
+      return {
+        action: 'release',
+        reason: transientHoldReason,
+        queueState: 'slot_released'
+      };
+    }
+    return { action: 'release', reason: status || 'closed', queueState: 'slot_released' };
   }
 
   return {
     action: 'keep',
     queueState: status === 'queued' ? 'active' : 'running'
   };
-}
-
-async function closeProcessWindowAfterQueueSuccess(process) {
-  if (!process || typeof process !== 'object') return false;
-  const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
-  const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
-  let tabClosed = false;
-
-  if (processTabId !== null) {
-    tabClosed = await removeTabSafe(processTabId);
-  }
-
-  if (!tabClosed && processWindowId !== null) {
-    const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
-    const validTabs = Array.isArray(tabsInWindow?.tabs)
-      ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
-      : [];
-    const hasOnlyProcessTab = validTabs.length === 1
-      && processTabId !== null
-      && validTabs[0].id === processTabId;
-    if (hasOnlyProcessTab) {
-      await removeWindowSafe(processWindowId);
-      return true;
-    }
-  }
-
-  return tabClosed;
 }
 
 function generateAnalysisQueueRunId(prefix = 'analysis') {
@@ -4434,6 +4523,13 @@ function generateAnalysisQueueRunId(prefix = 'analysis') {
 function generateAnalysisQueueJobId(sequence = 0) {
   const safeSequence = Number.isInteger(sequence) ? Math.max(0, sequence) : 0;
   return `aq-${Date.now()}-${safeSequence}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+function generateAnalysisQueueBatchId(prefix = 'analysis-batch') {
+  const safePrefix = typeof prefix === 'string' && prefix.trim()
+    ? prefix.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+    : 'analysis-batch';
+  return `ab-${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
 function buildQueuedProcessPatchForJob(job) {
@@ -4458,6 +4554,9 @@ function buildQueuedProcessPatchForJob(job) {
     slotReserved: false,
     slotReleasedAt: null,
     slotReleaseReason: '',
+    slotHoldReason: '',
+    slotHoldStartedAt: null,
+    slotHoldUntil: null,
     queueBatchId: safeJob.queueBatchId || '',
     manualPdfBatchId: safeJob.manualPdfBatchId || '',
     manualPdfProviderId: safeJob.manualPdfProviderId || '',
@@ -4467,8 +4566,12 @@ function buildQueuedProcessPatchForJob(job) {
   };
 
   if (safeJob.kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
-    const sourceUrl = typeof safeJob?.tabSnapshot?.url === 'string' ? safeJob.tabSnapshot.url : '';
-    patch.sourceUrl = sourceUrl;
+    const sourceUrl = normalizeStoredSourceUrl(
+      typeof safeJob?.tabSnapshot?.url === 'string' ? safeJob.tabSnapshot.url : ''
+    );
+    if (sourceUrl) {
+      patch.sourceUrl = sourceUrl;
+    }
   } else {
     const startIndex = Number.isInteger(safeJob.resumeStartIndex) ? safeJob.resumeStartIndex : 0;
     patch.currentPrompt = Math.max(0, startIndex);
@@ -4480,7 +4583,10 @@ function buildQueuedProcessPatchForJob(job) {
     }
     if (typeof safeJob.chatUrl === 'string' && safeJob.chatUrl.trim()) {
       patch.chatUrl = safeJob.chatUrl.trim();
-      patch.sourceUrl = safeJob.chatUrl.trim();
+    }
+    const resumeSourceUrl = normalizeStoredSourceUrl(safeJob.sourceUrl || '');
+    if (resumeSourceUrl) {
+      patch.sourceUrl = resumeSourceUrl;
     }
   }
 
@@ -4503,6 +4609,14 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
   await ensureAnalysisQueueReady();
   let queuedJobs = [];
   let persistedSnapshot = null;
+  const normalizedBatchIdFromOptions = typeof options?.queueBatchId === 'string' && options.queueBatchId.trim()
+    ? options.queueBatchId.trim()
+    : '';
+  const autoBatchId = normalizedBatchIdFromOptions || (
+    sourceJobs.length > 1
+      ? generateAnalysisQueueBatchId(typeof options?.reason === 'string' ? options.reason : 'analysis')
+      : ''
+  );
   persistedSnapshot = await withAnalysisQueueMutationLock(async () => {
     let state = cloneAnalysisQueueState();
     const nextJobs = [];
@@ -4518,6 +4632,9 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
         runId: typeof rawJob?.runId === 'string' && rawJob.runId.trim()
           ? rawJob.runId.trim()
           : generateAnalysisQueueRunId(rawJob?.kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE ? 'resume' : 'article'),
+        queueBatchId: typeof rawJob?.queueBatchId === 'string' && rawJob.queueBatchId.trim()
+          ? rawJob.queueBatchId.trim()
+          : autoBatchId,
         sequence,
         createdAt: Number.isInteger(rawJob?.createdAt) ? rawJob.createdAt : Date.now()
       });
@@ -4802,6 +4919,30 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
     });
 }
 
+function collectBlockedBatchReleaseIds(activeJobContexts = []) {
+  const blocked = new Set();
+  for (const context of activeJobContexts) {
+    const batchId = typeof context?.job?.queueBatchId === 'string'
+      ? context.job.queueBatchId.trim()
+      : '';
+    if (!batchId) continue;
+    if (context?.decision?.action !== 'release') {
+      blocked.add(batchId);
+    }
+  }
+  return blocked;
+}
+
+function shouldDelayCompletedBatchRelease(context, blockedBatchIds = new Set()) {
+  if (!context || typeof context !== 'object') return false;
+  const batchId = typeof context?.job?.queueBatchId === 'string'
+    ? context.job.queueBatchId.trim()
+    : '';
+  if (!batchId || !blockedBatchIds.has(batchId)) return false;
+  if (context?.decision?.action !== 'release') return false;
+  return normalizeProcessStatus(context?.process?.status) === 'completed';
+}
+
 async function reconcileAnalysisQueueState(reason = 'manual') {
   if (analysisQueueReconcileInProgress) {
     analysisQueueReconcileRequested = true;
@@ -4827,16 +4968,51 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
       await withAnalysisQueueMutationLock(async () => {
         let state = cloneAnalysisQueueState();
         const nextActiveJobs = [];
-
-        for (const activeJob of state.activeJobs) {
+        const activeJobContexts = state.activeJobs.map((activeJob) => {
           const process = processRegistry.get(activeJob.runId) || null;
-          const decision = resolveAnalysisQueueReleaseDecision(activeJob, process, now);
+          return {
+            job: activeJob,
+            process,
+            decision: resolveAnalysisQueueReleaseDecision(activeJob, process, now)
+          };
+        });
+        const blockedBatchReleaseIds = collectBlockedBatchReleaseIds(activeJobContexts);
+
+        for (const context of activeJobContexts) {
+          const activeJob = context.job;
+          const process = context.process;
+          const baseDecision = context.decision;
+          const decision = shouldDelayCompletedBatchRelease(context, blockedBatchReleaseIds)
+            ? {
+              action: 'keep',
+              queueState: 'waiting_batch_release'
+            }
+            : baseDecision;
+          const nextSlotHoldReason = typeof decision.slotHoldReason === 'string'
+            ? decision.slotHoldReason.trim()
+            : '';
+          const nextSlotHoldStartedAt = Number.isInteger(decision.slotHoldStartedAt)
+            ? decision.slotHoldStartedAt
+            : null;
+          const nextSlotHoldUntil = Number.isInteger(decision.slotHoldUntil)
+            ? decision.slotHoldUntil
+            : null;
           if (decision.action === 'release') {
+            console.info('[analysis-queue] Releasing slot', {
+              reason: decision.reason || '',
+              jobId: activeJob.jobId,
+              runId: activeJob.runId,
+              status: normalizeProcessStatus(process?.status || ''),
+              processReason: typeof process?.reason === 'string' ? process.reason : '',
+              queueBatchId: activeJob.queueBatchId || ''
+            });
             releaseJobs.push({
               job: activeJob,
               process,
               reason: decision.reason,
-              closeWindow: decision.closeWindow === true
+              queueState: typeof decision.queueState === 'string' && decision.queueState.trim()
+                ? decision.queueState.trim()
+                : 'slot_released'
             });
             continue;
           }
@@ -4845,12 +5021,38 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             ...activeJob,
             dispatchDeadlineAt: Number.isInteger(decision.dispatchDeadlineAt)
               ? decision.dispatchDeadlineAt
-              : activeJob.dispatchDeadlineAt
+              : activeJob.dispatchDeadlineAt,
+            slotHoldReason: nextSlotHoldReason,
+            slotHoldStartedAt: nextSlotHoldStartedAt,
+            slotHoldUntil: nextSlotHoldUntil
           });
           if (nextActiveJob) {
             nextActiveJobs.push(nextActiveJob);
           }
-          if (process && typeof decision.queueState === 'string' && process.queueState !== decision.queueState) {
+          const processSlotHoldReason = typeof process?.slotHoldReason === 'string'
+            ? process.slotHoldReason.trim()
+            : '';
+          const processSlotHoldStartedAt = Number.isInteger(process?.slotHoldStartedAt)
+            ? process.slotHoldStartedAt
+            : null;
+          const processSlotHoldUntil = Number.isInteger(process?.slotHoldUntil)
+            ? process.slotHoldUntil
+            : null;
+          const queueStateChanged = typeof decision.queueState === 'string' && process?.queueState !== decision.queueState;
+          const slotHoldChanged = processSlotHoldReason !== nextSlotHoldReason
+            || processSlotHoldStartedAt !== nextSlotHoldStartedAt
+            || processSlotHoldUntil !== nextSlotHoldUntil;
+          if (process && (queueStateChanged || slotHoldChanged)) {
+            if (nextSlotHoldReason && processSlotHoldUntil !== nextSlotHoldUntil) {
+              console.warn('[analysis-queue] Delaying slot release', {
+                reason: nextSlotHoldReason,
+                holdUntil: nextSlotHoldUntil,
+                jobId: activeJob.jobId,
+                runId: activeJob.runId,
+                status: normalizeProcessStatus(process?.status || ''),
+                processReason: typeof process?.reason === 'string' ? process.reason : ''
+              });
+            }
             followUpProcessPatches.push({
               runId: activeJob.runId,
               patch: {
@@ -4859,6 +5061,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
                 queueState: decision.queueState,
                 slotReserved: true,
                 slotReservedAt: Number.isInteger(activeJob.slotReservedAt) ? activeJob.slotReservedAt : now,
+                slotHoldReason: nextSlotHoldReason,
+                slotHoldStartedAt: nextSlotHoldStartedAt,
+                slotHoldUntil: nextSlotHoldUntil,
                 timestamp: now
               }
             });
@@ -4891,20 +5096,23 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           const releasePatch = {
             queueManaged: true,
             queueJobId: release.job.jobId,
-            queueState: release.closeWindow ? 'dispatch_confirmed' : 'slot_released',
+            queueState: release.queueState,
             slotReserved: false,
             slotReleasedAt: now,
             slotReleaseReason: release.reason,
+            slotHoldReason: '',
+            slotHoldStartedAt: null,
+            slotHoldUntil: null,
             timestamp: now
           };
+          if (release.reason === 'dispatch_confirmed') {
+            releasePatch.statusText = 'Final zapisany i dispatch potwierdzony - slot zwolniony, proces pozostaje otwarty';
+          }
           if (release.reason === 'pending_dispatch_timeout') {
             releasePatch.statusText = 'Final zapisany lokalnie, brak dispatch_confirmed w 60s - slot zwolniony';
             releasePatch.reason = 'pending_dispatch_timeout';
           }
           await upsertProcess(release.job.runId, releasePatch);
-          if (release.closeWindow) {
-            await closeProcessWindowAfterQueueSuccess(release.process);
-          }
         }
       }
 
@@ -4917,6 +5125,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           slotReservedAt: Number.isInteger(startJob.slotReservedAt) ? startJob.slotReservedAt : now,
           slotReleasedAt: null,
           slotReleaseReason: '',
+          slotHoldReason: '',
+          slotHoldStartedAt: null,
+          slotHoldUntil: null,
           statusText: 'Slot przydzielony, startuje',
           timestamp: now
         });
@@ -5092,6 +5303,7 @@ async function replayCompletedResponseForProcess(process, options = {}) {
   const conversationUrl = normalizeChatConversationUrl(process.chatUrl)
     || normalizeChatConversationUrl(process.sourceUrl)
     || null;
+  const sourceUrl = extractProcessSourceUrl(process) || null;
 
   const saveResult = await saveResponse(
     responseText,
@@ -5100,7 +5312,8 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     runId || null,
     responseId,
     stageMeta,
-    conversationUrl
+    conversationUrl,
+    sourceUrl
   );
 
   if (!saveResult?.success) {
@@ -6774,6 +6987,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     ? options.queueJobId.trim()
     : '';
   const queueManaged = !!queueJobId;
+  const initialSourceUrl = normalizeStoredSourceUrl(
+    typeof options?.sourceUrl === 'string' && options.sourceUrl.trim()
+      ? options.sourceUrl.trim()
+      : targetTabUrl
+  );
 
   await upsertProcess(processId, {
     title: processTitle,
@@ -6789,7 +7007,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     needsAction: false,
     startedAt: Date.now(),
     timestamp: Date.now(),
-    sourceUrl: targetTabUrl || '',
+    ...(initialSourceUrl ? { sourceUrl: initialSourceUrl } : {}),
     chatUrl: targetTabUrl || '',
     tabId,
     windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
@@ -6803,6 +7021,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       : {}),
     messages: []
   });
+  const persistedProcessSourceUrl = extractProcessSourceUrl(processRegistry.get(processId) || null);
 
   try {
     if (Number.isInteger(targetWindowId)) {
@@ -6846,7 +7065,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         {
           persistFinalResponseViaMessage: true,
           mode: 'runtime_message',
-          saveTimeoutMs: 18000
+          saveTimeoutMs: 18000,
+          sourceUrl: persistedProcessSourceUrl || ''
         }
       ];
 
@@ -7011,7 +7231,8 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
             processId,
             providedResponseId,
             Object.keys(stageMeta).length > 0 ? stageMeta : null,
-            normalizedConversationUrl || null
+            normalizedConversationUrl || null,
+            extractProcessSourceUrl(processRegistry.get(processId) || null) || null
           );
         }
       } else {
@@ -12361,6 +12582,11 @@ function summarizeWatchlistDispatchPayload(payload) {
     timestamp: payload.timestamp ?? null,
     textLength: text.length,
     textFingerprint: textFingerprint(text),
+    hasSourceUrl: !!normalizeStoredSourceUrl(
+      typeof payload.sourceUrl === 'string'
+        ? payload.sourceUrl
+        : (typeof payload.source_url === 'string' ? payload.source_url : '')
+    ),
     hasConversationUrl: !!(typeof payload.conversationUrl === 'string' && payload.conversationUrl.trim()),
     conversationLogCount,
     hasDecisionRecord: !!decisionRecord,
@@ -12495,6 +12721,14 @@ function normalizeWatchlistDispatchPayload(response) {
     analysisType: typeof response.analysisType === 'string' ? response.analysisType : '',
     timestamp: response.timestamp ?? Date.now()
   };
+  const sourceUrl = normalizeStoredSourceUrl(
+    typeof response.sourceUrl === 'string'
+      ? response.sourceUrl
+      : (typeof response.source_url === 'string' ? response.source_url : '')
+  );
+  if (sourceUrl) {
+    payload.sourceUrl = sourceUrl;
+  }
   if (decisionRecord) {
     payload.decisionRecord = {
       recordFormat: decisionRecord.recordFormat,
@@ -12575,6 +12809,14 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     analysisType,
     timestamp: rawPayload.timestamp ?? Date.now()
   };
+  const sourceUrl = normalizeStoredSourceUrl(
+    typeof rawPayload.sourceUrl === 'string'
+      ? rawPayload.sourceUrl
+      : (typeof rawPayload.source_url === 'string' ? rawPayload.source_url : '')
+  );
+  if (sourceUrl) {
+    payload.sourceUrl = sourceUrl;
+  }
 
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
   if (conversationUrl) {
@@ -12771,6 +13013,91 @@ function getWatchlistOutboxDedupKey(item) {
   return `hash:${textFingerprint(base)}`;
 }
 
+function deriveWatchlistOutboxItemTitle(payload = {}) {
+  const decisionCompany = typeof payload?.decisionRecord?.company === 'string'
+    ? payload.decisionRecord.company.trim()
+    : '';
+  if (decisionCompany) {
+    return truncateDispatchLogText(decisionCompany, 120);
+  }
+  const responseId = typeof payload?.responseId === 'string' ? payload.responseId.trim() : '';
+  const text = typeof payload?.text === 'string' ? payload.text : '';
+  const firstLine = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .find((line) => line);
+  if (firstLine && firstLine.includes(';')) {
+    const parts = firstLine.split(';').map((part) => part.trim()).filter(Boolean);
+    if (parts.length >= 4 && parts[3]) {
+      return truncateDispatchLogText(parts[3], 120);
+    }
+  }
+  if (firstLine) {
+    return truncateDispatchLogText(firstLine.replace(/\s+/g, ' '), 120);
+  }
+  return responseId || 'pozycja kolejki';
+}
+
+function summarizeWatchlistOutboxItemForUi(item, nowTs = Date.now()) {
+  if (!item || typeof item !== 'object') return null;
+  const payload = item.payload && typeof item.payload === 'object' ? item.payload : {};
+  const dedupeKey = getWatchlistOutboxDedupKey(item);
+  if (!dedupeKey) return null;
+  const responseId = typeof payload.responseId === 'string' ? payload.responseId.trim() : '';
+  const runId = typeof payload.runId === 'string' ? payload.runId.trim() : '';
+  const source = typeof payload.source === 'string' ? payload.source.trim() : '';
+  const analysisType = typeof payload.analysisType === 'string' ? payload.analysisType.trim() : '';
+  const queuedAt = Number.isInteger(item.queuedAt) ? item.queuedAt : 0;
+  const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
+  const attemptCount = Number.isInteger(item.attemptCount) && item.attemptCount >= 0 ? item.attemptCount : 0;
+  const deliveryAcceptedAt = Number.isInteger(item.deliveryAcceptedAt) && item.deliveryAcceptedAt > 0
+    ? item.deliveryAcceptedAt
+    : null;
+  const verifyState = normalizeWatchlistVerifyState(item.verifyState);
+  const verifiedAt = Number.isInteger(item.verifiedAt) && item.verifiedAt > 0 ? item.verifiedAt : null;
+  const materializedRowCount = Number.isInteger(item.materializedRowCount) ? item.materializedRowCount : 0;
+  const lastError = typeof item.lastError === 'string' ? truncateDispatchLogText(item.lastError, 220) : '';
+  const readyNow = nextAttemptAt <= nowTs;
+  const state = (() => {
+    if (verifiedAt) return 'verified';
+    if (deliveryAcceptedAt) return verifyState || 'verify_pending';
+    if (attemptCount > 0 && !readyNow) return 'retry_wait';
+    if (attemptCount > 0) return 'retry_ready';
+    return 'queued';
+  })();
+  return {
+    dedupeKey,
+    responseId,
+    runId,
+    title: deriveWatchlistOutboxItemTitle(payload),
+    source: truncateDispatchLogText(source || analysisType || 'n/a', 120),
+    analysisType,
+    queuedAt: queuedAt || null,
+    nextAttemptAt: nextAttemptAt > 0 ? nextAttemptAt : null,
+    attemptCount,
+    lastError,
+    state,
+    verifyState,
+    deliveryAcceptedAt,
+    verifiedAt,
+    materializedRowCount,
+    readyNow
+  };
+}
+
+function listWatchlistOutboxItemsForUi(items, limit = 8) {
+  const normalizedItems = Array.isArray(items) ? items : [];
+  return normalizedItems
+    .map((item) => summarizeWatchlistOutboxItemForUi(item))
+    .filter((item) => item && typeof item === 'object')
+    .sort((a, b) => {
+      const queuedA = Number.isInteger(a?.queuedAt) ? a.queuedAt : 0;
+      const queuedB = Number.isInteger(b?.queuedAt) ? b.queuedAt : 0;
+      return queuedA - queuedB;
+    })
+    .slice(0, Math.max(1, limit));
+}
+
 function normalizeWatchlistEventId(rawEventId) {
   if (Number.isInteger(rawEventId) && rawEventId >= 0) {
     return String(rawEventId);
@@ -12880,6 +13207,61 @@ async function writeWatchlistOutbox(items) {
   const normalized = sanitizeWatchlistOutbox(items);
   await chrome.storage.local.set({ [storageKey]: normalized });
   return normalized;
+}
+
+async function removeWatchlistOutboxItem(dedupeKey) {
+  const normalizedKey = typeof dedupeKey === 'string' ? dedupeKey.trim() : '';
+  if (!normalizedKey) {
+    return { success: false, reason: 'missing_dedupe_key' };
+  }
+  if (watchlistDispatchFlushInProgress) {
+    emitWatchlistDispatchProcessLog('warn', 'queue_item_remove_skipped_flush', 'Queue item remove skipped because flush is in progress', {
+      dedupeKey: normalizedKey
+    });
+    return { success: false, reason: 'flush_in_progress' };
+  }
+
+  return withWatchlistOutboxMutationLock(async () => {
+    const current = await readWatchlistOutbox();
+    const removedItem = current.find((item) => getWatchlistOutboxDedupKey(item) === normalizedKey) || null;
+    if (!removedItem) {
+      emitWatchlistDispatchProcessLog('warn', 'queue_item_remove_failed', 'Queue item remove failed because item was not found', {
+        dedupeKey: normalizedKey
+      });
+      return { success: false, reason: 'outbox_item_not_found' };
+    }
+
+    const next = current.filter((item) => getWatchlistOutboxDedupKey(item) !== normalizedKey);
+    const persisted = await writeWatchlistOutbox(next);
+    const removedSummary = summarizeWatchlistOutboxItemForUi(removedItem);
+    emitWatchlistDispatchProcessLog('info', 'queue_item_removed', 'Queue item removed manually', {
+      dedupeKey: normalizedKey,
+      responseId: removedSummary?.responseId || '',
+      runId: removedSummary?.runId || '',
+      queueSize: persisted.length
+    });
+    appendWatchlistDispatchHistory({
+      ts: Date.now(),
+      kind: 'queue_remove',
+      reason: 'manual_remove',
+      success: true,
+      queued: current.length,
+      sent: 0,
+      failed: 0,
+      deferred: 0,
+      remaining: persisted.length,
+      trace: buildCopyTrace(removedSummary?.runId || '', removedSummary?.responseId || ''),
+      runId: removedSummary?.runId || '',
+      responseId: removedSummary?.responseId || '',
+      intakeUrl: '',
+      status: null
+    }).catch(() => {});
+    return {
+      success: true,
+      removedItem: removedSummary,
+      queueSize: persisted.length
+    };
+  });
 }
 
 function withWatchlistOutboxMutationLock(task) {
@@ -13830,6 +14212,7 @@ async function getWatchlistDispatchStatus(forceReload = false) {
       : '',
     historySize: Array.isArray(history) ? history.length : 0,
     lastFlush,
+    queueItems: listWatchlistOutboxItemsForUi(outboxItems, 8),
     recentProcessLogs: Array.isArray(recentProcessLogs) ? recentProcessLogs : [],
     nextRetryAt,
     latestOutboxError,
@@ -16216,7 +16599,7 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null, conversationUrl = null) {
+async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null, conversationUrl = null, sourceUrl = null) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -16249,6 +16632,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     const copyTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
     const copyFingerprint = textFingerprint(responseText);
     const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
+    const normalizedSourceUrl = await resolveResponseSourceUrl(normalizedRunId, sourceUrl);
     const conversationLogs = await buildConversationLogSnapshotForResponse({
       runId: normalizedRunId,
       conversationUrl: normalizedConversationUrl,
@@ -16266,6 +16650,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       runId: normalizedRunId || '',
       responseId: normalizedResponseId,
       hasStage: !!(stage && typeof stage === 'object' && !Array.isArray(stage)),
+      hasSourceUrl: !!normalizedSourceUrl,
       hasConversationUrl: !!normalizedConversationUrl,
       conversationLogCount: conversationLogs.length
     });
@@ -16285,6 +16670,9 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       : null;
     if (normalizedStage) {
       newResponse.stage = normalizedStage;
+    }
+    if (normalizedSourceUrl) {
+      newResponse.sourceUrl = normalizedSourceUrl;
     }
     if (normalizedConversationUrl) {
       newResponse.conversationUrl = normalizedConversationUrl;
@@ -16675,7 +17063,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.runId,
       message.responseId,
       message.stage || null,
-      message.conversationUrl || null
+      message.conversationUrl || null,
+      message.sourceUrl || null
     )
       .then((saveResult) => {
         if (typeof sendResponse === 'function') {
@@ -16748,7 +17137,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       const runResult = await runAnalysis({
         invocationWindowId,
-        stopExistingInWindow: true
+        stopExistingInWindow: message?.stopExistingInWindow === true
       });
       reportAdminActionEvent('run_analysis', {
         level: runResult?.success === true ? 'info' : 'warn',
@@ -17265,6 +17654,51 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         console.warn('[copy-flow] [dispatch:status-failed]', error);
         sendResponse({ success: false, error: error?.message || 'status_failed' });
       });
+    return true;
+  } else if (message.type === 'REMOVE_WATCHLIST_DISPATCH_OUTBOX_ITEM') {
+    (async () => {
+      const dedupeKey = typeof message?.dedupeKey === 'string' ? message.dedupeKey.trim() : '';
+      const removeResult = await removeWatchlistOutboxItem(dedupeKey);
+      const status = await getWatchlistDispatchStatus(Boolean(message?.forceReload));
+      await logWatchlistDispatchStatusSnapshot('manual_queue_remove', false, {
+        dedupeKey,
+        removeResult
+      });
+      reportAdminActionEvent('remove_watchlist_dispatch_outbox_item', {
+        level: removeResult?.success === true ? 'info' : 'warn',
+        status: removeResult?.success === true ? 'completed' : 'failed',
+        reason: removeResult?.success === true
+          ? 'outbox_item_removed'
+          : (removeResult?.reason || 'outbox_item_remove_failed'),
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        details: {
+          dedupeKey: trimProblemLogText(dedupeKey, 120),
+          queueSize: Number.isInteger(status?.queueSize) ? status.queueSize : null,
+          responseId: typeof removeResult?.removedItem?.responseId === 'string'
+            ? removeResult.removedItem.responseId
+            : '',
+          runId: typeof removeResult?.removedItem?.runId === 'string'
+            ? removeResult.removedItem.runId
+            : ''
+        }
+      });
+      sendResponse({
+        success: removeResult?.success === true,
+        removeResult,
+        status,
+        reason: removeResult?.reason || ''
+      });
+    })().catch((error) => {
+      console.warn('[copy-flow] [dispatch:queue-remove-failed]', error);
+      reportAdminActionEvent('remove_watchlist_dispatch_outbox_item', {
+        level: 'error',
+        status: 'failed',
+        reason: 'outbox_item_remove_exception',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        error: error?.message || String(error)
+      });
+      sendResponse({ success: false, error: error?.message || 'outbox_item_remove_failed' });
+    });
     return true;
   } else if (message.type === 'GET_WATCHLIST_DISPATCH_PROCESS_LOGS') {
     const limit = Number.isInteger(message?.limit) ? message.limit : 120;
@@ -18839,7 +19273,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         {
           persistFinalResponseViaMessage: true,
           mode: 'runtime_message',
-          saveTimeoutMs: 15000
+          saveTimeoutMs: 15000,
+          sourceUrl: extractProcessSourceUrl(processRegistry.get(processId) || null) || ''
         },
         manualPdfAttachmentContext
       ];
@@ -19024,7 +19459,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           processId,
           providedResponseId,
           Object.keys(stageMeta).length > 0 ? stageMeta : null,
-          conversationUrl || null
+          conversationUrl || null,
+          sourceUrl || null
         );
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: true,
@@ -19450,7 +19886,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           {
             persistFinalResponseViaMessage: true,
             mode: 'runtime_message',
-            saveTimeoutMs: 15000
+            saveTimeoutMs: 15000,
+            sourceUrl: extractProcessSourceUrl(processRegistry.get(processId) || null) || ''
           },
           manualPdfAttachmentContext
         ];
@@ -19744,7 +20181,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             processId,
             providedResponseId,
             Object.keys(stageMeta).length > 0 ? stageMeta : null,
-            conversationUrl || null
+            conversationUrl || null,
+            sourceUrl || null
           );
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
@@ -21558,6 +21996,9 @@ async function injectToChat(
     const persistenceTimeoutMs = Number.isInteger(persistenceContext?.saveTimeoutMs) && persistenceContext.saveTimeoutMs > 0
       ? Math.max(1000, Math.min(persistenceContext.saveTimeoutMs, 60000))
       : 18000;
+    const persistenceSourceUrl = typeof persistenceContext?.sourceUrl === 'string'
+      ? persistenceContext.sourceUrl.trim()
+      : '';
     const MANUAL_PDF_ATTACH_MAX_ATTEMPTS = 2;
     const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
     const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
@@ -21669,6 +22110,7 @@ async function injectToChat(
         ? stageMeta
         : null;
       const conversationUrl = typeof location?.href === 'string' ? location.href : '';
+      const sourceUrl = persistenceSourceUrl;
 
       const responseRecord = {
         text: normalizedText,
@@ -21683,6 +22125,9 @@ async function injectToChat(
       if (stage && Object.keys(stage).length > 0) {
         responseRecord.stage = stage;
       }
+      if (sourceUrl) {
+        responseRecord.sourceUrl = sourceUrl;
+      }
       if (conversationUrl) {
         responseRecord.conversationUrl = conversationUrl;
       }
@@ -21696,6 +22141,9 @@ async function injectToChat(
         analysisType: normalizedAnalysisType,
         timestamp
       };
+      if (sourceUrl) {
+        dispatchPayload.sourceUrl = sourceUrl;
+      }
       if (conversationUrl) {
         dispatchPayload.conversationUrl = conversationUrl;
       }
@@ -22402,7 +22850,8 @@ async function injectToChat(
         runId: typeof runId === 'string' ? runId : '',
         responseId: typeof responseId === 'string' ? responseId : '',
         stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
-        conversationUrl: typeof location?.href === 'string' ? location.href : ''
+        conversationUrl: typeof location?.href === 'string' ? location.href : '',
+        sourceUrl: persistenceSourceUrl
       };
 
       const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);

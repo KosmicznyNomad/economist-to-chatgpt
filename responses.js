@@ -76,13 +76,57 @@ function makeResponseKey(response) {
 
 function mergeResponses(primary, secondary) {
   const merged = [];
-  const seen = new Set();
+  const seen = new Map();
+
+  const mergeDuplicate = (existing, incoming) => {
+    if (!existing || typeof existing !== 'object') return incoming;
+    if (!incoming || typeof incoming !== 'object') return existing;
+    const next = { ...existing };
+
+    const existingConversationUrl = resolveConversationUrl(existing);
+    const incomingConversationUrl = resolveConversationUrl(incoming);
+    if (!existingConversationUrl && incomingConversationUrl) {
+      next.conversationUrl = incomingConversationUrl;
+    }
+
+    const existingSourceUrl = resolveSourceUrl(existing);
+    const incomingSourceUrl = resolveSourceUrl(incoming);
+    if (!existingSourceUrl && incomingSourceUrl) {
+      next.sourceUrl = incomingSourceUrl;
+    }
+
+    if (!next.stage && incoming.stage && typeof incoming.stage === 'object' && !Array.isArray(incoming.stage)) {
+      next.stage = incoming.stage;
+    }
+
+    const existingLogs = Array.isArray(next.conversationLogs) ? next.conversationLogs : [];
+    const incomingLogs = Array.isArray(incoming.conversationLogs) ? incoming.conversationLogs : [];
+    if (existingLogs.length === 0 && incomingLogs.length > 0) {
+      next.conversationLogs = incomingLogs;
+      next.conversationLogCount = Number.isInteger(incoming.conversationLogCount)
+        ? incoming.conversationLogCount
+        : incomingLogs.length;
+    } else if (
+      !Number.isInteger(next.conversationLogCount)
+      && Number.isInteger(incoming.conversationLogCount)
+      && incoming.conversationLogCount > 0
+    ) {
+      next.conversationLogCount = incoming.conversationLogCount;
+    }
+
+    return next;
+  };
 
   const add = (response) => {
     if (!response || typeof response !== 'object') return;
     const key = makeResponseKey(response);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
+    if (!key) return;
+    if (seen.has(key)) {
+      const existingIndex = seen.get(key);
+      merged[existingIndex] = mergeDuplicate(merged[existingIndex], response);
+      return;
+    }
+    seen.set(key, merged.length);
     merged.push(response);
   };
 
@@ -608,6 +652,22 @@ function resolveConversationUrl(response) {
   );
 }
 
+function normalizeSourceUrl(value) {
+  const raw = typeof value === 'string' ? value.trim() : '';
+  if (!raw) return '';
+  if (!/^https?:\/\//i.test(raw)) return '';
+  return raw;
+}
+
+function resolveSourceUrl(response) {
+  if (!response || typeof response !== 'object') return '';
+  return (
+    normalizeSourceUrl(response.sourceUrl) ||
+    normalizeSourceUrl(response.source_url) ||
+    ''
+  );
+}
+
 // Funkcja kopiujÄ…ca wszystkie odpowiedzi danego typu
 async function copyAllByType(analysisType, button) {
   let opCounted = false;
@@ -891,6 +951,25 @@ function createResponseItem(response) {
       window.open(conversationUrl, '_blank', 'noopener,noreferrer');
     });
     actions.appendChild(openChatBtn);
+  }
+
+  const sourceUrl = resolveSourceUrl(response);
+  if (sourceUrl) {
+    const openSourceBtn = document.createElement('button');
+    openSourceBtn.className = 'toggle-btn';
+    openSourceBtn.textContent = 'Otworz zrodlo';
+    openSourceBtn.addEventListener('click', () => {
+      try {
+        if (chrome?.tabs?.create) {
+          chrome.tabs.create({ url: sourceUrl });
+          return;
+        }
+      } catch (error) {
+        // Ignore and fallback below.
+      }
+      window.open(sourceUrl, '_blank', 'noopener,noreferrer');
+    });
+    actions.appendChild(openSourceBtn);
   }
   
   const text = document.createElement('div');

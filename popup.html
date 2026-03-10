@@ -220,6 +220,60 @@
       gap: 8px;
       margin-bottom: 8px;
     }
+
+    .dispatch-queue-list {
+      display: flex;
+      flex-direction: column;
+      gap: 8px;
+      margin-top: 8px;
+    }
+
+    .dispatch-queue-item {
+      border: 1px solid #dbe4ee;
+      border-radius: 10px;
+      background: #f8fafc;
+      padding: 9px 10px;
+    }
+
+    .dispatch-queue-head {
+      display: flex;
+      align-items: flex-start;
+      justify-content: space-between;
+      gap: 8px;
+    }
+
+    .dispatch-queue-title {
+      margin: 0;
+      font-size: 12px;
+      font-weight: 700;
+      color: #0f172a;
+      line-height: 1.4;
+    }
+
+    .dispatch-queue-meta {
+      margin: 6px 0 0;
+      font-size: 11px;
+      line-height: 1.45;
+      color: #475569;
+      white-space: pre-line;
+    }
+
+    .dispatch-queue-remove {
+      flex: 0 0 auto;
+      border: 1px solid #fecaca;
+      border-radius: 8px;
+      background: #fff1f2;
+      color: #b91c1c;
+      padding: 6px 8px;
+      font-size: 11px;
+      font-weight: 600;
+      cursor: pointer;
+    }
+
+    .dispatch-queue-remove:disabled {
+      opacity: 0.55;
+      cursor: default;
+    }
   </style>
 </head>
 <body>
@@ -295,6 +349,8 @@
       </div>
       <div class="row"><button class="btn btn-center" id="flushWatchlistDispatchBtn">Wymus flush kolejki</button></div>
       <p class="status" id="watchlistDispatchStatus" aria-live="polite">Sprawdzam status intake...</p>
+      <p class="status status-compact" id="watchlistQueueHint" aria-live="polite" hidden></p>
+      <div class="dispatch-queue-list" id="watchlistQueueList" hidden></div>
     </div>
   </details>
 

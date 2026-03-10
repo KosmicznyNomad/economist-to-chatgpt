@@ -110,6 +110,8 @@ const analysisQueueStatus = document.getElementById('analysisQueueStatus');
 const copyYouTubeTranscriptBtn = document.getElementById('copyYouTubeTranscriptBtn');
 const youtubeTranscriptStatus = document.getElementById('youtubeTranscriptStatus');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
+const watchlistQueueHint = document.getElementById('watchlistQueueHint');
+const watchlistQueueList = document.getElementById('watchlistQueueList');
 const watchlistCredentialsHint = document.getElementById('watchlistCredentialsHint');
 const watchlistCredentialsForm = document.getElementById('watchlistCredentialsForm');
 const watchlistIntakeUrlInput = document.getElementById('watchlistIntakeUrlInput');
@@ -190,6 +192,10 @@ function setYouTubeTranscriptStatus(text, isError = false) {
 
 function setDispatchStatus(text, isError = false) {
   setStatusElement(watchlistDispatchStatus, text, isError);
+}
+
+function setWatchlistQueueHint(text, isError = false) {
+  setStatusElement(watchlistQueueHint, text, isError);
 }
 
 function setWatchlistCredentialsHint(text, isError = false) {
@@ -388,7 +394,9 @@ const DISPATCH_REASON_LABELS = {
   runtime_unavailable: 'most runtime niedostepny',
   runtime_timeout: 'timeout mostu runtime',
   flush_in_progress: 'flush juz trwa',
+  missing_dedupe_key: 'brak klucza pozycji kolejki',
   save_response: 'flush po zapisie odpowiedzi',
+  outbox_item_not_found: 'pozycja kolejki nie zostala znaleziona',
   verify_disabled: 'weryfikacja DB wylaczona',
   missing_verify_url: 'brak URL verify',
   missing_response_id: 'brak responseId',
@@ -439,7 +447,10 @@ const DISPATCH_PROCESS_CODE_LABELS = {
   flush_exception: 'wyjatek flush',
   flush_follow_up_scheduled: 'zaplanowano follow-up flush',
   flush_follow_up_failed: 'blad follow-up flush',
-  pipeline_result: 'wynik pipeline zapisu'
+  pipeline_result: 'wynik pipeline zapisu',
+  queue_item_removed: 'pozycja usunieta z kolejki',
+  queue_item_remove_skipped_flush: 'usuniecie z kolejki pominiete (flush w toku)',
+  queue_item_remove_failed: 'usuniecie z kolejki nieudane'
 };
 
 function normalizeDispatchToken(value) {
@@ -570,6 +581,138 @@ function formatDispatchFlushResult(flushResult) {
   return `accepted=${flushResult.accepted || 0}, sent=${flushResult.sent || 0}, failed=${flushResult.failed || 0}, deferred=${flushResult.deferred || 0}, remaining=${flushResult.remaining || 0}`;
 }
 
+const DISPATCH_QUEUE_STATE_LABELS = {
+  queued: 'w kolejce',
+  retry_wait: 'czeka na retry',
+  retry_ready: 'gotowe do retry',
+  verified: 'potwierdzone w DB',
+  verify_pending: 'oczekuje na verify',
+  not_found: 'oczekuje na materializacje',
+  materialization_pending: 'materializacja w toku',
+  materialization_partial: 'materializacja czesciowa',
+  missing_fields: 'verify: braki danych',
+  mismatch: 'verify: niezgodnosc',
+  ingest_failed: 'ingest zakonczony bledem',
+  materialization_unavailable: 'verify niedostepne'
+};
+
+function getDispatchQueueStateLabel(stateCode) {
+  const normalized = normalizeDispatchToken(stateCode);
+  if (!normalized) return 'w kolejce';
+  if (DISPATCH_QUEUE_STATE_LABELS[normalized]) return DISPATCH_QUEUE_STATE_LABELS[normalized];
+  const reasonLabel = getDispatchReasonLabel(normalized);
+  return reasonLabel || humanizeDispatchToken(normalized) || 'w kolejce';
+}
+
+function formatDispatchQueueTimestamp(ts) {
+  return Number.isInteger(ts) && ts > 0 ? new Date(ts).toLocaleString() : '';
+}
+
+function formatDispatchQueueItemMeta(item) {
+  if (!item || typeof item !== 'object') return '';
+  const parts = [];
+  const sourceText = typeof item.source === 'string' && item.source.trim()
+    ? item.source.trim()
+    : '';
+  if (sourceText) {
+    parts.push(`Zrodlo: ${sourceText}.`);
+  }
+  parts.push(`Stan: ${getDispatchQueueStateLabel(item.state)}.`);
+  if (Number.isInteger(item.attemptCount) && item.attemptCount > 0) {
+    parts.push(`Proby: ${item.attemptCount}.`);
+  }
+  const queuedAtText = formatDispatchQueueTimestamp(item.queuedAt);
+  if (queuedAtText) {
+    parts.push(`Dodano: ${queuedAtText}.`);
+  }
+  const nextAttemptAtText = formatDispatchQueueTimestamp(item.nextAttemptAt);
+  if (nextAttemptAtText && item.state === 'retry_wait') {
+    parts.push(`Retry: ${nextAttemptAtText}.`);
+  }
+  const verifiedAtText = formatDispatchQueueTimestamp(item.verifiedAt);
+  if (verifiedAtText) {
+    parts.push(`DB OK: ${verifiedAtText}.`);
+  }
+  if (Number.isInteger(item.materializedRowCount) && item.materializedRowCount > 0) {
+    parts.push(`Rows: ${item.materializedRowCount}.`);
+  }
+  const errorText = formatDispatchErrorText(item.lastError || '');
+  if (errorText) {
+    parts.push(`Blad: ${errorText}.`);
+  }
+  if (typeof item.responseId === 'string' && item.responseId.trim()) {
+    parts.push(`RID: ${safePreview(item.responseId.trim(), 'n/a')}.`);
+  }
+  return parts.join(' ');
+}
+
+function renderWatchlistQueueItems(status) {
+  if (!status || typeof status !== 'object' || status.success === false) {
+    if (watchlistQueueList) {
+      watchlistQueueList.replaceChildren();
+      watchlistQueueList.hidden = true;
+    }
+    setWatchlistQueueHint('', false);
+    return;
+  }
+
+  const items = Array.isArray(status?.queueItems) ? status.queueItems : [];
+  const total = Number.isInteger(status?.queueSize) ? status.queueSize : items.length;
+  const flushInProgress = !!status?.flushInProgress;
+
+  if (items.length === 0) {
+    if (watchlistQueueList) {
+      watchlistQueueList.replaceChildren();
+      watchlistQueueList.hidden = true;
+    }
+    setWatchlistQueueHint(total > 0 ? `Kolejka zawiera ${total} pozycji, ale podglad jest chwilowo niedostepny.` : 'Kolejka pusta.', false);
+    return;
+  }
+
+  const previewText = total > items.length
+    ? `Kolejka: pokazano ${items.length} z ${total} pozycji.`
+    : `Kolejka: ${total} ${total === 1 ? 'pozycja' : 'pozycji'}.`;
+  const actionText = flushInProgress
+    ? ' Flush trwa, usuwanie chwilowo zablokowane.'
+    : ' Kliknij Usun przy pozycji, aby wyczyscic ja z outboxu.';
+  setWatchlistQueueHint(`${previewText}${actionText}`, false);
+
+  if (!watchlistQueueList) return;
+  const fragment = document.createDocumentFragment();
+  items.forEach((item) => {
+    const card = document.createElement('div');
+    card.className = 'dispatch-queue-item';
+
+    const head = document.createElement('div');
+    head.className = 'dispatch-queue-head';
+
+    const title = document.createElement('p');
+    title.className = 'dispatch-queue-title';
+    title.textContent = safePreview(item?.title || 'pozycja kolejki', 'pozycja kolejki');
+
+    const removeBtn = document.createElement('button');
+    removeBtn.type = 'button';
+    removeBtn.className = 'dispatch-queue-remove';
+    removeBtn.dataset.dispatchRemoveKey = typeof item?.dedupeKey === 'string' ? item.dedupeKey : '';
+    removeBtn.textContent = 'Usun';
+    removeBtn.disabled = dispatchButtonsBusy || flushInProgress || !removeBtn.dataset.dispatchRemoveKey;
+
+    head.appendChild(title);
+    head.appendChild(removeBtn);
+
+    const meta = document.createElement('p');
+    meta.className = 'dispatch-queue-meta';
+    meta.textContent = formatDispatchQueueItemMeta(item);
+
+    card.appendChild(head);
+    card.appendChild(meta);
+    fragment.appendChild(card);
+  });
+
+  watchlistQueueList.replaceChildren(fragment);
+  watchlistQueueList.hidden = false;
+}
+
 function isDispatchInlineManaged(status) {
   return !!(status && status.configured === true && status.tokenSource === 'inline_config');
 }
@@ -579,6 +722,11 @@ function applyDispatchButtonsState() {
   if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
   if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
   if (flushWatchlistDispatchBtn) flushWatchlistDispatchBtn.disabled = dispatchButtonsBusy;
+  if (watchlistQueueList) {
+    watchlistQueueList.querySelectorAll('[data-dispatch-remove-key]').forEach((button) => {
+      button.disabled = dispatchButtonsBusy || !!watchlistDispatchStatusSnapshot?.flushInProgress;
+    });
+  }
 }
 
 function applyWatchlistCredentialsUi(status) {
@@ -612,6 +760,7 @@ function applyDispatchStatusSnapshot(status) {
     }
   }
   applyWatchlistCredentialsUi(watchlistDispatchStatusSnapshot);
+  renderWatchlistQueueItems(watchlistDispatchStatusSnapshot);
   applyDispatchButtonsState();
 }
 
@@ -1988,6 +2137,67 @@ if (flushWatchlistDispatchBtn) {
       setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
     } finally {
       flushWatchlistDispatchBtn.textContent = originalText;
+      setDispatchButtonsDisabled(false);
+    }
+  });
+}
+
+if (watchlistQueueList) {
+  watchlistQueueList.addEventListener('click', async (event) => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    const removeButton = target.closest('[data-dispatch-remove-key]');
+    if (!(removeButton instanceof HTMLButtonElement)) return;
+
+    const dedupeKey = typeof removeButton.dataset.dispatchRemoveKey === 'string'
+      ? removeButton.dataset.dispatchRemoveKey.trim()
+      : '';
+    if (!dedupeKey) {
+      setDispatchStatus('Intake status: brak klucza pozycji kolejki.', true);
+      return;
+    }
+
+    setDispatchButtonsDisabled(true);
+    const originalText = removeButton.textContent;
+    removeButton.textContent = 'Usuwam...';
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'REMOVE_WATCHLIST_DISPATCH_OUTBOX_ITEM',
+        dedupeKey,
+        forceReload: true,
+        origin: 'popup_queue_remove',
+      });
+      const statusPayload = response?.status && typeof response.status === 'object'
+        ? { success: true, ...response.status }
+        : null;
+      if (statusPayload) {
+        applyDispatchStatusSnapshot(statusPayload);
+      }
+
+      if (response?.success === false || response?.removeResult?.success === false) {
+        const reason = response?.reason || response?.removeResult?.reason || response?.error || 'unknown';
+        const reasonLabel = getDispatchReasonLabel(reason) || formatDispatchErrorText(reason) || reason;
+        if (statusPayload) {
+          setDispatchStatus(`${formatDispatchStatus(statusPayload)} Usuniecie: ${reasonLabel}.`, true);
+        } else {
+          setDispatchStatus(`Intake status: nie udalo sie usunac pozycji (${reasonLabel}).`, true);
+        }
+        return;
+      }
+
+      const removedTitle = safePreview(response?.removeResult?.removedItem?.title || 'pozycja kolejki', 'pozycja kolejki');
+      if (statusPayload) {
+        setDispatchStatus(`${formatDispatchStatus(statusPayload)} Usunieto: ${removedTitle}.`, false);
+      } else {
+        setDispatchStatus(`Intake status: usunieto z kolejki ${removedTitle}.`, false);
+      }
+    } catch (error) {
+      setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
+    } finally {
+      if (removeButton.isConnected) {
+        removeButton.textContent = originalText;
+      }
       setDispatchButtonsDisabled(false);
     }
   });
