@@ -120,9 +120,33 @@ const watchlistSecretInput = document.getElementById('watchlistSecretInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
+const remoteRunnerTransportModeInput = document.getElementById('remoteRunnerTransportModeInput');
+const remoteRunnerBaseUrlInput = document.getElementById('remoteRunnerBaseUrlInput');
+const remoteRunnerNameInput = document.getElementById('remoteRunnerNameInput');
+const remoteTargetRunnerIdInput = document.getElementById('remoteTargetRunnerIdInput');
+const remoteRunnerToggleBtn = document.getElementById('remoteRunnerToggleBtn');
+const copySupportIdBtn = document.getElementById('copySupportIdBtn');
+const checkRemoteRunnerBtn = document.getElementById('checkRemoteRunnerBtn');
+const runRemoteBtn = document.getElementById('runRemoteBtn');
+const runRemoteResumeAllBtn = document.getElementById('runRemoteResumeAllBtn');
+const remoteRunnerStatus = document.getElementById('remoteRunnerStatus');
+const remoteRunnerJobStatus = document.getElementById('remoteRunnerJobStatus');
+const remoteTransferCard = document.getElementById('remoteTransferCard');
+const remoteTransferKicker = document.getElementById('remoteTransferKicker');
+const remoteTransferSourceName = document.getElementById('remoteTransferSourceName');
+const remoteTransferSourceSubtitle = document.getElementById('remoteTransferSourceSubtitle');
+const remoteTransferTargetName = document.getElementById('remoteTransferTargetName');
+const remoteTransferTargetSubtitle = document.getElementById('remoteTransferTargetSubtitle');
+const remoteTransferSourceCount = document.getElementById('remoteTransferSourceCount');
+const remoteTransferCharCount = document.getElementById('remoteTransferCharCount');
+const remoteTransferPhase = document.getElementById('remoteTransferPhase');
+const remoteTransferNote = document.getElementById('remoteTransferNote');
+const remoteTransferList = document.getElementById('remoteTransferList');
+const remoteTransferFooter = document.getElementById('remoteTransferFooter');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
 const countCompanyMessagesBtn = document.getElementById('countCompanyMessagesBtn');
+const resumeAllNoReloadBtn = document.getElementById('resumeAllNoReloadBtn');
 const resumeAllExtendedBtn = document.getElementById('resumeAllExtendedBtn');
 const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
@@ -136,26 +160,55 @@ const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
   runAnalysis: '2',
+  runRemote: 'z',
   resumeStage: '3',
   resumeAll: '4',
+  resumeAllNoReload: '8',
   responses: '5',
   processPanel: '6',
   stop: '7',
-  copyYouTube: '8',
   restoreWindows: '9',
-  autoRestoreToggle: '0'
+  autoRestoreToggle: '0',
+  unfinishedProcesses: 'n',
+  problemLogs: 'l',
+  repeatLastPromptAll: 'r',
+  countCompanyMessages: 'c',
+  resumeAllExtended: 'e',
+  resumeAllHeavy: 'h'
 });
 
-function buildShortcutButtonHtml(label, shortcutKey) {
-  const safeLabel = typeof label === 'string' ? label.trim() : '';
-  const safeShortcut = typeof shortcutKey === 'string' ? shortcutKey.trim() : '';
-  if (!safeShortcut) return safeLabel;
-  return `${safeLabel} <span class="shortcut">${safeShortcut}</span>`;
+function escapeHtml(value) {
+  return String(value ?? '')
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;')
+    .replace(/"/g, '&quot;')
+    .replace(/'/g, '&#39;');
 }
 
-function setShortcutButtonLabel(button, label, shortcutKey) {
+function formatShortcutDisplay(shortcutKey) {
+  const safeShortcut = typeof shortcutKey === 'string' ? shortcutKey.trim() : '';
+  return safeShortcut ? safeShortcut.toUpperCase() : '';
+}
+
+function buildShortcutButtonHtml(label, shortcutKey, detail = '') {
+  const safeLabel = typeof label === 'string' ? label.trim() : '';
+  const safeShortcut = formatShortcutDisplay(shortcutKey);
+  const safeDetail = typeof detail === 'string' ? detail.trim() : '';
+  const shortcutHtml = safeShortcut ? `<span class="shortcut">${escapeHtml(safeShortcut)}</span>` : '';
+  const detailHtml = safeDetail ? `<span class="btn-detail">${escapeHtml(safeDetail)}</span>` : '';
+  return `<span class="btn-copy"><span class="btn-label">${escapeHtml(safeLabel)}</span>${detailHtml}</span>${shortcutHtml}`;
+}
+
+function setShortcutButtonLabel(button, label, shortcutKey = null, detail = null) {
   if (!button) return;
-  button.innerHTML = buildShortcutButtonHtml(label, shortcutKey);
+  const resolvedShortcut = typeof shortcutKey === 'string' && shortcutKey.trim()
+    ? shortcutKey.trim()
+    : (typeof button.dataset?.shortcutKey === 'string' ? button.dataset.shortcutKey : '');
+  const resolvedDetail = typeof detail === 'string'
+    ? detail
+    : (typeof button.dataset?.shortcutDetail === 'string' ? button.dataset.shortcutDetail : '');
+  button.innerHTML = buildShortcutButtonHtml(label, resolvedShortcut, resolvedDetail);
 }
 
 function setStatusElement(element, text, isError = false) {
@@ -236,9 +289,10 @@ function applyAutoRestoreUi(status) {
     ? status.periodInMinutes
     : 5;
   if (autoRestoreToggleBtn) {
+    autoRestoreToggleBtn.dataset.shortcutDetail = `Co ${periodInMinutes} min: restore okien, health check i reload+resume`;
     setShortcutButtonLabel(
       autoRestoreToggleBtn,
-      enabled ? `Auto co ${periodInMinutes} min: ON` : `Auto co ${periodInMinutes} min: OFF`,
+      enabled ? 'Auto ON' : 'Auto OFF',
       POPUP_SHORTCUTS.autoRestoreToggle
     );
     autoRestoreToggleBtn.dataset.enabled = enabled ? 'true' : 'false';
@@ -379,6 +433,613 @@ function safePreview(value, fallback = 'n/a') {
   const text = typeof value === 'string' ? value.trim() : '';
   if (!text) return fallback;
   return text.length > 48 ? `${text.slice(0, 45)}...` : text;
+}
+
+function formatCompactInteger(value) {
+  const safeValue = Number.isFinite(value) ? Number(value) : 0;
+  return new Intl.NumberFormat('pl-PL', { maximumFractionDigits: 0 }).format(safeValue);
+}
+
+function formatRemoteTransferCharCount(value) {
+  const safeValue = Number.isFinite(value) ? Number(value) : 0;
+  if (safeValue >= 1000) {
+    return `${formatCompactInteger(Math.round(safeValue / 1000))}k znak.`;
+  }
+  return `${formatCompactInteger(safeValue)} znak.`;
+}
+
+function deriveRemotePreviewHostLabel(sourceUrl, sourceName) {
+  const safeUrl = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
+  if (safeUrl) {
+    if (safeUrl.startsWith('manual://')) return 'manual';
+    try {
+      const parsed = new URL(safeUrl);
+      const hostname = String(parsed.hostname || '').trim().replace(/^www\./i, '');
+      if (hostname) return hostname;
+    } catch (_) {
+      // Ignore invalid URLs in popup preview.
+    }
+  }
+  return safePreview(sourceName || 'source', 'source');
+}
+
+function normalizeRemoteTransferPreview(rawPreview) {
+  if (!rawPreview || typeof rawPreview !== 'object') return null;
+  const rawItems = Array.isArray(rawPreview.items) ? rawPreview.items : [];
+  const items = rawItems
+    .filter((item) => item && typeof item === 'object')
+    .slice(0, 6)
+    .map((item, index) => {
+      const title = typeof item.title === 'string' && item.title.trim()
+        ? item.title.trim()
+        : `Artykul ${index + 1}`;
+      const sourceUrl = typeof item.sourceUrl === 'string'
+        ? item.sourceUrl.trim()
+        : (typeof item.source_url === 'string' ? item.source_url.trim() : '');
+      const sourceName = typeof item.sourceName === 'string'
+        ? item.sourceName.trim()
+        : (typeof item.source_name === 'string' ? item.source_name.trim() : '');
+      const hostLabel = typeof item.hostLabel === 'string' && item.hostLabel.trim()
+        ? item.hostLabel.trim()
+        : deriveRemotePreviewHostLabel(sourceUrl, sourceName);
+      const charCount = Number.isInteger(item.charCount)
+        ? item.charCount
+        : (typeof item.text === 'string' ? item.text.trim().length : 0);
+      return {
+        title: safePreview(title, `Artykul ${index + 1}`),
+        sourceUrl,
+        sourceName,
+        hostLabel,
+        charCount: Math.max(0, charCount),
+      };
+    });
+  const sourceCount = Number.isInteger(rawPreview.sourceCount)
+    ? rawPreview.sourceCount
+    : items.length;
+  const totalChars = Number.isInteger(rawPreview.totalChars)
+    ? rawPreview.totalChars
+    : items.reduce((sum, item) => sum + item.charCount, 0);
+  const hiddenCount = Number.isInteger(rawPreview.hiddenCount)
+    ? rawPreview.hiddenCount
+    : Math.max(0, sourceCount - items.length);
+  return {
+    sourceCount: Math.max(items.length, sourceCount),
+    totalChars,
+    hiddenCount,
+    sourceMode: typeof rawPreview.sourceMode === 'string' ? rawPreview.sourceMode.trim() : '',
+    usesRunnerPrompts: rawPreview.usesRunnerPrompts === true,
+    items,
+  };
+}
+
+function buildRemoteTransferPreviewFromJob(job) {
+  if (!job || typeof job !== 'object') return null;
+  const directPreview = normalizeRemoteTransferPreview(job.transferPreview);
+  if (directPreview) return directPreview;
+  const payload = job.requestPayload && typeof job.requestPayload === 'object' ? job.requestPayload : null;
+  const preparedSources = Array.isArray(payload?.preparedSources) ? payload.preparedSources : [];
+  if (preparedSources.length === 0) return null;
+  return normalizeRemoteTransferPreview({
+    sourceCount: preparedSources.length,
+    totalChars: preparedSources.reduce((sum, item) => sum + (typeof item?.text === 'string' ? item.text.trim().length : 0), 0),
+    usesRunnerPrompts: payload?.usesRunnerPrompts === true || payload?.uses_runner_prompts === true,
+    sourceMode: typeof job.sourceMode === 'string' ? job.sourceMode : '',
+    items: preparedSources.slice(0, 6).map((item) => ({
+      title: typeof item?.title === 'string' ? item.title : '',
+      sourceUrl: typeof item?.source_url === 'string' ? item.source_url : (typeof item?.sourceUrl === 'string' ? item.sourceUrl : ''),
+      sourceName: typeof item?.source_name === 'string' ? item.source_name : (typeof item?.sourceName === 'string' ? item.sourceName : ''),
+      charCount: typeof item?.text === 'string' ? item.text.trim().length : 0,
+    })),
+  });
+}
+
+function resolveRemoteTransferPhase(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
+  if (normalized === 'queued') {
+    return { tone: 'sending', kicker: 'Transfer w toku', phaseLabel: 'Wyslane' };
+  }
+  if (normalized === 'claimed' || normalized === 'received') {
+    return { tone: 'sending', kicker: 'Drugi laptop odebral paczke', phaseLabel: 'Odebrane' };
+  }
+  if (normalized === 'started' || normalized === 'running') {
+    return { tone: 'sending', kicker: 'Proces ruszyl na drugim laptopie', phaseLabel: 'Uruchomione' };
+  }
+  if (normalized === 'completed') {
+    return { tone: 'success', kicker: 'Transfer i start zakonczone', phaseLabel: 'Zakonczone' };
+  }
+  if (normalized === 'completed_with_errors') {
+    return { tone: 'error', kicker: 'Zakonczone z bledami', phaseLabel: 'Z bledami' };
+  }
+  if (normalized === 'failed' || normalized === 'cancelled' || normalized === 'canceled') {
+    return { tone: 'error', kicker: 'Transfer przerwany', phaseLabel: 'Blad' };
+  }
+  return { tone: 'sending', kicker: 'Przygotowanie transferu', phaseLabel: 'Przygotowanie' };
+}
+
+function renderRemoteTransferCard(view = null) {
+  if (!remoteTransferCard) return;
+  if (!view || view.visible !== true) {
+    remoteTransferCard.hidden = true;
+    remoteTransferCard.className = 'remote-transfer-card';
+    if (remoteTransferList) remoteTransferList.innerHTML = '';
+    return;
+  }
+
+  remoteTransferCard.hidden = false;
+  remoteTransferCard.className = `remote-transfer-card is-${view.tone || 'sending'}`;
+  if (remoteTransferKicker) remoteTransferKicker.textContent = view.kicker || 'Transfer';
+  if (remoteTransferSourceName) remoteTransferSourceName.textContent = view.sourceName || 'Ten laptop';
+  if (remoteTransferSourceSubtitle) remoteTransferSourceSubtitle.textContent = view.sourceSubtitle || 'wybor artykulow';
+  if (remoteTransferTargetName) remoteTransferTargetName.textContent = view.targetName || 'Drugi laptop';
+  if (remoteTransferTargetSubtitle) remoteTransferTargetSubtitle.textContent = view.targetSubtitle || 'uruchomienie procesu';
+  if (remoteTransferSourceCount) remoteTransferSourceCount.textContent = formatCompactInteger(view.sourceCount || 0);
+  if (remoteTransferCharCount) remoteTransferCharCount.textContent = formatRemoteTransferCharCount(view.totalChars || 0);
+  if (remoteTransferPhase) remoteTransferPhase.textContent = view.phaseLabel || '-';
+  if (remoteTransferNote) remoteTransferNote.textContent = view.note || 'Wysylany jest tylko tekst artykulow. Prompty sa lokalne na drugim laptopie.';
+  if (remoteTransferFooter) remoteTransferFooter.textContent = view.footer || '';
+  if (remoteTransferList) {
+    const items = Array.isArray(view.items) ? view.items : [];
+    remoteTransferList.innerHTML = items.map((item) => `
+      <div class="remote-transfer-item">
+        <div class="remote-transfer-item-top">
+          <span class="remote-transfer-item-title">${escapeHtml(item.title || 'Artykul')}</span>
+          <span class="remote-transfer-item-size">${escapeHtml(formatRemoteTransferCharCount(item.charCount || 0))}</span>
+        </div>
+        <div class="remote-transfer-item-subtitle">${escapeHtml(item.hostLabel || item.sourceName || 'source')}</div>
+      </div>
+    `).join('');
+  }
+}
+
+function buildRemoteTransferCardView(status, override = {}) {
+  const controllerJob = status?.controllerJob && typeof status.controllerJob === 'object' ? status.controllerJob : null;
+  const runnerJob = status?.runnerJob && typeof status.runnerJob === 'object' ? status.runnerJob : null;
+  const job = runnerJob || controllerJob || null;
+  const preview = normalizeRemoteTransferPreview(override.preview)
+    || buildRemoteTransferPreviewFromJob(job)
+    || buildRemoteTransferPreviewFromJob(controllerJob);
+  const explicitError = typeof override.error === 'string' ? override.error.trim() : '';
+
+  if (!preview && !explicitError && override.forceVisible !== true) {
+    return null;
+  }
+
+  const lifecycle = explicitError
+    ? { tone: 'error', kicker: 'Transfer nieudany', phaseLabel: 'Blad' }
+    : resolveRemoteTransferPhase(override.status || job?.status || '');
+  const targetRunner = override.runner && typeof override.runner === 'object'
+    ? override.runner
+    : (status?.targetRunner && typeof status.targetRunner === 'object' ? status.targetRunner : null);
+  const targetName = typeof targetRunner?.runnerName === 'string' && targetRunner.runnerName.trim()
+    ? targetRunner.runnerName.trim()
+    : safePreview(targetRunner?.runnerId || '', 'drugi laptop');
+  const sourceMode = preview?.sourceMode || override.sourceMode || '';
+  const sourceModeLabel = sourceMode === 'manual_text' ? 'tekst reczny' : 'otwarte artykuly';
+  const hiddenCount = preview?.hiddenCount || 0;
+  const footerParts = [];
+  if (job?.jobId) footerParts.push(`Job: ${safePreview(job.jobId)}`);
+  footerParts.push(`Tryb: ${sourceModeLabel}`);
+  if (preview?.usesRunnerPrompts === true) footerParts.push('Prompty zostaja na drugim laptopie');
+  if (hiddenCount > 0) footerParts.push(`+${hiddenCount} kolejne pozycje`);
+  if (explicitError) footerParts.push(`Blad: ${formatRemoteRunnerError(explicitError)}`);
+
+  return {
+    visible: true,
+    tone: lifecycle.tone,
+    kicker: lifecycle.kicker,
+    phaseLabel: lifecycle.phaseLabel,
+    sourceName: 'Ten laptop',
+    sourceSubtitle: 'wybor i wysylka tekstu',
+    targetName,
+    targetSubtitle: lifecycle.tone === 'success'
+      ? 'proces uruchomiony'
+      : (lifecycle.tone === 'error' ? 'wymaga uwagi' : 'odbior i start procesu'),
+    sourceCount: preview?.sourceCount || 0,
+    totalChars: preview?.totalChars || 0,
+    note: explicitError
+      ? `Wysylka nie doszla do skutku. ${formatRemoteRunnerError(explicitError)}.`
+      : 'Wysylamy tylko tekst artykulow. Prompty sa lokalne na drugim laptopie.',
+    footer: footerParts.join(' | '),
+    items: Array.isArray(preview?.items) ? preview.items : [],
+  };
+}
+
+function normalizeRemoteRunnerTransportMode(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return normalized === REMOTE_RUNNER_TRANSPORT_LOCAL
+    ? REMOTE_RUNNER_TRANSPORT_LOCAL
+    : REMOTE_RUNNER_TRANSPORT_WATCHLIST;
+}
+
+function isLocalRunnerIpv4(hostname) {
+  const text = typeof hostname === 'string' ? hostname.trim() : '';
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(text);
+  if (!match) return false;
+  const octets = match.slice(1).map((item) => Number.parseInt(item, 10));
+  if (octets.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) return false;
+  const [a, b] = octets;
+  if (a === 10 || a === 127) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+function isLocalRunnerIpv6(hostname) {
+  const text = typeof hostname === 'string' ? hostname.trim().toLowerCase() : '';
+  if (!text) return false;
+  if (text === '::1' || text === '[::1]') return true;
+  const normalized = text.replace(/^\[/, '').replace(/\]$/, '');
+  return normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe8')
+    || normalized.startsWith('fe9')
+    || normalized.startsWith('fea')
+    || normalized.startsWith('feb');
+}
+
+function isSafeLocalRunnerHostname(hostname) {
+  const text = typeof hostname === 'string' ? hostname.trim().toLowerCase() : '';
+  if (!text) return false;
+  if (text === 'localhost') return true;
+  if (text.endsWith('.local') || text.endsWith('.lan') || text.endsWith('.home.arpa') || text.endsWith('.ts.net')) {
+    return true;
+  }
+  return isLocalRunnerIpv4(text) || isLocalRunnerIpv6(text);
+}
+
+function normalizeLocalRemoteRunnerBaseUrl(value) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  try {
+    const parsed = new URL(text);
+    const protocol = String(parsed.protocol || '').toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:') return '';
+    const hostname = String(parsed.hostname || '').toLowerCase();
+    if (!isSafeLocalRunnerHostname(hostname)) return '';
+    parsed.pathname = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function buildOriginPatternFromBaseUrl(baseUrl) {
+  const normalized = normalizeLocalRemoteRunnerBaseUrl(baseUrl);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    return `${parsed.protocol}//${parsed.host}/*`;
+  } catch {
+    return '';
+  }
+}
+
+async function ensureRemoteRunnerBaseUrlPermission(baseUrl) {
+  const pattern = buildOriginPatternFromBaseUrl(baseUrl);
+  if (!pattern || !chrome?.permissions?.contains || !chrome?.permissions?.request) {
+    return { success: true };
+  }
+  const contains = await chrome.permissions.contains({ origins: [pattern] });
+  if (contains) return { success: true };
+  const granted = await chrome.permissions.request({ origins: [pattern] });
+  if (!granted) {
+    return { success: false, error: 'remote_runner_origin_permission_denied' };
+  }
+  return { success: true };
+}
+
+function formatRemoteRunnerStateLabel(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
+  if (normalized === 'ready') return 'gotowy';
+  if (normalized === 'busy') return 'zajety';
+  if (normalized === 'stale') return 'nieaktywny';
+  if (normalized === 'online') return 'online';
+  return normalized || 'offline';
+}
+
+function formatRemoteJobStateLabel(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
+  if (normalized === 'queued') return 'w kolejce';
+  if (normalized === 'claimed') return 'przyjete';
+  if (normalized === 'received') return 'odebrane';
+  if (normalized === 'started') return 'uruchomione';
+  if (normalized === 'running') return 'w toku';
+  if (normalized === 'completed') return 'zakonczone';
+  if (normalized === 'completed_with_errors') return 'zakonczone z bledami';
+  if (normalized === 'failed') return 'blad';
+  if (normalized === 'cancelled' || normalized === 'canceled') return 'anulowane';
+  return normalized || 'brak';
+}
+
+function formatRemoteRunnerError(error) {
+  const normalized = typeof error === 'string' ? error.trim().toLowerCase() : '';
+  if (!normalized) return 'blad zdalnego startu';
+  if (normalized === 'runner_id_missing') return 'brak wybranego komputera';
+  if (normalized === 'local_runner_requires_manual_runner_id') return 'w trybie lokalnym wpisz ID komputera recznie';
+  if (normalized === 'local_runner_base_url_missing') return 'brak adresu relay w trybie lokalnym';
+  if (normalized === 'local_runner_base_url_invalid') return 'adres relay musi wskazywac localhost / LAN / Tailscale';
+  if (normalized === 'remote_runner_origin_permission_denied') return 'brak zgody na polaczenie z adresem relay';
+  if (normalized === 'local_runner_unreachable') return 'relay lokalny nie odpowiada';
+  if (normalized === 'local_runner_client_not_allowed') return 'relay lokalny odrzucil polaczenie spoza localhost/LAN';
+  if (normalized === 'controller_not_allowed') return 'ten komputer sterujacy nie jest na liscie relay';
+  if (normalized === 'runner_id_matches_current_device') return 'wybrano ten sam komputer';
+  if (normalized === 'no_remote_runner_discovered') return 'brak drugiego komputera z odbiorem zdalnym';
+  if (normalized === 'multiple_remote_runners_detected') return 'wykryto wiele komputerow, wpisz ID recznie';
+  if (normalized === 'runner_not_found') return 'wybrany komputer nie zostal znaleziony';
+  if (normalized === 'remote_runner_list_failed') return 'blad pobierania listy komputerow';
+  if (normalized === 'remote_runner_status_failed') return 'blad odczytu stanu komputera';
+  if (normalized === 'remote_job_create_failed') return 'blad tworzenia zdalnego zadania';
+  if (normalized === 'remote_start_failed') return 'zdalny start nie udal sie';
+  if (normalized === 'run_remote_reload_resume_failed') return 'nie udalo sie wyslac zdalnego restartu + wznowienia';
+  if (normalized === 'remote_reload_resume_failed') return 'zdalne restart + wznow nie udalo sie';
+  if (normalized === 'remote_runner_command_not_supported') return 'runner nie obsluguje tego polecenia';
+  if (normalized === 'set_remote_runner_settings_failed') return 'nie udalo sie zapisac ustawien zdalnego startu';
+  if (normalized === 'http_413' || normalized === 'payload_too_large') return 'payload jest za duzy dla serwera';
+  if (normalized === 'remote_batch_prepare_failed') return 'nie udalo sie przygotowac paczki artykulow';
+  if (normalized === 'prompts_not_loaded') return 'prompty company nie sa zaladowane';
+  if (normalized.startsWith('runner_')) {
+    return `komputer ${normalized.slice('runner_'.length).replace(/_/g, ' ')}`;
+  }
+  return normalized;
+}
+
+function formatRemoteRunnerUiErrorText(rawError) {
+  const candidate = typeof rawError === 'string'
+    ? rawError.trim()
+    : (typeof rawError?.message === 'string'
+      ? rawError.message.trim()
+      : String(rawError || '').trim());
+  if (!candidate) return 'Zdalny start: blad.';
+  if (/^[a-z0-9_:-]+$/i.test(candidate)) {
+    return `Zdalny start: ${formatRemoteRunnerError(candidate)}.`;
+  }
+  return `Zdalny start: ${candidate}`;
+}
+
+function formatRemoteRunnerSummary(record, fallbackId = '') {
+  if (!record || typeof record !== 'object') {
+    return fallbackId ? `Komputer ${safePreview(fallbackId)}: offline.` : 'Komputer: brak danych.';
+  }
+  const runnerId = typeof record.runnerId === 'string' && record.runnerId.trim()
+    ? record.runnerId.trim()
+    : fallbackId;
+  const runnerName = typeof record.runnerName === 'string' && record.runnerName.trim()
+    ? record.runnerName.trim()
+    : '';
+  const label = formatRemoteRunnerStateLabel(record.status);
+  const parts = [`Komputer ${runnerName ? `${runnerName} ` : ''}(${safePreview(runnerId, 'n/a')}): ${label}.`];
+  if (record.promptsLoaded === false) parts.push('Prompty: brak.');
+  if (record.chatgptReady === false) parts.push('ChatGPT: niegotowy.');
+  if (typeof record.activeJobId === 'string' && record.activeJobId.trim()) {
+    parts.push(
+      `Aktywne zadanie: ${safePreview(record.activeJobId)}${
+        record.activeJobStatus ? ` (${formatRemoteJobStateLabel(record.activeJobStatus)})` : ''
+      }.`
+    );
+  }
+  if (Number.isInteger(record.lastSeenAgeSeconds)) {
+    parts.push(`Ostatni sygnal: ${record.lastSeenAgeSeconds}s temu.`);
+  }
+  return parts.join(' ');
+}
+
+function getRemoteJobCommandType(job) {
+  const payload = job?.requestPayload && typeof job.requestPayload === 'object' ? job.requestPayload : null;
+  const direct = typeof job?.commandType === 'string' && job.commandType.trim()
+    ? job.commandType.trim().toLowerCase()
+    : '';
+  if (direct) return direct;
+  if (typeof payload?.commandType === 'string' && payload.commandType.trim()) {
+    return payload.commandType.trim().toLowerCase();
+  }
+  if (typeof payload?.command_type === 'string' && payload.command_type.trim()) {
+    return payload.command_type.trim().toLowerCase();
+  }
+  return '';
+}
+
+function getRemoteJobKind(job) {
+  const commandType = getRemoteJobCommandType(job);
+  if (commandType) return 'command';
+  const directJobKind = typeof job?.jobKind === 'string' && job.jobKind.trim()
+    ? job.jobKind.trim().toLowerCase()
+    : '';
+  if (directJobKind === 'command' || directJobKind === 'analysis') return directJobKind;
+  const payload = job?.requestPayload && typeof job.requestPayload === 'object' ? job.requestPayload : null;
+  const preparedSources = Array.isArray(payload?.preparedSources) ? payload.preparedSources : [];
+  if (preparedSources.length > 0) return 'analysis';
+  const jobType = typeof job?.jobType === 'string' && job.jobType.trim()
+    ? job.jobType.trim().toLowerCase()
+    : (typeof payload?.jobType === 'string' && payload.jobType.trim()
+      ? payload.jobType.trim().toLowerCase()
+      : (typeof payload?.job_type === 'string' && payload.job_type.trim() ? payload.job_type.trim().toLowerCase() : ''));
+  if (jobType === 'command' || jobType === 'analysis') return jobType;
+  return '';
+}
+
+function getRemoteJobDisplayLabel(job) {
+  const commandType = getRemoteJobCommandType(job);
+  if (commandType === 'reload_resume_active_company_processes') {
+    return 'restart + wznow';
+  }
+  const jobKind = getRemoteJobKind(job);
+  if (jobKind === 'analysis') return 'analiza';
+  if (jobKind === 'command') return 'polecenie runnera';
+  return 'zadanie';
+}
+
+function formatRemoteCommandResultSummary(resultPayload) {
+  if (!resultPayload || typeof resultPayload !== 'object') return '';
+  const parts = [];
+  if (Number.isInteger(resultPayload.scannedTabs)) parts.push(`skan=${resultPayload.scannedTabs}`);
+  if (Number.isInteger(resultPayload.startedTabs)) parts.push(`start=${resultPayload.startedTabs}`);
+  if (Number.isInteger(resultPayload.resumedTabs)) parts.push(`wznowione=${resultPayload.resumedTabs}`);
+  const summary = resultPayload.summary && typeof resultPayload.summary === 'object' ? resultPayload.summary : null;
+  if (summary) {
+    const issues = (
+      (Number.isInteger(summary.detect_failed) ? summary.detect_failed : 0)
+      + (Number.isInteger(summary.reload_failed) ? summary.reload_failed : 0)
+      + (Number.isInteger(summary.start_failed) ? summary.start_failed : 0)
+    );
+    if (issues > 0) parts.push(`problemy=${issues}`);
+  }
+  return parts.length > 0 ? `Procesy: ${parts.join(', ')}.` : '';
+}
+
+function formatRemoteJobSummary(job, fallbackLabel = 'Zadanie') {
+  if (!job || typeof job !== 'object') return `${fallbackLabel}: brak.`;
+  const jobId = typeof job.jobId === 'string' && job.jobId.trim() ? job.jobId.trim() : 'n/a';
+  const status = formatRemoteJobStateLabel(job.status);
+  const staleText = job.isStale === true ? ', nieaktualne' : '';
+  const jobLabel = getRemoteJobDisplayLabel(job);
+  const parts = [`${fallbackLabel}: ${jobLabel}, ${status}${staleText} (${safePreview(jobId)}).`];
+  if (typeof job.error === 'string' && job.error.trim()) {
+    parts.push(`Blad: ${safePreview(job.error, job.error)}.`);
+  }
+  const resultPayload = job.resultPayload && typeof job.resultPayload === 'object' ? job.resultPayload : null;
+  if (resultPayload) {
+    if (getRemoteJobKind(job) === 'command') {
+      const commandSummary = formatRemoteCommandResultSummary(resultPayload);
+      if (commandSummary) {
+        parts.push(commandSummary);
+      }
+    } else {
+      const successCount = Number.isInteger(resultPayload.successCount) ? resultPayload.successCount : null;
+      const failureCount = Number.isInteger(resultPayload.failureCount) ? resultPayload.failureCount : null;
+      if (successCount !== null || failureCount !== null) {
+        parts.push(`Wynik: OK=${successCount ?? 0}, bledy=${failureCount ?? 0}.`);
+      }
+    }
+  }
+  return parts.join(' ');
+}
+
+function applyRemoteRunnerUi(status) {
+  remoteRunnerStatusSnapshot = status && typeof status === 'object' ? status : null;
+  const settings = remoteRunnerStatusSnapshot?.settings && typeof remoteRunnerStatusSnapshot.settings === 'object'
+    ? remoteRunnerStatusSnapshot.settings
+    : {};
+  if (remoteRunnerTransportModeInput && document.activeElement !== remoteRunnerTransportModeInput) {
+    remoteRunnerTransportModeInput.value = normalizeRemoteRunnerTransportMode(settings.transportMode);
+  }
+  if (remoteRunnerBaseUrlInput && document.activeElement !== remoteRunnerBaseUrlInput) {
+    remoteRunnerBaseUrlInput.value = typeof settings.localBaseUrl === 'string' ? settings.localBaseUrl : '';
+  }
+  if (remoteRunnerNameInput && document.activeElement !== remoteRunnerNameInput) {
+    remoteRunnerNameInput.value = typeof settings.runnerName === 'string' ? settings.runnerName : '';
+  }
+  if (remoteTargetRunnerIdInput && document.activeElement !== remoteTargetRunnerIdInput) {
+    remoteTargetRunnerIdInput.value = typeof settings.controllerRunnerId === 'string'
+      ? settings.controllerRunnerId
+      : '';
+  }
+  if (remoteRunnerToggleBtn) {
+    remoteRunnerToggleBtn.dataset.enabled = settings.enabled === true ? 'true' : 'false';
+    remoteRunnerToggleBtn.textContent = settings.enabled === true ? 'Ten komputer: ON' : 'Ten komputer: OFF';
+  }
+}
+
+function formatRemoteRunnerStatusView(status) {
+  if (!status || status.success === false) {
+    return `Zdalny start: ${formatRemoteRunnerError(status?.error || 'blad statusu')}.`;
+  }
+  const lines = [];
+  const transportMode = normalizeRemoteRunnerTransportMode(status?.settings?.transportMode);
+  const localBaseUrl = typeof status?.settings?.localBaseUrl === 'string'
+    ? status.settings.localBaseUrl.trim()
+    : '';
+  const supportId = typeof status.supportId === 'string' && status.supportId.trim() ? status.supportId.trim() : '';
+  lines.push(
+    transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL
+      ? `Polaczenie: relay lokalny${localBaseUrl ? ` (${safePreview(localBaseUrl, localBaseUrl)})` : ''}.`
+      : 'Polaczenie: Watchlist API.'
+  );
+  lines.push(`ID tego komputera: ${safePreview(supportId, 'brak ID')}.`);
+  if (status?.settings?.enabled === true) {
+    lines.push('Odbior zadan na tym komputerze: wlaczony.');
+    lines.push(formatRemoteRunnerSummary(status.localRunner, supportId));
+  } else {
+    lines.push('Odbior zadan na tym komputerze: wylaczony.');
+  }
+  const targetRunnerId = typeof status?.settings?.controllerRunnerId === 'string'
+    ? status.settings.controllerRunnerId.trim()
+    : '';
+  const discoveredRunners = Array.isArray(status.discoveredRunners) ? status.discoveredRunners : [];
+  const resolvedTargetSource = typeof status.resolvedTargetSource === 'string'
+    ? status.resolvedTargetSource
+    : '';
+  if (status.targetRunner) {
+    const targetLabel = resolvedTargetSource.startsWith('auto')
+      ? 'Wybrany komputer (auto)'
+      : 'Wybrany komputer';
+    const targetId = typeof status?.targetRunner?.runnerId === 'string' && status.targetRunner.runnerId.trim()
+      ? status.targetRunner.runnerId.trim()
+      : targetRunnerId;
+    lines.push(`${targetLabel}: ${formatRemoteRunnerSummary(status.targetRunner, targetId)}`);
+  } else if (targetRunnerId) {
+    if (status.targetRunnerError) {
+      lines.push(`Wybrany komputer: ${safePreview(targetRunnerId)} -> ${formatRemoteRunnerError(status.targetRunnerError)}.`);
+    } else {
+      lines.push(`Wybrany komputer: ${safePreview(targetRunnerId)}.`);
+    }
+  } else if (transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL) {
+    lines.push('Tryb lokalny: wpisz ID drugiego komputera i adres relay.');
+  } else if (discoveredRunners.length === 1) {
+    lines.push(`Auto-wybor: ${formatRemoteRunnerSummary(discoveredRunners[0], discoveredRunners[0].runnerId || '')}`);
+  } else if (discoveredRunners.length > 1) {
+    lines.push(`Auto-wybor: wykryto ${discoveredRunners.length} komputerow.`);
+    discoveredRunners.slice(0, 3).forEach((runner, index) => {
+      lines.push(`Komputer ${index + 1}: ${formatRemoteRunnerSummary(runner, runner?.runnerId || '')}`);
+    });
+  } else if (status.discoveredRunnersError) {
+    lines.push(`Auto-wybor: ${formatRemoteRunnerError(status.discoveredRunnersError)}.`);
+  } else {
+    lines.push('Auto-wybor: brak drugiego komputera.');
+  }
+  if (status.promptsLoaded === false) {
+    lines.push('Prompty company nie sa wczytane.');
+  }
+  return lines.join('\n');
+}
+
+function formatRemoteRunnerJobStatusView(status) {
+  if (!status || status.success === false) return '';
+  const lines = [];
+  if (status.controllerJob) {
+    lines.push(formatRemoteJobSummary(status.controllerJob, 'Zadanie wysylajace'));
+  } else if (status.controllerJobError) {
+    lines.push(`Zadanie wysylajace: ${status.controllerJobError}.`);
+  }
+  if (status.runnerJob) {
+    lines.push(formatRemoteJobSummary(status.runnerJob, 'Zadanie na drugim komputerze'));
+  } else if (status.runnerJobError) {
+    lines.push(`Zadanie na drugim komputerze: ${status.runnerJobError}.`);
+  }
+  return lines.join('\n');
+}
+
+async function refreshRemoteRunnerStatus(forceSync = false) {
+  if (!remoteRunnerStatus) return;
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_REMOTE_RUNNER_STATUS',
+      forceSync,
+    });
+    applyRemoteRunnerUi(response);
+    setRemoteRunnerStatus(formatRemoteRunnerStatusView(response), response?.success === false);
+    const jobText = formatRemoteRunnerJobStatusView(response);
+    setRemoteRunnerJobStatus(jobText, false);
+    renderRemoteTransferCard(buildRemoteTransferCardView(response));
+  } catch (error) {
+    applyRemoteRunnerUi(null);
+    setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+    setRemoteRunnerJobStatus('', false);
+    renderRemoteTransferCard(null);
+  }
 }
 
 const DISPATCH_REASON_LABELS = {
@@ -1096,9 +1757,9 @@ function formatCompanyConversationCountStatus(response) {
 async function executeCountCompanyMessagesFromPopup(button) {
   if (!button) return;
 
-  const originalText = button.textContent;
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Licze...';
+  setShortcutButtonLabel(button, 'Licze...');
   setRunStatus('Licze wszystkie wiadomosci company na aktywnej konwersacji...');
 
   try {
@@ -1129,7 +1790,7 @@ async function executeCountCompanyMessagesFromPopup(button) {
     setRestoreProcessWindowsStatus(`Licznik procesu: blad (${error?.message || String(error)})`, true);
   } finally {
     button.disabled = false;
-    button.textContent = originalText || 'Policz wszystkie wiadomosci (company)';
+    button.innerHTML = originalHtml;
   }
 }
 
@@ -1138,7 +1799,7 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
 
   const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Uruchamiam...';
+  setShortcutButtonLabel(button, 'Uruchamiam...');
   setRunStatus('Uruchamiam analizy...');
 
   try {
@@ -1182,6 +1843,7 @@ function getResumeAllSummary(response) {
     ? response.summary
     : {};
   const rows = Array.isArray(response?.results) ? response.results : [];
+  const reloadBeforeResume = response?.reloadBeforeResume !== false;
   const scannedTabs = Number.isInteger(response?.scannedTabs)
     ? response.scannedTabs
     : Number.isInteger(response?.eligibleProcesses)
@@ -1253,6 +1915,9 @@ function getResumeAllSummary(response) {
   const recognizedUnresolved = Number.isInteger(summary?.recognized_unresolved)
     ? summary.recognized_unresolved
     : rows.filter((row) => row?.action === 'detect_failed').length;
+  const modePart = reloadBeforeResume
+    ? `reload_ok: ${reloadOk}/${reloadTotal}`
+    : 'tryb: bez_reloadu';
 
   return `Procesy: ${scannedTabs}, started: ${startedTabs}, final_completed: ${finalStageCompleted}, start_failed: ${startFailed}, detect_failed: ${detectFailed}, prepare_ok: ${preparedOk}/${preparedTotal}, skipped_outside_invest: ${skippedOutsideInvest}, prompt_bloki: ${promptBlocks}, odpowiedz_bloki: ${responseBlocks}, missing_reply_detected: ${missingRepliesDetected}, data_gaps: ${dataGapsDetected}, detected_prompts: ${detectedPrompts}, rozpoznanie[saved=${recognizedSavedStage}, chat=${recognizedChatDetection}, counter_fb=${recognizedCounterFallback}, progress_fb=${recognizedProgressFallback}, unresolved=${recognizedUnresolved}], pipeline=saved_stage->chat_extract->chat_resolution->fallback->start_dispatch`;
 }
@@ -1261,6 +1926,7 @@ async function executeResumeAllFromPopup(button, options = {}) {
   if (!button) return;
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-resume-all';
+  const reloadBeforeResume = options?.reloadBeforeResume !== false;
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
@@ -1322,14 +1988,204 @@ async function executeResumeAllFromPopup(button, options = {}) {
   }
 }
 
+async function executeCheckRemoteRunnerFromPopup(button) {
+  if (!button) return;
+  const originalText = button.textContent;
+  button.disabled = true;
+  button.textContent = 'Sprawdzam...';
+  setRemoteRunnerStatus('Sprawdzam drugi komputer do zdalnego startu...', false);
+
+  try {
+    await saveRemoteRunnerSettingsFromPopup();
+    const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+      ? remoteTargetRunnerIdInput.value.trim()
+      : '';
+    const response = await sendRuntimeMessage(runnerId
+      ? {
+          type: 'CHECK_REMOTE_RUNNER',
+          runnerId
+        }
+      : {
+          type: 'CHECK_REMOTE_RUNNER'
+        });
+    if (response?.success === false) {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(response.error || 'blad sprawdzenia runnera'), true);
+      return;
+    }
+    await refreshRemoteRunnerStatus(true);
+  } catch (error) {
+    setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+  } finally {
+    button.disabled = false;
+    button.textContent = originalText || 'Sprawdz cel';
+  }
+}
+
+async function executeRunRemoteAnalysisFromPopup(button) {
+  if (!button) return;
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  setShortcutButtonLabel(button, 'Wysylam...', POPUP_SHORTCUTS.runRemote);
+  setRunStatus('Przygotowuje artykuly i wysylam je na drugi komputer...');
+  renderRemoteTransferCard(buildRemoteTransferCardView(null, {
+    forceVisible: true,
+    status: 'queued',
+    preview: {
+      sourceCount: 0,
+      totalChars: 0,
+      items: [],
+      hiddenCount: 0,
+    },
+  }));
+
+  try {
+    await saveRemoteRunnerSettingsFromPopup();
+    const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+      ? remoteTargetRunnerIdInput.value.trim()
+      : '';
+    const response = await sendRuntimeMessage(runnerId
+      ? {
+          type: 'RUN_REMOTE_ANALYSIS',
+          runnerId,
+          origin: 'popup-run-remote-analysis'
+        }
+      : {
+          type: 'RUN_REMOTE_ANALYSIS',
+          origin: 'popup-run-remote-analysis'
+        });
+    if (response?.success === false) {
+      setRunStatus(formatRemoteRunnerUiErrorText(response.error || 'remote_start_failed'), true);
+      renderRemoteTransferCard(buildRemoteTransferCardView(remoteRunnerStatusSnapshot, {
+        forceVisible: true,
+        error: response.error || 'remote_start_failed',
+      }));
+      await refreshRemoteRunnerStatus(true);
+      return;
+    }
+    const runnerLabel = typeof response?.runner?.runnerName === 'string' && response.runner.runnerName.trim()
+      ? response.runner.runnerName.trim()
+      : safePreview(response?.runner?.runnerId || '', 'runner');
+    setRunStatus(
+      `Wyslano analize do ${runnerLabel}. Zadanie=${safePreview(response?.job?.jobId || '', 'n/a')}, artykuly=${response?.preparedSourceCount || 0}, pominiete=${response?.skippedSourceCount || 0}.`,
+      false
+    );
+    renderRemoteTransferCard(buildRemoteTransferCardView({
+      controllerJob: response?.job || null,
+      runnerJob: null,
+      targetRunner: response?.runner || null,
+    }, {
+      status: response?.job?.status || 'queued',
+      preview: response?.transferPreview || null,
+      runner: response?.runner || null,
+      sourceMode: response?.sourceMode || '',
+      forceVisible: true,
+    }));
+    await refreshRemoteRunnerStatus(true);
+  } catch (error) {
+    setRunStatus(formatRemoteRunnerUiErrorText(error), true);
+    renderRemoteTransferCard(buildRemoteTransferCardView(remoteRunnerStatusSnapshot, {
+      forceVisible: true,
+      error: error?.message || String(error),
+    }));
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
+async function executeRunRemoteResumeAllFromPopup(button) {
+  if (!button) return;
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  setShortcutButtonLabel(button, 'Wysylam polecenie...');
+  setRunStatus('Wysylam na drugi komputer polecenie restart + wznow...');
+
+  try {
+    await saveRemoteRunnerSettingsFromPopup();
+    const runnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+      ? remoteTargetRunnerIdInput.value.trim()
+      : '';
+    const response = await sendRuntimeMessage(runnerId
+      ? {
+          type: 'RUN_REMOTE_RELOAD_RESUME',
+          runnerId,
+          origin: 'popup-run-remote-reload-resume'
+        }
+      : {
+          type: 'RUN_REMOTE_RELOAD_RESUME',
+          origin: 'popup-run-remote-reload-resume'
+        });
+    if (response?.success === false) {
+      setRunStatus(formatRemoteRunnerUiErrorText(response.error || 'run_remote_reload_resume_failed'), true);
+      await refreshRemoteRunnerStatus(true);
+      return;
+    }
+
+    const runnerLabel = typeof response?.runner?.runnerName === 'string' && response.runner.runnerName.trim()
+      ? response.runner.runnerName.trim()
+      : safePreview(response?.runner?.runnerId || '', 'runner');
+    setRunStatus(
+      `Wyslano polecenie restart + wznow do ${runnerLabel}. Zadanie=${safePreview(response?.job?.jobId || '', 'n/a')}.`,
+      false
+    );
+    await refreshRemoteRunnerStatus(true);
+  } catch (error) {
+    setRunStatus(formatRemoteRunnerUiErrorText(error), true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
+async function saveRemoteRunnerSettingsFromPopup(patch = {}) {
+  const transportMode = normalizeRemoteRunnerTransportMode(
+    typeof remoteRunnerTransportModeInput?.value === 'string'
+      ? remoteRunnerTransportModeInput.value
+      : ''
+  );
+  const localBaseUrlRaw = typeof remoteRunnerBaseUrlInput?.value === 'string'
+    ? remoteRunnerBaseUrlInput.value.trim()
+    : '';
+  const localBaseUrl = transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL
+    ? normalizeLocalRemoteRunnerBaseUrl(localBaseUrlRaw)
+    : '';
+  if (transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL && localBaseUrlRaw && !localBaseUrl) {
+    throw new Error('local_runner_base_url_invalid');
+  }
+  if (transportMode === REMOTE_RUNNER_TRANSPORT_LOCAL && localBaseUrl) {
+    const permissionResult = await ensureRemoteRunnerBaseUrlPermission(localBaseUrl);
+    if (!permissionResult.success) {
+      throw new Error(permissionResult.error || 'remote_runner_origin_permission_denied');
+    }
+  }
+  const runnerName = typeof remoteRunnerNameInput?.value === 'string'
+    ? remoteRunnerNameInput.value.trim()
+    : '';
+  const controllerRunnerId = typeof remoteTargetRunnerIdInput?.value === 'string'
+    ? remoteTargetRunnerIdInput.value.trim()
+    : '';
+  const response = await sendRuntimeMessage({
+    type: 'SET_REMOTE_RUNNER_SETTINGS',
+    transportMode,
+    localBaseUrl,
+    runnerName,
+    controllerRunnerId,
+    ...patch
+  });
+  if (response?.success === false) {
+    throw new Error(response.error || 'set_remote_runner_settings_failed');
+  }
+  return response;
+}
+
 async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   if (!button) return;
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all';
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
-  const originalText = button.textContent;
+  const originalHtml = button.innerHTML;
   button.disabled = true;
-  button.textContent = 'Powtarzam...';
+  setShortcutButtonLabel(button, 'Powtarzam...');
   setRunStatus('Powtarzam ostatni prompt we wszystkich aktywnych procesach company...');
 
   try {
@@ -1357,7 +2213,7 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
   } finally {
     button.disabled = false;
-    button.textContent = originalText || 'Powtorz ostatni prompt (wszystkie)';
+    button.innerHTML = originalHtml;
   }
 }
 
@@ -1556,7 +2412,7 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
   const originalHtml = button.innerHTML;
   button.disabled = true;
   setShortcutButtonLabel(button, 'Wykrywam etap...', POPUP_SHORTCUTS.resumeStage);
-  setRunStatus('Wykrywam etap i status odpowiedzi...');
+  setRunStatus('Wykrywam etap aktywnej karty i sprawdzam, czy powtorzyc ten sam czy uruchomic kolejny prompt...');
 
   try {
     const response = await sendRuntimeMessage({
@@ -1613,39 +2469,11 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
   }
 }
 
-function isYouTubeUrl(rawUrl) {
-  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return false;
-  try {
-    const parsed = new URL(rawUrl);
-    const host = String(parsed.hostname || '').toLowerCase();
-    return host.includes('youtube.com') || host.includes('youtu.be');
-  } catch (error) {
-    return false;
-  }
-}
-
 async function getActiveTabInCurrentWindow() {
   const tabs = await new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (rows) => resolve(Array.isArray(rows) ? rows : []));
   });
   return tabs.length > 0 ? tabs[0] : null;
-}
-
-async function refreshYouTubeTranscriptHint() {
-  try {
-    const activeTab = await getActiveTabInCurrentWindow();
-    if (!activeTab || !Number.isInteger(activeTab.id)) {
-      setYouTubeTranscriptStatus('YouTube transcript: brak aktywnej karty.', false);
-      return;
-    }
-    if (!isYouTubeUrl(activeTab.url || '')) {
-      setYouTubeTranscriptStatus('YouTube transcript: otworz karte YouTube i kliknij "Kopiuj".', false);
-      return;
-    }
-    setYouTubeTranscriptStatus('YouTube transcript: gotowy do pobrania.', false);
-  } catch (error) {
-    setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
-  }
 }
 
 async function fallbackCopyText(text) {
@@ -1673,81 +2501,7 @@ async function copyTextToClipboard(text) {
   await fallbackCopyText(text);
 }
 
-function formatTranscriptFetchError(response) {
-  const errorCode = typeof response?.errorCode === 'string' ? response.errorCode.trim() : '';
-  const errorMessage = typeof response?.error === 'string' ? response.error.trim() : '';
-  if (errorCode === 'not_youtube_tab') return 'Aktywna karta nie jest YouTube.';
-  if (errorCode === 'tab_id_missing' || errorCode === 'tab_not_found') return 'Nie znaleziono aktywnej karty.';
-  if (errorCode === 'not_video_page') return 'To nie jest strona filmu YouTube (watch/shorts/live).';
-  if (errorCode === 'caption_tracks_missing') return 'Ten film nie ma dostepnych napisow.';
-  if (errorCode === 'caption_tracks_timeout' || errorCode === 'player_response_missing') return 'Nie udalo sie zaladowac napisow. Sprobuj ponownie za chwile.';
-  if (errorCode === 'timedtext_list_fetch_failed') return 'Nie udalo sie pobrac listy napisow z YouTube.';
-  if (errorCode === 'transcript_fetch_failed') return 'Nie udalo sie pobrac transkrypcji z YouTube.';
-  if (errorCode === 'transcript_too_short') return 'Pobrana transkrypcja jest zbyt krotka.';
-  if (errorCode === 'content_script_unreachable') return 'Content script YouTube nie jest gotowy. Odswiez karte i sproboj ponownie.';
-  if (errorCode === 'content_script_injection_failed') return 'Nie udalo sie uruchomic modulu YouTube na tej karcie.';
-  if (errorCode === 'content_script_injection_blocked') return 'Przegladarka zablokowala dostep do tej strony.';
-  if (errorCode === 'invalid_transcript_response') return 'Otrzymano niepoprawna odpowiedz z modulu YouTube.';
-  if (errorCode === 'runtime_timeout') return 'Przekroczono czas oczekiwania na transkrypcje.';
-  return errorMessage || errorCode || 'transcript_unavailable';
-}
-
-async function executeCopyYouTubeTranscriptFromPopup(button) {
-  if (!button) return;
-  const originalHtml = button.innerHTML;
-  button.disabled = true;
-  setShortcutButtonLabel(button, 'Pobieram...', POPUP_SHORTCUTS.copyYouTube);
-  setYouTubeTranscriptStatus('YouTube transcript: pobieram...', false);
-
-  try {
-    const activeTab = await getActiveTabInCurrentWindow();
-    if (!activeTab || !Number.isInteger(activeTab.id)) {
-      setYouTubeTranscriptStatus('YouTube transcript: brak aktywnej karty.', true);
-      return;
-    }
-    if (!isYouTubeUrl(activeTab.url || '')) {
-      setYouTubeTranscriptStatus('YouTube transcript: aktywna karta nie jest YouTube.', true);
-      return;
-    }
-
-    const response = await sendRuntimeMessage({
-      type: 'YT_FETCH_TRANSCRIPT_FOR_TAB',
-      tabId: activeTab.id,
-      preferredLanguages: ['pl', 'en'],
-    });
-
-    if (!response?.success || typeof response?.transcript !== 'string' || !response.transcript.trim()) {
-      setYouTubeTranscriptStatus(`YouTube transcript: ${formatTranscriptFetchError(response)}`, true);
-      return;
-    }
-
-    await copyTextToClipboard(response.transcript);
-    const transcriptLength = response.transcript.trim().length;
-    const transcriptLang = typeof response.lang === 'string' && response.lang.trim() ? response.lang.trim() : 'unknown';
-    const method = typeof response.method === 'string' && response.method.trim() ? response.method.trim() : 'unknown';
-    const cacheHint = response.cacheHit ? ', cache' : '';
-    const attemptHint = Number.isInteger(response.attemptUsed) && Number.isInteger(response.attempts)
-      ? `, proba ${response.attemptUsed}/${response.attempts}`
-      : '';
-    setYouTubeTranscriptStatus(
-      `YouTube transcript: skopiowano (${transcriptLang}, ${transcriptLength} znakow, ${method}${cacheHint}${attemptHint}).`,
-      false
-    );
-  } catch (error) {
-    setYouTubeTranscriptStatus(`YouTube transcript: ${error?.message || String(error)}`, true);
-  } finally {
-    button.disabled = false;
-    button.innerHTML = originalHtml;
-  }
-}
-
 const runBtn = document.getElementById('runBtn');
-if (copyYouTubeTranscriptBtn) {
-  copyYouTubeTranscriptBtn.addEventListener('click', () => {
-    void executeCopyYouTubeTranscriptFromPopup(copyYouTubeTranscriptBtn);
-  });
-}
-
 if (runBtn) {
   runBtn.addEventListener('click', () => {
     withActiveWindowContext(({ windowId }) => {
@@ -1759,11 +2513,108 @@ if (runBtn) {
   });
 }
 
+if (remoteRunnerToggleBtn) {
+  remoteRunnerToggleBtn.addEventListener('click', async () => {
+    const enabledNow = remoteRunnerToggleBtn.dataset.enabled === 'true';
+    const nextEnabled = !enabledNow;
+    const originalText = remoteRunnerToggleBtn.textContent;
+    remoteRunnerToggleBtn.disabled = true;
+    remoteRunnerToggleBtn.textContent = nextEnabled ? 'Ten komputer: ON...' : 'Ten komputer: OFF...';
+    try {
+      await saveRemoteRunnerSettingsFromPopup({ enabled: nextEnabled });
+      await refreshRemoteRunnerStatus(true);
+    } catch (error) {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+      remoteRunnerToggleBtn.textContent = originalText || 'Ten komputer';
+    } finally {
+      remoteRunnerToggleBtn.disabled = false;
+    }
+  });
+}
+
+if (copySupportIdBtn) {
+  copySupportIdBtn.addEventListener('click', async () => {
+    try {
+      const status = remoteRunnerStatusSnapshot?.supportId
+        ? remoteRunnerStatusSnapshot
+        : await sendRuntimeMessage({ type: 'GET_REMOTE_RUNNER_STATUS', forceSync: false });
+      const supportId = typeof status?.supportId === 'string' ? status.supportId.trim() : '';
+      if (!supportId) {
+        setRemoteRunnerStatus('Zdalny start: brak ID tego komputera.', true);
+        return;
+      }
+      await copyTextToClipboard(supportId);
+      setRemoteRunnerStatus(`Skopiowano ID tego komputera: ${supportId}`, false);
+    } catch (error) {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+    }
+  });
+}
+
+if (checkRemoteRunnerBtn) {
+  checkRemoteRunnerBtn.addEventListener('click', () => {
+    void executeCheckRemoteRunnerFromPopup(checkRemoteRunnerBtn);
+  });
+}
+
+if (runRemoteBtn) {
+  runRemoteBtn.addEventListener('click', () => {
+    void executeRunRemoteAnalysisFromPopup(runRemoteBtn);
+  });
+}
+
+if (runRemoteResumeAllBtn) {
+  runRemoteResumeAllBtn.addEventListener('click', () => {
+    void executeRunRemoteResumeAllFromPopup(runRemoteResumeAllBtn);
+  });
+}
+
+if (remoteRunnerNameInput) {
+  remoteRunnerNameInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+    });
+  });
+}
+
+if (remoteRunnerTransportModeInput) {
+  remoteRunnerTransportModeInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+    });
+  });
+}
+
+if (remoteRunnerBaseUrlInput) {
+  remoteRunnerBaseUrlInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+    });
+  });
+}
+
+if (remoteTargetRunnerIdInput) {
+  remoteTargetRunnerIdInput.addEventListener('change', () => {
+    void saveRemoteRunnerSettingsFromPopup().then(() => refreshRemoteRunnerStatus(false)).catch((error) => {
+      setRemoteRunnerStatus(formatRemoteRunnerUiErrorText(error), true);
+    });
+  });
+}
+
 const resumeAllBtn = document.getElementById('resumeAllBtn');
 if (resumeAllBtn) {
   resumeAllBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllBtn, {
       origin: 'popup-resume-all',
+    });
+  });
+}
+
+if (resumeAllNoReloadBtn) {
+  resumeAllNoReloadBtn.addEventListener('click', () => {
+    void executeResumeAllFromPopup(resumeAllNoReloadBtn, {
+      origin: 'popup-resume-all-no-reload',
+      reloadBeforeResume: false,
     });
   });
 }
@@ -1976,24 +2827,34 @@ function clickIfEnabled(button) {
 const popupShortcutHandlers = {
   [POPUP_SHORTCUTS.manualSource]: () => clickIfEnabled(manualSourceBtn),
   [POPUP_SHORTCUTS.runAnalysis]: () => clickIfEnabled(runBtn),
+  [POPUP_SHORTCUTS.runRemote]: () => clickIfEnabled(runRemoteBtn),
   [POPUP_SHORTCUTS.resumeStage]: () => clickIfEnabled(resumeStageBtn),
   [POPUP_SHORTCUTS.resumeAll]: () => clickIfEnabled(resumeAllBtn),
+  [POPUP_SHORTCUTS.resumeAllNoReload]: () => clickIfEnabled(resumeAllNoReloadBtn),
   [POPUP_SHORTCUTS.responses]: () => clickIfEnabled(responsesBtn),
   [POPUP_SHORTCUTS.processPanel]: () => clickIfEnabled(decisionPanelBtn),
   [POPUP_SHORTCUTS.stop]: () => clickIfEnabled(stopBtn),
-  [POPUP_SHORTCUTS.copyYouTube]: () => clickIfEnabled(copyYouTubeTranscriptBtn),
   [POPUP_SHORTCUTS.restoreWindows]: () => clickIfEnabled(restoreProcessWindowsBtn),
   [POPUP_SHORTCUTS.autoRestoreToggle]: () => clickIfEnabled(autoRestoreToggleBtn),
+  [POPUP_SHORTCUTS.unfinishedProcesses]: () => clickIfEnabled(unfinishedProcessesBtn),
+  [POPUP_SHORTCUTS.problemLogs]: () => clickIfEnabled(problemLogsBtn),
+  [POPUP_SHORTCUTS.repeatLastPromptAll]: () => clickIfEnabled(repeatLastPromptAllBtn),
+  [POPUP_SHORTCUTS.countCompanyMessages]: () => clickIfEnabled(countCompanyMessagesBtn),
+  [POPUP_SHORTCUTS.resumeAllExtended]: () => clickIfEnabled(resumeAllExtendedBtn),
+  [POPUP_SHORTCUTS.resumeAllHeavy]: () => clickIfEnabled(resumeAllHeavyBtn),
 };
 
 function resolvePopupShortcutKey(event) {
   if (!event) return '';
   const key = typeof event.key === 'string' ? event.key.trim() : '';
   if (/^[0-9]$/.test(key)) return key;
+  if (/^[a-z]$/i.test(key)) return key.toLowerCase();
 
   const code = typeof event.code === 'string' ? event.code.trim() : '';
   const digitMatch = code.match(/^Digit([0-9])$/);
   if (digitMatch) return digitMatch[1];
+  const keyMatch = code.match(/^Key([A-Z])$/);
+  if (keyMatch) return keyMatch[1].toLowerCase();
   const numpadMatch = code.match(/^Numpad([0-9])$/);
   if (numpadMatch) return numpadMatch[1];
 

@@ -2,6 +2,8 @@
 
 const titleInput = document.getElementById('titleInput');
 const sourceInput = document.getElementById('sourceInput');
+const remoteRunnerCheckbox = document.getElementById('remoteRunnerCheckbox');
+const remoteRunnerHint = document.getElementById('remoteRunnerHint');
 const pdfInput = document.getElementById('pdfInput');
 const pdfList = document.getElementById('pdfList');
 const providerStatus = document.getElementById('providerStatus');
@@ -58,6 +60,24 @@ function updateSubmitButton() {
   submitBtn.disabled = queueActive || (!hasText && !hasPdf);
 }
 
+function updateRemoteRunnerModeState() {
+  if (!remoteRunnerCheckbox) return;
+
+  const hasPdf = selectedPdfFiles.length > 0;
+  const locked = queueActive === true;
+  remoteRunnerCheckbox.disabled = hasPdf || locked;
+  if (hasPdf) {
+    remoteRunnerCheckbox.checked = false;
+  }
+
+  if (!remoteRunnerHint) return;
+  if (hasPdf) {
+    remoteRunnerHint.textContent = 'Tryb zdalny jest dostepny tylko dla tekstu. Gdy wybierzesz PDF, analiza zostaje lokalna.';
+    return;
+  }
+  remoteRunnerHint.textContent = 'Tryb zdalny wysyla sam tekst do Remote Runnera. Drugi komputer uruchamia proces ChatGPT u siebie.';
+}
+
 function updateInstancesDisplay() {
   instancesValue.textContent = instances;
   decreaseBtn.disabled = instances <= MIN_INSTANCES;
@@ -69,12 +89,16 @@ function setQueueUiLocked(locked) {
   titleInput.disabled = isLocked;
   sourceInput.disabled = isLocked;
   pdfInput.disabled = isLocked;
+  if (remoteRunnerCheckbox) {
+    remoteRunnerCheckbox.disabled = isLocked || selectedPdfFiles.length > 0;
+  }
   if (isLocked) {
     decreaseBtn.disabled = true;
     increaseBtn.disabled = true;
   } else {
     updateInstancesDisplay();
   }
+  updateRemoteRunnerModeState();
 }
 
 function renderPdfList() {
@@ -205,6 +229,7 @@ function syncPdfSelection() {
 
   renderPdfList();
   updateSubmitButton();
+  updateRemoteRunnerModeState();
 
   if (rejectedCount > 0 || duplicateCount > 0) {
     const parts = [];
@@ -296,6 +321,7 @@ function releasePdfProviderState(releaseMessage = '') {
   setQueueUiLocked(false);
   renderPdfList();
   updateSubmitButton();
+  updateRemoteRunnerModeState();
   submitBtn.textContent = 'Uruchom';
 
   if (releaseMessage) {
@@ -326,6 +352,7 @@ submitBtn.addEventListener('click', () => {
   if (queueActive) return;
 
   const hasPdf = selectedPdfFiles.length > 0;
+  const remoteRequested = remoteRunnerCheckbox?.checked === true && !hasPdf;
   const text = sourceInput.value.trim();
   const title = titleInput.value.trim() || 'Recznie wklejony artykul';
 
@@ -343,13 +370,23 @@ submitBtn.addEventListener('click', () => {
       pdfProviderId: providerId,
       pdfFiles: selectedPdfFiles,
     }
-    : {
-      type: 'MANUAL_SOURCE_SUBMIT',
-      mode: 'text',
-      text,
-      title,
-      instances,
-    };
+    : (
+      remoteRequested
+        ? {
+          type: 'RUN_REMOTE_ANALYSIS',
+          text,
+          title,
+          instances,
+          origin: 'manual-source-remote'
+        }
+        : {
+          type: 'MANUAL_SOURCE_SUBMIT',
+          mode: 'text',
+          text,
+          title,
+          instances,
+        }
+    );
 
   if (hasPdf) {
     startProviderKeepalive();
@@ -481,3 +518,4 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 setQueueUiLocked(false);
 updateSubmitButton();
 updateInstancesDisplay();
+updateRemoteRunnerModeState();

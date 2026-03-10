@@ -114,6 +114,79 @@
       font-size: 12px;
       line-height: 1.35;
     }
+    .queue-live {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      border-radius: 12px;
+      padding: 10px 12px;
+      display: flex;
+      flex-direction: column;
+      gap: 10px;
+    }
+    .queue-live-head {
+      display: flex;
+      justify-content: space-between;
+      align-items: center;
+      gap: 8px;
+    }
+    .queue-live-title {
+      font-size: 12px;
+      font-weight: 700;
+      color: var(--text);
+    }
+    .queue-live-meta {
+      font-size: 11px;
+      color: var(--muted);
+      text-align: right;
+    }
+    .queue-live-section {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .queue-live-label {
+      font-size: 10px;
+      font-weight: 700;
+      text-transform: uppercase;
+      letter-spacing: 0.08em;
+      color: var(--muted);
+    }
+    .queue-live-list {
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .queue-live-item {
+      border: 1px solid var(--border);
+      border-radius: 10px;
+      padding: 8px 9px;
+      background: #f8fafc;
+    }
+    .queue-live-item.active {
+      background: #eff6ff;
+      border-color: #bfdbfe;
+    }
+    .queue-live-item.pending {
+      background: #f8fafc;
+      border-style: dashed;
+    }
+    .queue-live-line {
+      font-size: 11px;
+      font-weight: 700;
+      color: var(--text);
+      line-height: 1.35;
+    }
+    .queue-live-sub {
+      font-size: 10px;
+      color: var(--muted);
+      line-height: 1.35;
+      margin-top: 2px;
+    }
+    .queue-live-empty {
+      font-size: 11px;
+      color: var(--muted);
+      line-height: 1.35;
+    }
     .bulk-btn {
       width: 100%;
       border: 1px solid var(--border);
@@ -225,6 +298,14 @@
       border: 2px solid #f59e0b;
       background: #fffdf7;
     }
+    .process-card.queued {
+      border: 2px dashed #94a3b8;
+      background: #f8fafc;
+    }
+    .process-card.data-gap {
+      border: 2px solid #dc2626;
+      box-shadow: 0 8px 22px rgba(220, 38, 38, 0.18);
+    }
     .process-header {
       display: flex;
       justify-content: space-between;
@@ -313,6 +394,15 @@
     .status-failed {
       background: #fee2e2;
       color: #991b1b;
+    }
+    .status-data-gap {
+      margin-left: 6px;
+      background: #fef2f2;
+      color: #b91c1c;
+      border: 1px solid #fecaca;
+      text-decoration: underline;
+      text-decoration-thickness: 2px;
+      text-underline-offset: 2px;
     }
     .db-delivery {
       margin-bottom: 8px;
@@ -558,6 +648,7 @@
       <div class="view-controls">
         <select id="view-filter" class="view-filter">
           <option value="all">Widok: wszystkie aktywne</option>
+          <option value="queued">Widok: kolejka</option>
           <option value="needs_action">Widok: wymaga akcji</option>
           <option value="p1p2">Widok: priorytet P1/P2</option>
           <option value="failed">Widok: status blad</option>
@@ -565,14 +656,28 @@
         </select>
         <input id="view-query" class="view-query" type="text" placeholder="Filtr: tytul, reason, runId..." autocomplete="off" />
       </div>
-      <div id="view-hint" class="view-hint">Widok gotowy.</div>
-      <div id="process-summary" class="summary-bar">
-        Aktywne 0 | Akcja 0 | Zakonczone 0 | Bledy 0 | Wszystkie 0
-      </div>
-      <div id="process-list" class="process-list"></div>
-      <div id="empty-state" class="empty-state" style="display: none;">
-        Brak aktywnych procesow
-      </div>
+        <div id="view-hint" class="view-hint">Widok gotowy.</div>
+        <div id="process-summary" class="summary-bar">
+          Aktywne 0 | Akcja 0 | Zakonczone 0 | Bledy 0 | Wszystkie 0
+        </div>
+        <div id="queue-live" class="queue-live">
+          <div class="queue-live-head">
+            <div class="queue-live-title">Realizacja kolejki</div>
+            <div id="queue-live-meta" class="queue-live-meta">Teraz 0/0 | Czeka 0</div>
+          </div>
+          <div class="queue-live-section">
+            <div class="queue-live-label">Teraz wykonywane</div>
+            <div id="queue-live-active" class="queue-live-list"></div>
+          </div>
+          <div class="queue-live-section">
+            <div class="queue-live-label">Czeka dalej</div>
+            <div id="queue-live-pending" class="queue-live-list"></div>
+          </div>
+        </div>
+        <div id="process-list" class="process-list"></div>
+        <div id="empty-state" class="empty-state" style="display: none;">
+          Brak aktywnych procesow
+        </div>
       <div class="history">
         <button id="history-toggle" class="history-toggle">Historia</button>
         <div id="history-list" class="history-list" style="display: none;"></div>

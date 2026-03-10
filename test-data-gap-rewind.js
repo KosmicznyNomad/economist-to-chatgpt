@@ -10,9 +10,10 @@ const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i
 const MAX_REPLAYS_PER_STAGE = 2;
 
 const STAGE_TO_PROMPT_INDEX = new Map([
-  ['1', 2],
-  ['2', 3],
-  ['3', 4],
+  ['1', 1],
+  ['2', 2],
+  ['3', 3],
+  ['3.2', 4],
   ['4', 5],
   ['5', 6],
   ['6', 7],
@@ -20,7 +21,8 @@ const STAGE_TO_PROMPT_INDEX = new Map([
   ['8', 9],
   ['9', 10],
   ['10', 11],
-  ['11', 12]
+  ['11', 11],
+  ['12', 12]
 ]);
 
 function normalizeStageId(value) {
@@ -223,11 +225,14 @@ function run() {
   assert.strictEqual(parseDirective('SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN'), null);
 
   // Test 2: stage sequence should rollback exactly as requested: 3 -> 2 -> 3 -> next.
-  const promptChain = prompts.slice(2); // starts from stage 1 prompt in this project
+  const promptChain = prompts.slice(1); // starts from the current Stage 1 prompt
   const replayCounts = new Map();
   const stageByPrompt = new Map();
   for (const [stageId, promptText] of promptByStageId.entries()) {
-    stageByPrompt.set(normalizePromptText(promptText), stageId);
+    const key = normalizePromptText(promptText);
+    if (!stageByPrompt.has(key)) {
+      stageByPrompt.set(key, stageId);
+    }
   }
 
   const executed = [];
@@ -253,12 +258,12 @@ function run() {
     }
   }
 
-  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'];
+  const expected = ['1', '2', '3', '2', '3', '3.2', '4', '5', '6', '7', '8', '9', '10', '12'];
   assert.deepStrictEqual(stripUnknownStages(executed), expected);
 
   // Test 2b: if missing stage is far earlier (e.g. at stage 7), replay must start
   // from missing stage and continue sequentially up to current stage.
-  const promptChainFar = prompts.slice(2);
+  const promptChainFar = prompts.slice(1);
   const executedFar = [];
   let injectedFar = false;
   for (let i = 0; i < promptChainFar.length; i += 1) {
@@ -281,14 +286,14 @@ function run() {
     }
   }
   const expectedFar = [
-    '1', '2', '3', '4', '5', '6', '7',
-    '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'
+    '1', '2', '3', '3.2', '4', '5', '6', '7',
+    '2', '3', '3.2', '4', '5', '6', '7', '8', '9', '10', '12'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedFar), expectedFar);
 
   // Test 2d: self-reference directive (missing stage == current stage) should
   // recover by rewinding one prompt and replaying up to current stage.
-  const promptChainSelf = prompts.slice(2);
+  const promptChainSelf = prompts.slice(1);
   const executedSelf = [];
   let injectedSelf = false;
   for (let i = 0; i < promptChainSelf.length; i += 1) {
@@ -313,14 +318,14 @@ function run() {
   const expectedSelf = [
     '1', '2', '3',
     '2', '3',
-    '4', '5', '6', '7', '8', '9', '10', '11'
+    '3.2', '4', '5', '6', '7', '8', '9', '10', '12'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedSelf), expectedSelf);
 
   // Test 2c: generic rollback rule for many stage pairs.
   // For each current stage C and missing stage M where M < C (by prompt number),
   // expect replay sequence M..C inserted right after C.
-  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'];
+  const orderedStages = ['1', '2', '3', '3.2', '4', '5', '6', '7', '8', '9', '10'];
   const orderedByPromptNumber = orderedStages
     .map((stageId) => ({
       stageId,
@@ -333,7 +338,7 @@ function run() {
     const currentStage = stagesByPromptNumber[c];
     for (let m = 0; m < c; m += 1) {
       const missingStage = stagesByPromptNumber[m];
-      const chain = prompts.slice(2);
+      const chain = prompts.slice(1);
       const trace = [];
       let injectedPair = false;
       for (let i = 0; i < chain.length; i += 1) {
@@ -397,8 +402,8 @@ function run() {
 
   // Test 3b: replay counters should be scoped by stage+current prompt number.
   const perPromptReplayCounts = new Map();
-  const chainForStage3 = prompts.slice(2);
-  const chainForStage4 = prompts.slice(2);
+  const chainForStage3 = prompts.slice(1);
+  const chainForStage4 = prompts.slice(1);
   const stage3Prompt = promptByStageId.get('3');
   const stage4Prompt = promptByStageId.get('4');
   const stage3Index = chainForStage3.findIndex((item) => normalizePromptText(item) === normalizePromptText(stage3Prompt));

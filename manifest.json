@@ -1,5 +1,6 @@
 {
   "manifest_version": 3,
+  "minimum_chrome_version": "120",
   "name": "Iskra",
   "version": "2.0",
   "description": "Analyze news in ChatGPT and sync final responses to Watchlist.",
@@ -9,7 +10,8 @@
     "scripting",
     "contextMenus",
     "storage",
-    "alarms"
+    "alarms",
+    "permissions"
   ],
   "host_permissions": [
     "https://*.economist.com/*",
@@ -23,28 +25,22 @@
     "https://the-ken.com/*",
     "https://*.lazard.com/*",
     "https://*.rand.org/*",
-    "https://www.youtube.com/*",
-    "https://youtu.be/*",
     "https://*.wsj.com/*",
     "https://*.foreignaffairs.com/*",
     "https://*.barrons.com/*",
     "https://open.spotify.com/*",
-    "https://mail.google.com/*",
     "https://iskierka-watchlist.duckdns.org/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
     "https://chatgpt.com/*"
   ],
+  "optional_host_permissions": [
+    "http://*/*",
+    "https://*/*"
+  ],
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://*.youtube.com/*", "*://youtu.be/*"],
-      "js": ["youtube-content.js"],
-      "run_at": "document_end"
-    }
-  ],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",

@@ -18,12 +18,15 @@ const INVEST_GPT_PATH_BASE = (() => {
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
 const WAIT_FOR_RESPONSE_MS = 14400000; // 240 minut na odpowiedź ChatGPT (zwiększono dla bardzo długich sesji)
+const WAIT_FOR_INTERFACE_READY_MS = 30000; // max 30s na gotowość composera przed wstawieniem
+const WAIT_FOR_SEND_ARM_MS = 3500; // max 3.5s na aktywację przycisku Send po wstawieniu
 const RETRY_INTERVAL_MS = 500;
 // Auto start over active process contexts.
 const RESET_SCAN_DEFAULT_PASSES = 3;
 const RESET_SCAN_PASS_DELAY_MS = 500;
 const RESET_SCAN_PER_TAB_BUDGET_MS = 6000;
 const RESET_SCAN_MIN_RUNTIME_MS = 90 * 1000;
+const RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS = 4 * 60 * 60 * 1000;
 const RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST = 'active_company_invest_processes';
 const AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const AUTO_RECOVERY_DELAY_MS = 2000;
@@ -111,6 +114,57 @@ const WATCHLIST_DISPATCH = {
   alarmPeriodMinutes: 2
 };
 const WATCHLIST_PROBLEM_LOGS_PATH = '/api/v1/intake/problem-logs';
+const WATCHLIST_RESPONSE_VERIFY_PATH = '/api/v1/intake/economist-response/verify';
+const WATCHLIST_VERIFY_QUEUE = Object.freeze({
+  storageKey: 'watchlist_dispatch_verify_queue',
+  maxItems: 4000,
+  alarmName: 'watchlist-dispatch-verify',
+  alarmPeriodMinutes: 0.5,
+  maxItemsPerRun: 12,
+  maxRuntimeMs: 12000,
+  maxAttempts: 8,
+  baseBackoffMs: 5000,
+  maxBackoffMs: 15 * 60 * 1000,
+  timeoutMs: 5000
+});
+const WATCHLIST_REMOTE_RUNNER_HEARTBEAT_PATH = '/api/v1/iskra/runner/heartbeat';
+const WATCHLIST_REMOTE_RUNNERS_PATH = '/api/v1/iskra/runners';
+const WATCHLIST_DB_VERIFY_MAX_ATTEMPTS = 3;
+const WATCHLIST_DB_VERIFY_RETRY_DELAY_MS = 700;
+const REMOTE_RUNNER = {
+  enabledStorageKey: 'remote_runner_enabled',
+  nameStorageKey: 'remote_runner_name',
+  transportModeStorageKey: 'remote_runner_transport_mode',
+  localBaseUrlStorageKey: 'remote_runner_local_base_url',
+  controllerRunnerIdStorageKey: 'remote_controller_runner_id',
+  controllerRunnerNameCachedStorageKey: 'remote_controller_runner_name_cached',
+  controllerLastJobStorageKey: 'remote_controller_last_job',
+  runnerStateStorageKey: 'remote_runner_state',
+  runnerJobBindingsStorageKey: 'remote_runner_job_bindings',
+  alarmName: 'remote-runner-maintenance',
+  alarmPeriodMinutes: 0.5,
+  staleAfterSeconds: 90,
+  offlineAfterSeconds: 180,
+  timeoutMs: 20000
+};
+const REMOTE_RUNNER_TRANSPORT = Object.freeze({
+  WATCHLIST: 'watchlist',
+  LOCAL: 'local'
+});
+const LOCAL_REMOTE_RUNNER = Object.freeze({
+  defaultBaseUrl: 'http://127.0.0.1:8787',
+  statusPathTemplate: '/api/v1/local-runner/runner/{runnerId}/status',
+  heartbeatPath: '/api/v1/local-runner/runner/heartbeat',
+  remoteJobsPath: '/api/v1/local-runner/remote-jobs',
+  claimPath: '/api/v1/local-runner/remote-jobs/claim'
+});
+const REMOTE_RUNNER_JOB_KIND = Object.freeze({
+  ANALYSIS: 'analysis',
+  COMMAND: 'command'
+});
+const REMOTE_RUNNER_COMMAND = Object.freeze({
+  RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES: 'reload_resume_active_company_processes'
+});
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -141,7 +195,7 @@ const PROCESS_MONITOR_HEARTBEAT = {
 };
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
-const PROBLEM_LOG_CONSOLE_CAPTURE_ENABLED = true;
+const PROBLEM_LOG_CONSOLE_CAPTURE_ENABLED = false;
 const PROBLEM_LOG_CONSOLE_CAPTURE_DEDUPE_MS = 15000;
 const PROBLEM_LOG_CONSOLE_CAPTURE_MAX_KEYS = 600;
 const PROBLEM_LOG_CONSOLE_CAPTURE_MESSAGE_MAX_LENGTH = 300;
@@ -151,12 +205,26 @@ const WATCHLIST_DISPATCH_PROCESS_LOG_STORAGE_KEY = 'watchlist_dispatch_process_l
 const WATCHLIST_DISPATCH_PROCESS_LOG_MAX_ITEMS = 800;
 const RESPONSE_CONVERSATION_LOG_MAX_ITEMS = 40;
 const RESPONSE_CONVERSATION_LOG_MESSAGE_MAX_LENGTH = 420;
+const CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY = '__iskra_pending_responses_v1';
+const CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS = 24;
+const ANALYSIS_RUN_KEEPALIVE_PORT_PREFIX = 'analysis-run:';
+const ANALYSIS_RUN_KEEPALIVE_HEARTBEAT_MS = 15000;
+const LOCAL_DEBUG_COLLECTOR = Object.freeze({
+  enabled: false,
+  baseUrl: 'http://127.0.0.1:17777',
+  snapshotPath: '/extension-debug/snapshot',
+  timeoutMs: 4000,
+  debounceMs: 350,
+  maxProblemLogs: 250,
+  maxProcesses: 180
+});
 
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
 const PROCESS_CONVERSATION_URL_HISTORY_LIMIT = 12;
 const UNFINISHED_RESUME_BATCH_STORAGE_KEY = 'unfinished_resume_batch_state';
 const UNFINISHED_RESUME_BATCH_MAX_ROWS = 500;
+const UNFINISHED_RESUME_PAGE_KEEPALIVE_LOG_COOLDOWN_MS = 15000;
 const UNFINISHED_RESUME_BATCH_STATUSES = new Set([
   'idle',
   'running',
@@ -175,10 +243,28 @@ const CLOSED_PROCESS_STATUSES = new Set([
   'stopped',
   'interrupted'
 ]);
+const FAILED_PROCESS_STATUSES = new Set([
+  'failed',
+  'error',
+  'aborted',
+  'cancelled',
+  'canceled',
+  'stopped',
+  'crashed'
+]);
+const UNFINISHED_RECOVERY_EXCLUDED_REASONS = new Set([
+  'resumed_from_decision_panel',
+  'bulk_resume_reload',
+  'bulk_resume_no_reload',
+  'restarted_in_same_window'
+]);
+const UNFINISHED_RESUME_LIST_LOG_COOLDOWN_MS = 15000;
 const processRegistry = new Map();
 const ytTranscriptInFlightRequests = new Map();
 const ytTranscriptCache = new Map();
 const manualPdfProviderPorts = new Map();
+const unfinishedResumePagePorts = new Map();
+const analysisRunKeepalivePorts = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
 let watchlistDispatchFlushPending = false;
@@ -186,6 +272,7 @@ let watchlistDispatchFlushPendingReason = '';
 let watchlistDispatchFlushStartedAt = 0;
 let watchlistDispatchFlushStartedReason = '';
 let watchlistOutboxMutationQueue = Promise.resolve();
+let watchlistVerifyQueueMutationQueue = Promise.resolve();
 let responseStorageMutationQueue = Promise.resolve();
 let analysisQueueMutationQueue = Promise.resolve();
 let watchlistDispatchCredentialsCache = null;
@@ -216,7 +303,22 @@ let problemLogConsoleCaptureInstalled = false;
 let problemLogConsoleCaptureInProgress = false;
 let watchlistConnectionLogLastSignature = '';
 let watchlistConnectionLogLastTs = 0;
+let unfinishedResumeListLogLastSignature = '';
+let unfinishedResumeListLogLastTs = 0;
+let unfinishedResumePageKeepaliveLastLogTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
+let remoteRunnerMaintenanceInProgress = false;
+let remoteRunnerExecutionInProgress = false;
+let watchlistVerifyInProgress = false;
+let watchlistVerifyPending = false;
+let watchlistVerifyPendingReason = '';
+let localDebugCollectorTimer = null;
+let localDebugCollectorInFlight = null;
+let localDebugCollectorQueuedReason = '';
+let analysisProcessQueueSequence = 0;
+let analysisProcessQueueRecordSync = Promise.resolve();
+const analysisProcessQueuePending = [];
+const analysisProcessQueueActiveSlots = new Map();
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -224,6 +326,35 @@ function extractManualPdfProviderIdFromPort(port) {
   if (!name || !name.startsWith(prefix)) return '';
   const providerId = name.slice(prefix.length).trim();
   return providerId || '';
+}
+
+function extractUnfinishedResumePageIdFromPort(port) {
+  const name = typeof port?.name === 'string' ? port.name.trim() : '';
+  const prefix = 'unfinished-resume-page:';
+  if (!name || !name.startsWith(prefix)) return '';
+  const pageId = name.slice(prefix.length).trim();
+  return pageId || '';
+}
+
+function extractAnalysisRunIdFromPort(port) {
+  const name = typeof port?.name === 'string' ? port.name.trim() : '';
+  if (!name || !name.startsWith(ANALYSIS_RUN_KEEPALIVE_PORT_PREFIX)) return '';
+  const runId = name.slice(ANALYSIS_RUN_KEEPALIVE_PORT_PREFIX.length).trim();
+  return runId || '';
+}
+
+function logUnfinishedResumeKeepalive(message, details = {}) {
+  const now = Date.now();
+  if ((now - unfinishedResumePageKeepaliveLastLogTs) < UNFINISHED_RESUME_PAGE_KEEPALIVE_LOG_COOLDOWN_MS) {
+    if (message === 'heartbeat') {
+      return;
+    }
+  }
+  unfinishedResumePageKeepaliveLastLogTs = now;
+  console.log('[unfinished-resume] keepalive', {
+    message,
+    ...details
+  });
 }
 
 async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
@@ -423,12 +554,142 @@ function logProcessTransition(runId, next, patch) {
   });
 }
 
+function buildProcessSignalSnapshot(record) {
+  if (!record || typeof record !== 'object') return null;
+
+  const persistenceStatus = record.persistenceStatus && typeof record.persistenceStatus === 'object'
+    ? record.persistenceStatus
+    : null;
+  const persistenceDispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
+    ? persistenceStatus.dispatch
+    : null;
+  const persistenceVerification = persistenceDispatch?.dbVerification && typeof persistenceDispatch.dbVerification === 'object'
+    ? persistenceDispatch.dbVerification
+    : null;
+  const finalStagePersistence = record.finalStagePersistence && typeof record.finalStagePersistence === 'object'
+    ? record.finalStagePersistence
+    : null;
+  const finalStageVerification = finalStagePersistence?.dbVerification && typeof finalStagePersistence.dbVerification === 'object'
+    ? finalStagePersistence.dbVerification
+    : null;
+
+  return {
+    status: normalizeProcessStatus(record.status),
+    needsAction: record.needsAction === true,
+    currentPrompt: Number.isInteger(record.currentPrompt) ? record.currentPrompt : 0,
+    totalPrompts: Number.isInteger(record.totalPrompts) ? record.totalPrompts : 0,
+    stageIndex: Number.isInteger(record.stageIndex) ? record.stageIndex : null,
+    stageName: typeof record.stageName === 'string' ? record.stageName.trim() : '',
+    reason: typeof record.reason === 'string' ? record.reason.trim() : '',
+    error: typeof record.error === 'string' ? record.error.trim() : '',
+    title: typeof record.title === 'string' ? record.title.trim() : '',
+    analysisType: typeof record.analysisType === 'string' ? record.analysisType.trim() : '',
+    tabId: Number.isInteger(record.tabId) ? record.tabId : null,
+    windowId: Number.isInteger(record.windowId) ? record.windowId : null,
+    chatUrl: normalizeChatConversationUrl(typeof record.chatUrl === 'string' ? record.chatUrl : ''),
+    sourceUrl: typeof record.sourceUrl === 'string' ? record.sourceUrl.trim() : '',
+    queueState: typeof record.queueState === 'string' ? record.queueState.trim() : '',
+    queuePosition: Number.isInteger(record.queuePosition) ? record.queuePosition : null,
+    queueTotal: Number.isInteger(record.queueTotal) ? record.queueTotal : null,
+    queueSlot: Number.isInteger(record.queueSlot) ? record.queueSlot : null,
+    queueLimit: Number.isInteger(record.queueLimit) ? record.queueLimit : null,
+    finishedAt: Number.isInteger(record.finishedAt) ? record.finishedAt : null,
+    completedResponseSaved: record.completedResponseSaved === true,
+    completedResponseSavedAt: Number.isInteger(record.completedResponseSavedAt) ? record.completedResponseSavedAt : null,
+    completedResponseDispatchSummary: typeof record.completedResponseDispatchSummary === 'string'
+      ? record.completedResponseDispatchSummary.trim()
+      : '',
+    persistenceSaveOk: typeof persistenceStatus?.saveOk === 'boolean' ? persistenceStatus.saveOk : null,
+    persistenceSaveError: typeof persistenceStatus?.saveError === 'string' ? persistenceStatus.saveError.trim() : '',
+    persistenceBridgeError: typeof persistenceStatus?.bridgeError === 'string' ? persistenceStatus.bridgeError.trim() : '',
+    persistenceDispatchSummary: typeof persistenceStatus?.dispatchSummary === 'string'
+      ? persistenceStatus.dispatchSummary.trim()
+      : '',
+    persistenceUpdatedAt: Number.isInteger(persistenceStatus?.updatedAt) ? persistenceStatus.updatedAt : null,
+    persistenceDispatchSent: Number.isInteger(persistenceDispatch?.sent) ? persistenceDispatch.sent : null,
+    persistenceDispatchFailed: Number.isInteger(persistenceDispatch?.failed) ? persistenceDispatch.failed : null,
+    persistenceDispatchDeferred: Number.isInteger(persistenceDispatch?.deferred) ? persistenceDispatch.deferred : null,
+    persistenceDispatchRemaining: Number.isInteger(persistenceDispatch?.remaining) ? persistenceDispatch.remaining : null,
+    persistenceDispatchVerifyState: typeof persistenceVerification?.state === 'string'
+      ? persistenceVerification.state.trim()
+      : '',
+    finalStageSuccess: finalStagePersistence?.success === true,
+    finalStageSummary: typeof finalStagePersistence?.summary === 'string'
+      ? finalStagePersistence.summary.trim()
+      : '',
+    finalStageSent: Number.isInteger(finalStagePersistence?.sent) ? finalStagePersistence.sent : null,
+    finalStageFailed: Number.isInteger(finalStagePersistence?.failed) ? finalStagePersistence.failed : null,
+    finalStageVerifyState: typeof finalStageVerification?.state === 'string'
+      ? finalStageVerification.state.trim()
+      : ''
+  };
+}
+
+function getProcessSignalSignature(record) {
+  const snapshot = buildProcessSignalSnapshot(record);
+  if (!snapshot) return '';
+  try {
+    return JSON.stringify(snapshot);
+  } catch (error) {
+    return [
+      snapshot.status,
+      snapshot.needsAction ? '1' : '0',
+      snapshot.currentPrompt,
+      snapshot.totalPrompts,
+      snapshot.stageIndex ?? '',
+      snapshot.stageName,
+      snapshot.reason,
+      snapshot.error,
+      snapshot.title,
+      snapshot.analysisType,
+      snapshot.tabId ?? '',
+      snapshot.windowId ?? '',
+      snapshot.chatUrl,
+      snapshot.sourceUrl,
+      snapshot.queueState,
+      snapshot.queuePosition ?? '',
+      snapshot.queueTotal ?? '',
+      snapshot.queueSlot ?? '',
+      snapshot.queueLimit ?? '',
+      snapshot.finishedAt ?? '',
+      snapshot.completedResponseSaved ? '1' : '0',
+      snapshot.completedResponseSavedAt ?? '',
+      snapshot.completedResponseDispatchSummary,
+      snapshot.persistenceSaveOk === null ? '' : (snapshot.persistenceSaveOk ? '1' : '0'),
+      snapshot.persistenceSaveError,
+      snapshot.persistenceBridgeError,
+      snapshot.persistenceDispatchSummary,
+      snapshot.persistenceUpdatedAt ?? '',
+      snapshot.persistenceDispatchSent ?? '',
+      snapshot.persistenceDispatchFailed ?? '',
+      snapshot.persistenceDispatchDeferred ?? '',
+      snapshot.persistenceDispatchRemaining ?? '',
+      snapshot.persistenceDispatchVerifyState,
+      snapshot.finalStageSuccess ? '1' : '0',
+      snapshot.finalStageSummary,
+      snapshot.finalStageSent ?? '',
+      snapshot.finalStageFailed ?? '',
+      snapshot.finalStageVerifyState
+    ].join('|');
+  }
+}
+
+function hasMeaningfulProcessSignalChange(existingRecord, nextRecord) {
+  return getProcessSignalSignature(existingRecord) !== getProcessSignalSignature(nextRecord);
+}
+
 function normalizeProcessRecord(record) {
   if (!record || typeof record !== 'object') return null;
   const id = typeof record.id === 'string' ? record.id : String(record.id || '');
   if (!id) return null;
 
-  const status = normalizeProcessStatus(record.status);
+  let status = normalizeProcessStatus(record.status);
+  const hasVerifiedFinalPersistence = !isClosedProcessStatus(status)
+    && (record?.completedResponseSaved === true || record?.persistenceStatus?.saveOk === true)
+    && !!getProcessSuccessfulDbVerification(record);
+  if (hasVerifiedFinalPersistence) {
+    status = 'completed';
+  }
   const normalizedCounters = normalizePromptCounters(
     status,
     record.currentPrompt,
@@ -462,6 +723,26 @@ function normalizeProcessRecord(record) {
   if (typeof normalized.statusText !== 'string') delete normalized.statusText;
   if (typeof normalized.stageName !== 'string') delete normalized.stageName;
   if (!Number.isInteger(normalized.stageIndex)) delete normalized.stageIndex;
+  if (!Number.isInteger(normalized.queuePosition) || normalized.queuePosition <= 0) delete normalized.queuePosition;
+  if (!Number.isInteger(normalized.queueTotal) || normalized.queueTotal <= 0) delete normalized.queueTotal;
+  if (!Number.isInteger(normalized.queueSlot) || normalized.queueSlot <= 0) delete normalized.queueSlot;
+  if (!Number.isInteger(normalized.queueLimit) || normalized.queueLimit <= 0) delete normalized.queueLimit;
+  if (!Number.isInteger(normalized.queueAssignedAt) || normalized.queueAssignedAt <= 0) delete normalized.queueAssignedAt;
+  if (typeof normalized.queueState !== 'string' || !normalized.queueState.trim()) {
+    delete normalized.queueState;
+  } else {
+    normalized.queueState = normalized.queueState.trim().toLowerCase();
+  }
+  if (status !== 'queued') {
+    delete normalized.queuePosition;
+    delete normalized.queueTotal;
+    delete normalized.queueState;
+  }
+  if (!(status === 'starting' || status === 'started' || status === 'running')) {
+    delete normalized.queueSlot;
+    delete normalized.queueLimit;
+    delete normalized.queueAssignedAt;
+  }
   const normalizedChatUrl = normalizeChatConversationUrl(
     typeof normalized.chatUrl === 'string' ? normalized.chatUrl : ''
   );
@@ -521,6 +802,22 @@ function normalizeProcessRecord(record) {
   }
   if (Number.isInteger(normalized.finishedAt) && normalized.finishedAt < normalized.startedAt) {
     normalized.finishedAt = normalized.timestamp;
+  }
+  if (hasVerifiedFinalPersistence) {
+    if (!Number.isInteger(normalized.finishedAt)) {
+      normalized.finishedAt = normalized.timestamp;
+    }
+    if (normalized.totalPrompts > 0) {
+      normalized.currentPrompt = normalized.totalPrompts;
+      normalized.stageIndex = normalized.totalPrompts - 1;
+      if (typeof normalized.stageName !== 'string' || !normalized.stageName.trim()) {
+        normalized.stageName = STAGE_NAMES_COMPANY[normalized.stageIndex] || `Prompt ${normalized.totalPrompts}`;
+      }
+    }
+    if (typeof normalized.statusText !== 'string' || !normalized.statusText.trim()) {
+      normalized.statusText = 'Zakonczono - potwierdzono zapis w bazie';
+    }
+    normalized.needsAction = false;
   }
   if (isClosedProcessStatus(status)) {
     delete normalized.autoRecovery;
@@ -590,19 +887,26 @@ function pruneProcessRecords(records) {
 
   const deduped = Array.from(byId.values());
   const active = [];
-  const closed = [];
+  const closedRecoverable = [];
+  const closedHistory = [];
   for (const process of deduped) {
     if (isClosedProcessStatus(process.status)) {
-      closed.push(process);
+      if (isRecoverableUnfinishedProcess(process)) {
+        closedRecoverable.push(process);
+      } else {
+        closedHistory.push(process);
+      }
     } else {
       active.push(process);
     }
   }
 
   active.sort((a, b) => (b.startedAt || b.timestamp || 0) - (a.startedAt || a.timestamp || 0));
-  closed.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  closedRecoverable.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  closedHistory.sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
 
-  return active.concat(closed.slice(0, PROCESS_HISTORY_LIMIT));
+  // Keep all recoverable unfinished runs; only completed/non-recoverable history is trimmed.
+  return active.concat(closedRecoverable, closedHistory.slice(0, PROCESS_HISTORY_LIMIT));
 }
 
 function rehydrateProcessProblemLogState(records = []) {
@@ -660,6 +964,7 @@ async function persistProcessRegistry() {
     processRegistry.set(record.id, record);
   });
   await chrome.storage.local.set({ [PROCESS_MONITOR_STORAGE_KEY]: records });
+  scheduleLocalDebugCollectorSnapshot('process_monitor_state');
   return records;
 }
 
@@ -1040,8 +1345,8 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
 
     let staleDetected = 0;
     let staleLogged = 0;
-    let touched = 0;
     let fresh = 0;
+    let quiet = 0;
 
     for (const process of active) {
       const runId = typeof process?.id === 'string' ? process.id : '';
@@ -1064,9 +1369,7 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
         fresh += 1;
         continue;
       }
-
-      const touchedRecord = await upsertProcess(runId, { timestamp: nowTs });
-      if (touchedRecord) touched += 1;
+      quiet += 1;
     }
 
     pruneProcessStaleWarnMap(nowTs);
@@ -1074,8 +1377,8 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       success: true,
       origin,
       active: active.length,
-      touched,
       fresh,
+      quiet,
       staleDetected,
       staleLogged
     };
@@ -1413,7 +1716,10 @@ function calculateReloadResumeSummaryFromRows(rows, reloadTotalHint = null) {
   const detectedPrompts = sourceRows.reduce((sum, row) => (
     sum + (Number.isInteger(row?.detectedPromptNumber) ? 1 : 0)
   ), 0);
-  const reloadOk = sourceRows.filter((row) => typeof row?.reloadMethod === 'string' && row.reloadMethod.trim()).length;
+  const reloadOk = sourceRows.filter((row) => {
+    const reloadMethod = typeof row?.reloadMethod === 'string' ? row.reloadMethod.trim() : '';
+    return !!reloadMethod && reloadMethod !== 'no_reload';
+  }).length;
   const reloadTotal = Number.isInteger(reloadTotalHint)
     ? reloadTotalHint
     : sourceRows.filter((row) => row?.eligibleForReload === true).length;
@@ -1539,6 +1845,7 @@ function sanitizeReloadResumeMonitorState(rawState) {
     phase: typeof source.phase === 'string' ? source.phase : '',
     origin: typeof source.origin === 'string' ? source.origin : '',
     scope: typeof source.scope === 'string' ? source.scope : '',
+    reloadBeforeResume: source.reloadBeforeResume !== false,
     composerThinkingEffort: normalizeComposerThinkingEffort(source.composerThinkingEffort),
     forceRepeatLastPrompt: source.forceRepeatLastPrompt === true,
     startedAt: Number.isInteger(source.startedAt) ? source.startedAt : null,
@@ -1608,6 +1915,7 @@ async function setReloadResumeMonitorState(nextState) {
   await chrome.storage.local.set({
     [RELOAD_RESUME_MONITOR_STORAGE_KEY]: normalized
   });
+  scheduleLocalDebugCollectorSnapshot('reload_resume_monitor_state');
   try {
     await chrome.runtime.sendMessage({
       type: 'RELOAD_RESUME_MONITOR_UPDATE',
@@ -1892,10 +2200,100 @@ async function getReloadResumeMonitorState(sessionId = '') {
   });
 }
 
+function buildLocalDebugCollectorUrl(pathname = '') {
+  const baseUrl = typeof LOCAL_DEBUG_COLLECTOR?.baseUrl === 'string'
+    ? LOCAL_DEBUG_COLLECTOR.baseUrl.trim().replace(/\/+$/, '')
+    : '';
+  const suffix = typeof pathname === 'string' ? pathname.trim() : '';
+  if (!baseUrl) return '';
+  if (!suffix) return baseUrl;
+  return `${baseUrl}${suffix.startsWith('/') ? suffix : `/${suffix}`}`;
+}
+
+async function postLocalDebugCollectorSnapshot(reason = 'state_change') {
+  if (LOCAL_DEBUG_COLLECTOR.enabled !== true || typeof fetch !== 'function') {
+    return false;
+  }
+  const targetUrl = buildLocalDebugCollectorUrl(LOCAL_DEBUG_COLLECTOR.snapshotPath);
+  if (!targetUrl) return false;
+
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => {
+    try {
+      controller.abort();
+    } catch (error) {
+      // Ignore timeout abort failures.
+    }
+  }, LOCAL_DEBUG_COLLECTOR.timeoutMs);
+
+  try {
+    const [reloadResumeState, processMonitorState, problemLogs, unfinishedResumeState] = await Promise.all([
+      getReloadResumeMonitorState().catch(() => null),
+      getProcessSnapshot().catch(() => []),
+      getProblemLogSnapshot(LOCAL_DEBUG_COLLECTOR.maxProblemLogs).catch(() => []),
+      getUnfinishedResumeBatchState().catch(() => null)
+    ]);
+    const payload = {
+      source: 'iskra-extension',
+      reason: typeof reason === 'string' ? reason : 'state_change',
+      generatedAt: Date.now(),
+      sessionId: typeof reloadResumeState?.sessionId === 'string' ? reloadResumeState.sessionId : '',
+      reloadResumeMonitorState: reloadResumeState,
+      processMonitorState: Array.isArray(processMonitorState)
+        ? processMonitorState.slice(-LOCAL_DEBUG_COLLECTOR.maxProcesses)
+        : [],
+      problemLogEntries: Array.isArray(problemLogs) ? problemLogs : [],
+      unfinishedResumeBatchState: unfinishedResumeState
+    };
+    const response = await fetch(targetUrl, {
+      method: 'POST',
+      headers: {
+        'content-type': 'application/json'
+      },
+      body: JSON.stringify(payload),
+      signal: controller.signal
+    });
+    return response.ok === true;
+  } catch (error) {
+    return false;
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function scheduleLocalDebugCollectorSnapshot(reason = 'state_change') {
+  if (LOCAL_DEBUG_COLLECTOR.enabled !== true) return;
+  if (typeof reason === 'string' && reason.trim()) {
+    localDebugCollectorQueuedReason = reason.trim();
+  } else if (!localDebugCollectorQueuedReason) {
+    localDebugCollectorQueuedReason = 'state_change';
+  }
+  if (localDebugCollectorTimer) {
+    return;
+  }
+  localDebugCollectorTimer = setTimeout(() => {
+    localDebugCollectorTimer = null;
+    if (localDebugCollectorInFlight) {
+      return;
+    }
+    const queuedReason = localDebugCollectorQueuedReason || 'state_change';
+    localDebugCollectorQueuedReason = '';
+    localDebugCollectorInFlight = postLocalDebugCollectorSnapshot(queuedReason)
+      .catch(() => false)
+      .finally(() => {
+        localDebugCollectorInFlight = null;
+        if (localDebugCollectorQueuedReason) {
+          scheduleLocalDebugCollectorSnapshot(localDebugCollectorQueuedReason);
+        }
+      });
+  }, LOCAL_DEBUG_COLLECTOR.debounceMs);
+}
+
 async function startReloadResumeMonitorSession(payload = {}) {
   const sessionId = typeof payload.sessionId === 'string' && payload.sessionId.trim()
     ? payload.sessionId.trim()
     : createReloadResumeMonitorSessionId('reload-resume');
+  const reloadBeforeResume = payload.reloadBeforeResume !== false;
   const initialEvent = sanitizeReloadResumeMonitorEvent({
     level: 'info',
     code: 'session_started',
@@ -1907,6 +2305,7 @@ async function startReloadResumeMonitorSession(payload = {}) {
     phase: 'init',
     origin: typeof payload.origin === 'string' ? payload.origin : '',
     scope: typeof payload.scope === 'string' ? payload.scope : '',
+    reloadBeforeResume,
     composerThinkingEffort: normalizeComposerThinkingEffort(payload.composerThinkingEffort),
     forceRepeatLastPrompt: payload.forceRepeatLastPrompt === true,
     startedAt: Date.now(),
@@ -2014,6 +2413,21 @@ function normalizeUnfinishedResumeBatchTotals(rawTotals) {
   };
 }
 
+function normalizeUnfinishedResumeBatchSelection(rawSelection) {
+  const source = rawSelection && typeof rawSelection === 'object' ? rawSelection : {};
+  const sourceFilter = normalizeUnfinishedSourceFilter(source.sourceFilter);
+  const limitRequested = normalizeUnfinishedResumeLimit(source.limitRequested);
+  const limitApplied = normalizeUnfinishedResumeLimit(source.limitApplied);
+  return {
+    sourceFilter: sourceFilter || 'all',
+    sourceLabel: typeof source.sourceLabel === 'string' ? source.sourceLabel : '',
+    strategy: typeof source.strategy === 'string' ? source.strategy : '',
+    limitRequested,
+    limitApplied,
+    filteredTotal: toNonNegativeInt(source.filteredTotal, 0)
+  };
+}
+
 function sanitizeUnfinishedResumeBatchState(rawState) {
   const source = rawState && typeof rawState === 'object' ? rawState : {};
   const rows = (Array.isArray(source.rows) ? source.rows : [])
@@ -2028,6 +2442,7 @@ function sanitizeUnfinishedResumeBatchState(rawState) {
     updatedAt: Number.isInteger(source.updatedAt) ? source.updatedAt : Date.now(),
     origin: typeof source.origin === 'string' ? source.origin : '',
     totals: normalizeUnfinishedResumeBatchTotals(source.totals),
+    selection: normalizeUnfinishedResumeBatchSelection(source.selection),
     rows,
     activeRunId: typeof source.activeRunId === 'string' ? source.activeRunId : '',
     error: typeof source.error === 'string' ? source.error : ''
@@ -2094,6 +2509,7 @@ async function setUnfinishedResumeBatchState(nextState, options = {}) {
   await chrome.storage.local.set({
     [UNFINISHED_RESUME_BATCH_STORAGE_KEY]: normalized
   });
+  scheduleLocalDebugCollectorSnapshot('unfinished_resume_batch_state');
   if (options?.broadcast === false) {
     return normalized;
   }
@@ -2166,6 +2582,321 @@ function extractProcessChatUrl(process) {
   return '';
 }
 
+function isFailedProcessStatusForUnfinished(status) {
+  const normalized = normalizeProcessStatus(status || '');
+  return FAILED_PROCESS_STATUSES.has(normalized);
+}
+
+function normalizeUnfinishedSourceFilter(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized || normalized === 'all') return '';
+  return normalized;
+}
+
+function normalizeUnfinishedProcessSource(rawSourceUrl) {
+  const sourceUrl = typeof rawSourceUrl === 'string' ? rawSourceUrl.trim() : '';
+  if (!sourceUrl) {
+    return {
+      sourceKey: 'unknown',
+      sourceLabel: 'Unknown'
+    };
+  }
+
+  const lowered = sourceUrl.toLowerCase();
+  if (lowered.startsWith('manual://')) {
+    return {
+      sourceKey: 'manual',
+      sourceLabel: 'Manual'
+    };
+  }
+  if (lowered.startsWith('file://')) {
+    return {
+      sourceKey: 'file',
+      sourceLabel: 'File'
+    };
+  }
+
+  let hostname = '';
+  try {
+    hostname = new URL(sourceUrl).hostname || '';
+  } catch (error) {
+    try {
+      hostname = new URL(`https://${sourceUrl}`).hostname || '';
+    } catch (innerError) {
+      hostname = '';
+    }
+  }
+
+  const normalizedHost = hostname.trim().toLowerCase().replace(/^www\./, '');
+  if (normalizedHost) {
+    return {
+      sourceKey: normalizedHost,
+      sourceLabel: normalizedHost
+    };
+  }
+
+  return {
+    sourceKey: 'unknown',
+    sourceLabel: 'Unknown'
+  };
+}
+
+function buildUnfinishedSourceCatalog(items) {
+  const map = new Map();
+  (Array.isArray(items) ? items : []).forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const sourceKey = normalizeUnfinishedSourceFilter(item.sourceKey) || 'unknown';
+    const sourceLabel = typeof item.sourceLabel === 'string' && item.sourceLabel.trim()
+      ? item.sourceLabel.trim()
+      : (sourceKey || 'unknown');
+    const existing = map.get(sourceKey) || {
+      key: sourceKey,
+      label: sourceLabel,
+      total: 0,
+      runnable: 0
+    };
+    existing.total += 1;
+    if (item.hasChatUrl) {
+      existing.runnable += 1;
+    }
+    map.set(sourceKey, existing);
+  });
+  return Array.from(map.values()).sort((left, right) => {
+    const totalDiff = (right.total || 0) - (left.total || 0);
+    if (totalDiff !== 0) return totalDiff;
+    return String(left.label || '').localeCompare(String(right.label || ''), 'en', { sensitivity: 'base' });
+  });
+}
+
+function buildUnfinishedProcessListSummary(items = [], availableSources = []) {
+  const sourceItems = Array.isArray(items) ? items : [];
+  const total = sourceItems.length;
+  const runnable = sourceItems.filter((item) => item?.hasChatUrl === true).length;
+  const blockedMissingChatUrl = Math.max(0, total - runnable);
+  const failedStatuses = sourceItems.filter((item) => item?.isFailedStatus === true).length;
+  const needsAction = sourceItems.filter((item) => item?.needsAction === true).length;
+  const withStageSnapshot = sourceItems.filter((item) => (
+    Number.isInteger(item?.currentPrompt) && item.currentPrompt > 0
+  )).length;
+  const latestUpdatedAt = sourceItems.reduce((maxTs, item) => {
+    const itemTs = Number.isInteger(item?.timestamp) ? item.timestamp : 0;
+    return Math.max(maxTs, itemTs);
+  }, 0);
+  const statusCounts = {};
+  sourceItems.forEach((item) => {
+    const key = normalizeProcessStatus(item?.status || '') || 'unknown';
+    statusCounts[key] = (statusCounts[key] || 0) + 1;
+  });
+  const sourcePreview = (Array.isArray(availableSources) ? availableSources : [])
+    .slice(0, 4)
+    .map((source) => ({
+      key: typeof source?.key === 'string' ? source.key : '',
+      label: typeof source?.label === 'string' ? source.label : '',
+      total: toNonNegativeInt(source?.total, 0),
+      runnable: toNonNegativeInt(source?.runnable, 0)
+    }));
+
+  return {
+    total,
+    runnable,
+    blockedMissingChatUrl,
+    failedStatuses,
+    needsAction,
+    withStageSnapshot,
+    latestUpdatedAt,
+    runnableSharePct: total > 0 ? Math.round((runnable / total) * 100) : 0,
+    statusCounts,
+    sourcePreview
+  };
+}
+
+function buildUnfinishedProcessListLogSignature(summary, options = {}) {
+  const safeSummary = summary && typeof summary === 'object' ? summary : {};
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter) || 'all';
+  const origin = typeof options?.origin === 'string' ? options.origin.trim() : '';
+  const statusSignature = Object.entries(safeSummary.statusCounts || {})
+    .sort((left, right) => String(left[0]).localeCompare(String(right[0]), 'en', { sensitivity: 'base' }))
+    .map(([status, count]) => `${status}:${count}`)
+    .join(',');
+  return [
+    sourceFilter,
+    origin,
+    safeSummary.total || 0,
+    safeSummary.runnable || 0,
+    safeSummary.blockedMissingChatUrl || 0,
+    safeSummary.failedStatuses || 0,
+    safeSummary.needsAction || 0,
+    safeSummary.withStageSnapshot || 0,
+    statusSignature
+  ].join('|');
+}
+
+function maybeReportUnfinishedProcessListSummary(summary, options = {}) {
+  const safeSummary = summary && typeof summary === 'object' ? summary : {};
+  const nowTs = Date.now();
+  const signature = buildUnfinishedProcessListLogSignature(safeSummary, options);
+  if (
+    signature === unfinishedResumeListLogLastSignature
+    && (nowTs - unfinishedResumeListLogLastTs) < UNFINISHED_RESUME_LIST_LOG_COOLDOWN_MS
+  ) {
+    return;
+  }
+
+  unfinishedResumeListLogLastSignature = signature;
+  unfinishedResumeListLogLastTs = nowTs;
+
+  const statusPreview = Object.entries(safeSummary.statusCounts || {})
+    .sort((left, right) => (right[1] || 0) - (left[1] || 0))
+    .slice(0, 4)
+    .map(([status, count]) => `${status}:${count}`)
+    .join(', ');
+  const sourcePreview = (Array.isArray(safeSummary.sourcePreview) ? safeSummary.sourcePreview : [])
+    .map((entry) => `${entry.key || 'unknown'}:${entry.total || 0}/${entry.runnable || 0}`)
+    .join(', ');
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter) || 'all';
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'unfinished-resume-list';
+  const detailPayload = {
+    sourceFilter,
+    total: safeSummary.total || 0,
+    runnable: safeSummary.runnable || 0,
+    blockedMissingChatUrl: safeSummary.blockedMissingChatUrl || 0,
+    failedStatuses: safeSummary.failedStatuses || 0,
+    needsAction: safeSummary.needsAction || 0,
+    withStageSnapshot: safeSummary.withStageSnapshot || 0,
+    runnableSharePct: safeSummary.runnableSharePct || 0,
+    latestUpdatedAt: safeSummary.latestUpdatedAt || 0,
+    statusPreview,
+    sourcePreview
+  };
+
+  console.log('[unfinished-resume] list counted', detailPayload);
+  reportAdminActionEvent('unfinished_resume_list_counted', {
+    level: 'info',
+    status: 'counted',
+    reason: 'unfinished_resume_list_counted',
+    origin,
+    title: 'Unfinished resume list counted',
+    message: `unfinished_resume_list_counted | total=${detailPayload.total} | runnable=${detailPayload.runnable} | blocked=${detailPayload.blockedMissingChatUrl} | source=${sourceFilter}`,
+    details: detailPayload
+  });
+}
+
+function normalizeUnfinishedResumeLimit(value) {
+  if (value === null || value === undefined) return null;
+  const asNumber = Number.parseInt(String(value).trim(), 10);
+  if (!Number.isInteger(asNumber) || asNumber <= 0) return null;
+  return Math.min(asNumber, 10_000);
+}
+
+function hasUnfinishedProcessExecutionEvidence(process) {
+  if (!process || typeof process !== 'object') return false;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const stageIndex = Number.isInteger(process?.stageIndex) ? process.stageIndex : -1;
+  if (currentPrompt > 0 || stageIndex >= 0) return true;
+
+  const messages = Array.isArray(process?.messages) ? process.messages : [];
+  if (messages.length > 0) {
+    return messages.some((entry) => {
+      if (!entry || typeof entry !== 'object') return false;
+      const text = typeof entry.text === 'string' ? entry.text.trim() : '';
+      return text.length > 0;
+    });
+  }
+
+  return false;
+}
+
+function getProcessMeaningfulActivityTimestamp(process) {
+  if (!process || typeof process !== 'object') return 0;
+  const candidates = [
+    process.startedAt,
+    process.updatedAt,
+    process.autoRecovery?.updatedAt,
+    process.persistenceStatus?.updatedAt,
+    process.finalStagePersistence?.updatedAt,
+    process.completedResponseSavedAt,
+    process.completedResponseDispatch?.dbVerification?.checkedAt,
+    process.persistenceStatus?.dispatch?.dbVerification?.checkedAt
+  ];
+  return candidates.reduce((maxTs, value) => (
+    Number.isInteger(value) && value > maxTs ? value : maxTs
+  ), 0);
+}
+
+function isFreshActiveProcessForResetScan(process, options = {}) {
+  if (!process || typeof process !== 'object') return false;
+  if (isClosedProcessStatus(process?.status)) return false;
+
+  const nowTs = Number.isInteger(options?.nowTs) ? options.nowTs : Date.now();
+  const maxAgeMs = Number.isInteger(options?.maxAgeMs) && options.maxAgeMs > 0
+    ? options.maxAgeMs
+    : RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS;
+  const activityTs = getProcessMeaningfulActivityTimestamp(process);
+  if (!Number.isInteger(activityTs) || activityTs <= 0) return false;
+  if ((nowTs - activityTs) > maxAgeMs) return false;
+
+  if (hasUnfinishedProcessExecutionEvidence(process)) return true;
+
+  const status = normalizeProcessStatus(process?.status || '');
+  const hasContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+  return hasContext && (status === 'queued' || status === 'starting' || status === 'started' || status === 'running');
+}
+
+function isRecoverableUnfinishedProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process?.status || '');
+  if (status === 'completed') return false;
+  if (!isClosedProcessStatus(status)) return false;
+  if (!hasUnfinishedProcessExecutionEvidence(process)) return false;
+
+  const reason = typeof process?.reason === 'string' ? process.reason.trim().toLowerCase() : '';
+  if (reason && UNFINISHED_RECOVERY_EXCLUDED_REASONS.has(reason)) {
+    return false;
+  }
+  return true;
+}
+
+function getUnfinishedCandidateProgressMeta(candidate) {
+  const currentPrompt = Number.isInteger(candidate?.currentPrompt) && candidate.currentPrompt > 0
+    ? candidate.currentPrompt
+    : 0;
+  const totalPrompts = Number.isInteger(candidate?.totalPrompts) && candidate.totalPrompts > 0
+    ? candidate.totalPrompts
+    : 0;
+  const ratio = totalPrompts > 0
+    ? Math.max(0, Math.min(1, currentPrompt / totalPrompts))
+    : 0;
+  const timestamp = Number.isInteger(candidate?.timestamp) ? candidate.timestamp : 0;
+  return {
+    currentPrompt,
+    totalPrompts,
+    ratio,
+    timestamp
+  };
+}
+
+function compareUnfinishedCandidatesByProgressDesc(left, right) {
+  const leftMeta = getUnfinishedCandidateProgressMeta(left);
+  const rightMeta = getUnfinishedCandidateProgressMeta(right);
+  if (rightMeta.ratio !== leftMeta.ratio) {
+    return rightMeta.ratio - leftMeta.ratio;
+  }
+  if (rightMeta.currentPrompt !== leftMeta.currentPrompt) {
+    return rightMeta.currentPrompt - leftMeta.currentPrompt;
+  }
+  if (leftMeta.totalPrompts !== rightMeta.totalPrompts) {
+    return leftMeta.totalPrompts - rightMeta.totalPrompts;
+  }
+  if (rightMeta.timestamp !== leftMeta.timestamp) {
+    return rightMeta.timestamp - leftMeta.timestamp;
+  }
+  const leftRunId = typeof left?.runId === 'string' ? left.runId : '';
+  const rightRunId = typeof right?.runId === 'string' ? right.runId : '';
+  return leftRunId.localeCompare(rightRunId, 'en', { sensitivity: 'base' });
+}
+
 function resolveUnfinishedProcessStageName(process) {
   const stageName = typeof process?.stageName === 'string' ? process.stageName.trim() : '';
   if (stageName) return stageName;
@@ -2179,28 +2910,49 @@ function resolveUnfinishedProcessStageName(process) {
 function buildUnfinishedProcessItem(process) {
   const chatUrl = extractProcessChatUrl(process);
   const runId = typeof process?.id === 'string' ? process.id : '';
+  const status = normalizeProcessStatus(process?.status || '');
+  const sourceUrl = typeof process?.sourceUrl === 'string' ? process.sourceUrl : '';
+  const sourceMeta = normalizeUnfinishedProcessSource(sourceUrl);
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const progressShare = totalPrompts > 0 && currentPrompt > 0
+    ? Math.max(0, Math.min(1, currentPrompt / totalPrompts))
+    : 0;
   return {
     runId,
     title: typeof process?.title === 'string' ? process.title : '',
-    status: normalizeProcessStatus(process?.status || ''),
+    status,
+    isFailedStatus: isFailedProcessStatusForUnfinished(status),
     needsAction: process?.needsAction === true,
-    currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0,
-    totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0,
+    currentPrompt,
+    totalPrompts,
+    progressShare,
     stageName: resolveUnfinishedProcessStageName(process),
     timestamp: Number.isInteger(process?.timestamp) ? process.timestamp : 0,
     chatUrl,
     hasChatUrl: !!chatUrl,
-    sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : '',
-    lastError: typeof process?.error === 'string' ? process.error : ''
+    sourceUrl,
+    sourceKey: sourceMeta.sourceKey,
+    sourceLabel: sourceMeta.sourceLabel,
+    reason: typeof process?.reason === 'string' ? process.reason : '',
+    statusText: typeof process?.statusText === 'string' ? process.statusText : '',
+    lastError: typeof process?.error === 'string' ? process.error : '',
+    hasExecutionEvidence: hasUnfinishedProcessExecutionEvidence(process)
   };
 }
 
 async function listUnfinishedProcessesForResume(options = {}) {
   const includeNonCompleted = options?.includeNonCompleted !== false;
+  const recoverOnly = options?.recoverOnly !== false;
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter);
+  const origin = typeof options?.origin === 'string' ? options.origin : 'unfinished-resume-list';
   const snapshot = await getProcessSnapshot();
-  const items = (Array.isArray(snapshot) ? snapshot : [])
+  const allItems = (Array.isArray(snapshot) ? snapshot : [])
     .filter((process) => process && typeof process === 'object')
     .filter((process) => {
+      if (recoverOnly) {
+        return isRecoverableUnfinishedProcess(process);
+      }
       const status = normalizeProcessStatus(process?.status || '');
       if (status === 'queued') return false;
       if (includeNonCompleted) {
@@ -2210,9 +2962,21 @@ async function listUnfinishedProcessesForResume(options = {}) {
     })
     .map((process) => buildUnfinishedProcessItem(process))
     .sort((a, b) => (b.timestamp || 0) - (a.timestamp || 0));
+  const availableSources = buildUnfinishedSourceCatalog(allItems);
+  const items = sourceFilter
+    ? allItems.filter((item) => item.sourceKey === sourceFilter)
+    : allItems;
+  const sourceFilterMatched = sourceFilter
+    ? availableSources.some((source) => source.key === sourceFilter)
+    : true;
 
   const runnable = items.filter((item) => item.hasChatUrl).length;
   const skippedMissingUrl = items.length - runnable;
+  const summary = buildUnfinishedProcessListSummary(items, sourceFilter ? availableSources.filter((entry) => entry?.key === sourceFilter) : availableSources);
+  maybeReportUnfinishedProcessListSummary(summary, {
+    origin,
+    sourceFilter
+  });
 
   return {
     success: true,
@@ -2220,6 +2984,18 @@ async function listUnfinishedProcessesForResume(options = {}) {
     total: items.length,
     runnable,
     skippedMissingUrl,
+    sourceFilter: sourceFilter || 'all',
+    sourceFilterApplied: !!sourceFilter,
+    sourceFilterMatched,
+    recoverOnly,
+    countingModel: {
+      listSource: 'process_monitor_state',
+      listStageMeaning: 'snapshot_saved_progress',
+      resumeStageMeaning: 'live_recalculation_on_chat_tab',
+      batchLimitMeaning: 'top_progress_snapshot_then_live_verify'
+    },
+    summary,
+    availableSources,
     items
   };
 }
@@ -2347,6 +3123,29 @@ async function resumeSingleUnfinishedProcess(candidate, context = {}) {
     return row;
   }
 
+  const dbPersistCheck = await verifyExistingProcessResponseInDb(latest, {
+    origin: 'unfinished_resume_preflight'
+  });
+  if (dbPersistCheck?.persisted) {
+    await markProcessCompletedFromVerifiedDbPersistence(baseRow.runId, {
+      responseId: dbPersistCheck.responseId || '',
+      reason: 'db_verify_confirmed_before_resume',
+      statusText: 'Zakonczono - potwierdzono zapis w bazie',
+      origin: 'unfinished_resume_preflight'
+    });
+    const row = {
+      ...baseRow,
+      title: typeof latest?.title === 'string' ? latest.title : baseRow.title,
+      finishedAt: Date.now(),
+      outcome: 'skipped_already_completed',
+      reason: 'already_persisted_in_db',
+      detectedMethod: 'db_verify',
+      chatUrl: extractProcessChatUrl(latest)
+    };
+    await logUnfinishedResumeRow(row, context);
+    return row;
+  }
+
   const chatUrl = extractProcessChatUrl(latest);
   if (!chatUrl) {
     const row = {
@@ -2367,7 +3166,8 @@ async function resumeSingleUnfinishedProcess(candidate, context = {}) {
       windowId: Number.isInteger(latest?.windowId) ? latest.windowId : null,
       title: typeof latest?.title === 'string' ? latest.title : '',
       chatUrl,
-      origin: context?.origin || 'unfinished-resume-batch'
+      origin: context?.origin || 'unfinished-resume-batch',
+      preferFreshTab: true
     });
 
     const detectedPromptNumber = Number.isInteger(resumeResult?.detectedPromptNumber)
@@ -2479,14 +3279,24 @@ async function runResumeUnfinishedProcessesBatch(jobId, options = {}) {
     const providedCandidates = Array.isArray(options?.candidates) ? options.candidates : null;
     const listing = providedCandidates
       ? null
-      : await listUnfinishedProcessesForResume({ includeNonCompleted: true });
+      : await listUnfinishedProcessesForResume({
+        includeNonCompleted: true,
+        recoverOnly: true
+      });
     const candidates = providedCandidates || (Array.isArray(listing?.items) ? listing.items : []);
     let state = await getUnfinishedResumeBatchState(safeJobId);
     if (!state || state.status !== 'running') {
       return state;
     }
 
-    for (const candidate of candidates) {
+    console.log('[unfinished-resume] batch runner started', {
+      jobId: safeJobId,
+      origin: context.origin,
+      totalCandidates: candidates.length,
+      keepalivePages: unfinishedResumePagePorts.size
+    });
+
+    for (const [candidateIndex, candidate] of candidates.entries()) {
       state = await getUnfinishedResumeBatchState(safeJobId);
       if (!state || state.status !== 'running') {
         break;
@@ -2494,9 +3304,27 @@ async function runResumeUnfinishedProcessesBatch(jobId, options = {}) {
       state.activeRunId = typeof candidate?.runId === 'string' ? candidate.runId : '';
       await setUnfinishedResumeBatchState(state);
 
+      console.log('[unfinished-resume] processing candidate', {
+        jobId: safeJobId,
+        candidateIndex: candidateIndex + 1,
+        totalCandidates: candidates.length,
+        runId: typeof candidate?.runId === 'string' ? candidate.runId : '',
+        title: typeof candidate?.title === 'string' ? candidate.title : '',
+        hasChatUrl: candidate?.hasChatUrl === true
+      });
+
       const row = await resumeSingleUnfinishedProcess(candidate, context);
       const nextRows = (Array.isArray(state.rows) ? state.rows : []).concat([row]).slice(-UNFINISHED_RESUME_BATCH_MAX_ROWS);
       const nextTotals = applyUnfinishedResumeOutcomeToTotals(state.totals, row);
+
+      console.log('[unfinished-resume] candidate finished', {
+        jobId: safeJobId,
+        candidateIndex: candidateIndex + 1,
+        runId: row?.runId || '',
+        outcome: row?.outcome || '',
+        reason: row?.reason || '',
+        error: row?.error || ''
+      });
 
       state = {
         ...state,
@@ -2580,6 +3408,8 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     ? options.origin.trim()
     : 'runtime-message';
   const forceRestartIfRunning = options?.forceRestartIfRunning === true;
+  const sourceFilter = normalizeUnfinishedSourceFilter(options?.sourceFilter);
+  const limitRequested = normalizeUnfinishedResumeLimit(options?.limit);
   const current = await getUnfinishedResumeBatchState();
   if (current?.status === 'running') {
     if (!forceRestartIfRunning) {
@@ -2600,7 +3430,81 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     });
   }
 
-  const listing = await listUnfinishedProcessesForResume({ includeNonCompleted: true });
+  const listing = await listUnfinishedProcessesForResume({
+    includeNonCompleted: true,
+    recoverOnly: true,
+    sourceFilter,
+    origin: `${origin}:selection`
+  });
+  const allCandidates = Array.isArray(listing?.items) ? listing.items : [];
+  const rankingStrategy = Number.isInteger(limitRequested)
+    ? 'most_advanced_incomplete_first'
+    : 'latest_update_first';
+  const rankedCandidates = Number.isInteger(limitRequested)
+    ? allCandidates.slice().sort(compareUnfinishedCandidatesByProgressDesc)
+    : allCandidates.slice();
+  const limitApplied = Number.isInteger(limitRequested)
+    ? Math.min(limitRequested, rankedCandidates.length)
+    : null;
+  const candidates = Number.isInteger(limitApplied)
+    ? rankedCandidates.slice(0, limitApplied)
+    : rankedCandidates;
+  const selectedRunnable = candidates.filter((item) => item?.hasChatUrl === true).length;
+  const selectedSkippedMissingUrl = candidates.length - selectedRunnable;
+  const selectedSource = sourceFilter
+    ? (Array.isArray(listing?.availableSources)
+      ? listing.availableSources.find((entry) => entry?.key === sourceFilter)
+      : null)
+    : null;
+  const selection = {
+    sourceFilter: sourceFilter || 'all',
+    sourceLabel: selectedSource?.label || '',
+    strategy: rankingStrategy,
+    limitRequested,
+    limitApplied,
+    filteredTotal: Number.isInteger(listing?.total) ? listing.total : rankedCandidates.length
+  };
+  const candidatePreview = candidates.slice(0, 5).map((item) => ({
+    runId: typeof item?.runId === 'string' ? item.runId : '',
+    currentPrompt: Number.isInteger(item?.currentPrompt) ? item.currentPrompt : 0,
+    totalPrompts: Number.isInteger(item?.totalPrompts) ? item.totalPrompts : 0,
+    hasChatUrl: item?.hasChatUrl === true
+  }));
+  const keepalivePages = unfinishedResumePagePorts.size;
+  if (keepalivePages === 0) {
+    console.warn('[unfinished-resume] starting batch without active keepalive page; worker may be interrupted before all tabs open');
+  }
+  console.log('[unfinished-resume] batch selection', {
+    origin,
+    sourceFilter: selection.sourceFilter,
+    strategy: rankingStrategy,
+    filteredTotal: selection.filteredTotal,
+    selectedTotal: candidates.length,
+    runnableSelected: selectedRunnable,
+    blockedSelected: selectedSkippedMissingUrl,
+    keepalivePages,
+    candidatePreview
+  });
+  reportAdminActionEvent('unfinished_resume_candidates_selected', {
+    level: 'info',
+    status: 'selected',
+    reason: 'unfinished_resume_candidates_selected',
+    origin,
+    title: 'Unfinished resume candidates selected',
+    message: `unfinished_resume_candidates_selected | selected=${candidates.length}/${selection.filteredTotal} | runnable=${selectedRunnable} | blocked=${selectedSkippedMissingUrl} | strategy=${rankingStrategy}`,
+    details: {
+      sourceFilter: selection.sourceFilter,
+      sourceLabel: selection.sourceLabel,
+      strategy: rankingStrategy,
+      filteredTotal: selection.filteredTotal,
+      selectedTotal: candidates.length,
+      runnableSelected: selectedRunnable,
+      blockedSelected: selectedSkippedMissingUrl,
+      keepalivePages,
+      candidatePreview
+    }
+  });
+
   const jobId = createUnfinishedResumeBatchJobId('unfinished-resume');
   const initialState = {
     jobId,
@@ -2608,10 +3512,11 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     startedAt: Date.now(),
     finishedAt: null,
     origin,
+    selection,
     totals: normalizeUnfinishedResumeBatchTotals({
-      total: listing.total,
-      runnable: listing.runnable,
-      skippedMissingUrl: listing.skippedMissingUrl,
+      total: candidates.length,
+      runnable: selectedRunnable,
+      skippedMissingUrl: selectedSkippedMissingUrl,
       processed: 0,
       resumed: 0,
       skipped_missing_chat_url: 0,
@@ -2631,14 +3536,21 @@ async function startResumeUnfinishedProcessesBatch(options = {}) {
     origin,
     details: {
       jobId,
-      total: listing.total,
-      runnable: listing.runnable,
-      skippedMissingUrl: listing.skippedMissingUrl
+      total: candidates.length,
+      runnable: selectedRunnable,
+      skippedMissingUrl: selectedSkippedMissingUrl,
+      sourceFilter: selection.sourceFilter,
+      sourceLabel: selection.sourceLabel,
+      strategy: selection.strategy,
+      limitRequested: selection.limitRequested,
+      limitApplied: selection.limitApplied,
+      filteredTotal: selection.filteredTotal,
+      keepalivePages
     }
   });
   void runResumeUnfinishedProcessesBatch(jobId, {
     origin,
-    candidates: Array.isArray(listing?.items) ? listing.items : []
+    candidates
   });
   return {
     success: true,
@@ -2708,6 +3620,150 @@ function inferProblemLogStageName(rawStageName, reason, fallbackTitle = '') {
 
   const title = trimProblemLogText(fallbackTitle || '', 120);
   return title || '';
+}
+
+function toProblemLogNonNegativeInteger(value) {
+  if (Number.isInteger(value)) {
+    return value >= 0 ? value : null;
+  }
+  if (typeof value === 'number' && Number.isFinite(value)) {
+    const normalized = Math.trunc(value);
+    return normalized >= 0 ? normalized : null;
+  }
+  return null;
+}
+
+function resolveProblemLogStageProgress({
+  status = '',
+  reason = '',
+  error = '',
+  statusText = '',
+  currentPrompt = null,
+  totalPrompts = null,
+  stageIndex = null,
+  stageName = ''
+} = {}) {
+  let normalizedCurrentPrompt = toProblemLogNonNegativeInteger(currentPrompt);
+  let normalizedTotalPrompts = toProblemLogNonNegativeInteger(totalPrompts);
+  let normalizedStageIndex = toProblemLogNonNegativeInteger(stageIndex);
+  const normalizedStageName = trimProblemLogText(stageName || '', 120);
+
+  if (normalizedCurrentPrompt !== null && normalizedCurrentPrompt <= 0) {
+    normalizedCurrentPrompt = null;
+  }
+  if (normalizedTotalPrompts !== null && normalizedTotalPrompts <= 0) {
+    normalizedTotalPrompts = null;
+  }
+
+  if (normalizedCurrentPrompt === null && normalizedStageIndex !== null) {
+    normalizedCurrentPrompt = normalizedStageIndex + 1;
+  }
+  if (normalizedStageIndex === null && normalizedCurrentPrompt !== null) {
+    normalizedStageIndex = normalizedCurrentPrompt - 1;
+  }
+  if (
+    normalizedTotalPrompts !== null
+    && normalizedCurrentPrompt !== null
+    && normalizedCurrentPrompt > normalizedTotalPrompts
+  ) {
+    normalizedCurrentPrompt = normalizedTotalPrompts;
+  }
+  if (
+    normalizedTotalPrompts !== null
+    && normalizedStageIndex !== null
+    && normalizedStageIndex >= normalizedTotalPrompts
+  ) {
+    normalizedStageIndex = normalizedTotalPrompts - 1;
+  }
+
+  const normalizedStatus = normalizeProcessStatus(status);
+  const signalBlob = [reason, error, statusText]
+    .map((value) => (typeof value === 'string' ? value.toLowerCase() : ''))
+    .join(' ');
+  const hasBlockingSignal = /needs_action|missing_assistant_reply|invalid_response|timeout|send_failed|save_failed|data[_\s-]?gap|failed|error/.test(signalBlob);
+  const canAdvance = !isClosedProcessStatus(normalizedStatus)
+    && !hasBlockingSignal
+    && (normalizedStatus === 'running' || normalizedStatus === 'starting' || normalizedStatus === 'started' || normalizedStatus === 'queued');
+
+  let nextPrompt = null;
+  if (normalizedCurrentPrompt !== null) {
+    nextPrompt = canAdvance ? (normalizedCurrentPrompt + 1) : normalizedCurrentPrompt;
+  } else if (normalizedStageIndex !== null) {
+    nextPrompt = canAdvance ? (normalizedStageIndex + 2) : (normalizedStageIndex + 1);
+  }
+  if (normalizedTotalPrompts !== null && nextPrompt !== null && nextPrompt > normalizedTotalPrompts) {
+    nextPrompt = normalizedTotalPrompts;
+  }
+  if (nextPrompt !== null && nextPrompt <= 0) {
+    nextPrompt = null;
+  }
+
+  let nextStageIndex = null;
+  if (nextPrompt !== null) {
+    nextStageIndex = Math.max(0, nextPrompt - 1);
+    if (normalizedTotalPrompts !== null && nextStageIndex >= normalizedTotalPrompts) {
+      nextStageIndex = normalizedTotalPrompts - 1;
+    }
+  }
+
+  let nextStageName = '';
+  if (nextPrompt !== null) {
+    nextStageName = `Prompt ${nextPrompt}`;
+  } else if (normalizedStageName) {
+    nextStageName = normalizedStageName;
+  }
+
+  return {
+    currentPrompt: normalizedCurrentPrompt,
+    totalPrompts: normalizedTotalPrompts,
+    stageIndex: normalizedStageIndex,
+    stageName: normalizedStageName,
+    nextPrompt,
+    nextStageIndex,
+    nextStageName: trimProblemLogText(nextStageName, 120),
+    canAdvance
+  };
+}
+
+function inferProblemLogDataGapState({
+  status = '',
+  reason = '',
+  error = '',
+  statusText = '',
+  message = '',
+  explicitDetected = false,
+  explicitSignal = '',
+  explicitMissingInputs = ''
+} = {}) {
+  const parsed = parseDataGapsStopFromText([
+    typeof statusText === 'string' ? statusText : '',
+    typeof error === 'string' ? error : '',
+    typeof message === 'string' ? message : ''
+  ].filter(Boolean).join('\n'));
+  const markerDetected = [
+    status,
+    reason,
+    error,
+    statusText,
+    message
+  ].some((value) => looksLikeDataGapMarker(typeof value === 'string' ? value : ''));
+
+  const detected = explicitDetected || parsed.detected || markerDetected;
+  const signal = trimProblemLogText(
+    explicitSignal
+      || (parsed.detected ? 'system_command' : (markerDetected ? 'marker' : '')),
+    80
+  );
+  const missingInputs = trimProblemLogText(
+    explicitMissingInputs || parsed.missingInputsText || '',
+    320
+  );
+
+  return {
+    detected,
+    signal,
+    missingInputs
+  };
 }
 
 function classifyProblemLogCategory({
@@ -2797,6 +3853,26 @@ function buildProblemLogMessage(entry) {
       ? entry.chatUrl
       : (typeof entry.conversationUrl === 'string' ? entry.conversationUrl : '')
   );
+  const stageProgress = resolveProblemLogStageProgress({
+    status,
+    reason,
+    error,
+    statusText,
+    currentPrompt: entry.currentPrompt,
+    totalPrompts: entry.totalPrompts,
+    stageIndex: entry.stageIndex,
+    stageName
+  });
+  const dataGapState = inferProblemLogDataGapState({
+    status,
+    reason,
+    error,
+    statusText,
+    message: typeof entry.message === 'string' ? entry.message : '',
+    explicitDetected: entry.dataGapDetected === true,
+    explicitSignal: typeof entry.dataGapSignal === 'string' ? entry.dataGapSignal : '',
+    explicitMissingInputs: typeof entry.dataGapMissingInputs === 'string' ? entry.dataGapMissingInputs : ''
+  });
 
   if (title) parts.push(`title=${title}`);
   if (status) parts.push(`status=${status}`);
@@ -2804,13 +3880,24 @@ function buildProblemLogMessage(entry) {
   if (error) parts.push(`error=${error}`);
   if (statusText) parts.push(`statusText=${statusText}`);
 
-  const currentPrompt = Number.isInteger(entry.currentPrompt) ? entry.currentPrompt : null;
-  const totalPrompts = Number.isInteger(entry.totalPrompts) ? entry.totalPrompts : null;
-  if (currentPrompt !== null || totalPrompts !== null) {
-    parts.push(`prompt=${currentPrompt ?? '?'}${totalPrompts !== null ? `/${totalPrompts}` : ''}`);
+  if (stageProgress.currentPrompt !== null || stageProgress.totalPrompts !== null) {
+    parts.push(
+      `prompt=${stageProgress.currentPrompt ?? '?'}${stageProgress.totalPrompts !== null ? `/${stageProgress.totalPrompts}` : ''}`
+    );
   }
-  if (stageName) {
-    parts.push(`stage=${stageName}`);
+  if (stageProgress.stageName) {
+    parts.push(`stage=${stageProgress.stageName}`);
+  }
+  if (stageProgress.nextPrompt !== null) {
+    parts.push(`next_prompt=${stageProgress.nextPrompt}`);
+  }
+  if (stageProgress.nextStageName) {
+    parts.push(`next_stage=${stageProgress.nextStageName}`);
+  }
+  if (dataGapState.detected) {
+    parts.push('data_gap=1');
+    if (dataGapState.signal) parts.push(`data_gap_signal=${dataGapState.signal}`);
+    if (dataGapState.missingInputs) parts.push(`data_gap_missing_inputs=${dataGapState.missingInputs}`);
   }
   if (sourceUrl) {
     parts.push(`sourceUrl=${sourceUrl}`);
@@ -2881,6 +3968,16 @@ function sanitizeProblemLogEntry(rawEntry) {
   const title = inferProblemLogTitle(rawEntry.title || '', reason, rawEntry.message || '');
   const analysisType = trimProblemLogText(rawEntry.analysisType || '', 40);
   const stageName = inferProblemLogStageName(rawEntry.stageName || '', reason, title);
+  const stageProgress = resolveProblemLogStageProgress({
+    status,
+    reason,
+    error,
+    statusText,
+    currentPrompt: rawEntry.currentPrompt,
+    totalPrompts: rawEntry.totalPrompts,
+    stageIndex: rawEntry.stageIndex,
+    stageName
+  });
   const supportId = trimProblemLogText(
     rawEntry.supportId
       || extractSupportIdFromProblemLogSource(source)
@@ -2911,6 +4008,18 @@ function sanitizeProblemLogEntry(rawEntry) {
       : (typeof rawEntry.source_url === 'string' ? rawEntry.source_url : '')
   );
   const heartbeat = rawEntry.heartbeat === true;
+  const dataGapState = inferProblemLogDataGapState({
+    status,
+    reason,
+    error,
+    statusText,
+    message: typeof rawEntry.message === 'string' ? rawEntry.message : '',
+    explicitDetected: rawEntry.dataGapDetected === true,
+    explicitSignal: typeof rawEntry.dataGapSignal === 'string' ? rawEntry.dataGapSignal : '',
+    explicitMissingInputs: typeof rawEntry.dataGapMissingInputs === 'string'
+      ? rawEntry.dataGapMissingInputs
+      : ''
+  });
   const message = trimProblemLogText(rawEntry.message || buildProblemLogMessage(rawEntry));
   const signature = trimProblemLogText(rawEntry.signature || '', 380);
   const entryId = typeof rawEntry.id === 'string' && rawEntry.id.trim()
@@ -2933,10 +4042,16 @@ function sanitizeProblemLogEntry(rawEntry) {
     statusText,
     message: message || 'problem_detected',
     signature,
-    currentPrompt: Number.isInteger(rawEntry.currentPrompt) ? rawEntry.currentPrompt : null,
-    totalPrompts: Number.isInteger(rawEntry.totalPrompts) ? rawEntry.totalPrompts : null,
-    stageIndex: Number.isInteger(rawEntry.stageIndex) ? rawEntry.stageIndex : null,
-    stageName,
+    currentPrompt: stageProgress.currentPrompt,
+    totalPrompts: stageProgress.totalPrompts,
+    stageIndex: stageProgress.stageIndex,
+    stageName: stageProgress.stageName,
+    nextPrompt: stageProgress.nextPrompt,
+    nextStageIndex: stageProgress.nextStageIndex,
+    nextStageName: stageProgress.nextStageName,
+    dataGapDetected: dataGapState.detected,
+    dataGapSignal: dataGapState.signal,
+    dataGapMissingInputs: dataGapState.missingInputs,
     tabId: Number.isInteger(rawEntry.tabId) ? rawEntry.tabId : null,
     windowId: Number.isInteger(rawEntry.windowId) ? rawEntry.windowId : null,
     sourceUrl: sourceUrl || '',
@@ -2974,6 +4089,7 @@ async function persistProblemLogEntries() {
   await chrome.storage.local.set({
     [PROBLEM_LOG_STORAGE_KEY]: problemLogEntries
   });
+  scheduleLocalDebugCollectorSnapshot('problem_log_entries');
 }
 
 function cloneProblemLogEntries(entries) {
@@ -3084,6 +4200,11 @@ function normalizeConversationLogSnapshotEntry(rawEntry) {
     runId: trimProblemLogText(normalized.runId || '', 120),
     currentPrompt: Number.isInteger(normalized.currentPrompt) ? normalized.currentPrompt : null,
     totalPrompts: Number.isInteger(normalized.totalPrompts) ? normalized.totalPrompts : null,
+    nextPrompt: Number.isInteger(normalized.nextPrompt) ? normalized.nextPrompt : null,
+    nextStageName: trimProblemLogText(normalized.nextStageName || '', 120),
+    dataGapDetected: normalized.dataGapDetected === true,
+    dataGapSignal: trimProblemLogText(normalized.dataGapSignal || '', 80),
+    dataGapMissingInputs: trimProblemLogText(normalized.dataGapMissingInputs || '', 320),
     chatUrl: chatUrl || ''
   };
 }
@@ -3727,6 +4848,7 @@ installBackgroundConsoleProblemCapture();
 async function upsertProcess(runId, patch = {}) {
   if (!runId) return null;
   await ensureProcessRegistryReady();
+  const hadExistingRecord = processRegistry.has(runId);
   const patchData = (patch && typeof patch === 'object')
     ? { ...patch }
     : {};
@@ -3772,14 +4894,10 @@ async function upsertProcess(runId, patch = {}) {
 
   if (!next) return null;
   mergeProcessConversationUrls(existing, next);
-  const problemEntry = buildProcessProblemLogEntry(runId, next);
-  const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
-  const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
-  const heartbeatDue = !!(problemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
-  if (problemEntry && heartbeatDue && !signatureChanged) {
-    problemEntry.heartbeat = true;
-  }
-  if (problemEntry?.signature && (signatureChanged || heartbeatDue)) {
+  const signalChanged = !hadExistingRecord || hasMeaningfulProcessSignalChange(existing, next);
+  const problemEntry = signalChanged ? buildProcessProblemLogEntry(runId, next) : null;
+  const shouldEmitProblemEntry = !!(problemEntry?.signature && signalChanged);
+  if (shouldEmitProblemEntry) {
     const emittedEntry = await appendProblemLog(problemEntry);
     if (emittedEntry) {
       processLogLastEmitTsByRunId.set(runId, Date.now());
@@ -3801,9 +4919,64 @@ async function upsertProcess(runId, patch = {}) {
     console.warn('[manual-pdf] batch progress update failed:', error?.message || String(error));
   });
   logProcessTransition(runId, next, patchData);
-  await persistProcessRegistry();
-  await broadcastProcessUpdate();
+  if (signalChanged) {
+    await persistProcessRegistry();
+    await broadcastProcessUpdate();
+  }
   return next;
+}
+
+async function markInterruptedProcessesForClosedTab(tabId) {
+  if (!Number.isInteger(tabId)) {
+    return { matched: 0, marked: 0 };
+  }
+  await ensureProcessRegistryReady();
+  const candidates = Array.from(processRegistry.values()).filter((process) => (
+    process
+    && !isClosedProcessStatus(process.status)
+    && Number.isInteger(process.tabId)
+    && process.tabId === tabId
+  ));
+  if (candidates.length === 0) {
+    return { matched: 0, marked: 0 };
+  }
+
+  let marked = 0;
+  for (const process of candidates) {
+    if (!hasUnfinishedProcessExecutionEvidence(process)) {
+      continue;
+    }
+    await upsertProcess(process.id, {
+      status: 'stopped',
+      statusText: 'Karta ChatGPT zamknieta - proces przerwany',
+      reason: 'tab_closed',
+      needsAction: false,
+      tabId: null,
+      windowId: null,
+      finishedAt: Date.now(),
+      timestamp: Date.now()
+    });
+    marked += 1;
+  }
+
+  if (marked > 0) {
+    reportAdminActionEvent('processes_marked_stopped_on_tab_close', {
+      level: 'warn',
+      status: 'updated',
+      reason: 'tab_closed',
+      origin: 'tabs.onRemoved',
+      details: {
+        tabId,
+        matched: candidates.length,
+        marked
+      }
+    });
+  }
+
+  return {
+    matched: candidates.length,
+    marked
+  };
 }
 
 function resolveProcessConversationUrlFromMessage(message, sender) {
@@ -4215,6 +5388,10 @@ function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '',
     : Math.max(sent, 1);
   const failed = Number.isInteger(prev.failed) ? Math.max(0, prev.failed) : 0;
   const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+  const dbVerification = normalizeWatchlistDbVerification(details?.dbVerification || prev.dbVerification);
+  const nextState = isWatchlistDbVerificationSuccessful(dbVerification)
+    ? 'dispatch_confirmed'
+    : 'dispatch_accepted_unverified';
   return {
     ...prev,
     queued: true,
@@ -4278,8 +5455,9 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
     'ok',
     `responseId=${normalizedResponseId || 'n/a'}`,
     `status=${Number.isInteger(details?.status) ? details.status : 'n/a'}`,
-    `eventId=${typeof details?.eventId === 'string' && details.eventId.trim() ? details.eventId.trim() : 'n/a'}`,
-    `requestId=${typeof details?.requestId === 'string' && details.requestId.trim() ? details.requestId.trim() : 'n/a'}`
+    `eventId=${Number.isInteger(details?.eventId) ? details.eventId : (typeof details?.eventId === 'string' && details.eventId.trim() ? details.eventId.trim() : 'n/a')}`,
+    `requestId=${typeof details?.requestId === 'string' && details.requestId.trim() ? details.requestId.trim() : 'n/a'}`,
+    `dbVerify=${normalizedDbVerification?.success ? 'ok' : (normalizedDbVerification?.state || 'n/a')}`
   ].join('|');
   const nextLog = [...previousLog.slice(-15), deliveryLogEntry];
 
@@ -4326,13 +5504,18 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
       failureStatus: null,
       failureRequestId: '',
       failureIntakeUrl: '',
-      state: 'dispatch_confirmed',
+      state: nextDispatch.state,
       dispatchSummary,
+      dbVerification: normalizedDbVerification || previousFinalStagePersistence?.dbVerification || null,
       updatedAt: now
     };
   }
 
   await upsertProcess(normalizedRunId, patch);
+  await maybeAutoCloseProcessAfterDbVerify(normalizedRunId, {
+    responseId: normalizedResponseId,
+    origin: 'dispatch_delivery'
+  }).catch(() => {});
   return true;
 }
 
@@ -5386,6 +6569,7 @@ function summarizeFinalStagePersistence(result) {
   const state = typeof dispatch?.state === 'string' && dispatch.state.trim()
     ? dispatch.state.trim()
     : '';
+  const dbVerification = normalizeWatchlistDbVerification(dispatch?.dbVerification);
   return {
     attempted: result.attempted === true,
     success: result.success === true,
@@ -5413,7 +6597,8 @@ function summarizeFinalStagePersistence(result) {
     hasConversationUrl,
     conversationSnapshotRefreshed,
     conversationSnapshotSource,
-    state
+    state,
+    dbVerification
   };
 }
 
@@ -6164,30 +7349,30 @@ const STAGE_METADATA_COMPANY = [
   {
     promptIndex: 1,
     promptNumber: 2,
-    stageId: 'setup',
-    stageName: "Pipeline Setup (Rules + Data Contract)",
-    description: "Stage inheritance, time-anchor rules, data discipline, and execution order lock."
+    stageId: '1',
+    stageName: "Stage 1: Sub-segment Validation",
+    description: "Invoice-first sub-segment map, gates, timing funnel, and top sub-segment selection."
   },
   {
     promptIndex: 2,
     promptNumber: 3,
-    stageId: '1',
-    stageName: "Stage 1: Sub-segment Validation",
-    description: "Invoice-first sub-segment map, gates, timing funnel, delivered pool."
-  },
-  {
-    promptIndex: 3,
-    promptNumber: 4,
     stageId: '2',
     stageName: "Stage 2: Stock Universe (15 names)",
     description: "Exposure-based company mapping from invoice items to listed names."
   },
   {
-    promptIndex: 4,
-    promptNumber: 5,
+    promptIndex: 3,
+    promptNumber: 4,
     stageId: '3',
     stageName: "Stage 3: Thesis-Linked Traction Pack",
-    description: "Contract semantics, traction quality, and VOI objects for valuation handoff."
+    description: "Contract semantics, traction quality, and Stage 4 handoff objects."
+  },
+  {
+    promptIndex: 4,
+    promptNumber: 5,
+    stageId: '3.2',
+    stageName: "Stage 3.2: Traction Scoring Pack (Light)",
+    description: "Lean traction scoring pass for 15 companies feeding the Stage 4 valuation screen."
   },
   {
     promptIndex: 5,
@@ -6383,102 +7568,14 @@ function normalizeSentenceSignature(text) {
 }
 
 function buildPromptSignatureCatalog(prompts) {
-  if (!Array.isArray(prompts)) return [];
-
-  const catalog = [];
-  prompts.forEach((promptText, index) => {
-    if (typeof promptText !== 'string') return;
-    const signatureRaw = extractLastTwoSentences(promptText);
-    const signature = normalizeSentenceSignature(signatureRaw);
-    if (!signature) return;
-    const promptNumber = index + 1;
-    catalog.push({
-      index,
-      promptNumber,
-      stageName: STAGE_NAMES_COMPANY[index] || `Prompt ${promptNumber}`,
-      signature,
-      signatureRaw,
-      signatureLength: signature.length
-    });
-  });
-
-  return catalog;
+  return buildCompanyPromptMatchRecords(prompts);
 }
 
-function detectPromptIndexFromMessage(lastUserMessageText, catalog) {
-  const messageSignatureRaw = extractLastTwoSentences(lastUserMessageText || '');
-  const messageSignature = normalizeSentenceSignature(messageSignatureRaw);
-  if (!messageSignature) {
-    return {
-      matched: false,
-      reason: 'no_user_message',
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const list = Array.isArray(catalog) ? catalog : [];
-  if (list.length === 0) {
-    return {
-      matched: false,
-      reason: 'catalog_empty',
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const exactMatches = list.filter((entry) => entry.signature === messageSignature);
-  if (exactMatches.length > 0) {
-    const selected = exactMatches.sort((a, b) => b.index - a.index)[0];
-    return {
-      matched: true,
-      method: 'exact',
-      ...selected,
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const minComparableLen = 24;
-  if (messageSignature.length < minComparableLen) {
-    return {
-      matched: false,
-      reason: 'signature_too_short',
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  const includesMatches = list
-    .filter((entry) => {
-      const left = typeof entry?.signature === 'string' ? entry.signature : '';
-      if (left.length < minComparableLen) return false;
-      return messageSignature.includes(left) || left.includes(messageSignature);
-    })
-    .sort((a, b) => {
-      if (b.signatureLength !== a.signatureLength) {
-        return b.signatureLength - a.signatureLength;
-      }
-      return b.index - a.index;
-    });
-
-  if (includesMatches.length > 0) {
-    const selected = includesMatches[0];
-    return {
-      matched: true,
-      method: 'includes',
-      ...selected,
-      messageSignatureRaw,
-      messageSignature
-    };
-  }
-
-  return {
-    matched: false,
-    reason: 'signature_not_found',
-    messageSignatureRaw,
-    messageSignature
-  };
+function detectPromptIndexFromMessage(lastUserMessageText, promptRecords) {
+  return matchCompanyPromptText(lastUserMessageText, promptRecords, {
+    minScore: COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE,
+    minGap: COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP
+  });
 }
 
 async function readFullConversationFromTab(tabId, options = {}) {
@@ -6500,71 +7597,76 @@ async function readFullConversationFromTab(tabId, options = {}) {
     : 320;
   const hardForce = options?.hardForce !== false;
   const restoreScroll = options?.restoreScroll !== false;
+  const executionTimeoutMs = Number.isInteger(options?.executionTimeoutMs) && options.executionTimeoutMs > 0
+    ? Math.max(maxWaitMs, Math.min(options.executionTimeoutMs, 90000))
+    : Math.max(maxWaitMs + 5000, 10000);
+  const executionTimeoutMarker = { __conversationScanTimeout__: true };
 
   try {
-    const result = await chrome.scripting.executeScript({
-      target: { tabId },
-      function: async (cfg) => {
-        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
-        const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
-        const countWords = (text) => {
-          const normalized = compact(text).toLowerCase();
-          if (!normalized) return 0;
-          return normalized
-            .split(/[\s,.;:!?()[\]{}"'<>\-_/\\|]+/)
-            .map((token) => token.trim())
-            .filter((token) => token.length > 0)
-            .length;
-        };
-        const countSentences = (text) => {
-          const normalized = compact(text);
-          if (!normalized) return 0;
-          const parts = normalized.match(/[^.!?\n]+(?:[.!?]+|$)/g) || [];
-          return parts
-            .map((part) => compact(part))
-            .filter((part) => part.length > 0 && countWords(part) > 0)
-            .length;
-        };
-        const isElement = (node) => (
-          !!node
-          && typeof node === 'object'
-          && typeof node.nodeType === 'number'
-          && node.nodeType === 1
-        );
-
-        function readConversationEntries() {
-          const nodes = Array.from(
-            document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+    const result = await Promise.race([
+      chrome.scripting.executeScript({
+        target: { tabId },
+        function: async (cfg) => {
+          const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+          const compact = (text) => (text || '').replace(/\s+/g, ' ').trim();
+          const countWords = (text) => {
+            const normalized = compact(text).toLowerCase();
+            if (!normalized) return 0;
+            return normalized
+              .split(/[\s,.;:!?()[\]{}"'<>\-_/\\|]+/)
+              .map((token) => token.trim())
+              .filter((token) => token.length > 0)
+              .length;
+          };
+          const countSentences = (text) => {
+            const normalized = compact(text);
+            if (!normalized) return 0;
+            const parts = normalized.match(/[^.!?\n]+(?:[.!?]+|$)/g) || [];
+            return parts
+              .map((part) => compact(part))
+              .filter((part) => part.length > 0 && countWords(part) > 0)
+              .length;
+          };
+          const isElement = (node) => (
+            !!node
+            && typeof node === 'object'
+            && typeof node.nodeType === 'number'
+            && node.nodeType === 1
           );
-          const entries = [];
-          for (const node of nodes) {
-            const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
-            if (role !== 'user' && role !== 'assistant') continue;
-            const textRaw = compact(node?.innerText || node?.textContent || '');
-            if (!textRaw) continue;
-            entries.push({
-              role,
-              text: textRaw.length > cfg.maxCharsPerMessage
-                ? textRaw.slice(0, cfg.maxCharsPerMessage)
-                : textRaw
-            });
-          }
-          return entries;
-        }
 
-        function isScrollableElement(node) {
-          if (!isElement(node)) return false;
-          let style = null;
-          try {
-            style = window.getComputedStyle(node);
-          } catch (error) {
-            return false;
+          function readConversationEntries() {
+            const nodes = Array.from(
+              document.querySelectorAll('[data-message-author-role="user"], [data-message-author-role="assistant"]')
+            );
+            const entries = [];
+            for (const node of nodes) {
+              const role = node?.getAttribute ? node.getAttribute('data-message-author-role') : '';
+              if (role !== 'user' && role !== 'assistant') continue;
+              const textRaw = compact(node?.innerText || node?.textContent || '');
+              if (!textRaw) continue;
+              entries.push({
+                role,
+                text: textRaw.length > cfg.maxCharsPerMessage
+                  ? textRaw.slice(0, cfg.maxCharsPerMessage)
+                  : textRaw
+              });
+            }
+            return entries;
           }
-          const overflowY = String(style?.overflowY || '').toLowerCase();
-          const canScroll = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
-          if (!canScroll) return false;
-          return (node.scrollHeight - node.clientHeight) > 12;
-        }
+
+          function isScrollableElement(node) {
+            if (!isElement(node)) return false;
+            let style = null;
+            try {
+              style = window.getComputedStyle(node);
+            } catch (error) {
+              return false;
+            }
+            const overflowY = String(style?.overflowY || '').toLowerCase();
+            const canScroll = overflowY === 'auto' || overflowY === 'scroll' || overflowY === 'overlay';
+            if (!canScroll) return false;
+            return (node.scrollHeight - node.clientHeight) > 12;
+          }
 
         function getScrollRef() {
           const firstMessage = document.querySelector('[data-message-author-role="assistant"], [data-message-author-role="user"]');
@@ -6769,35 +7871,46 @@ async function readFullConversationFromTab(tabId, options = {}) {
           ? compact(lastAssistantEntry.text || '')
           : '';
 
-        return {
-          success: true,
-          url: location.href || '',
-          title: document.title || '',
-          text: lastUserMessageText,
-          count: userCountTotal,
-          assistantCount: assistantCountTotal,
-          totalMessages,
-          latestUserCount,
-          latestAssistantCount,
-          latestTotalMessages,
-          hardForceApplied: !!cfg.hardForce,
-          scanDurationMs: Date.now() - startedAt,
-          userMetaTotal: allUserMeta.length,
-          userMetaTruncated: allUserMeta.length > transferLimit,
-          lastAssistantText,
-          messages,
-          messageMeta: userMeta
-        };
-      },
-      args: [{
-        maxWaitMs,
-        stepDelayMs,
-        maxCharsPerMessage,
-        transferUserMetaLimit,
-        hardForce,
-        restoreScroll
-      }]
-    });
+          return {
+            success: true,
+            url: location.href || '',
+            title: document.title || '',
+            text: lastUserMessageText,
+            count: userCountTotal,
+            assistantCount: assistantCountTotal,
+            totalMessages,
+            latestUserCount,
+            latestAssistantCount,
+            latestTotalMessages,
+            hardForceApplied: !!cfg.hardForce,
+            scanDurationMs: Date.now() - startedAt,
+            userMetaTotal: allUserMeta.length,
+            userMetaTruncated: allUserMeta.length > transferLimit,
+            lastAssistantText,
+            messages,
+            messageMeta: userMeta
+          };
+        },
+        args: [{
+          maxWaitMs,
+          stepDelayMs,
+          maxCharsPerMessage,
+          transferUserMetaLimit,
+          hardForce,
+          restoreScroll
+        }]
+      }),
+      new Promise((resolve) => {
+        setTimeout(() => resolve(executionTimeoutMarker), executionTimeoutMs);
+      })
+    ]);
+
+    if (result && result.__conversationScanTimeout__ === true) {
+      return {
+        success: false,
+        error: `conversation_scan_timeout_after_${executionTimeoutMs}ms`
+      };
+    }
 
     const payload = result?.[0]?.result || {};
     if (payload?.success) {
@@ -6821,6 +7934,7 @@ async function extractLastUserMessageFromTab(tabId) {
 
   const scanned = await readFullConversationFromTab(tabId, {
     maxWaitMs: 14000,
+    maxCharsPerMessage: 32000,
     transferUserMetaLimit: 2,
     hardForce: true,
     restoreScroll: true
@@ -7308,6 +8422,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
+      await maybeAutoCloseProcessAfterDbVerify(processId, {
+        tabId,
+        windowId: Number.isInteger(windowId) ? windowId : null,
+        origin: 'auto_resume_completed'
+      }).catch(() => {});
 
       return {
         success: true,
@@ -7397,9 +8516,44 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   const includeClosedProcesses = options?.includeClosedProcesses === true;
   const includeInvestTabs = options?.includeInvestTabs !== false;
   const includeProcessContextFallback = options?.includeProcessContextFallback !== false;
+  const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses === true;
+  const restrictToFreshProcesses = options?.restrictToFreshProcesses === true;
+  const restrictToRunIds = Array.isArray(options?.restrictToRunIds)
+    ? new Set(
+      options.restrictToRunIds
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter(Boolean)
+    )
+    : null;
+  const restrictToTabIds = Array.isArray(options?.restrictToTabIds)
+    ? new Set(
+      options.restrictToTabIds
+        .filter((value) => Number.isInteger(value) && value >= 0)
+    )
+    : null;
+  const hasRunRestriction = restrictToRunIds instanceof Set && restrictToRunIds.size > 0;
+  const hasTabRestriction = restrictToTabIds instanceof Set && restrictToTabIds.size > 0;
+  const recentProcessMaxAgeMs = Number.isInteger(options?.recentProcessMaxAgeMs) && options.recentProcessMaxAgeMs > 0
+    ? options.recentProcessMaxAgeMs
+    : RESET_SCAN_ACTIVE_PROCESS_MAX_AGE_MS;
+  const nowTs = Date.now();
+  const tabsRaw = (includeInvestTabs || includeProcessContextFallback) ? await chrome.tabs.query({}) : [];
+  const liveTabsById = new Map();
+  const liveTabsByWindowId = new Map();
+  tabsRaw.forEach((tab) => {
+    if (!tab || typeof tab !== 'object') return;
+    if (Number.isInteger(tab?.id)) {
+      liveTabsById.set(tab.id, tab);
+    }
+    if (Number.isInteger(tab?.windowId)) {
+      const current = liveTabsByWindowId.get(tab.windowId) || [];
+      current.push(tab);
+      liveTabsByWindowId.set(tab.windowId, current);
+    }
+  });
 
   const processSnapshot = await getProcessSnapshot();
-  const processCandidates = processSnapshot
+  const allProcessCandidates = processSnapshot
     .filter((process) => {
       if (!process || typeof process !== 'object') return false;
       if (!includeClosedProcesses && isClosedProcessStatus(process?.status)) return false;
@@ -7407,6 +8561,20 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       return Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
     })
     .sort(compareProcessesForRestore);
+
+  const allProcessByTabId = new Map();
+  const allProcessByWindowId = new Map();
+  allProcessCandidates.forEach((process) => {
+    if (Number.isInteger(process?.tabId) && !allProcessByTabId.has(process.tabId)) {
+      allProcessByTabId.set(process.tabId, process);
+    }
+    if (Number.isInteger(process?.windowId) && !allProcessByWindowId.has(process.windowId)) {
+      allProcessByWindowId.set(process.windowId, process);
+    }
+  });
+
+  const processCandidates = allProcessCandidates
+    .filter((process) => !(excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(process)));
 
   const processByTabId = new Map();
   const processByWindowId = new Map();
@@ -7419,7 +8587,6 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     }
   });
 
-  const tabsRaw = includeInvestTabs ? await chrome.tabs.query({}) : [];
   const investTabs = tabsRaw
     .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
     .sort(compareTabsByWindowAndIndex);
@@ -7427,6 +8594,7 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   const targets = [];
   const handledContextKeys = new Set();
   let skipped = 0;
+  const restrictBareInvestTabs = restrictToFreshProcesses && allProcessCandidates.length > 0;
 
   investTabs.forEach((tab) => {
     const tabId = Number.isInteger(tab?.id) ? tab.id : null;
@@ -7437,9 +8605,28 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       skipped += 1;
       return;
     }
+
+    const linkedProcess = allProcessByTabId.get(tabId) || allProcessByWindowId.get(windowId) || null;
+    if (hasRunRestriction || hasTabRestriction) {
+      const linkedRunId = typeof linkedProcess?.id === 'string' ? linkedProcess.id.trim() : '';
+      const matchesRunRestriction = hasRunRestriction && !!linkedRunId && restrictToRunIds.has(linkedRunId);
+      const matchesTabRestriction = hasTabRestriction && restrictToTabIds.has(tabId);
+      if (!matchesRunRestriction && !matchesTabRestriction) {
+        skipped += 1;
+        return;
+      }
+    }
+    if (excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(linkedProcess)) {
+      skipped += 1;
+      return;
+    }
+    if (restrictBareInvestTabs && !linkedProcess) {
+      skipped += 1;
+      return;
+    }
     handledContextKeys.add(contextKey);
 
-    const process = processByTabId.get(tabId) || processByWindowId.get(windowId) || null;
+    const process = processByTabId.get(tabId) || processByWindowId.get(windowId) || linkedProcess || null;
     targets.push({
       source: 'tab_scan',
       tabId,
@@ -7454,10 +8641,16 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     processCandidates.forEach((process) => {
       const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
       const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
-      if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
-      const contextKey = Number.isInteger(processTabId)
-        ? `tab:${processTabId}`
-        : `window:${processWindowId}`;
+      const liveTab = Number.isInteger(processTabId) ? liveTabsById.get(processTabId) : null;
+      const tabsInWindow = Number.isInteger(processWindowId)
+        ? (liveTabsByWindowId.get(processWindowId) || [])
+        : [];
+      const contextTab = liveTab || findPreferredProcessTabInWindow(tabsInWindow, process);
+      if (!contextTab || !Number.isInteger(contextTab?.id) || !Number.isInteger(contextTab?.windowId)) {
+        skipped += 1;
+        return;
+      }
+      const contextKey = `tab:${contextTab.id}`;
       if (handledContextKeys.has(contextKey)) {
         skipped += 1;
         return;
@@ -7465,12 +8658,16 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       handledContextKeys.add(contextKey);
       targets.push({
         source: 'process_context',
-        tabId: processTabId,
-        windowId: processWindowId,
-        url: typeof process?.chatUrl === 'string' && process.chatUrl.trim()
-          ? process.chatUrl.trim()
-          : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : ''),
-        title: typeof process?.title === 'string' ? process.title : '',
+        tabId: contextTab.id,
+        windowId: contextTab.windowId,
+        url: getTabEffectiveUrl(contextTab) || (
+          typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+            ? process.chatUrl.trim()
+            : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : '')
+        ),
+        title: typeof contextTab?.title === 'string' && contextTab.title.trim()
+          ? contextTab.title
+          : (typeof process?.title === 'string' ? process.title : ''),
         process
       });
     });
@@ -7489,6 +8686,7 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
 }
 
 async function runResetScanStartAllTabs(options = {}) {
+  const reloadBeforeResume = options?.reloadBeforeResume !== false;
   const monitorSessionId = typeof options?.monitorSessionId === 'string' && options.monitorSessionId.trim()
     ? options.monitorSessionId.trim()
     : createReloadResumeMonitorSessionId('reload-resume');
@@ -7511,10 +8709,20 @@ async function runResetScanStartAllTabs(options = {}) {
     const scope = requestedScope === RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
       ? requestedScope
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+    const restrictToRunIds = Array.isArray(options?.restrictToRunIds)
+      ? options.restrictToRunIds
+        .map((value) => (typeof value === 'string' ? value.trim() : ''))
+        .filter(Boolean)
+      : [];
+    const restrictToTabIds = Array.isArray(options?.restrictToTabIds)
+      ? options.restrictToTabIds
+        .filter((value) => Number.isInteger(value) && value >= 0)
+      : [];
     await startReloadResumeMonitorSession({
       sessionId: monitorSessionId,
       origin,
       scope,
+      reloadBeforeResume,
       forceRepeatLastPrompt,
       composerThinkingEffort,
       counts: {
@@ -7561,6 +8769,7 @@ async function runResetScanStartAllTabs(options = {}) {
       mode: 'scoped_context_targets',
       scope,
       forceRepeatLastPrompt,
+      reloadBeforeResume,
       composerThinkingEffort: composerThinkingEffort || ''
     };
 
@@ -7572,6 +8781,7 @@ async function runResetScanStartAllTabs(options = {}) {
       const response = {
         success: false,
         monitorSessionId,
+        reloadBeforeResume,
         scannedTabs: 0,
         matchedTabs: 0,
         startedTabs: 0,
@@ -7637,6 +8847,22 @@ async function runResetScanStartAllTabs(options = {}) {
       const compact = text.replace(/\s+/g, ' ').trim();
       if (compact.length <= maxLen) return compact;
       return `${compact.slice(0, Math.max(0, maxLen - 3))}...`;
+    };
+    const settleWithTimeout = async (taskFactory, timeoutMs) => {
+      const safeTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0
+        ? timeoutMs
+        : 30000;
+      return Promise.race([
+        Promise.resolve()
+          .then(() => taskFactory())
+          .then(
+            (value) => ({ ok: true, value }),
+            (error) => ({ ok: false, error })
+          ),
+        new Promise((resolve) => {
+          setTimeout(() => resolve({ ok: false, timeout: true }), safeTimeoutMs);
+        })
+      ]);
     };
     const appendRecognitionStep = (row, stage, status, detail = '') => {
       if (!row || typeof row !== 'object') return;
@@ -7718,15 +8944,31 @@ async function runResetScanStartAllTabs(options = {}) {
         let finalStagePersistence = null;
         const processForPersistence = processRegistry.get(row.runId) || null;
         if (processForPersistence && typeof processForPersistence === 'object') {
-          const persistResult = await ensureCompletedProcessResponsePersisted(processForPersistence, {
-            force: true,
-            tabId: Number.isInteger(row?.tabId) ? row.tabId : null,
-            tabReadTimeoutMs: 2200,
-            origin: `reset_scan_start:${reason || 'already_at_last_stage'}`
+          const dbPersistCheck = await verifyExistingProcessResponseInDb(processForPersistence, {
+            origin: 'reset_scan_start_final_stage'
           });
-          finalStagePersistence = summarizeFinalStagePersistence(persistResult);
-          if (finalStagePersistence) {
-            row.finalStagePersistence = finalStagePersistence;
+          if (dbPersistCheck?.persisted) {
+            await markProcessCompletedAfterDbVerify(
+              row,
+              reason || 'already_at_last_stage',
+              dbPersistCheck.responseId || ''
+            );
+            const refreshedProcess = processRegistry.get(row.runId) || null;
+            if (refreshedProcess?.finalStagePersistence && typeof refreshedProcess.finalStagePersistence === 'object') {
+              finalStagePersistence = refreshedProcess.finalStagePersistence;
+              row.finalStagePersistence = finalStagePersistence;
+            }
+          } else {
+            const persistResult = await ensureCompletedProcessResponsePersisted(processForPersistence, {
+              force: true,
+              tabId: Number.isInteger(row?.tabId) ? row.tabId : null,
+              tabReadTimeoutMs: 2200,
+              origin: `reset_scan_start:${reason || 'already_at_last_stage'}`
+            });
+            finalStagePersistence = summarizeFinalStagePersistence(persistResult);
+            if (finalStagePersistence) {
+              row.finalStagePersistence = finalStagePersistence;
+            }
           }
         }
         await upsertProcess(row.runId, {
@@ -7998,9 +9240,9 @@ async function runResetScanStartAllTabs(options = {}) {
       if (!tab && Number.isInteger(row.windowId)) {
         try {
           const tabsInWindow = await chrome.tabs.query({ windowId: row.windowId });
-          const investTab = tabsInWindow.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate)));
-          if (investTab && Number.isInteger(investTab.id)) {
-            tab = investTab;
+          const candidateTab = findPreferredProcessTabInWindow(tabsInWindow, process);
+          if (candidateTab && Number.isInteger(candidateTab.id)) {
+            tab = candidateTab;
           }
         } catch (error) {
           // Best effort only.
@@ -8014,7 +9256,7 @@ async function runResetScanStartAllTabs(options = {}) {
         row.url = getTabEffectiveUrl(tab) || row.url;
       }
 
-      if (!isInvestGptUrl(row.url)) {
+      if (!isResumeEligibleProcessUrl(row.url, process)) {
         row.action = 'skipped_outside_invest';
         row.reason = `outside_invest:${row.url || 'empty'}`;
         appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
@@ -8137,6 +9379,7 @@ async function runResetScanStartAllTabs(options = {}) {
     });
 
     console.log('[reset-scan-start] Init', {
+      monitorSessionId,
       origin,
       scope,
       promptsCompanyCount: PROMPTS_COMPANY.length,
@@ -8165,6 +9408,7 @@ async function runResetScanStartAllTabs(options = {}) {
     ) {
       passCount += 1;
       console.log('[reset-scan-start] Pass start', {
+        monitorSessionId,
         pass: passCount,
         pending: pendingKeys.size,
         scanned: scanTargets.length
@@ -8177,6 +9421,7 @@ async function runResetScanStartAllTabs(options = {}) {
 
       for (const target of scanTargets) {
         if (!pendingKeys.has(target.key)) continue;
+        const process = target?.process || null;
 
         const previous = resultsByKey.get(target.key) || null;
         const row = {
@@ -8187,6 +9432,7 @@ async function runResetScanStartAllTabs(options = {}) {
         resultsByKey.set(target.key, row);
 
         console.log('[reset-scan-start] Inspect process', {
+          monitorSessionId,
           pass: passCount,
           runId: row.runId || '',
           tabId: row.tabId,
@@ -8207,11 +9453,12 @@ async function runResetScanStartAllTabs(options = {}) {
         }
 
         if (!preparedKeys.has(target.key)) {
+          const stopReason = reloadBeforeResume ? 'bulk_resume_reload' : 'bulk_resume_no_reload';
           const stopResult = await requestProcessForceStopOnTab(row.tabId, {
             runId: row.runId,
             reason: 'bulk_resume_prepare',
             origin
-          });
+          }, reloadBeforeResume ? 1200 : 2500);
           row.stopSignalSent = stopResult?.sent === true;
           row.stopSignalAck = stopResult?.acknowledged === true;
           row.stopSignalReason = stopResult?.reason || '';
@@ -8249,7 +9496,28 @@ async function runResetScanStartAllTabs(options = {}) {
             });
           }
         } else {
-          await prepareTabForDetection(row.tabId, row.windowId);
+          const detectionPrepareAttempt = await settleWithTimeout(
+            () => prepareTabForDetection(row.tabId, row.windowId),
+            20000
+          );
+          if (detectionPrepareAttempt?.timeout) {
+            row.action = 'detect_failed';
+            row.reason = 'prepare_detection_timeout';
+            setRecognitionSource(row, 'detect_unresolved');
+            appendRecognitionStep(row, 'precheck', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            continue;
+          }
+          if (!detectionPrepareAttempt?.ok) {
+            row.action = 'detect_failed';
+            row.reason = detectionPrepareAttempt?.error?.message || 'prepare_detection_exception';
+            setRecognitionSource(row, 'detect_unresolved');
+            appendRecognitionStep(row, 'precheck', 'failed', row.reason);
+            resultsByKey.set(target.key, row);
+            pendingKeys.delete(target.key);
+            continue;
+          }
         }
 
         const currentTab = await getTabByIdSafe(row.tabId);
@@ -8267,7 +9535,7 @@ async function runResetScanStartAllTabs(options = {}) {
         row.url = getTabEffectiveUrl(currentTab) || row.url;
         row.windowId = Number.isInteger(currentTab?.windowId) ? currentTab.windowId : row.windowId;
 
-        if (!isInvestGptUrl(row.url)) {
+        if (!isResumeEligibleProcessUrl(row.url, process)) {
           row.action = 'skipped_outside_invest';
           row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
           appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
@@ -8938,6 +10206,43 @@ async function runResetScanStartAllTabs(options = {}) {
 
     for (const row of startQueue) {
       if (!Number.isInteger(row.tabId) || !Number.isInteger(row.nextStartIndex)) continue;
+      if (row.runId) {
+        const latestProcess = processRegistry.get(row.runId) || null;
+        if (latestProcess && typeof latestProcess === 'object') {
+          const dbPersistCheck = await verifyExistingProcessResponseInDb(latestProcess, {
+            origin: 'reset_scan_start_preflight'
+          });
+          if (dbPersistCheck?.persisted) {
+            row.action = 'final_stage_already_sent';
+            row.reason = 'db_already_verified_before_reset';
+            row.resumeDecisionSource = 'db_verify_confirmed';
+            setRecognitionSource(row, 'db_verify_confirmed');
+            if (!row.detectedMethod) row.detectedMethod = 'db_verify';
+            appendRecognitionStep(
+              row,
+              'db_verify',
+              'confirmed',
+              dbPersistCheck.responseId
+                ? `responseId=${dbPersistCheck.responseId}`
+                : 'stored_in_db'
+            );
+            appendRecognitionStep(row, 'decision', 'final_completed', row.reason);
+            await markProcessCompletedAfterDbVerify(
+              row,
+              'db_already_verified_before_reset',
+              dbPersistCheck.responseId || ''
+            );
+            resultsByKey.set(row.key, row);
+            await updateMonitorSnapshot('start_dispatch', {
+              counts: {
+                startQueueSize: startQueue.length,
+                started: startedKeys.size
+              }
+            });
+            continue;
+          }
+        }
+      }
       let precomputedStagePlan = null;
       const stagePlanResult = await resolveCompanyResumeStagePlanForTab(row.tabId, {
         maxWaitMs: 18000,
@@ -9042,7 +10347,26 @@ async function runResetScanStartAllTabs(options = {}) {
         precomputedStagePlan
       });
 
-      if (startResult.success) {
+      if (startAttempt?.timeout) {
+        row.action = 'start_failed';
+        row.reason = 'start_dispatch_timeout';
+        appendRecognitionStep(row, 'start_dispatch', 'failed', row.reason);
+        console.warn('[reset-scan-start] Start timed out', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          nextStartIndex: row.nextStartIndex
+        });
+      } else if (!startAttempt?.ok) {
+        row.action = 'start_failed';
+        row.reason = startAttempt?.error?.message || 'start_dispatch_exception';
+        appendRecognitionStep(row, 'start_dispatch', 'failed', row.reason);
+        console.warn('[reset-scan-start] Start threw', {
+          runId: row.runId || '',
+          tabId: row.tabId,
+          nextStartIndex: row.nextStartIndex,
+          reason: row.reason
+        });
+      } else if (startResult.success) {
         startedKeys.add(row.key);
         row.action = 'started';
         row.restartDispatchStatus = startResult.detached ? 'start_dispatched' : 'start_started';
@@ -9150,9 +10474,11 @@ async function runResetScanStartAllTabs(options = {}) {
       acc[key] = (acc[key] || 0) + 1;
       return acc;
     }, {});
-    const summary = calculateReloadResumeSummaryFromRows(results, scanTargets.length);
-    const summaryCheck = verifyReloadResumeSummary(summary, results, scanTargets.length);
+    const reloadTotalHint = reloadBeforeResume ? scanTargets.length : 0;
+    const summary = calculateReloadResumeSummaryFromRows(results, reloadTotalHint);
+    const summaryCheck = verifyReloadResumeSummary(summary, results, reloadTotalHint);
     console.log('[reset-scan-start] Summary', {
+      monitorSessionId,
       scope,
       maxPasses,
       maxRuntimeMs,
@@ -9171,7 +10497,10 @@ async function runResetScanStartAllTabs(options = {}) {
       dataGapsDetected: summary.data_gaps_detected
     });
     results.forEach((item) => {
-      console.log('[reset-scan-start] Process result', item);
+      console.log('[reset-scan-start] Process result', {
+        monitorSessionId,
+        ...item
+      });
     });
     await updateReloadResumeMonitorSession(monitorSessionId, {
       status: 'completed',
@@ -9227,6 +10556,7 @@ async function runResetScanStartAllTabs(options = {}) {
       summary,
       summaryCheck,
       resetSummary,
+      reloadBeforeResume,
       results
     };
   } catch (error) {
@@ -9283,6 +10613,7 @@ async function runResetScanStartAllTabs(options = {}) {
       summary,
       summaryCheck: failureSummaryCheck,
       scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+      reloadBeforeResume,
       results: [],
       error: error?.message || String(error)
     };
@@ -9368,6 +10699,306 @@ function getTabEffectiveUrl(tab) {
   return pendingUrl;
 }
 
+function readChatGptEmergencyResponseRecordsFromPageStore(
+  storageKey = CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY,
+  maxItems = CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS
+) {
+  const safeStorageKey = typeof storageKey === 'string' && storageKey.trim()
+    ? storageKey.trim()
+    : CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY;
+  const safeMaxItems = Number.isInteger(maxItems) && maxItems > 0
+    ? Math.max(1, Math.min(maxItems, 100))
+    : CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS;
+  try {
+    if (!window?.localStorage) {
+      return { success: false, error: 'local_storage_unavailable', records: [] };
+    }
+    const raw = window.localStorage.getItem(safeStorageKey);
+    if (!raw) {
+      return { success: true, records: [] };
+    }
+    const parsed = JSON.parse(raw);
+    const records = Array.isArray(parsed)
+      ? parsed
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => {
+            const responseId = typeof item.responseId === 'string' ? item.responseId.trim() : '';
+            const text = typeof item.text === 'string' ? item.text : '';
+            if (!responseId || !text.trim()) return null;
+            const source = typeof item.source === 'string' ? item.source : '';
+            const analysisType = typeof item.analysisType === 'string' ? item.analysisType : 'company';
+            const runId = typeof item.runId === 'string' ? item.runId : '';
+            const conversationUrl = typeof item.conversationUrl === 'string' ? item.conversationUrl : '';
+            const timestamp = Number.isFinite(item.timestamp) ? Number(item.timestamp) : Date.now();
+            const stage = item.stage && typeof item.stage === 'object' && !Array.isArray(item.stage)
+              ? item.stage
+              : null;
+            return {
+              responseId,
+              text,
+              source,
+              analysisType,
+              runId,
+              conversationUrl,
+              timestamp,
+              stage
+            };
+          })
+          .filter(Boolean)
+          .slice(-safeMaxItems)
+      : [];
+    return {
+      success: true,
+      records
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+      records: []
+    };
+  }
+}
+
+function clearChatGptEmergencyResponseRecordsFromPageStore(
+  storageKey = CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY,
+  responseIds = []
+) {
+  const safeStorageKey = typeof storageKey === 'string' && storageKey.trim()
+    ? storageKey.trim()
+    : CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY;
+  const responseIdSet = new Set(
+    Array.isArray(responseIds)
+      ? responseIds
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter(Boolean)
+      : []
+  );
+  try {
+    if (!window?.localStorage) {
+      return { success: false, error: 'local_storage_unavailable', clearedCount: 0 };
+    }
+    const raw = window.localStorage.getItem(safeStorageKey);
+    if (!raw) {
+      return { success: true, clearedCount: 0, remainingCount: 0 };
+    }
+    const parsed = JSON.parse(raw);
+    const current = Array.isArray(parsed) ? parsed.filter((item) => item && typeof item === 'object') : [];
+    const next = responseIdSet.size > 0
+      ? current.filter((item) => !responseIdSet.has(typeof item?.responseId === 'string' ? item.responseId.trim() : ''))
+      : [];
+    if (next.length > 0) {
+      window.localStorage.setItem(safeStorageKey, JSON.stringify(next));
+    } else {
+      window.localStorage.removeItem(safeStorageKey);
+    }
+    return {
+      success: true,
+      clearedCount: Math.max(0, current.length - next.length),
+      remainingCount: next.length
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+      clearedCount: 0
+    };
+  }
+}
+
+async function readChatGptPageEmergencyResponses(tabId) {
+  if (!Number.isInteger(tabId) || !chrome?.scripting?.executeScript) {
+    return { success: false, error: 'tab_unavailable', records: [] };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: readChatGptEmergencyResponseRecordsFromPageStore,
+      args: [
+        CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY,
+        CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS
+      ]
+    });
+    const payload = results?.[0]?.result && typeof results[0].result === 'object'
+      ? results[0].result
+      : { success: false, error: 'missing_execute_result', records: [] };
+    const records = Array.isArray(payload.records) ? payload.records : [];
+    return {
+      success: payload.success === true,
+      error: typeof payload.error === 'string' ? payload.error : '',
+      records
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+      records: []
+    };
+  }
+}
+
+async function clearChatGptPageEmergencyResponses(tabId, responseIds = []) {
+  if (!Number.isInteger(tabId) || !chrome?.scripting?.executeScript) {
+    return { success: false, error: 'tab_unavailable', clearedCount: 0 };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: clearChatGptEmergencyResponseRecordsFromPageStore,
+      args: [
+        CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY,
+        Array.isArray(responseIds) ? responseIds : []
+      ]
+    });
+    const payload = results?.[0]?.result && typeof results[0].result === 'object'
+      ? results[0].result
+      : { success: false, error: 'missing_execute_result', clearedCount: 0 };
+    return {
+      success: payload.success === true,
+      error: typeof payload.error === 'string' ? payload.error : '',
+      clearedCount: Number.isInteger(payload.clearedCount) ? payload.clearedCount : 0,
+      remainingCount: Number.isInteger(payload.remainingCount) ? payload.remainingCount : 0
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: error?.message || String(error),
+      clearedCount: 0
+    };
+  }
+}
+
+async function recoverChatGptPageEmergencyResponses(options = {}) {
+  if (!chrome?.tabs?.query || !chrome?.scripting?.executeScript) {
+    return { attempted: false, reason: 'chrome_api_unavailable', recovered: 0, failed: 0 };
+  }
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'unknown';
+  const preferredTabId = Number.isInteger(options?.preferredTabId) ? options.preferredTabId : null;
+  const tabs = await chrome.tabs.query({});
+  const chatTabs = tabs
+    .filter((tab) => Number.isInteger(tab?.id) && isChatGptUrl(getTabEffectiveUrl(tab)))
+    .sort(compareTabsByWindowAndIndex);
+  if (chatTabs.length === 0) {
+    return { attempted: false, reason: 'no_chatgpt_tabs', recovered: 0, failed: 0 };
+  }
+
+  const orderedTabs = preferredTabId !== null
+    ? [
+      ...(chatTabs.filter((tab) => tab.id === preferredTabId)),
+      ...(chatTabs.filter((tab) => tab.id !== preferredTabId))
+    ]
+    : chatTabs;
+  const targetTabs = [];
+  const seenOrigins = new Set();
+  for (const tab of orderedTabs) {
+    const tabId = Number.isInteger(tab?.id) ? tab.id : null;
+    if (tabId === null) continue;
+    let originKey = getTabEffectiveUrl(tab) || `tab:${tabId}`;
+    try {
+      const parsed = new URL(originKey);
+      originKey = parsed.origin;
+    } catch {
+      // Keep raw origin key fallback.
+    }
+    if (seenOrigins.has(originKey)) continue;
+    seenOrigins.add(originKey);
+    targetTabs.push(tab);
+  }
+  if (targetTabs.length === 0) {
+    return { attempted: false, reason: 'target_tab_missing', recovered: 0, failed: 0 };
+  }
+
+  let recovered = 0;
+  let failed = 0;
+  let clearedCount = 0;
+  let readFailureReason = '';
+  let foundAnyRecords = false;
+  for (const targetTab of targetTabs) {
+    const targetTabId = Number.isInteger(targetTab?.id) ? targetTab.id : null;
+    if (targetTabId === null) continue;
+
+    const readResult = await readChatGptPageEmergencyResponses(targetTabId);
+    if (!readResult.success) {
+      readFailureReason = readFailureReason || readResult.error || 'read_failed';
+      console.warn('[copy-flow] [page-emergency:recover-read-failed]', {
+        origin,
+        tabId: targetTabId,
+        error: readResult.error || 'unknown'
+      });
+      continue;
+    }
+    if (!Array.isArray(readResult.records) || readResult.records.length === 0) {
+      continue;
+    }
+    foundAnyRecords = true;
+
+    const responseIdsToClear = [];
+    for (const record of readResult.records) {
+      try {
+        const saveResult = await saveResponse(
+          record.text,
+          record.source || '',
+          record.analysisType || 'company',
+          record.runId || null,
+          record.responseId || null,
+          record.stage || null,
+          record.conversationUrl || null
+        );
+        if (saveResult?.success) {
+          recovered += 1;
+          if (typeof record.responseId === 'string' && record.responseId.trim()) {
+            responseIdsToClear.push(record.responseId.trim());
+          }
+        } else {
+          failed += 1;
+        }
+      } catch (error) {
+        failed += 1;
+        console.warn('[copy-flow] [page-emergency:recover-save-failed]', {
+          origin,
+          tabId: targetTabId,
+          responseId: typeof record?.responseId === 'string' ? record.responseId : '',
+          error: error?.message || String(error)
+        });
+      }
+    }
+
+    if (responseIdsToClear.length > 0) {
+      const clearResult = await clearChatGptPageEmergencyResponses(targetTabId, responseIdsToClear);
+      clearedCount += Number.isInteger(clearResult?.clearedCount) ? clearResult.clearedCount : 0;
+      if (!clearResult?.success) {
+        console.warn('[copy-flow] [page-emergency:recover-clear-failed]', {
+          origin,
+          tabId: targetTabId,
+          error: clearResult?.error || 'unknown',
+          responseIds: responseIdsToClear
+        });
+      }
+    }
+  }
+
+  console.log('[copy-flow] [page-emergency:recover]', {
+    origin,
+    tabCount: targetTabs.length,
+    recovered,
+    failed,
+    clearedCount
+  });
+  return {
+    attempted: true,
+    reason: recovered > 0
+      ? 'recovered'
+      : (failed > 0
+        ? 'save_failed'
+        : (foundAnyRecords ? 'empty_after_save' : (readFailureReason || 'empty'))),
+    recovered,
+    failed,
+    clearedCount
+  };
+}
+
 function compareTabsByWindowAndIndex(left, right) {
   const leftWindow = Number.isInteger(left?.windowId) ? left.windowId : Number.MAX_SAFE_INTEGER;
   const rightWindow = Number.isInteger(right?.windowId) ? right.windowId : Number.MAX_SAFE_INTEGER;
@@ -9396,6 +11027,42 @@ function compareProcessesForRestore(left, right) {
   return String(left?.id || '').localeCompare(String(right?.id || ''));
 }
 
+function isRemoteRunnerManagedProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  const remoteJobId = typeof process?.remoteJobId === 'string' ? process.remoteJobId.trim() : '';
+  return remoteJobId.length > 0;
+}
+
+function isResumeEligibleProcessUrl(url, process = null) {
+  if (isInvestGptUrl(url)) return true;
+  return isRemoteRunnerManagedProcess(process) && isChatGptUrl(url);
+}
+
+function findPreferredProcessTabInWindow(tabsInWindow, process = null) {
+  const candidates = Array.isArray(tabsInWindow)
+    ? tabsInWindow.filter((candidate) => candidate && typeof candidate === 'object').sort(compareTabsByWindowAndIndex)
+    : [];
+  if (candidates.length === 0) return null;
+
+  const preferredUrls = [
+    normalizeChatConversationUrl(typeof process?.chatUrl === 'string' ? process.chatUrl : ''),
+    normalizeChatConversationUrl(typeof process?.sourceUrl === 'string' ? process.sourceUrl : '')
+  ].filter(Boolean);
+
+  for (const preferredUrl of preferredUrls) {
+    const matched = candidates.find((candidate) => (
+      normalizeChatConversationUrl(getTabEffectiveUrl(candidate)) === preferredUrl
+    ));
+    if (matched) return matched;
+  }
+
+  if (isRemoteRunnerManagedProcess(process)) {
+    return candidates.find((candidate) => isChatGptUrl(getTabEffectiveUrl(candidate))) || null;
+  }
+
+  return candidates.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate))) || null;
+}
+
 async function restoreProcessWindows(options = {}) {
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
@@ -9403,7 +11070,8 @@ async function restoreProcessWindows(options = {}) {
 
   const contextSnapshot = await collectCompanyInvestContextSnapshot({
     includeClosedProcesses: false,
-    includeInvestTabs: true
+    includeInvestTabs: true,
+    excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true
   });
   const activeProcesses = contextSnapshot.processCandidates;
   const targets = contextSnapshot.targets;
@@ -9437,7 +11105,7 @@ async function restoreProcessWindows(options = {}) {
     const runId = process?.id ? String(process.id) : '';
 
     let tab = targetTabId ? await getTabByIdSafe(targetTabId) : null;
-    if (tab && !isInvestGptUrl(getTabEffectiveUrl(tab))) {
+    if (tab && !isResumeEligibleProcessUrl(getTabEffectiveUrl(tab), process)) {
       tab = null;
     }
     const targetWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : targetWindowIdInput;
@@ -9461,14 +11129,14 @@ async function restoreProcessWindows(options = {}) {
     if (!tab && Number.isInteger(targetWindowId)) {
       try {
         const tabsInWindow = await chrome.tabs.query({ windowId: targetWindowId });
-        const investTab = tabsInWindow.find((candidate) => isInvestGptUrl(getTabEffectiveUrl(candidate)));
-        if (investTab && Number.isInteger(investTab.id)) {
-          tab = investTab;
+        const candidateTab = findPreferredProcessTabInWindow(tabsInWindow, process);
+        if (candidateTab && Number.isInteger(candidateTab.id)) {
+          tab = candidateTab;
           if (runId && process) {
             await upsertProcess(runId, {
-              tabId: investTab.id,
+              tabId: candidateTab.id,
               windowId: targetWindowId,
-              chatUrl: getTabEffectiveUrl(investTab) || (typeof process?.chatUrl === 'string' ? process.chatUrl : '')
+              chatUrl: getTabEffectiveUrl(candidateTab) || (typeof process?.chatUrl === 'string' ? process.chatUrl : '')
             });
           }
         }
@@ -9664,20 +11332,34 @@ function requestTabReload(tabId, reloadProperties = {}) {
       return;
     }
 
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        reason: 'reload_command_timeout'
+      });
+    }, 4000);
+
     try {
       chrome.tabs.reload(tabId, reloadProperties, () => {
         if (chrome.runtime.lastError) {
-          resolve({
+          finish({
             ok: false,
             reason: 'reload_command_failed',
             error: chrome.runtime.lastError.message || 'runtime_last_error'
           });
           return;
         }
-        resolve({ ok: true, reason: 'reload_command_sent' });
+        finish({ ok: true, reason: 'reload_command_sent' });
       });
     } catch (error) {
-      resolve({
+      finish({
         ok: false,
         reason: 'reload_exception',
         error: error?.message || String(error)
@@ -9697,20 +11379,34 @@ function requestTabNavigate(tabId, url) {
       return;
     }
 
+    let settled = false;
+    const finish = (result) => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      resolve(result);
+    };
+    const timer = setTimeout(() => {
+      finish({
+        ok: false,
+        reason: 'navigate_command_timeout'
+      });
+    }, 4000);
+
     try {
       chrome.tabs.update(tabId, { url: url.trim() }, () => {
         if (chrome.runtime.lastError) {
-          resolve({
+          finish({
             ok: false,
             reason: 'navigate_command_failed',
             error: chrome.runtime.lastError.message || 'runtime_last_error'
           });
           return;
         }
-        resolve({ ok: true, reason: 'navigate_command_sent' });
+        finish({ ok: true, reason: 'navigate_command_sent' });
       });
     } catch (error) {
-      resolve({
+      finish({
         ok: false,
         reason: 'navigate_exception',
         error: error?.message || String(error)
@@ -9958,18 +11654,7 @@ function buildTwoSentenceSignature(text) {
 }
 
 function buildPromptSignatureRecords(prompts) {
-  return (Array.isArray(prompts) ? prompts : [])
-    .map((promptText, index) => {
-      const signature = buildTwoSentenceSignature(promptText);
-      const normalizedPrefix = normalizeSignatureText(promptText).slice(0, 360);
-      return {
-        index,
-        promptNumber: index + 1,
-        signature,
-        normalizedPrefix
-      };
-    })
-    .filter((entry) => entry.signature.length > 0);
+  return buildCompanyPromptMatchRecords(prompts);
 }
 
 function sharedPrefixLength(left, right, maxLen = SIGNATURE_COMPARE_LIMIT) {
@@ -10186,27 +11871,40 @@ async function getTabByIdSafe(tabId) {
   }
 }
 
+async function getWindowByIdSafe(windowId) {
+  if (!Number.isInteger(windowId)) return null;
+  try {
+    const windowInfo = await chrome.windows.get(windowId);
+    return windowInfo || null;
+  } catch (error) {
+    return null;
+  }
+}
+
 async function resolveChatTabForProcess(process, message = {}) {
+  const preferFreshTab = message?.preferFreshTab === true;
   const messageTabId = Number.isInteger(message?.tabId) ? message.tabId : null;
   const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
   const candidateTabIds = [messageTabId, processTabId].filter((tabId, index, arr) => (
     Number.isInteger(tabId) && arr.indexOf(tabId) === index
   ));
 
-  for (const tabId of candidateTabIds) {
-    const tab = await getTabByIdSafe(tabId);
-    if (tab && isChatGptUrl(getTabEffectiveUrl(tab))) {
-      const directUngroup = await ungroupTabsById([tab.id], {
-        origin: 'resume-direct-chat-tab'
-      });
-      if (!directUngroup.ok && directUngroup.reason !== 'already_ungrouped') {
-        console.warn('[resume] ungroup direct chat tab failed:', {
-          tabId: tab.id,
-          reason: directUngroup.reason,
-          error: directUngroup.error || ''
+  if (!preferFreshTab) {
+    for (const tabId of candidateTabIds) {
+      const tab = await getTabByIdSafe(tabId);
+      if (tab && isChatGptUrl(getTabEffectiveUrl(tab))) {
+        const directUngroup = await ungroupTabsById([tab.id], {
+          origin: 'resume-direct-chat-tab'
         });
+        if (!directUngroup.ok && directUngroup.reason !== 'already_ungrouped') {
+          console.warn('[resume] ungroup direct chat tab failed:', {
+            tabId: tab.id,
+            reason: directUngroup.reason,
+            error: directUngroup.error || ''
+          });
+        }
+        return tab;
       }
-      return tab;
     }
   }
 
@@ -10218,30 +11916,33 @@ async function resolveChatTabForProcess(process, message = {}) {
     return null;
   }
 
-  try {
-    const existingTabs = await chrome.tabs.query({ url: chatUrlRaw });
-    const candidate = Array.isArray(existingTabs) ? existingTabs[0] : null;
-    if (candidate && Number.isInteger(candidate.id)) {
-      const existingUngroup = await ungroupTabsById([candidate.id], {
-        origin: 'resume-existing-chat-tab'
-      });
-      if (!existingUngroup.ok && existingUngroup.reason !== 'already_ungrouped') {
-        console.warn('[resume] ungroup existing chat tab failed:', {
-          tabId: candidate.id,
-          reason: existingUngroup.reason,
-          error: existingUngroup.error || ''
+  if (!preferFreshTab) {
+    try {
+      const existingTabs = await chrome.tabs.query({ url: chatUrlRaw });
+      const candidate = Array.isArray(existingTabs) ? existingTabs[0] : null;
+      if (candidate && Number.isInteger(candidate.id)) {
+        const existingUngroup = await ungroupTabsById([candidate.id], {
+          origin: 'resume-existing-chat-tab'
         });
+        if (!existingUngroup.ok && existingUngroup.reason !== 'already_ungrouped') {
+          console.warn('[resume] ungroup existing chat tab failed:', {
+            tabId: candidate.id,
+            reason: existingUngroup.reason,
+            error: existingUngroup.error || ''
+          });
+        }
+        return candidate;
       }
-      return candidate;
+    } catch (error) {
+      // Ignore and fallback to opening a new tab.
     }
-  } catch (error) {
-    // Ignore and fallback to opening a new tab.
   }
 
   try {
     const createOptions = { url: chatUrlRaw, active: false };
-    if (Number.isInteger(process?.windowId)) {
-      createOptions.windowId = process.windowId;
+    const targetWindow = await getWindowByIdSafe(Number.isInteger(process?.windowId) ? process.windowId : null);
+    if (targetWindow && Number.isInteger(targetWindow.id)) {
+      createOptions.windowId = targetWindow.id;
     }
     const createdTab = await chrome.tabs.create(createOptions);
     if (createdTab && Number.isInteger(createdTab.id)) {
@@ -10281,6 +11982,7 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
 
   const scanned = await readFullConversationFromTab(tabId, {
     maxWaitMs,
+    maxCharsPerMessage: 32000,
     transferUserMetaLimit: 420,
     hardForce: true,
     restoreScroll: true
@@ -10323,6 +12025,8 @@ async function extractRecentUserPromptsFromTab(tabId, maxWaitMs = 12000) {
 
 const COMPANY_PROMPT_MATCH_MIN_SCORE = 180;
 const COMPANY_PROMPT_MATCH_MAX_TOKENS = 1800;
+const COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE = 220;
+const COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP = 120;
 
 function extractSentenceWindowSignature(text, startIndex = 0, count = 2) {
   const safeStart = Number.isInteger(startIndex) ? Math.max(startIndex, 0) : 0;
@@ -10398,6 +12102,128 @@ function buildCompanyPromptMatchRecords(prompts) {
   });
 
   return records;
+}
+
+function rankCompanyPromptCandidatesForText(messageText, promptRecords) {
+  const records = Array.isArray(promptRecords)
+    ? promptRecords.filter((record) => record && Number.isInteger(record.promptNumber))
+    : [];
+  const features = buildConversationMessageMatchFeatures(messageText);
+  const candidates = records
+    .map((record) => {
+      const scoreInfo = computeCompanyPromptMatchScore(features, record);
+      return {
+        index: record.index,
+        promptNumber: record.promptNumber,
+        stageName: record.stageName || `Prompt ${record.promptNumber}`,
+        ...scoreInfo
+      };
+    })
+    .sort((left, right) => {
+      if (right.score !== left.score) return right.score - left.score;
+      const leftStrong = hasStrongCompanyPromptSignal(left) ? 1 : 0;
+      const rightStrong = hasStrongCompanyPromptSignal(right) ? 1 : 0;
+      if (rightStrong !== leftStrong) return rightStrong - leftStrong;
+      if (right.tokenHits !== left.tokenHits) return right.tokenHits - left.tokenHits;
+      if (right.prefixLen !== left.prefixLen) return right.prefixLen - left.prefixLen;
+      if (right.suffixLen !== left.suffixLen) return right.suffixLen - left.suffixLen;
+      return right.promptNumber - left.promptNumber;
+    });
+  return {
+    features,
+    candidates
+  };
+}
+
+function matchCompanyPromptText(messageText, promptRecords, options = {}) {
+  const rawText = typeof messageText === 'string' ? messageText : '';
+  const messageSignatureRaw = extractLastTwoSentences(rawText || '');
+  const messageSignature = normalizeSentenceSignature(messageSignatureRaw);
+  const records = Array.isArray(promptRecords) ? promptRecords : [];
+  if (!rawText.trim()) {
+    return {
+      matched: false,
+      reason: 'no_user_message',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+  if (records.length === 0) {
+    return {
+      matched: false,
+      reason: 'catalog_empty',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const minScore = Number.isInteger(options?.minScore) && options.minScore > 0
+    ? options.minScore
+    : COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE;
+  const minGap = Number.isInteger(options?.minGap) && options.minGap > 0
+    ? options.minGap
+    : COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP;
+  const { features, candidates } = rankCompanyPromptCandidatesForText(rawText, records);
+  if (!features?.normalized) {
+    return {
+      matched: false,
+      reason: 'no_user_message',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const best = candidates[0] || null;
+  const second = candidates[1] || null;
+  if (!best || !Number.isFinite(best.score) || best.score < minScore) {
+    return {
+      matched: false,
+      reason: 'signature_not_found',
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  const scoreGap = second && Number.isFinite(second.score)
+    ? (best.score - second.score)
+    : best.score;
+  const highConfidence = (
+    hasStrongCompanyPromptSignal(best)
+    || best.prefixLen >= 140
+    || best.suffixLen >= 120
+    || best.tokenHits >= 5
+    || best.score >= (minScore + 180)
+    || scoreGap >= minGap
+  );
+
+  if (!highConfidence) {
+    const bestPromptText = `best=P${best.promptNumber},score=${Math.round(best.score)}`;
+    const secondPromptText = second
+      ? `second=P${second.promptNumber},score=${Math.round(second.score)}`
+      : 'second=n/a';
+    return {
+      matched: false,
+      reason: `ambiguous_candidates(${bestPromptText};${secondPromptText})`,
+      messageSignatureRaw,
+      messageSignature
+    };
+  }
+
+  return {
+    matched: true,
+    method: best.primarySignal ? `score_${best.primarySignal}` : 'score_match',
+    index: best.index,
+    promptNumber: best.promptNumber,
+    stageName: best.stageName,
+    messageSignatureRaw,
+    messageSignature,
+    score: best.score,
+    scoreGap,
+    tokenHits: best.tokenHits,
+    signals: Array.isArray(best.signals) ? best.signals : [],
+    prefixLen: best.prefixLen,
+    suffixLen: best.suffixLen
+  };
 }
 
 function buildConversationMessageMatchFeatures(text) {
@@ -10738,6 +12564,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     : 18000;
   const scanned = await readFullConversationFromTab(tabId, {
     maxWaitMs,
+    maxCharsPerMessage: 32000,
     transferUserMetaLimit: 1200,
     hardForce: true,
     restoreScroll: true
@@ -11220,14 +13047,15 @@ function detectLastPromptMatch(userMessages, promptRecords) {
       ? entry
       : (typeof entry?.text === 'string' ? entry.text : '');
     if (typeof text !== 'string' || text.trim().length === 0) continue;
-    const signature = buildTwoSentenceSignature(text);
-    const normalizedPromptText = normalizeSignatureText(text).slice(0, 360);
-    const matched = matchPromptBySignature(signature, normalizedPromptText, promptRecords);
-    if (matched) {
+    const matched = matchCompanyPromptText(text, promptRecords, {
+      minScore: COMPANY_PROMPT_DIRECT_MATCH_MIN_SCORE,
+      minGap: COMPANY_PROMPT_DIRECT_MATCH_MIN_GAP
+    });
+    if (matched?.matched) {
       return {
         ...matched,
         messageIndex: i,
-        signature,
+        signature: matched.messageSignature || '',
         hasAssistantReplyAfter: typeof entry?.hasAssistantReplyAfter === 'boolean'
           ? entry.hasAssistantReplyAfter
           : null,
@@ -11994,6 +13822,7 @@ function formatDispatchUiSummary(dispatchOutcome) {
     : null;
   const hasConversationUrl = dispatch.hasConversationUrl === true;
   const conversationSnapshotRefreshed = dispatch.conversationSnapshotRefreshed === true;
+  const dbVerification = normalizeWatchlistDbVerification(dispatch.dbVerification);
   const diagnosticParts = [];
   if (failureStage) diagnosticParts.push(`stage=${failureStage}`);
   if (failureReason) diagnosticParts.push(`reason=${failureReason}`);
@@ -12008,6 +13837,9 @@ function formatDispatchUiSummary(dispatchOutcome) {
   if (conversationLogCount !== null) diagnosticParts.push(`convLogs=${conversationLogCount}`);
   if (hasConversationUrl) diagnosticParts.push('convUrl=1');
   if (conversationSnapshotRefreshed) diagnosticParts.push('convRefresh=1');
+  if (dbVerification?.attempted) {
+    diagnosticParts.push(`dbVerify=${dbVerification.success ? 'ok' : (dbVerification.state || 'failed')}`);
+  }
   const diagnosticSuffix = diagnosticParts.length > 0
     ? `, diag=[${diagnosticParts.join(', ')}]`
     : '';
@@ -12156,6 +13988,7 @@ function buildPersistenceUiSummary(options = {}) {
   );
   const dispatchFlowUiLines = buildDispatchProcessLogUiLines(dispatchProcessLog);
   const dispatchSummary = formatDispatchUiSummary(dispatch);
+  const dbVerificationSummaryLine = formatWatchlistDbVerificationSummary(dispatch?.dbVerification);
   const conversationSummaryLine = buildConversationAnalysisUiLine(saveResult, dispatch);
 
   if (!hasResponse) {
@@ -12187,6 +14020,7 @@ function buildPersistenceUiSummary(options = {}) {
       storageSummary,
       ...(bridgeSummary ? [bridgeSummary] : []),
       dispatchSummary,
+      ...(dbVerificationSummaryLine ? [dbVerificationSummaryLine] : []),
       ...(conversationSummaryLine ? [conversationSummaryLine] : []),
       ...dispatchFlowUiLines
     ];
@@ -12218,6 +14052,7 @@ function buildPersistenceUiSummary(options = {}) {
     storageSummary,
     ...(bridgeSummary ? [bridgeSummary] : []),
     dispatchSummary,
+    ...(dbVerificationSummaryLine ? [dbVerificationSummaryLine] : []),
     ...(conversationSummaryLine ? [conversationSummaryLine] : []),
     ...dispatchFlowUiLines
   ];
@@ -12772,6 +14607,10 @@ function normalizeWatchlistDispatchPayload(response) {
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
+  const sourceUrl = typeof response.sourceUrl === 'string' ? response.sourceUrl.trim() : '';
+  if (sourceUrl) {
+    payload.sourceUrl = sourceUrl;
+  }
   const conversationLogs = normalizeConversationLogSnapshot(
     response.conversationLogs,
     RESPONSE_CONVERSATION_LOG_MAX_ITEMS
@@ -12822,6 +14661,10 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (conversationUrl) {
     payload.conversationUrl = conversationUrl;
   }
+  const sourceUrl = typeof rawPayload.sourceUrl === 'string' ? rawPayload.sourceUrl.trim() : '';
+  if (sourceUrl) {
+    payload.sourceUrl = sourceUrl;
+  }
   const conversationLogs = normalizeConversationLogSnapshot(
     rawPayload.conversationLogs,
     RESPONSE_CONVERSATION_LOG_MAX_ITEMS
@@ -12844,6 +14687,26 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
 function buildProblemLogDispatchText(entry, installationId = '') {
   if (!entry || typeof entry !== 'object') return '';
   const parts = [];
+  const stageProgress = resolveProblemLogStageProgress({
+    status: entry.status,
+    reason: entry.reason,
+    error: entry.error,
+    statusText: entry.statusText,
+    currentPrompt: entry.currentPrompt,
+    totalPrompts: entry.totalPrompts,
+    stageIndex: entry.stageIndex,
+    stageName: entry.stageName
+  });
+  const dataGapState = inferProblemLogDataGapState({
+    status: entry.status,
+    reason: entry.reason,
+    error: entry.error,
+    statusText: entry.statusText,
+    message: typeof entry.message === 'string' ? entry.message : '',
+    explicitDetected: entry.dataGapDetected === true,
+    explicitSignal: typeof entry.dataGapSignal === 'string' ? entry.dataGapSignal : '',
+    explicitMissingInputs: typeof entry.dataGapMissingInputs === 'string' ? entry.dataGapMissingInputs : ''
+  });
   const supportId = typeof installationId === 'string' ? installationId.trim() : '';
   if (supportId) parts.push(`support_id=${supportId}`);
   if (entry?.category) parts.push(`category=${entry.category}`);
@@ -12855,11 +14718,18 @@ function buildProblemLogDispatchText(entry, installationId = '') {
   if (entry?.status) parts.push(`status=${entry.status}`);
   if (entry?.reason) parts.push(`reason=${entry.reason}`);
   if (entry?.error) parts.push(`error=${entry.error}`);
-  if (entry?.stageName) parts.push(`stage=${entry.stageName}`);
-  if (Number.isInteger(entry?.currentPrompt) || Number.isInteger(entry?.totalPrompts)) {
-    const currentPrompt = Number.isInteger(entry?.currentPrompt) ? entry.currentPrompt : '?';
-    const totalPrompts = Number.isInteger(entry?.totalPrompts) ? entry.totalPrompts : '?';
+  if (stageProgress.stageName) parts.push(`stage=${stageProgress.stageName}`);
+  if (stageProgress.currentPrompt !== null || stageProgress.totalPrompts !== null) {
+    const currentPrompt = stageProgress.currentPrompt !== null ? stageProgress.currentPrompt : '?';
+    const totalPrompts = stageProgress.totalPrompts !== null ? stageProgress.totalPrompts : '?';
     parts.push(`prompt=${currentPrompt}/${totalPrompts}`);
+  }
+  if (stageProgress.nextPrompt !== null) parts.push(`next_prompt=${stageProgress.nextPrompt}`);
+  if (stageProgress.nextStageName) parts.push(`next_stage=${stageProgress.nextStageName}`);
+  if (dataGapState.detected) {
+    parts.push('data_gap=1');
+    if (dataGapState.signal) parts.push(`data_gap_signal=${dataGapState.signal}`);
+    if (dataGapState.missingInputs) parts.push(`data_gap_missing_inputs=${dataGapState.missingInputs}`);
   }
   const chatUrl = normalizeChatConversationUrl(
     typeof entry?.chatUrl === 'string'
@@ -12955,6 +14825,40 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
   if (normalizedEntry.source && normalizedEntry.source !== PROBLEM_LOG_REMOTE_SOURCE) {
     sourceParts.push(`origin:${normalizedEntry.source}`);
   }
+  const stageProgress = resolveProblemLogStageProgress({
+    status: normalizedEntry.status,
+    reason: normalizedEntry.reason,
+    error: normalizedEntry.error,
+    statusText: normalizedEntry.statusText,
+    currentPrompt: normalizedEntry.currentPrompt,
+    totalPrompts: normalizedEntry.totalPrompts,
+    stageIndex: normalizedEntry.stageIndex,
+    stageName: normalizedEntry.stageName
+  });
+  const dataGapState = inferProblemLogDataGapState({
+    status: normalizedEntry.status,
+    reason: normalizedEntry.reason,
+    error: normalizedEntry.error,
+    statusText: normalizedEntry.statusText,
+    message: normalizedEntry.message || '',
+    explicitDetected: normalizedEntry.dataGapDetected === true,
+    explicitSignal: normalizedEntry.dataGapSignal || '',
+    explicitMissingInputs: normalizedEntry.dataGapMissingInputs || ''
+  });
+  const isProcessMonitorStage = problemLogSourceMatches(normalizedEntry.source, 'process-monitor')
+    && (normalizedEntry.category === 'process_stream' || normalizedEntry.category === 'process_state');
+  const dispatchCurrentPrompt = isProcessMonitorStage
+    && Number.isInteger(stageProgress.nextPrompt)
+    ? stageProgress.nextPrompt
+    : stageProgress.currentPrompt;
+  const dispatchStageIndex = isProcessMonitorStage
+    && Number.isInteger(stageProgress.nextStageIndex)
+    ? stageProgress.nextStageIndex
+    : stageProgress.stageIndex;
+  const dispatchStageName = isProcessMonitorStage
+    && stageProgress.nextStageName
+    ? stageProgress.nextStageName
+    : stageProgress.stageName;
   const stage = {
     title: normalizedEntry.title || '',
     source: normalizedEntry.source || '',
@@ -12964,10 +14868,19 @@ function buildProblemLogDispatchPayload(entry, installationId = '') {
     reason: normalizedEntry.reason || '',
     error: normalizedEntry.error || '',
     supportId: supportId || '',
-    stageName: normalizedEntry.stageName || '',
-    currentPrompt: Number.isInteger(normalizedEntry.currentPrompt) ? normalizedEntry.currentPrompt : null,
-    totalPrompts: Number.isInteger(normalizedEntry.totalPrompts) ? normalizedEntry.totalPrompts : null,
-    stageIndex: Number.isInteger(normalizedEntry.stageIndex) ? normalizedEntry.stageIndex : null,
+    stageName: dispatchStageName || '',
+    currentPrompt: Number.isInteger(dispatchCurrentPrompt) ? dispatchCurrentPrompt : null,
+    totalPrompts: Number.isInteger(stageProgress.totalPrompts) ? stageProgress.totalPrompts : null,
+    stageIndex: Number.isInteger(dispatchStageIndex) ? dispatchStageIndex : null,
+    currentPromptObserved: Number.isInteger(stageProgress.currentPrompt) ? stageProgress.currentPrompt : null,
+    stageIndexObserved: Number.isInteger(stageProgress.stageIndex) ? stageProgress.stageIndex : null,
+    stageNameObserved: stageProgress.stageName || '',
+    nextPrompt: Number.isInteger(stageProgress.nextPrompt) ? stageProgress.nextPrompt : null,
+    nextStageIndex: Number.isInteger(stageProgress.nextStageIndex) ? stageProgress.nextStageIndex : null,
+    nextStageName: stageProgress.nextStageName || '',
+    dataGapDetected: dataGapState.detected === true ? true : null,
+    dataGapSignal: dataGapState.signal || '',
+    dataGapMissingInputs: dataGapState.missingInputs || '',
     sourceUrl: normalizeProblemLogSourceUrl(
       typeof normalizedEntry.sourceUrl === 'string' ? normalizedEntry.sourceUrl : ''
     ),
@@ -13275,6 +15188,139 @@ function withWatchlistOutboxMutationLock(task) {
   );
   watchlistOutboxMutationQueue = next.catch(() => {});
   return next;
+}
+
+function normalizeWatchlistVerifyQueuePayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const responseId = typeof rawPayload.responseId === 'string' && rawPayload.responseId.trim()
+    ? rawPayload.responseId.trim()
+    : '';
+  if (!responseId) return null;
+  const normalized = {
+    runId: typeof rawPayload.runId === 'string' ? rawPayload.runId.trim() : '',
+    responseId,
+    source: typeof rawPayload.source === 'string' ? rawPayload.source.trim() : '',
+    analysisType: typeof rawPayload.analysisType === 'string' ? rawPayload.analysisType.trim() : '',
+    conversationUrl: normalizeChatConversationUrl(
+      typeof rawPayload.conversationUrl === 'string' ? rawPayload.conversationUrl : ''
+    )
+  };
+  if (Number.isInteger(rawPayload.conversationLogCount) && rawPayload.conversationLogCount >= 0) {
+    normalized.conversationLogCount = rawPayload.conversationLogCount;
+  } else if (Array.isArray(rawPayload.conversationLogs)) {
+    normalized.conversationLogCount = rawPayload.conversationLogs.length;
+  }
+  if (rawPayload.stage && typeof rawPayload.stage === 'object' && !Array.isArray(rawPayload.stage)) {
+    normalized.stage = {};
+  }
+  return normalized;
+}
+
+function getWatchlistVerifyQueueDedupKey(item) {
+  const payload = item?.payload && typeof item.payload === 'object' ? item.payload : null;
+  return typeof payload?.responseId === 'string' ? payload.responseId.trim() : '';
+}
+
+function sanitizeWatchlistVerifyQueueItems(rawItems) {
+  const items = Array.isArray(rawItems) ? rawItems : [];
+  const deduped = new Map();
+  for (const item of items) {
+    if (!item || typeof item !== 'object') continue;
+    const payload = normalizeWatchlistVerifyQueuePayload(item.payload);
+    if (!payload) continue;
+    const key = payload.responseId;
+    deduped.set(key, {
+      payload,
+      eventId: Number.isInteger(item.eventId) ? item.eventId : null,
+      intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl.trim() : '',
+      status: Number.isInteger(item.status) ? item.status : null,
+      queuedAt: Number.isInteger(item.queuedAt) ? item.queuedAt : Date.now(),
+      attemptCount: Number.isInteger(item.attemptCount) && item.attemptCount >= 0 ? item.attemptCount : 0,
+      nextAttemptAt: Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0,
+      lastError: typeof item.lastError === 'string' ? item.lastError : ''
+    });
+  }
+  const normalized = Array.from(deduped.values());
+  if (normalized.length <= WATCHLIST_VERIFY_QUEUE.maxItems) {
+    return normalized;
+  }
+  return normalized.slice(normalized.length - WATCHLIST_VERIFY_QUEUE.maxItems);
+}
+
+async function readWatchlistVerifyQueue() {
+  const result = await chrome.storage.local.get([WATCHLIST_VERIFY_QUEUE.storageKey]);
+  return sanitizeWatchlistVerifyQueueItems(result?.[WATCHLIST_VERIFY_QUEUE.storageKey]);
+}
+
+async function writeWatchlistVerifyQueue(items) {
+  const normalized = sanitizeWatchlistVerifyQueueItems(items);
+  await chrome.storage.local.set({
+    [WATCHLIST_VERIFY_QUEUE.storageKey]: normalized
+  });
+  return normalized;
+}
+
+function withWatchlistVerifyQueueMutationLock(task) {
+  const taskFn = typeof task === 'function' ? task : null;
+  if (!taskFn) {
+    return Promise.reject(new Error('verify_queue_mutation_task_required'));
+  }
+  const next = watchlistVerifyQueueMutationQueue.then(
+    () => taskFn(),
+    () => taskFn()
+  );
+  watchlistVerifyQueueMutationQueue = next.catch(() => {});
+  return next;
+}
+
+function shouldRetryWatchlistDbVerification(rawVerification) {
+  const verification = normalizeWatchlistDbVerification(rawVerification);
+  if (!verification || isWatchlistDbVerificationSuccessful(verification)) return false;
+  const state = typeof verification.state === 'string' ? verification.state.trim().toLowerCase() : '';
+  if (!state || state === 'verify_error' || state === 'verify_unavailable' || state === 'verify_invalid_response') {
+    return true;
+  }
+  if (state === 'not_found') return true;
+  const httpMatch = /^verify_http_(\d{3})$/.exec(state);
+  if (!httpMatch) return false;
+  const status = Number.parseInt(httpMatch[1], 10);
+  return status === 408 || status === 409 || status === 425 || status === 429 || status >= 500;
+}
+
+async function enqueueWatchlistDispatchVerification(rawPayload, details = {}) {
+  const payload = normalizeWatchlistVerifyQueuePayload(rawPayload);
+  if (!payload) {
+    return { skipped: true, reason: 'invalid_verify_payload' };
+  }
+  const trace = buildCopyTrace(payload.runId || '', payload.responseId || '');
+  const saved = await withWatchlistVerifyQueueMutationLock(async () => {
+    const current = await readWatchlistVerifyQueue();
+    const next = [
+      ...current.filter((item) => getWatchlistVerifyQueueDedupKey(item) !== payload.responseId),
+      {
+        payload,
+        eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+        intakeUrl: typeof details?.intakeUrl === 'string' ? details.intakeUrl.trim() : '',
+        status: Number.isInteger(details?.status) ? details.status : null,
+        queuedAt: Date.now(),
+        attemptCount: 0,
+        nextAttemptAt: 0,
+        lastError: ''
+      }
+    ];
+    return writeWatchlistVerifyQueue(next);
+  });
+  emitWatchlistDispatchProcessLog('info', 'verify_queue_queued', 'Dispatch verification queued for background processing', {
+    trace,
+    eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+    queueSize: saved.length
+  });
+  ensureWatchlistDispatchVerificationAlarm();
+  return {
+    queued: true,
+    responseId: payload.responseId,
+    queueSize: saved.length
+  };
 }
 
 function withResponseStorageMutationLock(task) {
@@ -13623,6 +15669,98 @@ function isLocalWatchlistLoopbackHost(rawHost) {
   return host === 'localhost' || host === '127.0.0.1' || host === '::1';
 }
 
+function normalizeRemoteRunnerTransportMode(rawMode) {
+  const mode = typeof rawMode === 'string' ? rawMode.trim().toLowerCase() : '';
+  return mode === REMOTE_RUNNER_TRANSPORT.LOCAL
+    ? REMOTE_RUNNER_TRANSPORT.LOCAL
+    : REMOTE_RUNNER_TRANSPORT.WATCHLIST;
+}
+
+function isPrivateIpv4Host(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim() : '';
+  const match = /^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/.exec(host);
+  if (!match) return false;
+  const octets = match.slice(1).map((item) => Number.parseInt(item, 10));
+  if (octets.some((item) => !Number.isInteger(item) || item < 0 || item > 255)) return false;
+  const [a, b] = octets;
+  if (a === 10 || a === 127) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true;
+  return false;
+}
+
+function isPrivateIpv6Host(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim().toLowerCase() : '';
+  if (!host) return false;
+  if (host === '::1' || host === '[::1]') return true;
+  const normalized = host.replace(/^\[/, '').replace(/\]$/, '');
+  return normalized.startsWith('fc')
+    || normalized.startsWith('fd')
+    || normalized.startsWith('fe8')
+    || normalized.startsWith('fe9')
+    || normalized.startsWith('fea')
+    || normalized.startsWith('feb');
+}
+
+function isSafeLocalRemoteRunnerHost(rawHost) {
+  const host = typeof rawHost === 'string' ? rawHost.trim().toLowerCase() : '';
+  if (!host) return false;
+  if (host === 'localhost') return true;
+  if (host.endsWith('.local') || host.endsWith('.lan') || host.endsWith('.home.arpa') || host.endsWith('.ts.net')) {
+    return true;
+  }
+  return isPrivateIpv4Host(host) || isPrivateIpv6Host(host);
+}
+
+function normalizeLocalRemoteRunnerBaseUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!value) return '';
+  try {
+    const parsed = new URL(value);
+    const protocol = String(parsed.protocol || '').toLowerCase();
+    const hostname = String(parsed.hostname || '').toLowerCase();
+    if (protocol !== 'http:' && protocol !== 'https:') return '';
+    if (!isSafeLocalRemoteRunnerHost(hostname)) return '';
+    parsed.pathname = '';
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString().replace(/\/$/, '');
+  } catch {
+    return '';
+  }
+}
+
+function resolveRemoteRunnerLocalBaseUrl(settings = {}, options = {}) {
+  const requestedBaseUrl = typeof options?.baseUrl === 'string'
+    ? options.baseUrl.trim()
+    : '';
+  const rawValue = requestedBaseUrl || (
+    typeof settings?.localBaseUrl === 'string'
+      ? settings.localBaseUrl
+      : ''
+  );
+  const normalized = normalizeLocalRemoteRunnerBaseUrl(rawValue);
+  if (normalized) return normalized;
+  return options?.allowDefault === true ? LOCAL_REMOTE_RUNNER.defaultBaseUrl : '';
+}
+
+function buildLocalRemoteRunnerUrl(baseUrl, endpointPath) {
+  const normalizedBaseUrl = normalizeLocalRemoteRunnerBaseUrl(baseUrl);
+  const safeEndpointPath = typeof endpointPath === 'string' ? endpointPath.trim() : '';
+  if (!normalizedBaseUrl || !safeEndpointPath) return '';
+  try {
+    const url = new URL(normalizedBaseUrl);
+    url.pathname = safeEndpointPath.startsWith('/') ? safeEndpointPath : `/${safeEndpointPath}`;
+    url.search = '';
+    url.hash = '';
+    return url.toString();
+  } catch {
+    return '';
+  }
+}
+
 function normalizeWatchlistIntakeUrl(rawUrl) {
   const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
   if (!value) return '';
@@ -13714,6 +15852,198 @@ function buildWatchlistProblemLogUrlCandidates(primaryIntakeUrl) {
     .map((candidate) => convertWatchlistIntakeUrlToProblemLogsUrl(candidate))
     .filter((candidate) => typeof candidate === 'string' && candidate.trim());
   return [...new Set(candidates)];
+}
+
+function convertWatchlistIntakeUrlToVerifyUrl(rawIntakeUrl) {
+  const normalized = normalizeWatchlistIntakeUrl(rawIntakeUrl);
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    const pathname = typeof parsed.pathname === 'string' ? parsed.pathname : '';
+    if (/\/economist-response\/?$/i.test(pathname)) {
+      parsed.pathname = pathname.replace(/\/economist-response\/?$/i, '/economist-response/verify');
+    } else {
+      const basePath = pathname.replace(/\/+$/, '');
+      parsed.pathname = `${basePath}${WATCHLIST_RESPONSE_VERIFY_PATH.startsWith('/') ? WATCHLIST_RESPONSE_VERIFY_PATH : `/${WATCHLIST_RESPONSE_VERIFY_PATH}`}`;
+    }
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function buildWatchlistVerifyUrlCandidates(primaryIntakeUrl) {
+  const candidates = buildWatchlistDispatchUrlCandidates(primaryIntakeUrl)
+    .map((candidate) => convertWatchlistIntakeUrlToVerifyUrl(candidate))
+    .filter((candidate) => typeof candidate === 'string' && candidate.trim());
+  return [...new Set(candidates)];
+}
+
+function convertWatchlistIntakeUrlToRemoteApiUrl(rawIntakeUrl, targetPath) {
+  const normalized = normalizeWatchlistIntakeUrl(rawIntakeUrl);
+  const safeTargetPath = typeof targetPath === 'string' ? targetPath.trim() : '';
+  if (!normalized || !safeTargetPath) return '';
+  try {
+    const parsed = new URL(normalized);
+    parsed.pathname = safeTargetPath.startsWith('/') ? safeTargetPath : `/${safeTargetPath}`;
+    parsed.search = '';
+    parsed.hash = '';
+    return parsed.toString();
+  } catch {
+    return '';
+  }
+}
+
+function buildWatchlistRemoteApiUrlCandidates(primaryIntakeUrl, targetPath) {
+  const candidates = buildWatchlistDispatchUrlCandidates(primaryIntakeUrl)
+    .map((candidate) => convertWatchlistIntakeUrlToRemoteApiUrl(candidate, targetPath))
+    .filter((candidate) => typeof candidate === 'string' && candidate.trim());
+  return [...new Set(candidates)];
+}
+
+function normalizeWatchlistDbVerification(rawVerification) {
+  if (!rawVerification || typeof rawVerification !== 'object') return null;
+  const requiredFieldsRaw = Array.isArray(rawVerification.requiredFields)
+    ? rawVerification.requiredFields
+    : (Array.isArray(rawVerification.required_fields) ? rawVerification.required_fields : []);
+  const missingFieldsRaw = Array.isArray(rawVerification.missingFields)
+    ? rawVerification.missingFields
+    : (Array.isArray(rawVerification.missing_fields) ? rawVerification.missing_fields : []);
+  const mismatchFieldsRaw = Array.isArray(rawVerification.mismatchFields)
+    ? rawVerification.mismatchFields
+    : (Array.isArray(rawVerification.mismatch_fields) ? rawVerification.mismatch_fields : []);
+  const requiredFields = requiredFieldsRaw
+    .filter((field) => typeof field === 'string' && field.trim())
+    .map((field) => field.trim())
+    .slice(0, 16);
+  const missingFields = missingFieldsRaw
+    .filter((field) => typeof field === 'string' && field.trim())
+    .map((field) => field.trim())
+    .slice(0, 16);
+  const mismatchFields = mismatchFieldsRaw
+    .filter((field) => typeof field === 'string' && field.trim())
+    .map((field) => field.trim())
+    .slice(0, 16);
+  const state = typeof rawVerification.state === 'string' && rawVerification.state.trim()
+    ? rawVerification.state.trim()
+    : '';
+  const reason = typeof rawVerification.reason === 'string' && rawVerification.reason.trim()
+    ? rawVerification.reason.trim()
+    : '';
+  const ingestStatus = typeof rawVerification.ingestStatus === 'string' && rawVerification.ingestStatus.trim()
+    ? rawVerification.ingestStatus.trim()
+    : (
+      typeof rawVerification.ingest_status === 'string' && rawVerification.ingest_status.trim()
+        ? rawVerification.ingest_status.trim()
+        : ''
+    );
+  const responseId = typeof rawVerification.responseId === 'string' && rawVerification.responseId.trim()
+    ? rawVerification.responseId.trim()
+    : (
+      typeof rawVerification.response_id === 'string' && rawVerification.response_id.trim()
+        ? rawVerification.response_id.trim()
+        : ''
+    );
+  const eventId = Number.isInteger(rawVerification.eventId)
+    ? rawVerification.eventId
+    : (Number.isInteger(rawVerification.event_id) ? rawVerification.event_id : null);
+  const checkedAt = Number.isInteger(rawVerification.checkedAt)
+    ? rawVerification.checkedAt
+    : Date.now();
+  return {
+    attempted: rawVerification.attempted === true || rawVerification.success === true || rawVerification.ok === true || !!state,
+    success: rawVerification.success === true || rawVerification.ok === true,
+    found: rawVerification.found === true,
+    state,
+    reason,
+    responseId,
+    eventId,
+    ingestStatus,
+    requiredFields,
+    missingFields,
+    mismatchFields,
+    checkedAt
+  };
+}
+
+function isWatchlistDbVerificationSuccessful(rawVerification) {
+  const verification = normalizeWatchlistDbVerification(rawVerification);
+  return !!(verification && verification.attempted && verification.success);
+}
+
+function buildWatchlistDbVerificationRequest(payload = {}, details = {}) {
+  const responseId = typeof payload?.responseId === 'string' && payload.responseId.trim()
+    ? payload.responseId.trim()
+    : '';
+  const eventId = Number.isInteger(details?.eventId) ? details.eventId : null;
+  if (!responseId && eventId === null) return null;
+
+  const conversationLogs = Array.isArray(payload?.conversationLogs) ? payload.conversationLogs : [];
+  const explicitConversationLogCount = Number.isInteger(payload?.conversationLogCount)
+    ? Math.max(0, payload.conversationLogCount)
+    : null;
+  const conversationLogCount = explicitConversationLogCount !== null
+    ? explicitConversationLogCount
+    : conversationLogs.length;
+  const expected = {
+    runId: typeof payload?.runId === 'string' ? payload.runId.trim() : '',
+    source: typeof payload?.source === 'string' ? payload.source.trim() : '',
+    analysisType: typeof payload?.analysisType === 'string' ? payload.analysisType.trim() : '',
+    conversationUrl: normalizeChatConversationUrl(typeof payload?.conversationUrl === 'string' ? payload.conversationUrl : ''),
+    expectStage: !!(payload?.stage && typeof payload.stage === 'object' && !Array.isArray(payload.stage)),
+    expectText: true,
+    expectTimestamp: true
+  };
+  if (conversationLogCount > 0) {
+    expected.conversationLogCount = conversationLogCount;
+  }
+
+  return {
+    responseId,
+    ...(eventId !== null ? { eventId } : {}),
+    expected
+  };
+}
+
+function formatWatchlistDbVerificationSummary(rawVerification) {
+  const verification = normalizeWatchlistDbVerification(rawVerification);
+  if (!verification || !verification.attempted) return '';
+  if (verification.success) {
+    const meta = [];
+    if (verification.ingestStatus) meta.push(`status=${verification.ingestStatus}`);
+    if (Number.isInteger(verification.eventId)) meta.push(`event=${verification.eventId}`);
+    return `DB verify: OK${meta.length > 0 ? ` (${meta.join(', ')})` : ''}`;
+  }
+  const details = [];
+  if (verification.state) details.push(verification.state);
+  if (verification.ingestStatus) details.push(`status=${verification.ingestStatus}`);
+  if (verification.missingFields.length > 0) details.push(`missing=${verification.missingFields.join('+')}`);
+  if (verification.mismatchFields.length > 0) details.push(`mismatch=${verification.mismatchFields.join('+')}`);
+  return `DB verify: ${details.length > 0 ? details.join(', ') : (verification.reason || 'failed')}`;
+}
+
+function buildQueuedWatchlistDbVerification(responseId = '', details = {}) {
+  const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+  return {
+    attempted: true,
+    success: false,
+    found: false,
+    state: typeof details?.state === 'string' && details.state.trim()
+      ? details.state.trim()
+      : 'verify_queued',
+    reason: typeof details?.reason === 'string' && details.reason.trim()
+      ? details.reason.trim()
+      : 'background_verify_queued',
+    responseId: normalizedResponseId,
+    eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+    ingestStatus: '',
+    requiredFields: [],
+    missingFields: [],
+    mismatchFields: [],
+    checkedAt: Date.now()
+  };
 }
 
 function parseRemoteProblemLogTimestamp(...values) {
@@ -13809,6 +16139,12 @@ function normalizeRemoteProblemLogEntries(rawItems) {
       totalPrompts: Number.isInteger(stage.totalPrompts) ? stage.totalPrompts : null,
       stageIndex: Number.isInteger(stage.stageIndex) ? stage.stageIndex : null,
       stageName,
+      nextPrompt: Number.isInteger(stage.nextPrompt) ? stage.nextPrompt : null,
+      nextStageIndex: Number.isInteger(stage.nextStageIndex) ? stage.nextStageIndex : null,
+      nextStageName: trimProblemLogText(stage.nextStageName || '', 120),
+      dataGapDetected: stage.dataGapDetected === true,
+      dataGapSignal: trimProblemLogText(stage.dataGapSignal || '', 80),
+      dataGapMissingInputs: trimProblemLogText(stage.dataGapMissingInputs || '', 320),
       tabId: Number.isInteger(stage.tabId) ? stage.tabId : null,
       windowId: Number.isInteger(stage.windowId) ? stage.windowId : null,
       chatUrl: chatUrl || '',
@@ -13948,6 +16284,260 @@ async function fetchRemoteProblemLogs(options = {}) {
     intakeUrl: lastIntakeUrl,
     supportId
   };
+}
+
+async function verifyWatchlistDispatchStoredRecord(payload, details = {}, dispatchConfigOverride = null) {
+  const verificationRequest = buildWatchlistDbVerificationRequest(payload, details);
+  if (!verificationRequest) {
+    return {
+      attempted: false,
+      success: false,
+      state: 'verify_missing_identity',
+      reason: 'verify_missing_identity',
+      found: false,
+      responseId: typeof payload?.responseId === 'string' ? payload.responseId.trim() : '',
+      eventId: Number.isInteger(details?.eventId) ? details.eventId : null,
+      requiredFields: [],
+      missingFields: [],
+      mismatchFields: [],
+      checkedAt: Date.now()
+    };
+  }
+
+  const dispatchConfig = dispatchConfigOverride && typeof dispatchConfigOverride === 'object'
+    ? dispatchConfigOverride
+    : await resolveWatchlistDispatchConfiguration();
+  if (!dispatchConfig?.ok) {
+    return {
+      attempted: false,
+      success: false,
+      state: 'verify_config_missing',
+      reason: dispatchConfig?.reason || 'missing_dispatch_credentials',
+      found: false,
+      responseId: verificationRequest.responseId || '',
+      eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+      requiredFields: [],
+      missingFields: [],
+      mismatchFields: [],
+      checkedAt: Date.now()
+    };
+  }
+
+  const preferredIntakeUrl = typeof details?.intakeUrl === 'string' && details.intakeUrl.trim()
+    ? details.intakeUrl.trim()
+    : dispatchConfig.intakeUrl;
+  const urlCandidates = buildWatchlistVerifyUrlCandidates(preferredIntakeUrl);
+  if (urlCandidates.length === 0) {
+    return {
+      attempted: false,
+      success: false,
+      state: 'verify_endpoint_missing',
+      reason: 'verify_endpoint_missing',
+      found: false,
+      responseId: verificationRequest.responseId || '',
+      eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+      requiredFields: [],
+      missingFields: [],
+      mismatchFields: [],
+      checkedAt: Date.now()
+    };
+  }
+
+  const body = JSON.stringify(verificationRequest);
+  const trace = buildCopyTrace(
+    typeof payload?.runId === 'string' ? payload.runId.trim() : '',
+    verificationRequest.responseId || ''
+  );
+  const timeoutMs = Number.isInteger(details?.timeoutMs) && details.timeoutMs > 0
+    ? Math.max(1000, details.timeoutMs)
+    : Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
+  const verifyMaxAttempts = Number.isInteger(details?.maxAttempts) && details.maxAttempts > 0
+    ? Math.max(1, Math.min(details.maxAttempts, WATCHLIST_DB_VERIFY_MAX_ATTEMPTS))
+    : WATCHLIST_DB_VERIFY_MAX_ATTEMPTS;
+  let lastVerification = {
+    attempted: true,
+    success: false,
+    state: 'verify_unavailable',
+    reason: 'verify_unavailable',
+    found: false,
+    responseId: verificationRequest.responseId || '',
+    eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+    requiredFields: [],
+    missingFields: [],
+    mismatchFields: [],
+    checkedAt: Date.now()
+  };
+
+  emitWatchlistDispatchProcessLog('info', 'verify_start', 'Starting DB verification after dispatch', {
+    trace,
+    responseId: verificationRequest.responseId || '',
+    eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null
+  });
+
+  for (const candidate of urlCandidates) {
+    for (let attempt = 1; attempt <= verifyMaxAttempts; attempt += 1) {
+      const controller = new AbortController();
+      let timeoutId = null;
+      try {
+        const endpoint = new URL(candidate);
+        const timestamp = Math.floor(Date.now() / 1000).toString();
+        const nonce = generateWatchlistNonce();
+        const bodyHash = await sha256HexForDispatch(body);
+        const canonical = buildWatchlistCanonicalString({
+          method: 'POST',
+          path: endpoint.pathname || '/',
+          timestamp,
+          nonce,
+          bodyHash
+        });
+        const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
+
+        console.log('[copy-flow] [dispatch:verify-start]', {
+          trace,
+          attempt,
+          maxAttempts: verifyMaxAttempts,
+          verifyUrl: endpoint.toString(),
+          responseId: verificationRequest.responseId || '',
+          eventId: verificationRequest.eventId ?? null
+        });
+
+        const response = await Promise.race([
+          fetch(endpoint.toString(), {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              'X-Watchlist-Key-Id': dispatchConfig.keyId,
+              'X-Watchlist-Timestamp': timestamp,
+              'X-Watchlist-Nonce': nonce,
+              'X-Watchlist-Signature': signature,
+            },
+            body,
+            signal: controller.signal
+          }),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              try {
+                controller.abort();
+              } catch {
+                // Ignore abort exceptions in timeout branch.
+              }
+              reject(createDispatchTimeoutError(timeoutMs));
+            }, timeoutMs);
+          })
+        ]);
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+
+        if (!response.ok) {
+          const errorText = await response.text().catch(() => '');
+          lastVerification = {
+            attempted: true,
+            success: false,
+            state: `verify_http_${response.status}`,
+            reason: truncateDispatchLogText(errorText || `http_${response.status}`, 180) || `http_${response.status}`,
+            found: false,
+            responseId: verificationRequest.responseId || '',
+            eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+            requiredFields: [],
+            missingFields: [],
+            mismatchFields: [],
+            checkedAt: Date.now()
+          };
+          if (response.status === 401 || response.status === 403 || response.status === 404) {
+            break;
+          }
+          continue;
+        }
+
+        const responseJson = await response.json().catch(() => ({}));
+        const normalizedVerification = normalizeWatchlistDbVerification(responseJson) || {
+          attempted: true,
+          success: false,
+          state: 'verify_invalid_response',
+          reason: 'verify_invalid_response',
+          found: false,
+          responseId: verificationRequest.responseId || '',
+          eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+          requiredFields: [],
+          missingFields: [],
+          mismatchFields: [],
+          checkedAt: Date.now()
+        };
+        lastVerification = normalizedVerification;
+        if (normalizedVerification.success) {
+          console.log('[copy-flow] [dispatch:verify-ok]', {
+            trace,
+            responseId: normalizedVerification.responseId || verificationRequest.responseId || '',
+            eventId: normalizedVerification.eventId ?? verificationRequest.eventId ?? null,
+            ingestStatus: normalizedVerification.ingestStatus || ''
+          });
+          emitWatchlistDispatchProcessLog('info', 'verify_ok', 'DB verification confirmed stored response', {
+            trace,
+            responseId: normalizedVerification.responseId || verificationRequest.responseId || '',
+            eventId: normalizedVerification.eventId ?? verificationRequest.eventId ?? null,
+            ingestStatus: normalizedVerification.ingestStatus || ''
+          });
+          return normalizedVerification;
+        }
+
+        const retryableNotFound = normalizedVerification.state === 'not_found'
+          && attempt < verifyMaxAttempts;
+        if (retryableNotFound) {
+          await sleep(WATCHLIST_DB_VERIFY_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+        break;
+      } catch (error) {
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+        lastVerification = {
+          attempted: true,
+          success: false,
+          state: 'verify_error',
+          reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_error',
+          found: false,
+          responseId: verificationRequest.responseId || '',
+          eventId: Number.isInteger(verificationRequest.eventId) ? verificationRequest.eventId : null,
+          requiredFields: [],
+          missingFields: [],
+          mismatchFields: [],
+          checkedAt: Date.now()
+        };
+        if (attempt < verifyMaxAttempts) {
+          await sleep(WATCHLIST_DB_VERIFY_RETRY_DELAY_MS * attempt);
+          continue;
+        }
+      }
+      break;
+    }
+    if (isWatchlistDbVerificationSuccessful(lastVerification)) {
+      return lastVerification;
+    }
+  }
+
+  console.warn('[copy-flow] [dispatch:verify-failed]', {
+    trace,
+    responseId: lastVerification.responseId || verificationRequest.responseId || '',
+    eventId: lastVerification.eventId ?? verificationRequest.eventId ?? null,
+    state: lastVerification.state || '',
+    reason: lastVerification.reason || '',
+    missingFields: lastVerification.missingFields || [],
+    mismatchFields: lastVerification.mismatchFields || []
+  });
+  emitWatchlistDispatchProcessLog('warn', 'verify_failed', 'DB verification did not confirm stored response', {
+    trace,
+    responseId: lastVerification.responseId || verificationRequest.responseId || '',
+    eventId: lastVerification.eventId ?? verificationRequest.eventId ?? null,
+    state: lastVerification.state || '',
+    reason: lastVerification.reason || '',
+    missingFields: Array.isArray(lastVerification.missingFields) ? lastVerification.missingFields.join(',') : '',
+    mismatchFields: Array.isArray(lastVerification.mismatchFields) ? lastVerification.mismatchFields.join(',') : ''
+  });
+  return lastVerification;
 }
 
 function shouldSwitchWatchlistUrlCandidateEarly({
@@ -14518,6 +17108,725 @@ function buildWatchlistCanonicalString({ method, path, timestamp, nonce, bodyHas
     String(nonce || ''),
     String(bodyHash || ''),
   ].join('\n');
+}
+
+function buildCompanyPromptHashSnapshot(promptChain = PROMPTS_COMPANY) {
+  const prompts = Array.isArray(promptChain)
+    ? promptChain.filter((item) => typeof item === 'string' && item.trim())
+    : [];
+  return prompts.length > 0
+    ? textFingerprint(prompts.join('\nPROMPT_SEPARATOR\n'))
+    : '';
+}
+
+async function getRemoteRunnerSettings() {
+  const snapshot = await chrome.storage.local.get([
+    REMOTE_RUNNER.enabledStorageKey,
+    REMOTE_RUNNER.nameStorageKey,
+    REMOTE_RUNNER.transportModeStorageKey,
+    REMOTE_RUNNER.localBaseUrlStorageKey,
+    REMOTE_RUNNER.controllerRunnerIdStorageKey,
+    REMOTE_RUNNER.controllerRunnerNameCachedStorageKey,
+  ]);
+  return {
+    enabled: snapshot?.[REMOTE_RUNNER.enabledStorageKey] === true,
+    runnerName: typeof snapshot?.[REMOTE_RUNNER.nameStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.nameStorageKey].trim()
+      : '',
+    transportMode: normalizeRemoteRunnerTransportMode(snapshot?.[REMOTE_RUNNER.transportModeStorageKey]),
+    localBaseUrl: typeof snapshot?.[REMOTE_RUNNER.localBaseUrlStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.localBaseUrlStorageKey].trim()
+      : '',
+    controllerRunnerId: typeof snapshot?.[REMOTE_RUNNER.controllerRunnerIdStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.controllerRunnerIdStorageKey].trim()
+      : '',
+    controllerRunnerNameCached: typeof snapshot?.[REMOTE_RUNNER.controllerRunnerNameCachedStorageKey] === 'string'
+      ? snapshot[REMOTE_RUNNER.controllerRunnerNameCachedStorageKey].trim()
+      : '',
+  };
+}
+
+async function saveRemoteRunnerSettings(patch = {}) {
+  const current = await getRemoteRunnerSettings();
+  const requestedTransportMode = typeof patch?.transportMode === 'string'
+    ? normalizeRemoteRunnerTransportMode(patch.transportMode)
+    : current.transportMode;
+  const requestedLocalBaseUrl = typeof patch?.localBaseUrl === 'string'
+    ? patch.localBaseUrl.trim()
+    : current.localBaseUrl;
+  const normalizedLocalBaseUrl = requestedLocalBaseUrl
+    ? normalizeLocalRemoteRunnerBaseUrl(requestedLocalBaseUrl)
+    : '';
+  if (requestedLocalBaseUrl && !normalizedLocalBaseUrl) {
+    throw new Error('local_runner_base_url_invalid');
+  }
+  const next = {
+    enabled: typeof patch?.enabled === 'boolean' ? patch.enabled : current.enabled,
+    runnerName: typeof patch?.runnerName === 'string' ? patch.runnerName.trim() : current.runnerName,
+    transportMode: requestedTransportMode,
+    localBaseUrl: normalizedLocalBaseUrl,
+    controllerRunnerId: typeof patch?.controllerRunnerId === 'string'
+      ? patch.controllerRunnerId.trim()
+      : current.controllerRunnerId,
+    controllerRunnerNameCached: typeof patch?.controllerRunnerNameCached === 'string'
+      ? patch.controllerRunnerNameCached.trim()
+      : current.controllerRunnerNameCached,
+  };
+  await chrome.storage.local.set({
+    [REMOTE_RUNNER.enabledStorageKey]: next.enabled,
+    [REMOTE_RUNNER.nameStorageKey]: next.runnerName,
+    [REMOTE_RUNNER.transportModeStorageKey]: next.transportMode,
+    [REMOTE_RUNNER.localBaseUrlStorageKey]: next.localBaseUrl,
+    [REMOTE_RUNNER.controllerRunnerIdStorageKey]: next.controllerRunnerId,
+    [REMOTE_RUNNER.controllerRunnerNameCachedStorageKey]: next.controllerRunnerNameCached,
+  });
+  return next;
+}
+
+async function getRemoteControllerLastJobState() {
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.controllerLastJobStorageKey]);
+  const record = snapshot?.[REMOTE_RUNNER.controllerLastJobStorageKey];
+  return record && typeof record === 'object' ? record : null;
+}
+
+async function setRemoteControllerLastJobState(record = null) {
+  if (record && typeof record === 'object') {
+    await chrome.storage.local.set({
+      [REMOTE_RUNNER.controllerLastJobStorageKey]: {
+        ...record,
+        updatedAt: Date.now(),
+      }
+    });
+    return;
+  }
+  await chrome.storage.local.remove([REMOTE_RUNNER.controllerLastJobStorageKey]);
+}
+
+async function getRemoteRunnerExecutionState() {
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.runnerStateStorageKey]);
+  const record = snapshot?.[REMOTE_RUNNER.runnerStateStorageKey];
+  return record && typeof record === 'object' ? record : {};
+}
+
+async function setRemoteRunnerExecutionState(patch = {}) {
+  const current = await getRemoteRunnerExecutionState();
+  const next = {
+    ...(current && typeof current === 'object' ? current : {}),
+    ...(patch && typeof patch === 'object' ? patch : {}),
+    updatedAt: Date.now()
+  };
+  await chrome.storage.local.set({ [REMOTE_RUNNER.runnerStateStorageKey]: next });
+  return next;
+}
+
+async function clearRemoteRunnerExecutionState() {
+  await chrome.storage.local.remove([REMOTE_RUNNER.runnerStateStorageKey]);
+}
+
+async function setRemoteRunnerJobBinding(jobId, patch = {}) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return null;
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.runnerJobBindingsStorageKey]);
+  const current = snapshot?.[REMOTE_RUNNER.runnerJobBindingsStorageKey]
+    && typeof snapshot[REMOTE_RUNNER.runnerJobBindingsStorageKey] === 'object'
+      ? snapshot[REMOTE_RUNNER.runnerJobBindingsStorageKey]
+      : {};
+  const next = {
+    ...current,
+    [safeJobId]: {
+      jobId: safeJobId,
+      ...(current?.[safeJobId] && typeof current[safeJobId] === 'object' ? current[safeJobId] : {}),
+      ...(patch && typeof patch === 'object' ? patch : {}),
+      updatedAt: Date.now()
+    }
+  };
+  await chrome.storage.local.set({ [REMOTE_RUNNER.runnerJobBindingsStorageKey]: next });
+  return next[safeJobId];
+}
+
+async function getRemoteRunnerJobBinding(jobId) {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  if (!safeJobId) return null;
+  const snapshot = await chrome.storage.local.get([REMOTE_RUNNER.runnerJobBindingsStorageKey]);
+  const bindings = snapshot?.[REMOTE_RUNNER.runnerJobBindingsStorageKey];
+  if (!bindings || typeof bindings !== 'object') return null;
+  const record = bindings[safeJobId];
+  return record && typeof record === 'object' ? record : null;
+}
+
+async function sendSignedWatchlistApiRequest({ method = 'GET', endpointPath = '', payload = null, timeoutMs = null }) {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    return { success: false, error: 'dispatch_disabled' };
+  }
+
+  const safeMethod = typeof method === 'string' && method.trim()
+    ? method.trim().toUpperCase()
+    : 'GET';
+  const safeEndpointPath = typeof endpointPath === 'string' ? endpointPath.trim() : '';
+  if (!safeEndpointPath) {
+    return { success: false, error: 'missing_endpoint_path' };
+  }
+
+  const dispatchConfig = await resolveWatchlistDispatchConfiguration();
+  if (!dispatchConfig.ok) {
+    return { success: false, error: dispatchConfig.reason || 'missing_dispatch_credentials' };
+  }
+
+  const urlCandidates = buildWatchlistRemoteApiUrlCandidates(dispatchConfig.intakeUrl, safeEndpointPath);
+  if (urlCandidates.length === 0) {
+    return { success: false, error: 'remote_api_endpoint_missing' };
+  }
+
+  const safeTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0
+    ? Math.max(1000, timeoutMs)
+    : Math.max(1000, Number(REMOTE_RUNNER.timeoutMs || 0) || 20000);
+  const body = safeMethod === 'GET'
+    ? ''
+    : JSON.stringify(payload && typeof payload === 'object' ? payload : {});
+  const bodyHash = await sha256HexForDispatch(body);
+
+  let lastError = 'remote_api_request_failed';
+  let lastStatus = null;
+  let lastIntakeUrl = '';
+  for (const candidate of urlCandidates) {
+    const controller = new AbortController();
+    let timeoutId = null;
+    try {
+      const url = new URL(candidate);
+      lastIntakeUrl = url.toString();
+      const timestamp = Math.floor(Date.now() / 1000).toString();
+      const nonce = generateWatchlistNonce();
+      const canonical = buildWatchlistCanonicalString({
+        method: safeMethod,
+        path: url.pathname || '/',
+        timestamp,
+        nonce,
+        bodyHash,
+      });
+      const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
+      const response = await Promise.race([
+        fetch(url.toString(), {
+          method: safeMethod,
+          headers: {
+            'Content-Type': 'application/json',
+            'X-Watchlist-Key-Id': dispatchConfig.keyId,
+            'X-Watchlist-Timestamp': timestamp,
+            'X-Watchlist-Nonce': nonce,
+            'X-Watchlist-Signature': signature,
+          },
+          ...(safeMethod === 'GET' ? {} : { body }),
+          signal: controller.signal
+        }),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            try {
+              controller.abort();
+            } catch {
+              // Ignore abort exceptions after timeout.
+            }
+            reject(createDispatchTimeoutError(safeTimeoutMs));
+          }, safeTimeoutMs);
+        })
+      ]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
+      let responseJson = null;
+      try {
+        responseJson = await response.json();
+      } catch {
+        responseJson = null;
+      }
+
+      if (!response.ok) {
+        lastStatus = response.status;
+        lastError = typeof responseJson?.detail === 'string' && responseJson.detail.trim()
+          ? responseJson.detail.trim()
+          : `http_${response.status}`;
+        if (response.status === 401 || response.status === 403) {
+          break;
+        }
+        continue;
+      }
+
+      return {
+        success: true,
+        status: response.status,
+        data: responseJson && typeof responseJson === 'object' ? responseJson : {},
+        intakeUrl: url.toString()
+      };
+    } catch (error) {
+      lastError = trimProblemLogText(error?.message || String(error), 180) || 'remote_api_request_failed';
+    } finally {
+      if (timeoutId) clearTimeout(timeoutId);
+    }
+  }
+
+  return {
+    success: false,
+    error: lastError,
+    status: lastStatus,
+    intakeUrl: lastIntakeUrl
+  };
+}
+
+async function sendLocalRemoteRunnerApiRequest({ baseUrl = '', method = 'GET', endpointPath = '', payload = null, timeoutMs = null }) {
+  const normalizedBaseUrl = normalizeLocalRemoteRunnerBaseUrl(baseUrl);
+  if (!normalizedBaseUrl) {
+    return { success: false, error: baseUrl ? 'local_runner_base_url_invalid' : 'local_runner_base_url_missing' };
+  }
+  const targetUrl = buildLocalRemoteRunnerUrl(normalizedBaseUrl, endpointPath);
+  if (!targetUrl) {
+    return { success: false, error: 'local_runner_base_url_invalid' };
+  }
+
+  const safeMethod = typeof method === 'string' && method.trim()
+    ? method.trim().toUpperCase()
+    : 'GET';
+  const safeTimeoutMs = Number.isInteger(timeoutMs) && timeoutMs > 0
+    ? Math.max(1000, timeoutMs)
+    : Math.max(1000, Number(REMOTE_RUNNER.timeoutMs || 0) || 20000);
+  const body = safeMethod === 'GET'
+    ? ''
+    : JSON.stringify(payload && typeof payload === 'object' ? payload : {});
+
+  const controller = new AbortController();
+  let timeoutId = null;
+  try {
+    const response = await Promise.race([
+      fetch(targetUrl, {
+        method: safeMethod,
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        ...(safeMethod === 'GET' ? {} : { body }),
+        signal: controller.signal
+      }),
+      new Promise((_, reject) => {
+        timeoutId = setTimeout(() => {
+          try {
+            controller.abort();
+          } catch {
+            // Ignore abort exceptions after timeout.
+          }
+          reject(createDispatchTimeoutError(safeTimeoutMs));
+        }, safeTimeoutMs);
+      })
+    ]);
+    if (timeoutId) {
+      clearTimeout(timeoutId);
+      timeoutId = null;
+    }
+
+    let responseJson = null;
+    try {
+      responseJson = await response.json();
+    } catch {
+      responseJson = null;
+    }
+
+    if (!response.ok) {
+      const detail = typeof responseJson?.detail === 'string' && responseJson.detail.trim()
+        ? responseJson.detail.trim()
+        : `http_${response.status}`;
+      return {
+        success: false,
+        error: detail || 'local_runner_unreachable',
+        status: response.status,
+        intakeUrl: targetUrl
+      };
+    }
+
+    return {
+      success: true,
+      status: response.status,
+      data: responseJson && typeof responseJson === 'object' ? responseJson : {},
+      intakeUrl: targetUrl
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: trimProblemLogText(error?.message || String(error), 180) || 'local_runner_unreachable',
+      status: null,
+      intakeUrl: targetUrl
+    };
+  } finally {
+    if (timeoutId) clearTimeout(timeoutId);
+  }
+}
+
+function normalizeRemoteRunnerStatusRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== 'object') return null;
+  const status = typeof rawRecord.status === 'string' ? rawRecord.status.trim().toLowerCase() : '';
+  return {
+    runnerId: typeof rawRecord.runner_id === 'string'
+      ? rawRecord.runner_id
+      : (typeof rawRecord.runnerId === 'string' ? rawRecord.runnerId : ''),
+    runnerName: typeof rawRecord.runner_name === 'string'
+      ? rawRecord.runner_name
+      : (typeof rawRecord.runnerName === 'string' ? rawRecord.runnerName : ''),
+    enabled: rawRecord.enabled === true,
+    promptsLoaded: rawRecord.prompts_loaded === true || rawRecord.promptsLoaded === true,
+    promptHash: typeof rawRecord.prompt_hash === 'string'
+      ? rawRecord.prompt_hash
+      : (typeof rawRecord.promptHash === 'string' ? rawRecord.promptHash : ''),
+    chatgptReady: rawRecord.chatgpt_ready === true || rawRecord.chatgptReady === true,
+    activeJobId: typeof rawRecord.active_job_id === 'string'
+      ? rawRecord.active_job_id
+      : (typeof rawRecord.activeJobId === 'string' ? rawRecord.activeJobId : ''),
+    activeJobStatus: typeof rawRecord.active_job_status === 'string'
+      ? rawRecord.active_job_status
+      : (typeof rawRecord.activeJobStatus === 'string' ? rawRecord.activeJobStatus : ''),
+    lastSeenAt: typeof rawRecord.last_seen_at === 'string'
+      ? rawRecord.last_seen_at
+      : (typeof rawRecord.lastSeenAt === 'string' ? rawRecord.lastSeenAt : ''),
+    updatedAt: typeof rawRecord.updated_at === 'string'
+      ? rawRecord.updated_at
+      : (typeof rawRecord.updatedAt === 'string' ? rawRecord.updatedAt : ''),
+    lastSeenAgeSeconds: Number.isInteger(rawRecord.last_seen_age_seconds)
+      ? rawRecord.last_seen_age_seconds
+      : (Number.isInteger(rawRecord.lastSeenAgeSeconds) ? rawRecord.lastSeenAgeSeconds : null),
+    acceptsRemoteJobs: rawRecord.accepts_remote_jobs === true || rawRecord.acceptsRemoteJobs === true,
+    isOnline: rawRecord.is_online === true || rawRecord.isOnline === true,
+    status
+  };
+}
+
+const REMOTE_JOB_TERMINAL_STATUSES = new Set([
+  'completed',
+  'failed',
+  'cancelled',
+  'canceled',
+  'aborted',
+  'stopped',
+  'interrupted'
+]);
+
+function isRemoteJobTerminalStatus(status) {
+  const normalized = typeof status === 'string' ? status.trim().toLowerCase() : '';
+  return normalized ? REMOTE_JOB_TERMINAL_STATUSES.has(normalized) : false;
+}
+
+function normalizeRemoteJobRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== 'object') return null;
+  return {
+    jobId: typeof rawRecord.job_id === 'string'
+      ? rawRecord.job_id
+      : (typeof rawRecord.jobId === 'string' ? rawRecord.jobId : ''),
+    controllerId: typeof rawRecord.controller_id === 'string'
+      ? rawRecord.controller_id
+      : (typeof rawRecord.controllerId === 'string' ? rawRecord.controllerId : ''),
+    runnerId: typeof rawRecord.runner_id === 'string'
+      ? rawRecord.runner_id
+      : (typeof rawRecord.runnerId === 'string' ? rawRecord.runnerId : ''),
+    status: typeof rawRecord.status === 'string' ? rawRecord.status.trim().toLowerCase() : '',
+    requestPayload: rawRecord.request_payload && typeof rawRecord.request_payload === 'object'
+      ? rawRecord.request_payload
+      : (rawRecord.requestPayload && typeof rawRecord.requestPayload === 'object' ? rawRecord.requestPayload : null),
+    resultPayload: rawRecord.result_payload && typeof rawRecord.result_payload === 'object'
+      ? rawRecord.result_payload
+      : (rawRecord.resultPayload && typeof rawRecord.resultPayload === 'object' ? rawRecord.resultPayload : null),
+    error: typeof rawRecord.error === 'string' ? rawRecord.error.trim() : '',
+    createdAt: typeof rawRecord.created_at === 'string'
+      ? rawRecord.created_at
+      : (typeof rawRecord.createdAt === 'string' ? rawRecord.createdAt : ''),
+    claimedAt: typeof rawRecord.claimed_at === 'string'
+      ? rawRecord.claimed_at
+      : (typeof rawRecord.claimedAt === 'string' ? rawRecord.claimedAt : ''),
+    receivedAt: typeof rawRecord.received_at === 'string'
+      ? rawRecord.received_at
+      : (typeof rawRecord.receivedAt === 'string' ? rawRecord.receivedAt : ''),
+    startedAt: typeof rawRecord.started_at === 'string'
+      ? rawRecord.started_at
+      : (typeof rawRecord.startedAt === 'string' ? rawRecord.startedAt : ''),
+    heartbeatAt: typeof rawRecord.heartbeat_at === 'string'
+      ? rawRecord.heartbeat_at
+      : (typeof rawRecord.heartbeatAt === 'string' ? rawRecord.heartbeatAt : ''),
+    completedAt: typeof rawRecord.completed_at === 'string'
+      ? rawRecord.completed_at
+      : (typeof rawRecord.completedAt === 'string' ? rawRecord.completedAt : ''),
+    updatedAt: typeof rawRecord.updated_at === 'string'
+      ? rawRecord.updated_at
+      : (typeof rawRecord.updatedAt === 'string' ? rawRecord.updatedAt : ''),
+    heartbeatAgeSeconds: Number.isInteger(rawRecord.heartbeat_age_seconds)
+      ? rawRecord.heartbeat_age_seconds
+      : (Number.isInteger(rawRecord.heartbeatAgeSeconds) ? rawRecord.heartbeatAgeSeconds : null),
+    isStale: rawRecord.is_stale === true || rawRecord.isStale === true,
+  };
+}
+
+async function reconcileRemoteRunnerExecutionState(runnerState = {}, options = {}) {
+  const currentState = runnerState && typeof runnerState === 'object'
+    ? runnerState
+    : await getRemoteRunnerExecutionState();
+  const activeJobId = typeof currentState?.activeJobId === 'string' ? currentState.activeJobId.trim() : '';
+  if (!activeJobId) {
+    return currentState && typeof currentState === 'object' ? currentState : {};
+  }
+
+  const remoteRunner = options?.runner && typeof options.runner === 'object' ? options.runner : null;
+  const remoteJob = options?.job && typeof options.job === 'object' ? options.job : null;
+  const remoteActiveJobId = typeof remoteRunner?.activeJobId === 'string' ? remoteRunner.activeJobId.trim() : '';
+  const remoteActiveJobStatus = typeof remoteRunner?.activeJobStatus === 'string'
+    ? remoteRunner.activeJobStatus.trim().toLowerCase()
+    : '';
+  const remoteJobStatus = typeof remoteJob?.status === 'string'
+    ? remoteJob.status.trim().toLowerCase()
+    : '';
+  const shouldClear = (
+    (!!remoteRunner && !remoteActiveJobId)
+    || (!!remoteActiveJobId && remoteActiveJobId !== activeJobId)
+    || isRemoteJobTerminalStatus(remoteActiveJobStatus)
+    || isRemoteJobTerminalStatus(remoteJobStatus)
+    || remoteJob?.isStale === true
+  );
+  if (!shouldClear) {
+    return currentState;
+  }
+
+  console.warn('[remote-runner] clearing stale local execution state', {
+    activeJobId,
+    remoteActiveJobId,
+    remoteActiveJobStatus,
+    remoteJobStatus,
+    remoteJobStale: remoteJob?.isStale === true
+  });
+  await clearRemoteRunnerExecutionState();
+  return {};
+}
+
+function normalizeRemotePreparedJobPayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const analysisType = typeof rawPayload.analysisType === 'string'
+    ? rawPayload.analysisType.trim().toLowerCase()
+    : '';
+  const promptChainSnapshot = Array.isArray(rawPayload.promptChainSnapshot)
+    ? rawPayload.promptChainSnapshot
+        .filter((item) => typeof item === 'string' && item.trim())
+        .map((item) => item.trim())
+    : [];
+  const promptHash = typeof rawPayload.prompt_hash === 'string'
+    ? rawPayload.prompt_hash.trim()
+    : (typeof rawPayload.promptHash === 'string' ? rawPayload.promptHash.trim() : '');
+  const usesRunnerPrompts = rawPayload.uses_runner_prompts === true || rawPayload.usesRunnerPrompts === true;
+  const preparedSources = Array.isArray(rawPayload.preparedSources)
+    ? rawPayload.preparedSources
+        .filter((item) => item && typeof item === 'object')
+        .map((item) => ({
+          sourceId: typeof item.source_id === 'string'
+            ? item.source_id
+            : (typeof item.sourceId === 'string' ? item.sourceId : ''),
+          title: typeof item.title === 'string' ? item.title.trim() : '',
+          sourceUrl: typeof item.source_url === 'string'
+            ? item.source_url
+            : (typeof item.sourceUrl === 'string' ? item.sourceUrl : ''),
+          sourceName: typeof item.source_name === 'string'
+            ? item.source_name
+            : (typeof item.sourceName === 'string' ? item.sourceName : ''),
+          text: typeof item.text === 'string' ? item.text : '',
+          textHash: typeof item.text_hash === 'string'
+            ? item.text_hash
+            : (typeof item.textHash === 'string' ? item.textHash : ''),
+          extractedAtUtc: typeof item.extracted_at_utc === 'string'
+            ? item.extracted_at_utc
+            : (typeof item.extractedAtUtc === 'string' ? item.extractedAtUtc : '')
+        }))
+        .filter((item) => item.title && item.sourceUrl && item.sourceName && item.text)
+    : [];
+  if (analysisType !== 'company') return null;
+  if (preparedSources.length === 0) return null;
+  return {
+    analysisType,
+    promptChainSnapshot,
+    promptHash,
+    usesRunnerPrompts,
+    preparedSources
+  };
+}
+
+function getRemoteRunnerCommandLabel(commandType = '') {
+  const normalized = typeof commandType === 'string' ? commandType.trim().toLowerCase() : '';
+  if (normalized === REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES) {
+    return 'restart + wznow';
+  }
+  return normalized || 'polecenie runnera';
+}
+
+function normalizeRemoteRunnerCommandPayload(rawPayload) {
+  if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const jobType = typeof rawPayload.job_type === 'string'
+    ? rawPayload.job_type.trim().toLowerCase()
+    : (typeof rawPayload.jobType === 'string' ? rawPayload.jobType.trim().toLowerCase() : '');
+  if (jobType && jobType !== REMOTE_RUNNER_JOB_KIND.COMMAND) return null;
+
+  const commandType = typeof rawPayload.command_type === 'string'
+    ? rawPayload.command_type.trim().toLowerCase()
+    : (typeof rawPayload.commandType === 'string' ? rawPayload.commandType.trim().toLowerCase() : '');
+  if (commandType !== REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES) {
+    return null;
+  }
+
+  const requestedScope = typeof rawPayload.scope === 'string' && rawPayload.scope.trim()
+    ? rawPayload.scope.trim()
+    : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+
+  return {
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    commandLabel: getRemoteRunnerCommandLabel(commandType),
+    scope: requestedScope === RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
+      ? requestedScope
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+    forceRepeatLastPrompt: rawPayload.force_repeat_last_prompt === true || rawPayload.forceRepeatLastPrompt === true,
+    composerThinkingEffort: normalizeComposerThinkingEffort(
+      typeof rawPayload.composer_thinking_effort === 'string'
+        ? rawPayload.composer_thinking_effort
+        : rawPayload.composerThinkingEffort
+    ),
+    createdAtUtc: typeof rawPayload.created_at_utc === 'string'
+      ? rawPayload.created_at_utc
+      : (typeof rawPayload.createdAtUtc === 'string' ? rawPayload.createdAtUtc : '')
+  };
+}
+
+function buildRemoteReloadResumeResultPayload(result = {}, options = {}) {
+  const commandPayload = options?.commandPayload && typeof options.commandPayload === 'object'
+    ? options.commandPayload
+    : {};
+  const commandType = typeof commandPayload.commandType === 'string'
+    ? commandPayload.commandType
+    : REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES;
+  return {
+    jobType: REMOTE_RUNNER_JOB_KIND.COMMAND,
+    commandType,
+    commandLabel: getRemoteRunnerCommandLabel(commandType),
+    scope: typeof commandPayload.scope === 'string' && commandPayload.scope.trim()
+      ? commandPayload.scope.trim()
+      : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+    monitorSessionId: typeof options?.monitorSessionId === 'string' ? options.monitorSessionId : '',
+    scannedTabs: Number.isInteger(result?.scannedTabs) ? result.scannedTabs : 0,
+    matchedTabs: Number.isInteger(result?.matchedTabs) ? result.matchedTabs : 0,
+    startedTabs: Number.isInteger(result?.startedTabs) ? result.startedTabs : 0,
+    resumedTabs: Number.isInteger(result?.resumedTabs) ? result.resumedTabs : 0,
+    requestedProcesses: Number.isInteger(result?.requestedProcesses) ? result.requestedProcesses : 0,
+    eligibleProcesses: Number.isInteger(result?.eligibleProcesses) ? result.eligibleProcesses : 0,
+    summary: normalizeReloadResumeSummary(result?.summary || {}),
+    finishedAtUtc: new Date().toISOString()
+  };
+}
+
+async function executeRemoteRunnerCommand(commandPayload, options = {}) {
+  const normalizedCommand = normalizeRemoteRunnerCommandPayload(commandPayload);
+  if (!normalizedCommand) {
+    return {
+      success: false,
+      error: 'remote_runner_command_not_supported',
+      runIds: [],
+      resultPayload: null
+    };
+  }
+
+  if (normalizedCommand.commandType === REMOTE_RUNNER_COMMAND.RELOAD_RESUME_ACTIVE_COMPANY_PROCESSES) {
+    const monitorSessionId = createReloadResumeMonitorSessionId('remote-reload-resume');
+    const result = await runResetScanStartAllTabs({
+      origin: typeof options?.origin === 'string' && options.origin.trim()
+        ? options.origin.trim()
+        : `remote-runner:${normalizedCommand.commandType}`,
+      scope: normalizedCommand.scope,
+      forceRepeatLastPrompt: normalizedCommand.forceRepeatLastPrompt === true,
+      ...(normalizedCommand.composerThinkingEffort
+        ? { composerThinkingEffort: normalizedCommand.composerThinkingEffort }
+        : {}),
+      monitorSessionId,
+      excludeRemoteRunnerProcesses: false
+    });
+    return {
+      success: result?.success === true,
+      error: result?.success === true ? '' : (result?.error || 'remote_reload_resume_failed'),
+      runIds: [],
+      resultPayload: buildRemoteReloadResumeResultPayload(result, {
+        monitorSessionId,
+        commandPayload: normalizedCommand
+      })
+    };
+  }
+
+  return {
+    success: false,
+    error: 'remote_runner_command_not_supported',
+    runIds: [],
+    resultPayload: null
+  };
+}
+
+function trimRemotePreviewText(value, maxLength = 120) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  return text.length > maxLength ? `${text.slice(0, Math.max(0, maxLength - 3))}...` : text;
+}
+
+function deriveRemoteSourceHostLabel(sourceUrl, sourceName) {
+  const normalizedUrl = typeof sourceUrl === 'string' ? sourceUrl.trim() : '';
+  if (normalizedUrl) {
+    if (normalizedUrl.startsWith('manual://')) {
+      return 'manual';
+    }
+    try {
+      const parsed = new URL(normalizedUrl);
+      const hostname = String(parsed.hostname || '').trim().replace(/^www\./i, '');
+      if (hostname) return hostname;
+    } catch (_) {
+      // Ignore invalid preview URLs.
+    }
+  }
+  return trimRemotePreviewText(sourceName || 'source', 32) || 'source';
+}
+
+function buildRemoteTransferPreview(preparedSources = [], options = {}) {
+  const safeSources = Array.isArray(preparedSources)
+    ? preparedSources.filter((item) => item && typeof item === 'object')
+    : [];
+  const previewLimit = Number.isInteger(options?.previewLimit) && options.previewLimit > 0
+    ? Math.min(options.previewLimit, 8)
+    : 5;
+  const totalChars = safeSources.reduce((sum, item) => {
+    const text = typeof item?.text === 'string' ? item.text.trim() : '';
+    return sum + text.length;
+  }, 0);
+  const items = safeSources.slice(0, previewLimit).map((item, index) => {
+    const title = trimRemotePreviewText(item?.title || `Artykul ${index + 1}`, 96) || `Artykul ${index + 1}`;
+    const sourceUrl = typeof item?.source_url === 'string'
+      ? item.source_url
+      : (typeof item?.sourceUrl === 'string' ? item.sourceUrl : '');
+    const sourceName = typeof item?.source_name === 'string'
+      ? item.source_name
+      : (typeof item?.sourceName === 'string' ? item.sourceName : '');
+    const rawText = typeof item?.text === 'string' ? item.text.trim() : '';
+    return {
+      sourceId: typeof item?.source_id === 'string'
+        ? item.source_id
+        : (typeof item?.sourceId === 'string' ? item.sourceId : ''),
+      title,
+      sourceUrl,
+      sourceName: trimRemotePreviewText(sourceName || '', 40),
+      hostLabel: deriveRemoteSourceHostLabel(sourceUrl, sourceName),
+      charCount: rawText.length,
+      extractedAtUtc: typeof item?.extracted_at_utc === 'string'
+        ? item.extracted_at_utc
+        : (typeof item?.extractedAtUtc === 'string' ? item.extractedAtUtc : ''),
+    };
+  });
+  return {
+    sourceCount: safeSources.length,
+    totalChars,
+    previewCount: items.length,
+    hiddenCount: Math.max(0, safeSources.length - items.length),
+    usesRunnerPrompts: options?.usesRunnerPrompts === true,
+    sourceMode: typeof options?.sourceMode === 'string' ? options.sourceMode : '',
+    items,
+  };
 }
 
 function createDispatchTimeoutError(timeoutMs) {
@@ -15123,6 +18432,14 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           intakeUrl: url,
           status: response.status,
           requestId,
+          dbVerification: dbVerification
+            ? {
+              success: dbVerification.success === true,
+              state: dbVerification.state || '',
+              eventId: dbVerification.eventId ?? responseEventId,
+              responseId: dbVerification.responseId || traceResponseId || ''
+            }
+            : null,
           responseBody: responseJson && typeof responseJson === 'object'
             ? {
               status: responseJson.status || '',
@@ -15166,6 +18483,7 @@ async function sendWatchlistDispatch(payload, copyTrace = 'no-run/no-response', 
           requestId,
           intakeUrl: url,
           stage: 'send_http',
+          dbVerification,
           conversationLogCount,
           hasConversationUrl,
           conversationSnapshotRefreshed,
@@ -15433,7 +18751,8 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
         conversationLogCount: null,
         hasConversationUrl: false,
         conversationSnapshotRefreshed: false,
-        conversationSnapshotSource: ''
+        conversationSnapshotSource: '',
+        itemResults: {}
       };
     }
 
@@ -15469,6 +18788,36 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     const sendTimeoutMs = Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
     let scannedInThisRun = 0;
     let attemptedInThisRun = 0;
+    const itemResults = {};
+    const recordItemResult = (queuePayload, patch = {}) => {
+      const responseId = typeof queuePayload?.responseId === 'string' && queuePayload.responseId.trim()
+        ? queuePayload.responseId.trim()
+        : '';
+      if (!responseId) return;
+      const previous = itemResults[responseId] && typeof itemResults[responseId] === 'object'
+        ? itemResults[responseId]
+        : {};
+      const next = {
+        responseId,
+        runId: typeof queuePayload?.runId === 'string' ? queuePayload.runId.trim() : '',
+        success: false,
+        pending: false,
+        state: '',
+        reason: '',
+        error: '',
+        status: null,
+        requestId: '',
+        intakeUrl: '',
+        ...previous,
+        ...patch
+      };
+      if (patch?.dbVerification) {
+        next.dbVerification = normalizeWatchlistDbVerification(patch.dbVerification);
+      } else if (previous?.dbVerification) {
+        next.dbVerification = previous.dbVerification;
+      }
+      itemResults[responseId] = next;
+    };
 
     for (let index = 0; index < queued.length; index += 1) {
       const item = queued[index];
@@ -15482,11 +18831,21 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
           const queuedItemNextAttemptAt = Number.isInteger(queuedItem?.nextAttemptAt) ? queuedItem.nextAttemptAt : 0;
           return queuedItemNextAttemptAt <= Date.now();
         });
-        remaining.push(...unprocessed);
-        deferred += unprocessed.length;
         budgetStopReason = limitByItemsReached
           ? `limit_items_${flushMaxItemsPerRun}`
           : `limit_runtime_${flushMaxRuntimeMs}ms`;
+        unprocessed.forEach((queuedItem) => {
+          if (!queuedItem?.payload || typeof queuedItem.payload !== 'object') return;
+          recordItemResult(queuedItem.payload, {
+            success: false,
+            pending: true,
+            state: 'pending_budget',
+            reason: budgetStopReason || 'budget_limit',
+            error: ''
+          });
+        });
+        remaining.push(...unprocessed);
+        deferred += unprocessed.length;
         if (hasReadyUnprocessed) {
           watchlistDispatchFlushPending = true;
           if (!watchlistDispatchFlushPendingReason) {
@@ -15531,6 +18890,13 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
           reason: normalizedReason,
           trace,
           waitMs
+        });
+        recordItemResult(item.payload, {
+          success: false,
+          pending: true,
+          state: 'pending_retry_window',
+          reason: 'pending_retry_window',
+          error: ''
         });
         remaining.push(item);
         continue;
@@ -15824,7 +19190,8 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       conversationLogCount,
       hasConversationUrl,
       conversationSnapshotRefreshed,
-      conversationSnapshotSource: conversationSnapshotSource || ''
+      conversationSnapshotSource: conversationSnapshotSource || '',
+      itemResults
     };
   } catch (error) {
     emitWatchlistDispatchProcessLog('error', 'flush_exception', 'Flush crashed with unexpected error', {
@@ -15877,6 +19244,258 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   }
 }
 
+async function processWatchlistDispatchVerificationQueue(reason = 'manual') {
+  const normalizedReason = normalizeWatchlistFlushReason(reason, 'manual');
+  if (watchlistVerifyInProgress) {
+    watchlistVerifyPending = true;
+    if (!watchlistVerifyPendingReason) {
+      watchlistVerifyPendingReason = normalizedReason;
+    }
+    emitWatchlistDispatchProcessLog('info', 'verify_queue_skipped_in_progress', 'Verification queue skipped because another run is active', {
+      reason: normalizedReason
+    });
+    return {
+      skipped: true,
+      reason: 'verify_in_progress'
+    };
+  }
+
+  watchlistVerifyInProgress = true;
+  try {
+    const dispatchConfig = await resolveWatchlistDispatchConfiguration();
+    if (!dispatchConfig?.ok) {
+      emitWatchlistDispatchProcessLog('warn', 'verify_queue_skipped_config', 'Verification queue skipped due to missing dispatch configuration', {
+        reason: normalizedReason,
+        configReason: dispatchConfig?.reason || 'missing_dispatch_credentials'
+      });
+      return {
+        skipped: true,
+        reason: dispatchConfig?.reason || 'missing_dispatch_credentials'
+      };
+    }
+
+    const queued = await readWatchlistVerifyQueue();
+    if (queued.length === 0) {
+      return {
+        success: true,
+        verified: 0,
+        deferred: 0,
+        remaining: 0
+      };
+    }
+
+    const remaining = [];
+    let verified = 0;
+    let deferred = 0;
+    let failed = 0;
+    let attemptedInThisRun = 0;
+    const startedAt = Date.now();
+
+    for (let index = 0; index < queued.length; index += 1) {
+      const item = queued[index];
+      const elapsedMs = Math.max(0, Date.now() - startedAt);
+      const limitByItemsReached = attemptedInThisRun >= WATCHLIST_VERIFY_QUEUE.maxItemsPerRun;
+      const limitByRuntimeReached = elapsedMs >= WATCHLIST_VERIFY_QUEUE.maxRuntimeMs;
+      if (limitByItemsReached || limitByRuntimeReached) {
+        const carryOver = queued.slice(index);
+        remaining.push(...carryOver);
+        deferred += carryOver.length;
+        watchlistVerifyPending = true;
+        if (!watchlistVerifyPendingReason) {
+          watchlistVerifyPendingReason = normalizedReason;
+        }
+        emitWatchlistDispatchProcessLog('info', 'verify_queue_budget_stop', 'Verification queue budget reached', {
+          reason: normalizedReason,
+          carryOver: carryOver.length,
+          attemptedInThisRun,
+          elapsedMs
+        });
+        break;
+      }
+
+      if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
+        failed += 1;
+        continue;
+      }
+
+      const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
+      if (nextAttemptAt > Date.now()) {
+        remaining.push(item);
+        deferred += 1;
+        continue;
+      }
+
+      attemptedInThisRun += 1;
+      const payload = item.payload;
+      const trace = buildCopyTrace(payload.runId || '', payload.responseId || '');
+      const verification = await verifyWatchlistDispatchStoredRecord(
+        payload,
+        {
+          eventId: Number.isInteger(item.eventId) ? item.eventId : null,
+          intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+          timeoutMs: WATCHLIST_VERIFY_QUEUE.timeoutMs,
+          maxAttempts: 1
+        },
+        dispatchConfig
+      ).catch((error) => ({
+        attempted: true,
+        success: false,
+        state: 'verify_error',
+        reason: truncateDispatchLogText(error?.message || String(error), 180) || 'verify_error',
+        found: false,
+        responseId: payload.responseId || '',
+        eventId: Number.isInteger(item.eventId) ? item.eventId : null,
+        requiredFields: [],
+        missingFields: [],
+        mismatchFields: [],
+        checkedAt: Date.now()
+      }));
+
+      if (isWatchlistDbVerificationSuccessful(verification)) {
+        verified += 1;
+        emitWatchlistDispatchProcessLog('info', 'verify_queue_ok', 'Background verification confirmed stored response', {
+          trace,
+          eventId: verification?.eventId ?? item.eventId ?? null,
+          ingestStatus: verification?.ingestStatus || ''
+        });
+        appendWatchlistDispatchHistory({
+          ts: Date.now(),
+          kind: 'verify',
+          reason: 'verify_ok',
+          success: true,
+          queued: 0,
+          sent: 0,
+          failed: 0,
+          deferred: 0,
+          remaining: 0,
+          trace,
+          runId: payload.runId || '',
+          responseId: payload.responseId || '',
+          eventId: verification?.eventId ?? item.eventId ?? '',
+          intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+          status: Number.isInteger(item.status) ? item.status : null
+        }).catch(() => {});
+        await updateProcessDispatchAfterSendSuccess(payload.runId || '', payload.responseId || '', {
+          status: Number.isInteger(item.status) ? item.status : 202,
+          eventId: verification?.eventId ?? item.eventId ?? null,
+          intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+          dbVerification: verification
+        }).catch((error) => {
+          console.warn('[copy-flow] [verify-queue:process-update-failed]', {
+            runId: payload.runId || '',
+            responseId: payload.responseId || '',
+            error: error?.message || String(error)
+          });
+        });
+        continue;
+      }
+
+      const attemptCount = (Number.isInteger(item.attemptCount) ? item.attemptCount : 0) + 1;
+      const retryable = shouldRetryWatchlistDbVerification(verification)
+        && attemptCount < WATCHLIST_VERIFY_QUEUE.maxAttempts;
+      if (retryable) {
+        const retryDelayMs = Math.min(
+          WATCHLIST_VERIFY_QUEUE.maxBackoffMs,
+          Math.max(1000, WATCHLIST_VERIFY_QUEUE.baseBackoffMs * attemptCount)
+        );
+        remaining.push({
+          ...item,
+          attemptCount,
+          nextAttemptAt: Date.now() + retryDelayMs,
+          lastError: verification?.reason || verification?.state || 'verify_retry_scheduled'
+        });
+        deferred += 1;
+        watchlistVerifyPending = true;
+        if (!watchlistVerifyPendingReason) {
+          watchlistVerifyPendingReason = normalizedReason;
+        }
+        emitWatchlistDispatchProcessLog('info', 'verify_queue_retry_scheduled', 'Background verification will be retried', {
+          trace,
+          state: verification?.state || '',
+          reason: verification?.reason || '',
+          retryDelayMs,
+          attemptCount
+        });
+        continue;
+      }
+
+      failed += 1;
+      emitWatchlistDispatchProcessLog('warn', 'verify_queue_failed', 'Background verification exhausted retries or is non-retryable', {
+        trace,
+        state: verification?.state || '',
+        reason: verification?.reason || '',
+        attemptCount
+      });
+      await updateProcessDispatchAfterSendSuccess(payload.runId || '', payload.responseId || '', {
+        status: Number.isInteger(item.status) ? item.status : 202,
+        eventId: verification?.eventId ?? item.eventId ?? null,
+        intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+        dbVerification: verification
+      }).catch(() => false);
+      appendWatchlistDispatchHistory({
+        ts: Date.now(),
+        kind: 'verify',
+        reason: verification?.state || verification?.reason || 'verify_failed',
+        success: false,
+        queued: 0,
+        sent: 0,
+        failed: 1,
+        deferred: 0,
+        remaining: 0,
+        trace,
+        runId: payload.runId || '',
+        responseId: payload.responseId || '',
+        eventId: verification?.eventId ?? item.eventId ?? '',
+        intakeUrl: typeof item.intakeUrl === 'string' ? item.intakeUrl : '',
+        status: Number.isInteger(item.status) ? item.status : null,
+        error: verification?.reason || verification?.state || 'verify_failed'
+      }).catch(() => {});
+    }
+
+    const persisted = await withWatchlistVerifyQueueMutationLock(async () => {
+      const latest = await readWatchlistVerifyQueue();
+      const processedKeys = new Set(
+        queued
+          .map((item) => getWatchlistVerifyQueueDedupKey(item))
+          .filter((key) => key)
+      );
+      const merged = [...remaining];
+      for (const item of latest) {
+        const key = getWatchlistVerifyQueueDedupKey(item);
+        if (!key || processedKeys.has(key)) continue;
+        merged.push(item);
+      }
+      return writeWatchlistVerifyQueue(merged);
+    });
+
+    return {
+      success: true,
+      verified,
+      failed,
+      deferred,
+      remaining: Array.isArray(persisted) ? persisted.length : 0
+    };
+  } finally {
+    watchlistVerifyInProgress = false;
+    if (watchlistVerifyPending) {
+      const pendingReason = normalizeWatchlistFlushReason(
+        `follow_up:${watchlistVerifyPendingReason || normalizedReason}`,
+        'follow_up'
+      );
+      watchlistVerifyPending = false;
+      watchlistVerifyPendingReason = '';
+      Promise.resolve()
+        .then(() => processWatchlistDispatchVerificationQueue(pendingReason))
+        .catch((error) => {
+          console.warn('[copy-flow] [verify-queue:follow-up-failed]', {
+            reason: pendingReason,
+            error: error?.message || String(error)
+          });
+        });
+    }
+  }
+}
+
 function ensureWatchlistDispatchAlarm() {
   if (!WATCHLIST_DISPATCH.enabled) return;
   if (!chrome?.alarms?.create) return;
@@ -15887,6 +19506,48 @@ function ensureWatchlistDispatchAlarm() {
   } catch (error) {
     console.warn('[copy-flow] [dispatch:alarm-failed]', error);
   }
+}
+
+function ensureWatchlistDispatchVerificationAlarm() {
+  if (!WATCHLIST_DISPATCH.enabled) {
+    clearAlarmSafe(WATCHLIST_VERIFY_QUEUE.alarmName).catch(() => {});
+    return;
+  }
+  if (!chrome?.alarms?.create) return;
+  try {
+    chrome.alarms.create(WATCHLIST_VERIFY_QUEUE.alarmName, {
+      periodInMinutes: WATCHLIST_VERIFY_QUEUE.alarmPeriodMinutes
+    });
+  } catch (error) {
+    console.warn('[copy-flow] [verify-queue:alarm-failed]', error);
+  }
+}
+
+async function syncRemoteRunnerAlarm() {
+  const settings = await getRemoteRunnerSettings();
+  if (!chrome?.alarms?.create) {
+    return { enabled: settings.enabled, alarmActive: false, nextRunAt: null };
+  }
+
+  if (settings.enabled) {
+    try {
+      chrome.alarms.create(REMOTE_RUNNER.alarmName, {
+        delayInMinutes: REMOTE_RUNNER.alarmPeriodMinutes,
+        periodInMinutes: REMOTE_RUNNER.alarmPeriodMinutes
+      });
+    } catch (error) {
+      console.warn('[remote-runner] create alarm failed:', error);
+    }
+  } else {
+    await clearAlarmSafe(REMOTE_RUNNER.alarmName);
+  }
+
+  const alarm = await getAlarmSafe(REMOTE_RUNNER.alarmName);
+  return {
+    enabled: settings.enabled,
+    alarmActive: !!alarm,
+    nextRunAt: alarm && Number.isInteger(alarm.scheduledTime) ? alarm.scheduledTime : null
+  };
 }
 
 function getAlarmSafe(alarmName) {
@@ -16070,9 +19731,14 @@ async function collectTabConversationMetricsForAutoRestore(tabId) {
 
 async function collectAutoRestoreProcessHealthSnapshot(options = {}) {
   await ensureProcessRegistryReady();
+  const excludeRemoteRunnerProcesses = options?.excludeRemoteRunnerProcesses === true;
   const processSnapshot = await getProcessSnapshot();
   const activeProcesses = processSnapshot
-    .filter((process) => process && !isClosedProcessStatus(process.status))
+    .filter((process) => (
+      process
+      && !isClosedProcessStatus(process.status)
+      && !(excludeRemoteRunnerProcesses && isRemoteRunnerManagedProcess(process))
+    ))
     .sort(compareProcessesForRestore);
 
   const minAssistantWords = Number.isInteger(options?.minAssistantWords) && options.minAssistantWords > 0
@@ -16166,6 +19832,11 @@ async function collectAutoRestoreProcessHealthSnapshot(options = {}) {
     checkedProcesses: allItems.length,
     issueProcesses: issueItems.length,
     scanRecommended: issueItems.length > 0,
+    scanTargets: issueItems.map((item) => ({
+      runId: typeof item?.runId === 'string' ? item.runId : '',
+      tabId: Number.isInteger(item?.tabId) ? item.tabId : null,
+      windowId: Number.isInteger(item?.windowId) ? item.windowId : null
+    })),
     thresholds: {
       minAssistantWords,
       minAssistantSentences
@@ -16280,18 +19951,49 @@ async function runAutoRestoreWindowsCycle(options = {}) {
   autoRestoreWindowsInProgress = true;
   try {
     const cycleStartedAt = Date.now();
-    const restoreResult = await restoreProcessWindows({ origin });
-    const healthCheck = await collectAutoRestoreProcessHealthSnapshot({ origin });
+    const restoreResult = await restoreProcessWindows({
+      origin,
+      excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true
+    });
+    const healthCheck = await collectAutoRestoreProcessHealthSnapshot({
+      origin,
+      excludeRemoteRunnerProcesses: options?.excludeRemoteRunnerProcesses === true
+    });
 
     let scanResult = null;
     let scanTriggered = false;
     if (healthCheck.scanRecommended) {
+      const issueScanTargets = Array.isArray(healthCheck?.scanTargets)
+        ? healthCheck.scanTargets
+        : (Array.isArray(healthCheck?.items) ? healthCheck.items : []);
+      const issueRunIds = issueScanTargets
+        ? issueScanTargets
+          .map((item) => (typeof item?.runId === 'string' ? item.runId.trim() : ''))
+          .filter(Boolean)
+        : [];
+      const issueTabIds = issueScanTargets
+        ? issueScanTargets
+          .map((item) => (Number.isInteger(item?.tabId) ? item.tabId : null))
+          .filter((value) => Number.isInteger(value) && value >= 0)
+        : [];
+      const hasRestrictedTargets = issueRunIds.length > 0 || issueTabIds.length > 0;
       scanTriggered = true;
       try {
-        scanResult = await runResetScanStartAllTabs({
-          origin: `${origin}:health_scan`,
-          scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST
-        });
+        scanResult = hasRestrictedTargets
+          ? await runResetScanStartAllTabs({
+            origin: `${origin}:health_scan`,
+            scope: RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST,
+            restrictToRunIds: issueRunIds,
+            restrictToTabIds: issueTabIds
+          })
+          : {
+            success: false,
+            error: 'health_scan_missing_targets',
+            summary: null,
+            startedTabs: 0,
+            resumedTabs: 0,
+            matchedTabs: 0
+          };
       } catch (error) {
         scanResult = {
           success: false,
@@ -16408,9 +20110,13 @@ markRunningUnfinishedResumeBatchInterruptedOnBoot().catch((error) => {
   console.warn('[unfinished-resume] initial state recovery failed:', error?.message || String(error));
 });
 ensureWatchlistDispatchAlarm();
+ensureWatchlistDispatchVerificationAlarm();
 ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
+});
+syncRemoteRunnerAlarm().catch((error) => {
+  console.warn('[remote-runner] sync alarm on boot failed:', error);
 });
 logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
 logWatchlistRemoteConnectionState('service_worker_boot', false).catch(() => {});
@@ -16418,6 +20124,9 @@ runProcessMonitorHeartbeatSweep('service_worker_boot').catch(() => {});
 requestAnalysisQueueReconcile('service_worker_boot');
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
+});
+processWatchlistDispatchVerificationQueue('service_worker_boot').catch((error) => {
+  console.warn('[copy-flow] [verify-queue:error] reason=service_worker_boot', error);
 });
 
 // Obsługiwane źródła artykułów
@@ -16433,13 +20142,10 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://the-ken.com/*", name: "The Ken" },
   { pattern: "https://*.lazard.com/*", name: "Lazard" },
   { pattern: "https://*.rand.org/*", name: "RAND Corporation" },
-  { pattern: "https://www.youtube.com/*", name: "YouTube" },
-  { pattern: "https://youtu.be/*", name: "YouTube" },
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
   { pattern: "https://*.barrons.com/*", name: "Barron's" },
   { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
-  { pattern: "https://open.spotify.com/*", name: "Spotify" },
-  { pattern: "https://mail.google.com/*", name: "Gmail" }
+  { pattern: "https://open.spotify.com/*", name: "Spotify" }
 ];
 
 // Funkcja zwracająca tablicę URLi do query
@@ -16455,29 +20161,55 @@ chrome.runtime.onInstalled.addListener(() => {
     contexts: ["all"]
   });
   ensureWatchlistDispatchAlarm();
+  ensureWatchlistDispatchVerificationAlarm();
   ensureProcessMonitorHeartbeatAlarm();
   requestAnalysisQueueReconcile('on_installed');
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onInstalled failed:', error);
   });
+  syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm onInstalled failed:', error);
+  });
   logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_installed', false).catch(() => {});
+  recoverChatGptPageEmergencyResponses({ origin: 'on_installed' }).catch((error) => {
+    console.warn('[copy-flow] [page-emergency:recover-failed] origin=on_installed', error);
+  });
+  runRemoteRunnerMaintenance('on_installed').catch((error) => {
+    console.warn('[remote-runner] maintenance onInstalled failed:', error);
+  });
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_installed', error);
+  });
+  processWatchlistDispatchVerificationQueue('on_installed').catch((error) => {
+    console.warn('[copy-flow] [verify-queue:error] reason=on_installed', error);
   });
 });
 
 chrome.runtime.onStartup.addListener(() => {
   ensureWatchlistDispatchAlarm();
+  ensureWatchlistDispatchVerificationAlarm();
   ensureProcessMonitorHeartbeatAlarm();
   requestAnalysisQueueReconcile('on_startup');
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onStartup failed:', error);
   });
+  syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm onStartup failed:', error);
+  });
   logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_startup', false).catch(() => {});
+  recoverChatGptPageEmergencyResponses({ origin: 'on_startup' }).catch((error) => {
+    console.warn('[copy-flow] [page-emergency:recover-failed] origin=on_startup', error);
+  });
+  runRemoteRunnerMaintenance('on_startup').catch((error) => {
+    console.warn('[remote-runner] maintenance onStartup failed:', error);
+  });
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
+  });
+  processWatchlistDispatchVerificationQueue('on_startup').catch((error) => {
+    console.warn('[copy-flow] [verify-queue:error] reason=on_startup', error);
   });
 });
 
@@ -16523,37 +20255,128 @@ if (typeof globalThis?.addEventListener === 'function') {
 if (chrome?.runtime?.onConnect) {
   chrome.runtime.onConnect.addListener((port) => {
     const providerId = extractManualPdfProviderIdFromPort(port);
-    if (!providerId) return;
+    if (providerId) {
+      manualPdfProviderPorts.set(providerId, {
+        port,
+        lastSeenAt: Date.now()
+      });
+      console.log('[manual-pdf] provider keepalive connected:', {
+        providerId
+      });
 
-    manualPdfProviderPorts.set(providerId, {
+      if (port?.onMessage?.addListener) {
+        port.onMessage.addListener((message) => {
+          const incomingProviderId = typeof message?.providerId === 'string'
+            ? message.providerId.trim()
+            : '';
+          if (!incomingProviderId || incomingProviderId !== providerId) return;
+          const record = manualPdfProviderPorts.get(providerId);
+          if (!record || record.port !== port) return;
+          record.lastSeenAt = Date.now();
+          manualPdfProviderPorts.set(providerId, record);
+        });
+      }
+
+      if (port?.onDisconnect?.addListener) {
+        port.onDisconnect.addListener(() => {
+          const record = manualPdfProviderPorts.get(providerId);
+          if (record && record.port === port) {
+            manualPdfProviderPorts.delete(providerId);
+          }
+          console.log('[manual-pdf] provider keepalive disconnected:', {
+            providerId
+          });
+        });
+      }
+      return;
+    }
+
+    const analysisRunId = extractAnalysisRunIdFromPort(port);
+    if (analysisRunId) {
+      analysisRunKeepalivePorts.set(analysisRunId, {
+        port,
+        lastSeenAt: Date.now()
+      });
+      console.log('[analysis-run] keepalive connected', {
+        runId: analysisRunId,
+        openPorts: analysisRunKeepalivePorts.size
+      });
+
+      if (port?.onMessage?.addListener) {
+        port.onMessage.addListener((message) => {
+          const incomingRunId = typeof message?.runId === 'string'
+            ? message.runId.trim()
+            : '';
+          if (!incomingRunId || incomingRunId !== analysisRunId) return;
+          const record = analysisRunKeepalivePorts.get(analysisRunId);
+          if (!record || record.port !== port) return;
+          record.lastSeenAt = Date.now();
+          analysisRunKeepalivePorts.set(analysisRunId, record);
+        });
+      }
+
+      if (port?.onDisconnect?.addListener) {
+        port.onDisconnect.addListener(() => {
+          const record = analysisRunKeepalivePorts.get(analysisRunId);
+          if (record && record.port === port) {
+            analysisRunKeepalivePorts.delete(analysisRunId);
+          }
+          console.log('[analysis-run] keepalive disconnected', {
+            runId: analysisRunId,
+            openPorts: analysisRunKeepalivePorts.size
+          });
+        });
+      }
+      return;
+    }
+
+    const pageId = extractUnfinishedResumePageIdFromPort(port);
+    if (!pageId) return;
+
+    unfinishedResumePagePorts.set(pageId, {
       port,
-      lastSeenAt: Date.now()
+      lastSeenAt: Date.now(),
+      state: 'idle',
+      sourceFilter: 'all'
     });
-    console.log('[manual-pdf] provider keepalive connected:', {
-      providerId
+    logUnfinishedResumeKeepalive('connected', {
+      pageId,
+      openPages: unfinishedResumePagePorts.size
     });
 
     if (port?.onMessage?.addListener) {
       port.onMessage.addListener((message) => {
-        const incomingProviderId = typeof message?.providerId === 'string'
-          ? message.providerId.trim()
+        const incomingPageId = typeof message?.pageId === 'string'
+          ? message.pageId.trim()
           : '';
-        if (!incomingProviderId || incomingProviderId !== providerId) return;
-        const record = manualPdfProviderPorts.get(providerId);
+        if (!incomingPageId || incomingPageId !== pageId) return;
+        const record = unfinishedResumePagePorts.get(pageId);
         if (!record || record.port !== port) return;
         record.lastSeenAt = Date.now();
-        manualPdfProviderPorts.set(providerId, record);
+        record.state = typeof message?.state === 'string' && message.state.trim()
+          ? message.state.trim()
+          : record.state;
+        record.sourceFilter = typeof message?.sourceFilter === 'string' && message.sourceFilter.trim()
+          ? message.sourceFilter.trim()
+          : 'all';
+        unfinishedResumePagePorts.set(pageId, record);
+        logUnfinishedResumeKeepalive('heartbeat', {
+          pageId,
+          state: record.state,
+          sourceFilter: record.sourceFilter
+        });
       });
     }
 
     if (port?.onDisconnect?.addListener) {
       port.onDisconnect.addListener(() => {
-        const record = manualPdfProviderPorts.get(providerId);
+        const record = unfinishedResumePagePorts.get(pageId);
         if (record && record.port === port) {
-          manualPdfProviderPorts.delete(providerId);
+          unfinishedResumePagePorts.delete(pageId);
         }
-        console.log('[manual-pdf] provider keepalive disconnected:', {
-          providerId
+        logUnfinishedResumeKeepalive('disconnected', {
+          pageId,
+          openPages: unfinishedResumePagePorts.size
         });
       });
     }
@@ -16570,6 +20393,13 @@ if (chrome?.alarms?.onAlarm) {
         console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
       });
       requestAnalysisQueueReconcile('watchlist_dispatch_alarm');
+      return;
+    }
+
+    if (alarm.name === WATCHLIST_VERIFY_QUEUE.alarmName) {
+      processWatchlistDispatchVerificationQueue('alarm').catch((error) => {
+        console.warn('[copy-flow] [verify-queue:error] reason=alarm', error);
+      });
       return;
     }
 
@@ -16681,6 +20511,29 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       newResponse.conversationLogs = conversationLogs;
       newResponse.conversationLogCount = conversationLogs.length;
     }
+    const safeExtraMetadata = extraMetadata && typeof extraMetadata === 'object' && !Array.isArray(extraMetadata)
+      ? extraMetadata
+      : null;
+    const sourceUrl = typeof safeExtraMetadata?.sourceUrl === 'string' ? safeExtraMetadata.sourceUrl.trim() : '';
+    const remoteSourceName = typeof safeExtraMetadata?.remoteSourceName === 'string'
+      ? safeExtraMetadata.remoteSourceName.trim()
+      : '';
+    const remoteJobId = typeof safeExtraMetadata?.remoteJobId === 'string' ? safeExtraMetadata.remoteJobId.trim() : '';
+    const remoteControllerId = typeof safeExtraMetadata?.remoteControllerId === 'string'
+      ? safeExtraMetadata.remoteControllerId.trim()
+      : '';
+    const remoteRunnerId = typeof safeExtraMetadata?.remoteRunnerId === 'string'
+      ? safeExtraMetadata.remoteRunnerId.trim()
+      : '';
+    const remoteSourceId = typeof safeExtraMetadata?.remoteSourceId === 'string'
+      ? safeExtraMetadata.remoteSourceId.trim()
+      : '';
+    if (sourceUrl) newResponse.sourceUrl = sourceUrl;
+    if (remoteSourceName) newResponse.remoteSourceName = remoteSourceName;
+    if (remoteJobId) newResponse.remoteJobId = remoteJobId;
+    if (remoteControllerId) newResponse.remoteControllerId = remoteControllerId;
+    if (remoteRunnerId) newResponse.remoteRunnerId = remoteRunnerId;
+    if (remoteSourceId) newResponse.remoteSourceId = remoteSourceId;
     
     const saveMaxAttempts = 4;
     const saveRetryDelayMs = 650;
@@ -16795,10 +20648,16 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       hasConversationUrl: conversationAnalysis.hasConversationUrl,
       conversationSnapshotRefreshed: conversationAnalysis.snapshotRefreshedBeforeSend,
       conversationSnapshotSource: conversationAnalysis.snapshotSource,
+      responseId: normalizedResponseId,
+      currentResponseState: '',
+      currentResponsePending: false,
+      currentResponseEventId: null,
+      dbVerification: null,
       state: '',
       processLog: []
     };
     const dispatchProcessLog = [];
+    let currentResponseDispatchResult = null;
     const appendDispatchProcessLog = (stage, status, details = '') => {
       const normalizedStage = typeof stage === 'string' ? stage.trim() : '';
       const normalizedStatus = typeof status === 'string' ? status.trim() : '';
@@ -16853,6 +20712,12 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
           dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
           dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
+          const flushItemResults = flushResult?.itemResults && typeof flushResult.itemResults === 'object'
+            ? flushResult.itemResults
+            : {};
+          currentResponseDispatchResult = flushItemResults[normalizedResponseId] && typeof flushItemResults[normalizedResponseId] === 'object'
+            ? flushItemResults[normalizedResponseId]
+            : null;
           dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
           dispatchOutcome.failureStage = typeof flushResult?.firstFailureStage === 'string'
             ? flushResult.firstFailureStage.trim()
@@ -16901,11 +20766,32 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
           dispatchOutcome.hasConversationUrl = conversationAnalysis.hasConversationUrl;
           dispatchOutcome.conversationSnapshotRefreshed = conversationAnalysis.snapshotRefreshedBeforeSend;
           dispatchOutcome.conversationSnapshotSource = conversationAnalysis.snapshotSource;
+          dispatchOutcome.currentResponseState = typeof currentResponseDispatchResult?.state === 'string'
+            ? currentResponseDispatchResult.state.trim()
+            : '';
+          dispatchOutcome.currentResponsePending = currentResponseDispatchResult?.pending === true;
+          dispatchOutcome.currentResponseEventId = Number.isInteger(currentResponseDispatchResult?.eventId)
+            ? currentResponseDispatchResult.eventId
+            : null;
+          dispatchOutcome.dbVerification = normalizeWatchlistDbVerification(currentResponseDispatchResult?.dbVerification);
           appendDispatchProcessLog(
             'flush_result',
             dispatchOutcome.failed > 0 ? 'partial' : 'ok',
             `accepted=${dispatchOutcome.accepted}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, verifyState=${dispatchOutcome.verifyState || 'n/a'}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
           );
+          if (dispatchOutcome.dbVerification) {
+            appendDispatchProcessLog(
+              'db_verify',
+              dispatchOutcome.dbVerification.success ? 'ok' : 'warn',
+              `state=${dispatchOutcome.dbVerification.state || 'n/a'}, missing=${dispatchOutcome.dbVerification.missingFields.join('+') || 'none'}, mismatch=${dispatchOutcome.dbVerification.mismatchFields.join('+') || 'none'}`
+            );
+          } else if (currentResponseDispatchResult) {
+            appendDispatchProcessLog(
+              'current_response',
+              currentResponseDispatchResult.success ? 'accepted' : (currentResponseDispatchResult.pending ? 'pending' : 'warn'),
+              `state=${dispatchOutcome.currentResponseState || 'n/a'}, responseId=${normalizedResponseId}`
+            );
+          }
           appendDispatchProcessLog(
             'conversation_analysis',
             'used_for_report',
@@ -16944,6 +20830,11 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
 
     const pipelineDispatchState = (() => {
       if (dispatchOutcome.queueSkipped) return 'dispatch_skipped';
+      if (currentResponseDispatchResult?.success === true && isWatchlistDbVerificationSuccessful(dispatchOutcome.dbVerification)) {
+        return 'dispatch_confirmed';
+      }
+      if (currentResponseDispatchResult?.success === true) return 'dispatch_accepted_unverified';
+      if (currentResponseDispatchResult?.pending === true) return 'dispatch_pending';
       if (dispatchOutcome.failed > 0) return 'dispatch_failed';
       if (dispatchOutcome.sent > 0 && dispatchOutcome.failed === 0) return 'dispatch_confirmed';
       if (dispatchOutcome.accepted > 0 && dispatchOutcome.sent === 0) return 'dispatch_pending';
@@ -17164,6 +21055,124 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({ success: false, error: error?.message || 'run_analysis_start_failed' });
     });
     return true;
+  } else if (message.type === 'RUN_REMOTE_ANALYSIS') {
+    (async () => {
+      const response = await runRemoteAnalysis({
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        text: typeof message?.text === 'string' ? message.text : '',
+        title: typeof message?.title === 'string' ? message.title : '',
+        instances: Number.isInteger(message?.instances) ? message.instances : 1
+      });
+      sendResponse(response);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'run_remote_analysis_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'RUN_REMOTE_RELOAD_RESUME') {
+    (async () => {
+      const response = await runRemoteReloadResumeCommand({
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
+        forceRepeatLastPrompt: message?.forceRepeatLastPrompt === true,
+        composerThinkingEffort: typeof message?.composerThinkingEffort === 'string' ? message.composerThinkingEffort : ''
+      });
+      sendResponse(response);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'run_remote_reload_resume_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'GET_REMOTE_RUNNER_STATUS') {
+    getRemoteRunnerPopupStatus({
+      forceSync: message?.forceSync === true
+    })
+      .then((status) => sendResponse(status))
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          error: error?.message || 'remote_runner_status_failed'
+        });
+      });
+    return true;
+  } else if (message.type === 'CHECK_REMOTE_RUNNER') {
+    (async () => {
+      const settings = await getRemoteRunnerSettings();
+      const supportId = await ensureExtensionInstallationId().catch(() => '');
+      const requestedRunnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
+        ? message.runnerId.trim()
+        : '';
+      const resolution = await resolveRemoteRunnerSelection({
+        supportId,
+        settings,
+        requestedRunnerId
+      });
+      if (!resolution?.targetRunner) {
+        sendResponse({
+          success: false,
+          error: resolution?.targetRunnerError || resolution?.discoveredRunnersError || 'runner_id_missing',
+          discoveredRunners: Array.isArray(resolution?.discoveredRunners) ? resolution.discoveredRunners : []
+        });
+        return;
+      }
+      const settingsPatch = {};
+      if (requestedRunnerId || settings.controllerRunnerId) {
+        settingsPatch.controllerRunnerId = resolution.targetRunner.runnerId;
+      }
+      if (resolution.targetRunner.runnerName) {
+        settingsPatch.controllerRunnerNameCached = resolution.targetRunner.runnerName;
+      }
+      if (Object.keys(settingsPatch).length > 0) {
+        await saveRemoteRunnerSettings(settingsPatch);
+      }
+      sendResponse({
+        success: true,
+        runner: resolution.targetRunner,
+        targetSource: resolution.targetRunnerSource || '',
+        discoveredRunners: Array.isArray(resolution.discoveredRunners) ? resolution.discoveredRunners : []
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'remote_runner_check_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'SET_REMOTE_RUNNER_SETTINGS') {
+    (async () => {
+      const settings = await saveRemoteRunnerSettings({
+        enabled: typeof message?.enabled === 'boolean' ? message.enabled : undefined,
+        runnerName: typeof message?.runnerName === 'string' ? message.runnerName : undefined,
+        transportMode: typeof message?.transportMode === 'string' ? message.transportMode : undefined,
+        localBaseUrl: typeof message?.localBaseUrl === 'string' ? message.localBaseUrl : undefined,
+        controllerRunnerId: typeof message?.controllerRunnerId === 'string'
+          ? message.controllerRunnerId
+          : undefined,
+        controllerRunnerNameCached: typeof message?.controllerRunnerNameCached === 'string'
+          ? message.controllerRunnerNameCached
+          : undefined
+      });
+      await syncRemoteRunnerAlarm();
+      if (settings.enabled) {
+        await runRemoteRunnerMaintenance('settings_updated').catch(() => null);
+      }
+      const status = await getRemoteRunnerPopupStatus({ forceSync: settings.enabled });
+      sendResponse({
+        success: true,
+        settings,
+        status
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'set_remote_runner_settings_failed'
+      });
+    });
+    return true;
   } else if (message.type === 'COUNT_COMPANY_CONVERSATION_MESSAGES') {
     (async () => {
       const targetTabId = Number.isInteger(message?.tabId)
@@ -17181,75 +21190,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
     return true;
   } else if (message.type === 'YT_FETCH_TRANSCRIPT_FOR_TAB') {
-    (async () => {
-      const targetTabId = Number.isInteger(message?.tabId)
-        ? message.tabId
-        : (Number.isInteger(sender?.tab?.id) ? sender.tab.id : null);
-
-      if (!Number.isInteger(targetTabId)) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'tab_id_missing',
-          error: 'Missing target tab id',
-        });
-        return;
-      }
-
-      let targetTab;
-      try {
-        targetTab = await chrome.tabs.get(targetTabId);
-      } catch (error) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'tab_not_found',
-          error: error?.message || 'Unable to get tab info',
-        });
-        return;
-      }
-
-      const targetUrl = typeof targetTab?.url === 'string' ? targetTab.url : '';
-      if (!isYouTubeTabUrl(targetUrl)) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'not_youtube_tab',
-          error: 'Active tab is not a YouTube page',
-          tabId: targetTabId,
-          tabUrl: targetUrl,
-        });
-        return;
-      }
-
-      const preferredLanguages = Array.isArray(message?.preferredLanguages) && message.preferredLanguages.length > 0
-        ? message.preferredLanguages
-        : YT_TRANSCRIPT_PREFERRED_LANGUAGES;
-      const timeoutMs = Number.isInteger(message?.timeoutMs) ? message.timeoutMs : YT_TRANSCRIPT_REQUEST_TIMEOUT_MS;
-      const maxRetries = Number.isInteger(message?.maxRetries) ? message.maxRetries : YT_TRANSCRIPT_MAX_RETRIES;
-      const result = await fetchYouTubeTranscriptForTab(targetTabId, preferredLanguages, { timeoutMs, maxRetries });
-      sendResponse({
-        ...result,
-        tabId: targetTabId,
-        tabUrl: targetUrl,
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        transcript: '',
-        lang: '',
-        method: 'none',
-        errorCode: 'runtime_error',
-        error: error?.message || 'runtime_error',
-      });
+    sendResponse({
+      success: false,
+      transcript: '',
+      lang: '',
+      method: 'none',
+      errorCode: 'youtube_disabled',
+      error: 'YouTube transcript fetch is disabled',
     });
-    return true;
+    return false;
   } else if (message.type === 'STOP_PROCESS') {
     (async () => {
       const actionOrigin = typeof message?.origin === 'string' && message.origin.trim()
@@ -17430,7 +21379,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   } else if (message.type === 'GET_UNFINISHED_PROCESSES') {
     (async () => {
       const includeNonCompleted = message?.includeNonCompleted !== false;
-      const result = await listUnfinishedProcessesForResume({ includeNonCompleted });
+      const recoverOnly = message?.recoverOnly !== false;
+      const sourceFilter = typeof message?.sourceFilter === 'string' ? message.sourceFilter : '';
+      const origin = typeof message?.origin === 'string' ? message.origin : 'runtime-message:get-unfinished-processes';
+      const result = await listUnfinishedProcessesForResume({
+        includeNonCompleted,
+        recoverOnly,
+        sourceFilter,
+        origin
+      });
       sendResponse(result);
     })().catch((error) => {
       console.warn('[unfinished-resume] GET_UNFINISHED_PROCESSES failed:', error);
@@ -17440,6 +21397,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         total: 0,
         runnable: 0,
         skippedMissingUrl: 0,
+        sourceFilter: 'all',
+        sourceFilterApplied: false,
+        sourceFilterMatched: true,
+        recoverOnly: true,
+        availableSources: [],
         items: [],
         error: error?.message || String(error)
       });
@@ -17449,7 +21411,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     (async () => {
       const result = await startResumeUnfinishedProcessesBatch({
         origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
-        forceRestartIfRunning: message?.forceRestartIfRunning === true
+        forceRestartIfRunning: message?.forceRestartIfRunning === true,
+        sourceFilter: typeof message?.sourceFilter === 'string' ? message.sourceFilter : '',
+        limit: message?.limit
       });
       sendResponse(result);
     })().catch((error) => {
@@ -17774,8 +21738,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const reason = normalizeWatchlistFlushReason(message?.reason, 'manual_popup');
       console.log('[copy-flow] [dispatch:manual-flush-requested]', { reason });
       const flushResult = await flushWatchlistDispatchOutbox(reason);
+      const verifyResult = await processWatchlistDispatchVerificationQueue(reason).catch((error) => ({
+        success: false,
+        error: error?.message || String(error)
+      }));
       const status = await getWatchlistDispatchStatus(Boolean(message?.forceReload));
-      await logWatchlistDispatchStatusSnapshot('manual_flush', false, { reason, flushResult });
+      await logWatchlistDispatchStatusSnapshot('manual_flush', false, { reason, flushResult, verifyResult });
       reportAdminActionEvent('flush_watchlist_dispatch', {
         level: flushResult?.success === true
           ? 'info'
@@ -17796,7 +21764,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         },
         error: typeof flushResult?.error === 'string' ? flushResult.error : ''
       });
-      sendResponse({ success: true, flushResult, status });
+      sendResponse({ success: true, flushResult, verifyResult, status });
     })().catch((error) => {
       console.warn('[copy-flow] [dispatch:manual-flush-failed]', error);
       reportAdminActionEvent('flush_watchlist_dispatch', {
@@ -17830,14 +21798,18 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           return;
         }
 
-        const [status, flushResult] = await Promise.all([
+        const [status, flushResult, verifyResult] = await Promise.all([
           getWatchlistDispatchStatus(true),
           flushWatchlistDispatchOutbox('credentials_updated').catch((error) => ({
             success: false,
             error: error?.message || String(error)
+          })),
+          processWatchlistDispatchVerificationQueue('credentials_updated').catch((error) => ({
+            success: false,
+            error: error?.message || String(error)
           }))
         ]);
-        await logWatchlistDispatchStatusSnapshot('credentials_updated', false, { flushResult });
+        await logWatchlistDispatchStatusSnapshot('credentials_updated', false, { flushResult, verifyResult });
         await logWatchlistRemoteConnectionState('set_watchlist_dispatch_token', true, {
           statusText: `flushSuccess=${flushResult?.success === true ? 'yes' : 'no'}`
         });
@@ -17852,7 +21824,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             queueSize: Number.isInteger(status?.queueSize) ? status.queueSize : null
           }
         });
-        sendResponse({ success: true, status, flushResult });
+        sendResponse({ success: true, status, flushResult, verifyResult });
       })
       .catch((error) => {
         console.warn('[copy-flow] [dispatch:set-token-failed]', error);
@@ -17975,6 +21947,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const resumeScope = typeof message?.scope === 'string' && message.scope.trim()
       ? message.scope.trim()
       : RESUME_ALL_SCOPE_ACTIVE_COMPANY_INVEST;
+    const reloadBeforeResume = message?.reloadBeforeResume !== false;
     const forceRepeatLastPrompt = message?.forceRepeatLastPrompt === true;
     const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
     const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
@@ -17984,7 +21957,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       : 0;
     const monitorSessionId = typeof message?.monitorSessionId === 'string' && message.monitorSessionId.trim()
       ? message.monitorSessionId.trim()
-      : createReloadResumeMonitorSessionId('reload-resume');
+      : createReloadResumeMonitorSessionId(reloadBeforeResume ? 'reload-resume' : 'resume-no-reload');
     (async () => {
       let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
       if (resolvedComposerThinkingEffort) {
@@ -18008,11 +21981,14 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         reportAdminActionEvent('reload_resume_all', {
           level: success ? 'info' : 'warn',
           status: success ? 'completed' : 'failed',
-          reason: success ? 'reload_resume_all_completed' : 'reload_resume_all_failed',
+          reason: success
+            ? (reloadBeforeResume ? 'reload_resume_all_completed' : 'resume_all_no_reload_completed')
+            : (reloadBeforeResume ? 'reload_resume_all_failed' : 'resume_all_no_reload_failed'),
           origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
           error: success ? '' : (result?.error || ''),
           details: {
             scope: resumeScope,
+            reloadBeforeResume,
             scannedTabs: Number.isInteger(result?.scannedTabs) ? result.scannedTabs : 0,
             matchedTabs: Number.isInteger(result?.matchedTabs) ? result.matchedTabs : 0,
             startedTabs: Number.isInteger(result?.startedTabs) ? result.startedTabs : 0,
@@ -18030,11 +22006,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         reportAdminActionEvent('reload_resume_all', {
           level: 'error',
           status: 'failed',
-          reason: 'reload_resume_all_exception',
+          reason: reloadBeforeResume ? 'reload_resume_all_exception' : 'resume_all_no_reload_exception',
           origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
           error: error?.message || String(error),
           details: {
-            scope: resumeScope
+            scope: resumeScope,
+            reloadBeforeResume
           }
         });
         void updateReloadResumeMonitorSession(monitorSessionId, {
@@ -18053,14 +22030,15 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           startedTabs: 0,
           resumedTabs: 0,
           scope: resumeScope,
-        summary: {
-          started: 0,
-          detect_failed: 0,
-          reload_failed: 0,
-          skipped_outside_invest: 0,
-          final_stage_completed: 0,
-          start_failed: 0,
-          reload_ok: 0,
+          reloadBeforeResume,
+          summary: {
+            started: 0,
+            detect_failed: 0,
+            reload_failed: 0,
+            skipped_outside_invest: 0,
+            final_stage_completed: 0,
+            start_failed: 0,
+            reload_ok: 0,
             reload_total: 0,
             prompt_blocks: 0,
             response_blocks: 0,
@@ -18948,6 +22926,9 @@ chrome.tabs.onRemoved.addListener((tabId) => {
       ytTranscriptInFlightRequests.delete(cacheKey);
     }
   }
+  void markInterruptedProcessesForClosedTab(tabId).catch((error) => {
+    console.warn('[monitor] Failed to mark interrupted process after tab close:', error?.message || String(error));
+  });
 });
 
 function clampWindowMetric(value, minValue, maxValue) {
@@ -19661,122 +23642,92 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
   const invocationWindowId = Number.isInteger(options?.invocationWindowId)
     ? options.invocationWindowId
     : null;
-  
-  console.log(`[${analysisType}] Rozpoczynam przetwarzanie ${tabs.length} artykułów`);
-  
-  const processingPromises = tabs.map(async (tab, index) => {
-    const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
+  const processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
+  console.log(`[${analysisType}] Dodaję ${tabs.length} artykułów do kolejki procesów`, {
+    requested: tabs.length,
+    ...getAnalysisProcessQueueSnapshot()
+  });
+
+  const queuedDescriptors = tabs.map((tab, index) => ({
+    tab,
+    index,
+    processId: `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`,
+    initialTitle: tab?.title || 'Bez tytulu'
+  }));
+
+  await Promise.all(queuedDescriptors.map(async ({ tab, processId, initialTitle }) => {
+    const sourceWindowId = Number.isInteger(tab?.windowId)
+      ? tab.windowId
+      : (Number.isInteger(options?.sourceWindowId) ? options.sourceWindowId : null);
+    await upsertProcess(processId, {
+      title: initialTitle,
+      analysisType,
+      status: 'queued',
+      queueState: 'pending',
+      queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
+      statusText: 'W kolejce do uruchomienia',
+      currentPrompt: 0,
+      totalPrompts: processTotalPrompts,
+      needsAction: false,
+      startedAt: Date.now(),
+      timestamp: Date.now(),
+      sourceUrl: typeof tab?.url === 'string' ? tab.url : '',
+      ...(invocationWindowId !== null ? { invocationWindowId } : {}),
+      ...(sourceWindowId !== null ? { sourceWindowId } : {})
+    });
+  }));
+
+  const runSingleProcess = async (tab, index, slotId, processId) => {
     let processTitle = tab?.title || 'Bez tytulu';
-    let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
-    const sourceWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
+    let processTotalPromptsForRun = Array.isArray(promptChain) ? promptChain.length : 0;
+    const sourceWindowId = Number.isInteger(tab?.windowId)
+      ? tab.windowId
+      : (Number.isInteger(options?.sourceWindowId) ? options.sourceWindowId : null);
     try {
-      console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
+      console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] [slot ${slotId}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
       console.log(`URL: ${tab.url}`);
-      
-      // Małe opóźnienie między startami aby nie przytłoczyć przeglądarki
-      await sleep(index * 500);
-      
-      // Sprawdź czy to pseudo-tab (ręcznie wklejone źródło)
-      const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
-      const isManualSource = manualUrl.startsWith('manual://');
-      const isManualPdf = manualUrl === 'manual://pdf';
-      let extractedText;
-      let transcriptLang = null; // Moze byc ustawiony przez YouTube content script
-      const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
-        ? tab.manualPdfAttachment
-        : null;      
-      if (isManualSource) {
-        // Użyj tekstu przekazanego bezpośrednio
-        extractedText = tab.manualText;
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Używam ręcznie wklejonego tekstu: ${extractedText?.length || 0} znaków`);
-        
-        // Dla manual source: brak walidacji długości (zgodnie z planem)
-        if (!extractedText || extractedText.length === 0) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - pusty tekst`);
-          return { success: false, title: processTitle, reason: 'pusty tekst', error: 'manual_source_empty' };
-        }
-      } else {
-        // Wykryj źródło najpierw, aby wiedzieć czy to YouTube
-        const isYouTube = isYouTubeTabUrl(tab.url);
-        
-        if (isYouTube) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube detected - fetching transcript`);
-          const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
-            timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
-            maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
-          });
 
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript result:`, {
-            success: transcriptResult.success,
-            length: transcriptResult.transcript?.length || 0,
-            lang: transcriptResult.lang,
-            method: transcriptResult.method,
-            cacheHit: transcriptResult.cacheHit,
-            errorCode: transcriptResult.errorCode,
-            error: transcriptResult.error,
-            attemptUsed: transcriptResult.attemptUsed,
-            attempts: transcriptResult.attempts,
-          });
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType,
+        status: 'starting',
+        queueSlot: slotId,
+        queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
+        queueAssignedAt: Date.now(),
+        statusText: 'Przygotowanie procesu',
+        currentPrompt: 0,
+        totalPrompts: processTotalPromptsForRun,
+        needsAction: false,
+        sourceUrl: typeof tab?.url === 'string' ? tab.url : '',
+        ...(invocationWindowId !== null ? { invocationWindowId } : {}),
+        ...(sourceWindowId !== null ? { sourceWindowId } : {}),
+        timestamp: Date.now()
+      });
 
-          if (!transcriptResult.success || !transcriptResult.transcript) {
-            const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
-            const ytError = transcriptResult.error || ytReason;
-            console.warn(
-              `[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript failed: reason=${ytReason} retryable=${transcriptResult.retryable === true} attempt=${transcriptResult.attemptUsed || 0}/${transcriptResult.attempts || YT_TRANSCRIPT_MAX_RETRIES} error=${truncateDispatchLogText(ytError, 220)}`
-            );
-            return {
-              success: false,
-              title: processTitle,
-              reason: `youtube_${ytReason}`,
-              error: ytError
-            };
-          }
-
-          extractedText = transcriptResult.transcript;
-          transcriptLang = transcriptResult.lang || 'unknown';
-        } else {
-          // === NON-YOUTUBE: Użyj executeScript z extractText ===
-          const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            function: extractText
-          });
-          extractedText = results[0]?.result;
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
-        }
-        
-        // Dla automatycznych źródeł: walidacja minimum 50 znaków
-        if (!extractedText || extractedText.length < 50) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - za mało tekstu`);
-          return {
-            success: false,
-            title: processTitle,
-            reason: 'za mało tekstu',
-            error: `text_too_short_${extractedText?.length || 0}`
-          };
-        }
+      // Lekko rozsuń start aktywnych slotów, ale bez blokowania kolejki globalnej.
+      const startDelayMs = Math.max(0, (slotId - 1) * 300);
+      if (startDelayMs > 0) {
+        await sleep(startDelayMs);
+      }
+      const extracted = await extractArticleSourcePayload(tab, analysisType);
+      if (!extracted?.success) {
+        return {
+          success: false,
+          title: extracted?.title || processTitle,
+          reason: extracted?.reason || 'extract_failed',
+          error: extracted?.error || ''
+        };
       }
 
-      // Pobierz tytuł
-      const title = tab.title || "Bez tytułu";
+      const extractedText = extracted.text;
+      const title = extracted.title || tab.title || "Bez tytułu";
       processTitle = title;
-      
-      // Wykryj źródło artykułu (dla non-YouTube lub dla payload metadata)
-      let sourceName;
-      
-      if (isManualSource) {
-        sourceName = isManualPdf ? "Manual PDF" : "Manual Source";
-      } else {
-        const url = new URL(tab.url);
-        const hostname = url.hostname;
-        sourceName = "Unknown";
-        for (const source of SUPPORTED_SOURCES) {
-          const domain = source.pattern.replace('*://*.', '').replace('*://', '').replace('/*', '');
-          if (hostname.includes(domain)) {
-            sourceName = source.name;
-            break;
-          }
-        }
-      }
+      const isManualSource = extracted.isManualSource === true;
+      const isManualPdf = extracted.isManualPdf === true;
+      const transcriptLang = extracted.transcriptLang || null;
+      const sourceName = extracted.sourceName || 'Unknown';
+      const manualPdfAttachmentContext = extracted.manualPdfAttachmentContext || null;
+      const processSourceUrl = extracted.sourceUrl || (tab?.url || '');
 
       // Wyciągnij treść pierwszego prompta z promptChain
       const firstPrompt = promptChain[0] || '';
@@ -19786,20 +23737,50 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       
       // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
       const restOfPrompts = promptChain.slice(1);
-      processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
-      const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
+      processTotalPromptsForRun = Array.isArray(promptChain) ? promptChain.length : 0;
+      const processPromptOffset = processTotalPromptsForRun > 0 ? 1 : 0;
       await upsertProcess(processId, {
         title,
         analysisType,
         status: 'starting',
+        queueSlot: slotId,
+        queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
+        queueAssignedAt: Date.now(),
         statusText: 'Przygotowanie procesu',
         currentPrompt: 0,
-        totalPrompts: processTotalPrompts,
+        totalPrompts: processTotalPromptsForRun,
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
-        sourceUrl: isManualSource ? (tab.url || 'manual://source') : (tab.url || ''),
-        chatUrl,
+        sourceUrl: processSourceUrl,
+        sourceName,
+        ...(typeof tab?.remoteSourceName === 'string' && tab.remoteSourceName.trim()
+          ? { remoteSourceName: tab.remoteSourceName.trim() }
+          : {}),
+        ...(typeof tab?.remoteJobId === 'string' && tab.remoteJobId.trim()
+          ? { remoteJobId: tab.remoteJobId.trim() }
+          : (typeof options?.remoteJobId === 'string' && options.remoteJobId.trim()
+            ? { remoteJobId: options.remoteJobId.trim() }
+            : {})),
+        ...(typeof tab?.remoteControllerId === 'string' && tab.remoteControllerId.trim()
+          ? { remoteControllerId: tab.remoteControllerId.trim() }
+          : (typeof options?.remoteControllerId === 'string' && options.remoteControllerId.trim()
+            ? { remoteControllerId: options.remoteControllerId.trim() }
+            : {})),
+        ...(typeof tab?.remoteRunnerId === 'string' && tab.remoteRunnerId.trim()
+          ? { remoteRunnerId: tab.remoteRunnerId.trim() }
+          : (typeof options?.remoteRunnerId === 'string' && options.remoteRunnerId.trim()
+            ? { remoteRunnerId: options.remoteRunnerId.trim() }
+            : {})),
+        ...(typeof tab?.remoteSourceId === 'string' && tab.remoteSourceId.trim()
+          ? { remoteSourceId: tab.remoteSourceId.trim() }
+          : {}),
+        ...(typeof tab?.remoteTextHash === 'string' && tab.remoteTextHash.trim()
+          ? { remoteTextHash: tab.remoteTextHash.trim() }
+          : {}),
+        ...(typeof tab?.remoteExtractedAtUtc === 'string' && tab.remoteExtractedAtUtc.trim()
+          ? { remoteExtractedAtUtc: tab.remoteExtractedAtUtc.trim() }
+          : {}),
         ...(invocationWindowId !== null ? { invocationWindowId } : {}),
         ...(sourceWindowId !== null ? { sourceWindowId } : {}),
         messages: []
@@ -19833,6 +23814,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
 
       await upsertProcess(processId, {
         status: 'running',
+        queueSlot: slotId,
+        queueLimit: Math.max(1, Number.isInteger(PROCESS_QUEUE_MAX_CONCURRENCY) ? PROCESS_QUEUE_MAX_CONCURRENCY : 1),
         statusText: 'Okno ChatGPT gotowe',
         windowId: window.id,
         tabId: chatTabId,
@@ -19852,6 +23835,18 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         }
       } catch (error) {
         // Ignore URL capture errors; process can continue without a conversation link.
+      }
+      try {
+        await recoverChatGptPageEmergencyResponses({
+          origin: 'process_articles_tab_ready',
+          preferredTabId: chatTabId
+        });
+      } catch (error) {
+        console.warn('[copy-flow] [page-emergency:recover-failed] origin=process_articles_tab_ready', {
+          processId,
+          chatTabId,
+          error: error?.message || String(error)
+        });
       }
 
       // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
@@ -19902,14 +23897,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             onRetry: async ({ attempt, maxAttempts, errorText }) => {
               await upsertProcess(processId, {
                 title: processTitle,
-                analysisType,
-                status: 'running',
-                needsAction: false,
-                statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
-                reason: 'execute_script_retry',
-                error: errorText || '',
-                timestamp: Date.now()
-              });
+            analysisType,
+            status: 'running',
+            needsAction: false,
+            statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
+            reason: 'execute_script_retry',
+            error: errorText || '',
+            timestamp: Date.now()
+          });
             }
           });
           console.log(`✅ executeScript zakończony pomyślnie`);
@@ -19981,7 +23976,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           status: 'running',
           needsAction: false,
           currentPrompt: recoveryCurrentPrompt,
-          totalPrompts: processTotalPrompts,
+          totalPrompts: processTotalPromptsForRun,
           statusText: `Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
           reason: recoveryReason,
           autoRecovery: {
@@ -20337,12 +24332,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           : {}),
         ...(finalStatus === 'completed'
           ? {
-            currentPrompt: processTotalPrompts,
-            totalPrompts: processTotalPrompts,
-            ...(processTotalPrompts > 0
+            currentPrompt: processTotalPromptsForRun,
+            totalPrompts: processTotalPromptsForRun,
+            ...(processTotalPromptsForRun > 0
               ? {
-                stageIndex: processTotalPrompts - 1,
-                stageName: `Prompt ${processTotalPrompts}`
+                stageIndex: processTotalPromptsForRun - 1,
+                stageName: `Prompt ${processTotalPromptsForRun}`
               }
               : {
                 stageName: 'Start'
@@ -20352,12 +24347,17 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
+      await maybeAutoCloseProcessAfterDbVerify(processId, {
+        tabId: chatTabId,
+        origin: 'process_completed'
+      }).catch(() => {});
 
       const processSuccess = finalStatus === 'completed';
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
       return {
         success: processSuccess,
         title,
+        processId,
         reason: finalReason || '',
         error: finalError || ''
       };
@@ -20376,11 +24376,18 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         finishedAt: Date.now(),
         timestamp: Date.now()
       });
-      return { success: false, error: error.message };
+      return { success: false, processId, error: error.message };
     }
-  });
+  };
 
-  // Poczekaj na uruchomienie wszystkich
+  const processingPromises = queuedDescriptors.map(({ tab, index, processId, initialTitle }) => enqueueAnalysisProcessTask(
+    (slotId) => runSingleProcess(tab, index, slotId, processId),
+    {
+      analysisType,
+      title: initialTitle,
+      processId
+    }
+  ));
   const results = await Promise.allSettled(processingPromises);
   
   const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
@@ -20481,26 +24488,9 @@ async function runAnalysis(options = {}) {
     
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
-    const allTabs = [];
     const patterns = getSupportedSourcesQuery();
     console.log(`Szukam artykułów w ${patterns.length} źródłach:`, patterns);
-    
-    for (const pattern of patterns) {
-      const tabs = await chrome.tabs.query({url: pattern});
-      console.log(`  - ${pattern}: znaleziono ${tabs.length} kart`);
-      if (tabs.length > 0) {
-        tabs.forEach(tab => console.log(`    • ${tab.title} (${tab.url})`));
-      }
-      allTabs.push(...tabs);
-    }
-    
-    const orderedTabs = Array.from(
-      new Map(
-        allTabs
-          .filter((tab) => Number.isInteger(tab?.id))
-          .map((tab) => [tab.id, tab])
-      ).values()
-    ).sort(compareTabsByWindowAndIndex);
+    const orderedTabs = await querySupportedSourceTabs();
 
     if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
@@ -21095,8 +25085,8 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
 // Uwaga: chrome.action.onClicked NIE działa gdy jest default_popup w manifest
 // Ikona uruchamia popup, a popup wysyła message RUN_ANALYSIS
 
-// Funkcja ekstrakcji tekstu (content script) - tylko dla non-YouTube sources
-// YouTube używa dedykowanego content script (youtube-content.js)
+// Funkcja ekstrakcji tekstu (content script) dla wspieranych źródeł webowych.
+// YouTube nie jest już wspieranym źródłem w runtime.
 async function extractText() {
   const hostname = window.location.hostname;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -21185,114 +25175,12 @@ async function extractText() {
     }
   }
 
-  async function extractGmailOpenEmail() {
-    try {
-      const url = new URL(window.location.href);
-
-      // Gmail renders message panels lazily after navigation.
-      await sleep(500);
-
-      const firstText = (selectors, minLength = 1) => {
-        for (const selector of selectors) {
-          let elements = [];
-          try {
-            elements = Array.from(document.querySelectorAll(selector));
-          } catch (_) {
-            continue;
-          }
-          for (const element of elements) {
-            const text = elementText(element);
-            if (text.length >= minLength) {
-              return text;
-            }
-          }
-        }
-        return '';
-      };
-
-      const longestText = (selectors, minLength = 1) => {
-        let best = '';
-        for (const selector of selectors) {
-          let elements = [];
-          try {
-            elements = Array.from(document.querySelectorAll(selector));
-          } catch (_) {
-            continue;
-          }
-          for (const element of elements) {
-            const text = elementText(element);
-            if (text.length >= minLength && text.length > best.length) {
-              best = text;
-            }
-          }
-        }
-        return best;
-      };
-
-      const subject = firstText([
-        'h2.hP',
-        'h2[data-thread-perm-id]',
-        'div[role="main"] h2[tabindex="-1"]',
-        'div[role="main"] h2'
-      ], 2);
-
-      const sender = firstText([
-        'div.adn.ads span.gD',
-        'div[role="listitem"] span.gD',
-        'span.gD[email]',
-        'span[email][name]',
-        'span[email]'
-      ], 2);
-
-      const sentAtNode = document.querySelector('div.adn.ads span.g3[title], div[role="listitem"] span.g3[title], span.g3[title]');
-      const sentAt = normalizeText(
-        (sentAtNode && (sentAtNode.getAttribute('title') || sentAtNode.innerText || sentAtNode.textContent)) || ''
-      );
-
-      const bodyText = longestText([
-        'div.adn.ads div.a3s.aiL',
-        'div.adn.ads div.a3s',
-        'div[role="listitem"] div.a3s.aiL',
-        'div[role="listitem"] div.a3s',
-        'div[role="main"] div.a3s.aiL',
-        'div[role="main"] div.a3s'
-      ], 20);
-
-      if (!subject && !bodyText) {
-        return '';
-      }
-
-      const headerParts = [
-        '[Gmail]',
-        subject ? `Subject: ${subject}` : null,
-        sender ? `From: ${sender}` : null,
-        sentAt ? `Date: ${sentAt}` : null,
-        `URL: ${url.href}`
-      ].filter(Boolean);
-
-      return `${headerParts.join(' | ')}\n\n${bodyText}`;
-    } catch (error) {
-      console.error('Gmail extraction failed:', error);
-      return '';
-    }
-  }
-
   if (hostname.includes('open.spotify.com')) {
     const spotifyTranscript = await extractSpotifyTranscript();
     if (spotifyTranscript && spotifyTranscript.length > 50) {
       console.log(`Spotify: extracted transcript text, length=${spotifyTranscript.length}`);
       return spotifyTranscript;
     }
-  }
-
-  if (hostname.includes('mail.google.com')) {
-    const gmailEmail = await extractGmailOpenEmail();
-    if (gmailEmail && gmailEmail.length > 20) {
-      console.log(`Gmail: extracted open email, length=${gmailEmail.length}`);
-      return gmailEmail;
-    }
-    console.log('Gmail: open email not detected, skipping tab');
-    return '';
   }
   console.log(`Próbuję wyekstrahować tekst z: ${hostname}`);
   
@@ -21586,7 +25474,13 @@ async function injectToChat(
     const runTag = `runId=${runId || 'n/a'}`;
     const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i;
     const DATA_GAP_MAX_REPLAYS_PER_STAGE = 2;
+    const CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY = '__iskra_pending_responses_v1';
+    const CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS = 24;
+    const ANALYSIS_RUN_KEEPALIVE_PORT_PREFIX = 'analysis-run:';
+    const ANALYSIS_RUN_KEEPALIVE_HEARTBEAT_MS = 15000;
     const dataGapReplayCountsByStage = new Map();
+    let analysisRunKeepalivePort = null;
+    let analysisRunKeepaliveTimerId = null;
 
     const sendOkTotal = () => runMetrics.sendOkVerified + runMetrics.sendOkInferred;
     const duplicateTotal = () => runMetrics.sendDuplicateAttempts + runMetrics.responseDuplicateAccepted;
@@ -21681,6 +25575,173 @@ async function injectToChat(
       const fraction = fractionRaw.replace(/0+$/, '');
       return fraction ? `${whole}.${fraction}` : whole;
     }
+
+    function sanitizePageEmergencyStageMeta(stageMeta = null) {
+      return stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
+        ? stageMeta
+        : null;
+    }
+
+    function readPageEmergencyResponseQueue() {
+      try {
+        if (!window?.localStorage) return [];
+        const raw = window.localStorage.getItem(CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => {
+            const responseId = typeof item.responseId === 'string' ? item.responseId.trim() : '';
+            const text = typeof item.text === 'string' ? item.text : '';
+            if (!responseId || !text.trim()) return null;
+            return {
+              responseId,
+              text,
+              source: typeof item.source === 'string' ? item.source : '',
+              analysisType: typeof item.analysisType === 'string' ? item.analysisType : 'company',
+              runId: typeof item.runId === 'string' ? item.runId : '',
+              conversationUrl: typeof item.conversationUrl === 'string' ? item.conversationUrl : '',
+              timestamp: Number.isFinite(item.timestamp) ? Number(item.timestamp) : Date.now(),
+              stage: sanitizePageEmergencyStageMeta(item.stage)
+            };
+          })
+          .filter(Boolean)
+          .slice(-CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS);
+      } catch (error) {
+        return [];
+      }
+    }
+
+    function writePageEmergencyResponseQueue(records = []) {
+      try {
+        if (!window?.localStorage) {
+          return { success: false, reason: 'local_storage_unavailable', count: 0 };
+        }
+        const normalized = Array.isArray(records)
+          ? records
+              .filter((item) => item && typeof item === 'object')
+              .slice(-CHATGPT_PAGE_EMERGENCY_RESPONSE_MAX_ITEMS)
+          : [];
+        if (normalized.length > 0) {
+          window.localStorage.setItem(
+            CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY,
+            JSON.stringify(normalized)
+          );
+        } else {
+          window.localStorage.removeItem(CHATGPT_PAGE_EMERGENCY_RESPONSE_STORAGE_KEY);
+        }
+        return {
+          success: true,
+          count: normalized.length
+        };
+      } catch (error) {
+        return {
+          success: false,
+          reason: error?.message || String(error),
+          count: 0
+        };
+      }
+    }
+
+    function stageResponseInPageEmergencyStore(responseText, responseId, stageMeta = null) {
+      const normalizedText = typeof responseText === 'string' ? responseText : '';
+      if (!normalizedText.trim()) {
+        return { success: false, reason: 'empty_response' };
+      }
+      const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+      if (!normalizedResponseId) {
+        return { success: false, reason: 'missing_response_id' };
+      }
+      const current = readPageEmergencyResponseQueue();
+      const next = current.filter((item) => item?.responseId !== normalizedResponseId);
+      next.push({
+        responseId: normalizedResponseId,
+        text: normalizedText,
+        source: typeof articleTitle === 'string' ? articleTitle : '',
+        analysisType: typeof analysisType === 'string' ? analysisType : 'company',
+        runId: typeof runId === 'string' ? runId : '',
+        conversationUrl: typeof location?.href === 'string' ? location.href : '',
+        timestamp: Date.now(),
+        stage: sanitizePageEmergencyStageMeta(stageMeta)
+      });
+      const writeResult = writePageEmergencyResponseQueue(next);
+      return {
+        ...writeResult,
+        responseId: normalizedResponseId
+      };
+    }
+
+    function clearResponseFromPageEmergencyStore(responseId) {
+      const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+      if (!normalizedResponseId) {
+        return { success: false, reason: 'missing_response_id' };
+      }
+      const current = readPageEmergencyResponseQueue();
+      const next = current.filter((item) => item?.responseId !== normalizedResponseId);
+      const writeResult = writePageEmergencyResponseQueue(next);
+      return {
+        ...writeResult,
+        responseId: normalizedResponseId
+      };
+    }
+
+    function stopAnalysisRunKeepalive() {
+      if (analysisRunKeepaliveTimerId !== null) {
+        clearInterval(analysisRunKeepaliveTimerId);
+        analysisRunKeepaliveTimerId = null;
+      }
+      if (!analysisRunKeepalivePort) return;
+      try {
+        analysisRunKeepalivePort.disconnect();
+      } catch {
+        // Ignore disconnect issues.
+      }
+      analysisRunKeepalivePort = null;
+    }
+
+    function startAnalysisRunKeepalive() {
+      if (analysisRunKeepalivePort || !chrome?.runtime?.connect) return;
+      const normalizedRunId = typeof runId === 'string' && runId.trim()
+        ? runId.trim()
+        : `adhoc-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+      try {
+        analysisRunKeepalivePort = chrome.runtime.connect({
+          name: `${ANALYSIS_RUN_KEEPALIVE_PORT_PREFIX}${normalizedRunId}`
+        });
+      } catch {
+        analysisRunKeepalivePort = null;
+        return;
+      }
+
+      const postTick = () => {
+        if (!analysisRunKeepalivePort) return;
+        try {
+          analysisRunKeepalivePort.postMessage({
+            type: 'ANALYSIS_RUN_KEEPALIVE',
+            runId: normalizedRunId,
+            analysisType: typeof analysisType === 'string' ? analysisType : 'company'
+          });
+        } catch {
+          // Ignore keepalive post failures; disconnect handler will clear the port.
+        }
+      };
+
+      if (analysisRunKeepalivePort?.onDisconnect?.addListener) {
+        analysisRunKeepalivePort.onDisconnect.addListener(() => {
+          if (analysisRunKeepaliveTimerId !== null) {
+            clearInterval(analysisRunKeepaliveTimerId);
+            analysisRunKeepaliveTimerId = null;
+          }
+          analysisRunKeepalivePort = null;
+        });
+      }
+
+      postTick();
+      analysisRunKeepaliveTimerId = setInterval(postTick, ANALYSIS_RUN_KEEPALIVE_HEARTBEAT_MS);
+    }
+
+    startAnalysisRunKeepalive();
 
     function parseDataGapDirectiveResponse(text) {
       if (typeof text !== 'string') return null;
@@ -22002,10 +26063,17 @@ async function injectToChat(
     const MANUAL_PDF_ATTACH_MAX_ATTEMPTS = 2;
     const MANUAL_PDF_ATTACH_RETRY_DELAY_MS = 1200;
     const MANUAL_PDF_CHUNK_SIZE_INJECT = 512 * 1024;
-    // Keep interface-ready wait aligned with response wait; long "thinking" must not fail early.
-    const interfaceReadyWaitMs = Number.isFinite(responseWaitMs) && responseWaitMs > 0
-      ? Math.max(15000, responseWaitMs)
-      : WAIT_FOR_RESPONSE_MS;
+    const DEFAULT_INTERFACE_READY_WAIT_MS = 30000;
+    const DEFAULT_SEND_ARM_WAIT_MS = 3500;
+    // Injected functions execute without access to background.js globals, so keep local defaults here.
+    const interfaceReadyWaitMs = Number.isInteger(progressContext?.interfaceReadyWaitMs)
+      && progressContext.interfaceReadyWaitMs > 0
+      ? progressContext.interfaceReadyWaitMs
+      : DEFAULT_INTERFACE_READY_WAIT_MS;
+    const sendArmWaitMs = Number.isInteger(progressContext?.sendArmWaitMs)
+      && progressContext.sendArmWaitMs > 0
+      ? progressContext.sendArmWaitMs
+      : DEFAULT_SEND_ARM_WAIT_MS;
     const manualPdfAttachment = (() => {
       const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
         ? manualPdfAttachmentContext
@@ -22405,7 +26473,22 @@ async function injectToChat(
         if (textKey && !promptNumberByText.has(textKey)) {
           promptNumberByText.set(textKey, promptNumber);
         }
-        const stageIds = extractStageIdsFromPromptText(promptText);
+      }
+
+      for (const [stageId, promptIndex] of injectedCompanyStageIdPromptIndexHints.entries()) {
+        if (
+          !promptNumberByStageId.has(stageId)
+          && Number.isInteger(promptIndex)
+          && promptIndex >= 0
+          && promptIndex < normalizedPrompts.length
+        ) {
+          promptNumberByStageId.set(stageId, promptIndex + 1);
+        }
+      }
+
+      for (let idx = 0; idx < normalizedPrompts.length; idx += 1) {
+        const promptNumber = idx + 1;
+        const stageIds = extractStageIdsFromPromptText(normalizedPrompts[idx]);
         for (const stageId of stageIds) {
           if (!promptNumberByStageId.has(stageId)) {
             promptNumberByStageId.set(stageId, promptNumber);
@@ -22830,6 +26913,10 @@ async function injectToChat(
       if (!normalizedText.trim()) {
         return { ok: false, error: 'empty_response' };
       }
+      const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+      if (!normalizedResponseId) {
+        return { ok: false, error: 'missing_response_id' };
+      }
 
       const stageMeta = {};
       if (Number.isInteger(selectedPrompt)) {
@@ -22841,6 +26928,11 @@ async function injectToChat(
       if (Number.isInteger(selectedPrompt)) {
         stageMeta.selected_response_reason = 'last_prompt';
       }
+      const pageEmergencyStage = stageResponseInPageEmergencyStore(
+        normalizedText,
+        normalizedResponseId,
+        stageMeta
+      );
 
       const messagePayload = {
         type: 'SAVE_RESPONSE',
@@ -22848,7 +26940,7 @@ async function injectToChat(
         source: articleTitle || '',
         analysisType,
         runId: typeof runId === 'string' ? runId : '',
-        responseId: typeof responseId === 'string' ? responseId : '',
+        responseId: normalizedResponseId,
         stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
         conversationUrl: typeof location?.href === 'string' ? location.href : '',
         sourceUrl: persistenceSourceUrl
@@ -22862,7 +26954,7 @@ async function injectToChat(
           try {
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
-              responseId,
+              normalizedResponseId,
               stageMeta
             );
           } catch (error) {
@@ -22872,13 +26964,17 @@ async function injectToChat(
             };
           }
         }
+        if (emergencyLocalSave?.success === true) {
+          clearResponseFromPageEmergencyStore(normalizedResponseId);
+        }
         return {
           ok: false,
           error: normalizedError,
           saveResult: emergencyLocalSave
             ? {
               success: false,
-              emergencyLocalSave
+              emergencyLocalSave,
+              pageEmergencyStage
             }
             : null
         };
@@ -22896,7 +26992,7 @@ async function injectToChat(
           try {
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
-              responseId,
+              normalizedResponseId,
               stageMeta
             );
           } catch (error) {
@@ -22906,23 +27002,36 @@ async function injectToChat(
             };
           }
         }
+        if (emergencyLocalSave?.success === true) {
+          clearResponseFromPageEmergencyStore(normalizedResponseId);
+        }
         return {
           ok: false,
           error: normalizedError,
           saveResult: emergencyLocalSave
             ? {
               success: false,
-              emergencyLocalSave
+              emergencyLocalSave,
+              pageEmergencyStage
             }
             : (runtimeResponse?.saveResult || null)
         };
       }
 
+      const pageEmergencyClear = clearResponseFromPageEmergencyStore(normalizedResponseId);
+
       return {
         ok: true,
         saveResult: runtimeResponse?.saveResult && typeof runtimeResponse.saveResult === 'object'
-          ? runtimeResponse.saveResult
-          : null
+          ? {
+            ...runtimeResponse.saveResult,
+            pageEmergencyStage,
+            pageEmergencyClear
+          }
+          : {
+            pageEmergencyStage,
+            pageEmergencyClear
+          }
       };
     }
 
@@ -23345,6 +27454,23 @@ async function injectToChat(
       );
     }
 
+    function findHardGenerationErrorTextInContainer(container) {
+      if (!container || !(container instanceof Element)) return '';
+      const scopedCandidates = [
+        container,
+        ...container.querySelectorAll('[role="alert"]'),
+        ...container.querySelectorAll('[class*="error"]'),
+        ...container.querySelectorAll('[class*="text"]')
+      ];
+      for (const node of scopedCandidates) {
+        const text = compactText(node?.textContent || '');
+        if (isHardGenerationErrorText(text)) {
+          return text;
+        }
+      }
+      return '';
+    }
+
     function getLastTurnState() {
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
@@ -23369,6 +27495,9 @@ async function injectToChat(
         lastAssistantText: compactText(lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : ''),
         lastUserTurnText: compactText(lastUserContainer ? (lastUserContainer.innerText || lastUserContainer.textContent || '') : ''),
         lastAssistantTurnText: compactText(lastAssistantContainer ? (lastAssistantContainer.innerText || lastAssistantContainer.textContent || '') : ''),
+        lastAssistantScopedErrorText:
+          findHardGenerationErrorTextInContainer(lastAssistantContainer) ||
+          findHardGenerationErrorTextInContainer(lastAssistant),
         lastAlertText: compactText(lastAlert ? (lastAlert.innerText || lastAlert.textContent || '') : ''),
         turnLikelyCurrent: assistantMessages.length >= userMessages.length
       };
@@ -23382,7 +27511,10 @@ async function injectToChat(
         lastUserText: state.lastUserText,
         lastAssistantText: state.lastAssistantText,
         lastUserTurnText: state.lastUserTurnText,
-        lastAssistantTurnText: state.lastAssistantTurnText
+        lastAssistantTurnText: state.lastAssistantTurnText,
+        lastAssistantScopedErrorText: state.lastAssistantScopedErrorText,
+        lastAlertText: state.lastAlertText,
+        turnLikelyCurrent: state.turnLikelyCurrent
       };
     }
 
@@ -23440,39 +27572,63 @@ async function injectToChat(
       return interruptedInAlert && turnLikelyCurrent;
     }
 
-    function hasHardGenerationErrorMessage() {
-      if (hasStreamingInterruptedState()) {
-        return true;
+    function getHardGenerationErrorSnapshot(snapshot = null) {
+      const state = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
+      const normalized = {
+        userCount: Number.isInteger(state.userCount) ? state.userCount : 0,
+        assistantCount: Number.isInteger(state.assistantCount) ? state.assistantCount : 0,
+        lastAssistantText: compactText(state.lastAssistantText || ''),
+        lastAssistantTurnText: compactText(state.lastAssistantTurnText || ''),
+        lastAssistantScopedErrorText: compactText(state.lastAssistantScopedErrorText || ''),
+        lastAlertText: compactText(state.lastAlertText || ''),
+        turnLikelyCurrent: state.turnLikelyCurrent !== false
+      };
+      const matches = [];
+      if (isHardGenerationErrorText(normalized.lastAlertText)) {
+        matches.push(`alert:${normalized.lastAlertText.toLowerCase()}`);
       }
+      if (isHardGenerationErrorText(normalized.lastAssistantScopedErrorText)) {
+        matches.push(`scoped:${normalized.lastAssistantScopedErrorText.toLowerCase()}`);
+      }
+      if (isHardGenerationErrorText(normalized.lastAssistantText)) {
+        matches.push(`assistant:${normalized.lastAssistantText.toLowerCase()}`);
+      }
+      if (isHardGenerationErrorText(normalized.lastAssistantTurnText)) {
+        matches.push(`turn:${normalized.lastAssistantTurnText.toLowerCase()}`);
+      }
+      return {
+        ...normalized,
+        detected: matches.length > 0,
+        signature: matches.join('|')
+      };
+    }
 
-      const state = getLastTurnState();
-      if (!state.turnLikelyCurrent) {
+    function hasHardGenerationErrorMessage(snapshot = null) {
+      const current = getHardGenerationErrorSnapshot();
+      if (!current.detected) {
         return false;
       }
 
-      if (isHardGenerationErrorText(state.lastAssistantText)) {
-        return true;
-      }
-      if (isHardGenerationErrorText(state.lastAlertText)) {
+      const base = snapshot && typeof snapshot === 'object'
+        ? getHardGenerationErrorSnapshot(snapshot)
+        : null;
+      if (!base || !base.detected) {
         return true;
       }
 
-      const scopedContainers = [state.lastAssistant, state.lastAssistantContainer].filter(Boolean);
-      for (const container of scopedContainers) {
-        const scopedCandidates = [
-          ...container.querySelectorAll('[role="alert"]'),
-          ...container.querySelectorAll('[class*="error"]'),
-          ...container.querySelectorAll('[class*="text"]')
-        ];
-        for (const node of scopedCandidates) {
-          const text = compactText(node?.textContent || '');
-          if (isHardGenerationErrorText(text)) {
-            return true;
-          }
-        }
+      const assistantUnchanged =
+        current.assistantCount === base.assistantCount &&
+        current.lastAssistantText === base.lastAssistantText &&
+        current.lastAssistantTurnText === base.lastAssistantTurnText &&
+        current.lastAssistantScopedErrorText === base.lastAssistantScopedErrorText;
+      const alertUnchanged = current.lastAlertText === base.lastAlertText;
+      const sameSignature = current.signature === base.signature;
+
+      if (assistantUnchanged && alertUnchanged && sameSignature) {
+        return false;
       }
 
-      return false;
+      return true;
     }
 
     async function detectPromptSentDespiteFailure(snapshot, promptText, maxWaitMs = 6000) {
@@ -23504,13 +27660,13 @@ async function injectToChat(
       const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
       const promptFragment = getPromptProbeFragment(promptText);
 
-      if (hasHardGenerationErrorMessage()) {
+      if (hasHardGenerationErrorMessage(base)) {
         return 'no_response_or_error';
       }
 
       if (hasAssistantAdvancedSince(base, 20)) {
         const extracted = await getLastResponseText();
-        if (!hasHardGenerationErrorMessage() && validateResponse(extracted)) {
+        if (!hasHardGenerationErrorMessage(base) && validateResponse(extracted)) {
           return 'response_ready';
         }
       }
@@ -23526,9 +27682,52 @@ async function injectToChat(
       return 'no_response_or_error';
     }
 
+    const PROCESS_PROGRESS_NOTIFY_MIN_INTERVAL_MS = 1500;
+    let lastProgressNotifyKey = '';
+    let lastProgressNotifyAt = 0;
+
+    function shouldDispatchProcessProgressUpdate(payload = {}) {
+      const status = typeof payload?.status === 'string'
+        ? payload.status.trim().toLowerCase()
+        : 'running';
+      const needsAction = payload?.needsAction === true;
+      const currentPrompt = Number.isInteger(payload?.currentPrompt) ? payload.currentPrompt : 0;
+      const totalPrompts = Number.isInteger(payload?.totalPrompts) ? payload.totalPrompts : 0;
+      const stageIndex = Number.isInteger(payload?.stageIndex) ? payload.stageIndex : '';
+      const reason = typeof payload?.reason === 'string' ? payload.reason.trim() : '';
+      const notifyKey = [
+        status,
+        needsAction ? '1' : '0',
+        currentPrompt,
+        totalPrompts,
+        stageIndex,
+        reason
+      ].join('|');
+      const now = Date.now();
+      const critical = needsAction
+        || status === 'failed'
+        || status === 'error'
+        || status === 'completed'
+        || status === 'stopped'
+        || status === 'interrupted'
+        || status === 'queued'
+        || status === 'starting';
+
+      if (!critical && notifyKey === lastProgressNotifyKey && (now - lastProgressNotifyAt) < PROCESS_PROGRESS_NOTIFY_MIN_INTERVAL_MS) {
+        return false;
+      }
+
+      lastProgressNotifyKey = notifyKey;
+      lastProgressNotifyAt = now;
+      return true;
+    }
+
     function notifyProcess(type, payload = {}) {
       if (!runId || !chrome?.runtime?.sendMessage) return;
       try {
+        if (type === 'PROCESS_PROGRESS' && !shouldDispatchProcessProgressUpdate(payload)) {
+          return;
+        }
         const outboundPayload = {
           type,
           runId,
@@ -23580,6 +27779,284 @@ async function injectToChat(
         element.getAttribute('value') || ''
       ];
       return normalizeDomText(parts.join(' '));
+    }
+
+    function getComposerEditorDescriptor(element) {
+      if (!(element instanceof HTMLElement)) return 'invalid-editor';
+      const parts = [
+        String(element.tagName || '').toLowerCase(),
+        element.id ? `#${element.id}` : '',
+        element.getAttribute('data-testid') ? `[data-testid="${element.getAttribute('data-testid')}"]` : '',
+        element.getAttribute('role') ? `[role="${element.getAttribute('role')}"]` : '',
+        element.getAttribute('placeholder') ? `placeholder="${element.getAttribute('placeholder')}"` : '',
+        element.getAttribute('aria-label') ? `aria-label="${element.getAttribute('aria-label')}"` : ''
+      ].filter(Boolean);
+      return parts.join(' ');
+    }
+
+    function scoreComposerEditorCandidate(element) {
+      if (!(element instanceof HTMLElement)) return Number.NEGATIVE_INFINITY;
+      let score = 0;
+      const tag = String(element.tagName || '').toLowerCase();
+      const testId = normalizeDomText(element.getAttribute('data-testid') || '');
+      const id = normalizeDomText(element.id || '');
+      const className = normalizeDomText(element.className || '');
+      const placeholder = normalizeDomText(element.getAttribute('placeholder') || '');
+      const ariaLabel = normalizeDomText(element.getAttribute('aria-label') || '');
+      const role = normalizeDomText(element.getAttribute('role') || '');
+      const matchText = getElementMatchText(element);
+
+      if (tag === 'textarea') score += 140;
+      if (tag === 'input') score -= 60;
+      if (role === 'textbox') score += 100;
+      if (element.matches('textarea#prompt-textarea, #prompt-textarea')) score += 560;
+      if (testId === 'composer-input') score += 560;
+      if (testId.includes('composer')) score += 260;
+      if (testId.includes('prompt')) score += 200;
+      if (id.includes('composer')) score += 200;
+      if (id.includes('prompt')) score += 160;
+      if (className.includes('composer')) score += 150;
+      if (className.includes('prompt')) score += 90;
+      if (
+        placeholder.includes('ask anything')
+        || ariaLabel.includes('ask anything')
+        || matchText.includes('ask anything')
+        || placeholder.includes('zapytaj o cokolwiek')
+        || ariaLabel.includes('zapytaj o cokolwiek')
+        || matchText.includes('zapytaj o cokolwiek')
+      ) {
+        score += 260;
+      }
+      if (placeholder.includes('message') || ariaLabel.includes('message')) score += 80;
+      if (element.closest('form')) score += 220;
+      if (element.closest('[data-testid*="composer" i]')) score += 220;
+      if (element.closest('[id*="composer" i]')) score += 180;
+      if (element.closest('footer')) score += 120;
+      if (element.closest('main')) score += 30;
+      if (element.closest('header') || element.closest('nav') || element.closest('aside')) score -= 260;
+      if (element.closest('article') || element.closest('[data-message-author-role]')) score -= 260;
+      if (element.closest('[role="dialog"]')) score -= 80;
+      if (!isElementVisibleForInteraction(element)) score -= 220;
+
+      return score;
+    }
+
+    function isRoleTextboxComposerCandidate(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      const role = normalizeDomText(element.getAttribute('role') || '');
+      if (role !== 'textbox') return false;
+      const contenteditable = normalizeDomText(element.getAttribute('contenteditable') || '');
+      if (contenteditable === 'false') return false;
+      if (normalizeDomText(element.getAttribute('aria-disabled') || '') === 'true') return false;
+      const tag = String(element.tagName || '').toLowerCase();
+      if (tag === 'input' || tag === 'textarea') {
+        return element.disabled !== true && element.readOnly !== true;
+      }
+      return true;
+    }
+
+    function isUsableComposerEditorCandidate(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      if (!isElementVisibleForInteraction(element)) return false;
+      const tag = String(element.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input') {
+        if (element.disabled === true || element.readOnly === true) return false;
+      } else {
+        const contenteditable = normalizeDomText(element.getAttribute('contenteditable') || '');
+        const editableByContentEditable = contenteditable === 'true'
+          || contenteditable === 'plaintext-only'
+          || element.isContentEditable;
+        if (!editableByContentEditable && !isRoleTextboxComposerCandidate(element)) return false;
+      }
+      return scoreComposerEditorCandidate(element) > 0;
+    }
+
+    function getComposerEditorCandidates() {
+      const selectors = [
+        '#prompt-textarea',
+        'textarea#prompt-textarea',
+        'form #prompt-textarea',
+        '[data-testid="composer-input"][contenteditable="true"]',
+        '[data-testid="composer-input"][contenteditable="plaintext-only"]',
+        '[data-testid="composer-input"]',
+        '[role="textbox"][contenteditable="plaintext-only"]',
+        '[role="textbox"][contenteditable="true"]',
+        '[role="textbox"]',
+        'form textarea',
+        'form [contenteditable="plaintext-only"]',
+        'form [role="textbox"][contenteditable="true"]',
+        'footer textarea',
+        'footer [contenteditable="plaintext-only"]',
+        'footer [role="textbox"][contenteditable="true"]',
+        '[contenteditable="plaintext-only"]',
+        'div[contenteditable="true"]',
+        '[contenteditable]'
+      ];
+      const seen = new Set();
+      const collected = [];
+      selectors.forEach((selector) => {
+        document.querySelectorAll(selector).forEach((node) => {
+          if (!(node instanceof HTMLElement)) return;
+          if (seen.has(node)) return;
+          seen.add(node);
+          if (!isUsableComposerEditorCandidate(node)) return;
+          collected.push(node);
+        });
+      });
+      return collected.sort((left, right) => {
+        const scoreDiff = scoreComposerEditorCandidate(right) - scoreComposerEditorCandidate(left);
+        if (scoreDiff !== 0) return scoreDiff;
+        const leftRect = left.getBoundingClientRect();
+        const rightRect = right.getBoundingClientRect();
+        const verticalDiff = Math.round(rightRect.top - leftRect.top);
+        if (verticalDiff !== 0) return verticalDiff;
+        return Math.round(leftRect.left - rightRect.left);
+      });
+    }
+
+    function findPreferredComposerEditor() {
+      const candidates = getComposerEditorCandidates();
+      return candidates.length > 0 ? candidates[0] : null;
+    }
+
+    function isComposerEditorReadyForInput(editor) {
+      if (!(editor instanceof HTMLElement)) return false;
+      const tag = String(editor.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input') {
+        return editor.disabled !== true && editor.readOnly !== true;
+      }
+      const contenteditable = normalizeDomText(editor.getAttribute('contenteditable') || '');
+      if (contenteditable === 'true' || contenteditable === 'plaintext-only' || editor.isContentEditable) {
+        return true;
+      }
+      return isRoleTextboxComposerCandidate(editor);
+    }
+
+    function getComposerSubmitButtonDescriptor(button) {
+      if (!(button instanceof HTMLElement)) return 'invalid-submit';
+      const parts = [
+        String(button.tagName || '').toLowerCase(),
+        button.id ? `#${button.id}` : '',
+        button.getAttribute('data-testid') ? `[data-testid="${button.getAttribute('data-testid')}"]` : '',
+        button.getAttribute('type') ? `[type="${button.getAttribute('type')}"]` : '',
+        button.getAttribute('aria-label') ? `aria-label="${button.getAttribute('aria-label')}"` : ''
+      ].filter(Boolean);
+      return parts.join(' ');
+    }
+
+    function collectComposerSubmitButtonCandidates(editorNode = null) {
+      const roots = [];
+      const registerRoot = (root) => {
+        if (!root || roots.includes(root)) return;
+        roots.push(root);
+      };
+      if (editorNode instanceof HTMLElement) {
+        registerRoot(editorNode.closest('form'));
+        registerRoot(editorNode.closest('[data-testid*="composer" i]'));
+        registerRoot(editorNode.closest('[id*="composer" i]'));
+        registerRoot(editorNode.closest('footer'));
+      }
+      registerRoot(document);
+
+      const selectors = [
+        'button[data-testid="send-button"]',
+        '#composer-submit-button',
+        'button[type="submit"]',
+        'button[aria-label="Send"]',
+        'button[aria-label*="Send"]',
+        'button[data-testid*="send"]'
+      ];
+      const seen = new Set();
+      const collected = [];
+      roots.forEach((root) => {
+        selectors.forEach((selector) => {
+          root.querySelectorAll(selector).forEach((node) => {
+            if (!(node instanceof HTMLElement)) return;
+            if (seen.has(node)) return;
+            seen.add(node);
+            if (!isElementVisibleForInteraction(node)) return;
+            collected.push(node);
+          });
+        });
+      });
+      return collected;
+    }
+
+    function scoreComposerSubmitButtonCandidate(button, editorNode = null) {
+      if (!(button instanceof HTMLElement)) return Number.NEGATIVE_INFINITY;
+      const text = getElementMatchText(button);
+      const testId = normalizeDomText(button.getAttribute('data-testid') || '');
+      let score = 0;
+
+      if (testId === 'send-button') score += 420;
+      if (button.id === 'composer-submit-button') score += 380;
+      if (button.matches('button[type="submit"]')) score += 220;
+      if (text.includes('send') || text.includes('wyslij') || text.includes('submit')) score += 180;
+      if (
+        text.includes('voice')
+        || text.includes('microphone')
+        || text.includes('record')
+        || text.includes('audio')
+        || text.includes('listen')
+        || text.includes('read aloud')
+      ) {
+        score -= 320;
+      }
+      if (text.includes('stop')) score -= 180;
+      if (!button.disabled) score += 40;
+
+      if (editorNode instanceof HTMLElement) {
+        const editorForm = editorNode.closest('form');
+        const buttonForm = button.closest('form');
+        if (editorForm && buttonForm && editorForm === buttonForm) score += 260;
+        const editorComposer = editorNode.closest('[data-testid*="composer" i]') || editorNode.closest('[id*="composer" i]');
+        const buttonComposer = button.closest('[data-testid*="composer" i]') || button.closest('[id*="composer" i]');
+        if (editorComposer && buttonComposer && editorComposer === buttonComposer) score += 160;
+        const editorFooter = editorNode.closest('footer');
+        const buttonFooter = button.closest('footer');
+        if (editorFooter && buttonFooter && editorFooter === buttonFooter) score += 90;
+      }
+
+      return score;
+    }
+
+    function findPreferredComposerSubmitButton(editorNode = null, options = {}) {
+      const enabledOnly = options?.enabledOnly === true;
+      const candidates = collectComposerSubmitButtonCandidates(editorNode)
+        .sort((left, right) => scoreComposerSubmitButtonCandidate(right, editorNode) - scoreComposerSubmitButtonCandidate(left, editorNode));
+      for (const candidate of candidates) {
+        if (scoreComposerSubmitButtonCandidate(candidate, editorNode) <= 0) continue;
+        if (enabledOnly && candidate.disabled) continue;
+        return candidate;
+      }
+      return null;
+    }
+
+    function hasComposerSubmitContext(editorNode = null) {
+      if (!(editorNode instanceof HTMLElement)) return false;
+      if (findPreferredComposerSubmitButton(editorNode, { enabledOnly: false })) return true;
+      if (
+        editorNode.closest('form')
+        || editorNode.closest('[data-testid*="composer" i]')
+        || editorNode.closest('[id*="composer" i]')
+        || editorNode.closest('footer')
+      ) {
+        return true;
+      }
+      if (scoreComposerEditorCandidate(editorNode) >= 180) {
+        return true;
+      }
+      if (
+        isRoleTextboxComposerCandidate(editorNode)
+        && editorNode.closest('main')
+        && !editorNode.closest('header')
+        && !editorNode.closest('nav')
+        && !editorNode.closest('aside')
+        && !editorNode.closest('[data-message-author-role]')
+      ) {
+        return true;
+      }
+      return editorNode.matches('#prompt-textarea, [data-testid="composer-input"]');
     }
 
     function containsWord(text, word) {
@@ -24883,9 +29360,8 @@ async function injectToChat(
     }
     
     // 6. Editor disabled (fallback - mniej pewny)
-    const editor = document.querySelector('[role="textbox"]') ||
-                  document.querySelector('[contenteditable]');
-    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+    const editor = findPreferredComposerEditor();
+    const editorDisabled = editor && !isComposerEditorReadyForInput(editor);
     if (editorDisabled) {
       return { generating: true, reason: 'editorDisabled', element: editor };
     }
@@ -24899,6 +29375,7 @@ async function injectToChat(
   async function waitForResponse(maxWaitMs) {
     if (shouldStopNow()) return false;
     const safeMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
+    const hardErrorBaseline = getPromptDomSnapshot();
     const initialSnapshot = getAssistantSnapshot();
     const initialAssistantCount = initialSnapshot.count;
     const initialAssistantText = initialSnapshot.lastText || '';
@@ -24915,7 +29392,7 @@ async function injectToChat(
 
     while (true) {
       if (shouldStopNow()) return false;
-      if (hasHardGenerationErrorMessage()) {
+      if (hasHardGenerationErrorMessage(hardErrorBaseline)) {
         console.error('[FAZA 1] Wykryto hard error na ostatnim turnie.');
         return false;
       }
@@ -24971,19 +29448,14 @@ async function injectToChat(
 
     while (true) {
       if (shouldStopNow()) return false;
-      if (hasHardGenerationErrorMessage()) {
+      if (hasHardGenerationErrorMessage(hardErrorBaseline)) {
         console.error('[FAZA 2] Wykryto hard error na ostatnim turnie.');
         return false;
       }
 
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]') ||
-                     document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
+      const editor = findPreferredComposerEditor();
 
-      const sendButton = document.querySelector('[data-testid="send-button"]') ||
-                        document.querySelector('#composer-submit-button') ||
-                        document.querySelector('button[aria-label="Send"]') ||
-                        document.querySelector('button[aria-label*="Send"]');
+      const sendButton = findPreferredComposerSubmitButton(editor, { enabledOnly: false });
 
       const genStatus = isGenerating();
 
@@ -25095,6 +29567,15 @@ async function injectToChat(
     console.log("🔍 Sprawdzam połączenie z ChatGPT...");
     
     try {
+      const href = String(window.location?.href || '');
+      const hostname = String(window.location?.hostname || '');
+      if (!/(\.|^)chatgpt\.com$/i.test(hostname)) {
+        return { healthy: false, error: `Nieprawidlowy host: ${hostname || 'unknown'}` };
+      }
+      if (href.startsWith('chrome-error://') || href.startsWith('edge-error://')) {
+        return { healthy: false, error: `Karta bledu przegladarki: ${href}` };
+      }
+
       // Sprawdź czy są błędy w konsoli (HTTP2, 404, itp.)
       const hasConnectionErrors = await checkForConnectionErrors();
       if (hasConnectionErrors) {
@@ -25102,10 +29583,15 @@ async function injectToChat(
       }
       
       // Sprawdź czy interfejs ChatGPT jest responsywny
-      const editor = document.querySelector('[role="textbox"]') || 
-                   document.querySelector('[contenteditable]');
+      const editor = findPreferredComposerEditor();
       if (!editor) {
         return { healthy: false, error: "Nie znaleziono edytora ChatGPT" };
+      }
+      if (!isComposerEditorReadyForInput(editor)) {
+        return { healthy: false, error: "Composer istnieje, ale nie jest gotowy do wpisywania" };
+      }
+      if (!hasComposerSubmitContext(editor)) {
+        return { healthy: false, error: "Wykryty textbox nie wyglada na prawdziwy composer ChatGPT" };
       }
       
       // Sprawdź czy nie ma komunikatów o błędach na stronie
@@ -25604,9 +30090,8 @@ async function injectToChat(
     if (isNewConversation) {
       console.log("✅ Nowa konwersacja - pomijam czekanie na gotowość (nie powinno być generowania)");
       // Sprawdź tylko czy editor istnieje i jest enabled
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]');
-      if (editor) {
+      const editor = findPreferredComposerEditor();
+      if (editor && isComposerEditorReadyForInput(editor) && hasComposerSubmitContext(editor)) {
         console.log("✅ Editor gotowy - kontynuuję natychmiast");
         return true;
       } else {
@@ -25651,8 +30136,7 @@ async function injectToChat(
     while (true) {
       if (shouldStopNow()) return false;
       // Sprawdź wszystkie elementy interfejsu
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]');
+      const editor = findPreferredComposerEditor();
       
       // POPRAWKA: Użyj isGenerating() zamiast tylko sprawdzania stopButton
       const genStatus = isGenerating();
@@ -25660,7 +30144,8 @@ async function injectToChat(
       // Interface jest gotowy gdy:
       // 1. BRAK wskaźników generowania (isGenerating() == false)
       // 2. Editor ISTNIEJE i jest ENABLED
-      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const editorReady = editor && isComposerEditorReadyForInput(editor);
+      const hasSubmitContext = editor && hasComposerSubmitContext(editor);
       const noGeneration = !genStatus.generating;
       const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
@@ -25684,7 +30169,7 @@ async function injectToChat(
         readyIdleSince = Date.now();
       }
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const isReady = noGeneration && editorReady && textStable && !hasProgressText;
+      const isReady = noGeneration && editorReady && hasSubmitContext && textStable && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -25719,6 +30204,7 @@ async function injectToChat(
           reason: genStatus.reason,
           reasonDesc: reason,
           editorReady: editorReady,
+          hasSubmitContext: hasSubmitContext,
           textStable: textStable,
           hasProgressText: hasProgressText,
           consecutiveReady: consecutiveReady,
@@ -25979,46 +30465,6 @@ async function injectToChat(
     }
     console.log("✅ Połączenie z ChatGPT OK - wysyłam prompt");
     
-    function isVisibleEditorCandidate(element) {
-      if (!element || !(element instanceof Element)) return false;
-      const style = window.getComputedStyle(element);
-      if (!style) return false;
-      if (style.display === 'none' || style.visibility === 'hidden') return false;
-      const rect = element.getBoundingClientRect();
-      return rect.width > 0 && rect.height > 0;
-    }
-
-    function isUsableEditorCandidate(element) {
-      if (!isVisibleEditorCandidate(element)) return false;
-      const tag = String(element.tagName || '').toLowerCase();
-      if (tag === 'textarea' || tag === 'input') {
-        return element.disabled !== true && element.readOnly !== true;
-      }
-      const contenteditable = element.getAttribute('contenteditable');
-      return contenteditable === 'true' || element.isContentEditable;
-    }
-
-    function collectEditorCandidates() {
-      const selectors = [
-        'textarea#prompt-textarea',
-        '[role="textbox"][contenteditable="true"]',
-        'div[contenteditable="true"]',
-        '[data-testid="composer-input"]',
-        '[contenteditable]'
-      ];
-      const seen = new Set();
-      const collected = [];
-      selectors.forEach((selector) => {
-        const nodes = document.querySelectorAll(selector);
-        nodes.forEach((node) => {
-          if (seen.has(node)) return;
-          seen.add(node);
-          collected.push(node);
-        });
-      });
-      return collected;
-    }
-
     function clearContentEditableEditor(editorNode) {
       try {
         const selection = window.getSelection();
@@ -26047,190 +30493,491 @@ async function injectToChat(
       return domText.replace(/\r\n?/g, '\n');
     }
 
+    function clearEditorCandidate(editorNode, textInputMode = false) {
+      if (!(editorNode instanceof HTMLElement)) return;
+      if (textInputMode) {
+        try {
+          const valueDescriptor = editorNode.tagName.toLowerCase() === 'textarea'
+            ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+            : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
+            ? valueDescriptor.set
+            : null;
+          if (nativeSetter) {
+            nativeSetter.call(editorNode, '');
+          } else {
+            editorNode.value = '';
+          }
+        } catch (_) {
+          editorNode.value = '';
+        }
+        editorNode.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'deleteContentBackward', data: null }));
+        editorNode.dispatchEvent(new Event('change', { bubbles: true }));
+        return;
+      }
+      clearContentEditableEditor(editorNode);
+    }
+
+    async function waitForEnabledSubmitButton(editorNode, maxButtonWait = sendArmWaitMs) {
+      let waitTime = 0;
+      let lastSeenButton = null;
+      while (waitTime < maxButtonWait) {
+        if (shouldStopNow()) return { button: null, waitTime, aborted: true };
+        const enabledButton = findPreferredComposerSubmitButton(editorNode, { enabledOnly: true });
+        if (enabledButton) {
+          return { button: enabledButton, waitTime, aborted: false };
+        }
+        lastSeenButton = findPreferredComposerSubmitButton(editorNode, { enabledOnly: false }) || lastSeenButton;
+        if (waitTime > 0 && waitTime % 2000 === 0) {
+          console.log(`⏳ Czekam na przycisk Send dla ${getComposerEditorDescriptor(editorNode)}... (${waitTime}ms / ${maxButtonWait}ms)`, {
+            lastSeenButton: lastSeenButton ? getComposerSubmitButtonDescriptor(lastSeenButton) : 'none'
+          });
+        }
+        await new Promise(resolve => setTimeout(resolve, 100));
+        waitTime += 100;
+      }
+      return { button: lastSeenButton, waitTime, aborted: false };
+    }
+
+    async function tryPasteIntoContentEditable(editorNode, text) {
+      if (!(editorNode instanceof HTMLElement)) {
+        return { success: false, method: 'invalid-editor', text: '' };
+      }
+
+      const dataTransfer = typeof DataTransfer === 'function' ? new DataTransfer() : null;
+      if (dataTransfer) {
+        try {
+          dataTransfer.setData('text/plain', text);
+          dataTransfer.setData('text', text);
+        } catch (_) {
+          // Best effort only.
+        }
+      }
+
+      let beforePaste = null;
+      try {
+        beforePaste = new InputEvent('beforeinput', {
+          bubbles: true,
+          cancelable: true,
+          inputType: 'insertFromPaste',
+          data: text
+        });
+      } catch (_) {
+        beforePaste = null;
+      }
+      if (beforePaste && dataTransfer) {
+        try {
+          Object.defineProperty(beforePaste, 'dataTransfer', {
+            configurable: true,
+            value: dataTransfer
+          });
+        } catch (_) {
+          // Ignore defineProperty failures.
+        }
+      }
+
+      let pasteEvent = null;
+      try {
+        pasteEvent = new ClipboardEvent('paste', {
+          bubbles: true,
+          cancelable: true,
+          clipboardData: dataTransfer
+        });
+      } catch (_) {
+        pasteEvent = null;
+      }
+      if (pasteEvent && dataTransfer && !pasteEvent.clipboardData) {
+        try {
+          Object.defineProperty(pasteEvent, 'clipboardData', {
+            configurable: true,
+            value: dataTransfer
+          });
+        } catch (_) {
+          // Ignore defineProperty failures.
+        }
+      }
+
+      if (beforePaste) {
+        editorNode.dispatchEvent(beforePaste);
+      }
+      if (pasteEvent) {
+        editorNode.dispatchEvent(pasteEvent);
+      }
+      editorNode.dispatchEvent(new InputEvent('input', {
+        bubbles: true,
+        inputType: 'insertFromPaste',
+        data: text
+      }));
+      editorNode.dispatchEvent(new Event('change', { bubbles: true }));
+      await new Promise((resolve) => setTimeout(resolve, 160));
+
+      return {
+        success: compactText(getEditorCurrentText(editorNode, false)).length > 0,
+        method: 'paste-event',
+        text: getEditorCurrentText(editorNode, false)
+      };
+    }
+
+    function moveContentEditableCaretToEnd(editorNode) {
+      if (!(editorNode instanceof HTMLElement)) return;
+      try {
+        const selection = window.getSelection();
+        const range = document.createRange();
+        range.selectNodeContents(editorNode);
+        range.collapse(false);
+        selection.removeAllRanges();
+        selection.addRange(range);
+      } catch (error) {
+        console.warn("⚠️ Nie udało się przesunąć kursora:", error);
+      }
+    }
+
+    function dispatchContentEditableChangeEvents(editorNode, inputType = 'insertText') {
+      if (!(editorNode instanceof HTMLElement)) return;
+      try {
+        editorNode.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType }));
+      } catch (_) {
+        // Best effort only.
+      }
+      try {
+        editorNode.dispatchEvent(new InputEvent('input', { bubbles: true, inputType }));
+      } catch (_) {
+        // Best effort only.
+      }
+      editorNode.dispatchEvent(new Event('change', { bubbles: true }));
+      editorNode.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
+    }
+
+    async function insertTextIntoContentEditableInChunks(editorNode, text, options = {}) {
+      if (!(editorNode instanceof HTMLElement)) {
+        return { success: false, method: 'invalid-editor', text: '' };
+      }
+
+      const normalizedText = typeof text === 'string' ? text.replace(/\r\n?/g, '\n') : '';
+      if (!normalizedText) {
+        return { success: true, method: 'chunked-empty', text: '' };
+      }
+
+      const chunkSize = Number.isInteger(options?.chunkSize) && options.chunkSize > 0
+        ? options.chunkSize
+        : 900;
+      const yieldEvery = Number.isInteger(options?.yieldEvery) && options.yieldEvery > 0
+        ? options.yieldEvery
+        : 24;
+      const lines = normalizedText.split('\n');
+      let operationCount = 0;
+      let usedExecCommand = false;
+
+      for (let lineIndex = 0; lineIndex < lines.length; lineIndex += 1) {
+        const line = lines[lineIndex];
+        if (line.length > 0) {
+          for (let offset = 0; offset < line.length; offset += chunkSize) {
+            const chunk = line.slice(offset, offset + chunkSize);
+            let inserted = false;
+            if (typeof document.execCommand === 'function') {
+              try {
+                inserted = document.execCommand('insertText', false, chunk);
+              } catch (error) {
+                console.warn("⚠️ Chunk insertText failed:", error);
+              }
+            }
+            if (!inserted) {
+              editorNode.appendChild(document.createTextNode(chunk));
+            } else {
+              usedExecCommand = true;
+            }
+            operationCount += 1;
+            if (operationCount % yieldEvery === 0) {
+              await new Promise((resolve) => setTimeout(resolve, 0));
+            }
+          }
+        }
+
+        if (lineIndex < lines.length - 1) {
+          let lineBreakInserted = false;
+          if (typeof document.execCommand === 'function') {
+            try {
+              lineBreakInserted = document.execCommand('insertLineBreak', false, null);
+            } catch (error) {
+              console.warn("⚠️ Chunk insertLineBreak failed:", error);
+            }
+          }
+          if (!lineBreakInserted) {
+            editorNode.appendChild(document.createElement('br'));
+          } else {
+            usedExecCommand = true;
+          }
+          operationCount += 1;
+          if (operationCount % yieldEvery === 0) {
+            await new Promise((resolve) => setTimeout(resolve, 0));
+          }
+        }
+      }
+
+      return {
+        success: compactText(getEditorCurrentText(editorNode, false)).length > 0,
+        method: usedExecCommand ? 'chunked-exec-command' : 'chunked-dom',
+        text: getEditorCurrentText(editorNode, false)
+      };
+    }
+
+    async function dispatchSubmitAction(editorNode, submitButtonNode = null, submitFormNode = null) {
+      if (submitButtonNode instanceof HTMLElement && submitButtonNode.disabled !== true) {
+        try {
+          await activateElement(submitButtonNode);
+          return 'activateElement';
+        } catch (error) {
+          console.warn('⚠️ activateElement(send) failed:', error);
+        }
+
+        try {
+          submitButtonNode.dispatchEvent(new PointerEvent('pointerdown', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
+          submitButtonNode.dispatchEvent(new MouseEvent('mousedown', { bubbles: true, cancelable: true }));
+          submitButtonNode.dispatchEvent(new PointerEvent('pointerup', { bubbles: true, cancelable: true, pointerType: 'mouse' }));
+          submitButtonNode.dispatchEvent(new MouseEvent('mouseup', { bubbles: true, cancelable: true }));
+        } catch (_) {
+          // Ignore pointer synthesis issues.
+        }
+
+        try {
+          submitButtonNode.click();
+          return 'click';
+        } catch (error) {
+          console.warn('⚠️ click(send) failed:', error);
+        }
+      }
+
+      if (submitFormNode && typeof submitFormNode.requestSubmit === 'function') {
+        try {
+          if (submitButtonNode instanceof HTMLElement) {
+            submitFormNode.requestSubmit(submitButtonNode);
+          } else {
+            submitFormNode.requestSubmit();
+          }
+          return 'requestSubmit';
+        } catch (error) {
+          console.warn('⚠️ requestSubmit(send) failed:', error);
+        }
+      }
+
+      if (editorNode instanceof HTMLElement) {
+        try {
+          editorNode.focus({ preventScroll: true });
+        } catch (_) {
+          // Best effort only.
+        }
+        const enterInit = {
+          key: 'Enter',
+          code: 'Enter',
+          keyCode: 13,
+          which: 13,
+          bubbles: true,
+          cancelable: true
+        };
+        editorNode.dispatchEvent(new KeyboardEvent('keydown', enterInit));
+        editorNode.dispatchEvent(new KeyboardEvent('keypress', enterInit));
+        editorNode.dispatchEvent(new KeyboardEvent('keyup', enterInit));
+        return 'keyboard-enter';
+      }
+
+      return 'none';
+    }
+
     // KROK 2: Szukaj edytora
-    console.log("🔍 Szukam edytora contenteditable...");
-    
-    // ChatGPT używa contenteditable div, NIE textarea!
+    console.log("🔍 Szukam composera ChatGPT...");
+
     let editor = null;
+    let submitButton = null;
+    let submitForm = null;
+    let isTextInputEditor = false;
     const maxWait = 15000; // Zwiększono z 10s na 15s
     const startTime = Date.now();
-    
+    let editorCandidates = [];
+
     while (Date.now() - startTime < maxWait) {
       if (shouldStopNow()) return false;
-      const candidates = collectEditorCandidates();
-      editor = candidates.find((node) => isUsableEditorCandidate(node))
-        || candidates.find((node) => isVisibleEditorCandidate(node))
-        || candidates[0]
-        || null;
-      if (editor) {
+      editorCandidates = getComposerEditorCandidates();
+      if (editorCandidates.length > 0) {
         break;
       }
       await new Promise(resolve => setTimeout(resolve, 200));
     }
-    
-    if (!editor) {
-      console.error("❌ Nie znaleziono edytora contenteditable po " + maxWait + "ms");
+
+    if (editorCandidates.length === 0) {
+      console.error("❌ Nie znaleziono composera ChatGPT po " + maxWait + "ms");
       return false;
     }
-    
-    console.log("✓ Znaleziono edytor");
+
+    console.log('✓ Znaleziono kandydatów composera', editorCandidates.slice(0, 5).map((node) => ({
+      descriptor: getComposerEditorDescriptor(node),
+      score: scoreComposerEditorCandidate(node)
+    })));
     const normalizedPromptText = typeof promptText === 'string'
       ? promptText.replace(/\r\n?/g, '\n')
       : '';
-    const editorTagName = String(editor.tagName || '').toLowerCase();
-    const isTextInputEditor = editorTagName === 'textarea' || editorTagName === 'input';
-    
-    // Focus i wyczyść - ulepszona wersja
-    editor.focus();
-    await new Promise(resolve => setTimeout(resolve, 300));
+    updateCounter(counter, promptIndex, promptTotal, 'Wstawiam prompt...');
 
-    if (isTextInputEditor) {
-      // ChatGPT często używa textarea sterowanego przez React - użyj natywnego setter-a value.
-      try {
-        const valueDescriptor = editorTagName === 'textarea'
-          ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
-          : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
-        const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
-          ? valueDescriptor.set
-          : null;
-        if (nativeSetter) {
-          nativeSetter.call(editor, normalizedPromptText);
-        } else {
-          editor.value = normalizedPromptText;
-        }
-      } catch (e) {
-        console.warn("⚠️ Fallback ustawiania value:", e);
-        editor.value = normalizedPromptText;
-      }
-
-      try {
-        if (typeof editor.setSelectionRange === 'function') {
-          const caretPos = normalizedPromptText.length;
-          editor.setSelectionRange(caretPos, caretPos);
-        }
-      } catch (e) {
-        console.warn("⚠️ Nie udało się ustawić kursora:", e);
-      }
-
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
-      editor.dispatchEvent(new Event('change', { bubbles: true }));
-    } else {
-      const newlineExpected = normalizedPromptText.includes('\n');
-      clearContentEditableEditor(editor);
-      await new Promise(resolve => setTimeout(resolve, 120));
-
-      let insertedByCommand = false;
-      if (typeof document.execCommand === 'function') {
-        try {
-          insertedByCommand = document.execCommand('insertText', false, normalizedPromptText);
-        } catch (e) {
-          console.warn("⚠️ insertText failed:", e);
-        }
-      }
-
-      let insertedText = getEditorCurrentText(editor, false);
-      let newlinePreserved = !newlineExpected || insertedText.includes('\n');
-
-      if (!insertedByCommand || !newlinePreserved) {
-        clearContentEditableEditor(editor);
-        await new Promise(resolve => setTimeout(resolve, 80));
-        const lines = normalizedPromptText.split('\n');
-        lines.forEach((line, index) => {
-          if (typeof document.execCommand === 'function' && line.length > 0) {
-            document.execCommand('insertText', false, line);
-          } else if (line.length > 0) {
-            editor.appendChild(document.createTextNode(line));
-          }
-          if (index < lines.length - 1) {
-            const lineBreakInserted = typeof document.execCommand === 'function'
-              ? document.execCommand('insertLineBreak', false, null)
-              : false;
-            if (!lineBreakInserted) {
-              editor.appendChild(document.createElement('br'));
-            }
-          }
-        });
-
-        insertedText = getEditorCurrentText(editor, false);
-        newlinePreserved = !newlineExpected || insertedText.includes('\n');
-      }
-
-      if (!newlinePreserved) {
-        clearContentEditableEditor(editor);
-        const fragment = document.createDocumentFragment();
-        const lines = normalizedPromptText.split('\n');
-        lines.forEach((line, index) => {
-          if (index > 0) fragment.appendChild(document.createElement('br'));
-          fragment.appendChild(document.createTextNode(line));
-        });
-        editor.appendChild(fragment);
-      }
-
-      // Przesuń kursor na koniec
-      try {
-        const selection = window.getSelection();
-        const range = document.createRange();
-        range.selectNodeContents(editor);
-        range.collapse(false);
-        selection.removeAllRanges();
-        selection.addRange(range);
-      } catch (e) {
-        console.warn("⚠️ Nie udało się przesunąć kursora:", e);
-      }
-
-      // Triggeruj więcej eventów dla pewności
-      editor.dispatchEvent(new InputEvent('beforeinput', { bubbles: true, inputType: 'insertText' }));
-      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText' }));
-      editor.dispatchEvent(new Event('change', { bubbles: true }));
-      editor.dispatchEvent(new KeyboardEvent('keyup', { key: 'a', bubbles: true }));
-    }
-
-    const postInsertText = getEditorCurrentText(editor, isTextInputEditor);
-    const postInsertLines = postInsertText.split('\n').length;
-    console.log(`✓ Tekst wstawiony (${normalizedPromptText.length} znaków, linie=${postInsertLines}): "${normalizedPromptText.substring(0, 50)}..."`);
-    
-    // Czekaj aż przycisk Send będzie enabled - zwiększony timeout
-    let submitButton = null;
-    let waitTime = 0;
-    const maxButtonWait = 10000; // Zwiększono z 3s na 10s
-    
-    while (waitTime < maxButtonWait) {
+    const editorCandidatesToTry = editorCandidates.slice(0, 5);
+    for (const candidate of editorCandidatesToTry) {
       if (shouldStopNow()) return false;
-      submitButton = document.querySelector('[data-testid="send-button"]') ||
-                     document.querySelector('#composer-submit-button') ||
-                     document.querySelector('button[aria-label="Send"]') ||
-                     document.querySelector('button[aria-label*="Send"]') ||
-                     document.querySelector('button[data-testid*="send"]');
-      
-      if (submitButton && !submitButton.disabled) {
-        console.log(`✅ Przycisk Send gotowy (${waitTime}ms)`);
+      const candidateTagName = String(candidate.tagName || '').toLowerCase();
+      const candidateIsTextInput = candidateTagName === 'textarea' || candidateTagName === 'input';
+      console.log(`🔍 Próba composera: ${getComposerEditorDescriptor(candidate)}`, {
+        score: scoreComposerEditorCandidate(candidate),
+        textInput: candidateIsTextInput
+      });
+
+      candidate.focus();
+      await new Promise(resolve => setTimeout(resolve, 300));
+
+      if (candidateIsTextInput) {
+        try {
+          const valueDescriptor = candidateTagName === 'textarea'
+            ? Object.getOwnPropertyDescriptor(HTMLTextAreaElement.prototype, 'value')
+            : Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value');
+          const nativeSetter = valueDescriptor && typeof valueDescriptor.set === 'function'
+            ? valueDescriptor.set
+            : null;
+          if (nativeSetter) {
+            nativeSetter.call(candidate, normalizedPromptText);
+          } else {
+            candidate.value = normalizedPromptText;
+          }
+        } catch (e) {
+          console.warn("⚠️ Fallback ustawiania value:", e);
+          candidate.value = normalizedPromptText;
+        }
+
+        try {
+          if (typeof candidate.setSelectionRange === 'function') {
+            const caretPos = normalizedPromptText.length;
+            candidate.setSelectionRange(caretPos, caretPos);
+          }
+        } catch (e) {
+          console.warn("⚠️ Nie udało się ustawić kursora:", e);
+        }
+
+        candidate.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: null }));
+        candidate.dispatchEvent(new Event('change', { bubbles: true }));
+      } else {
+        const newlineExpected = normalizedPromptText.includes('\n');
+        const promptLineCount = normalizedPromptText ? normalizedPromptText.split('\n').length : 0;
+        const shouldPreferChunkedInsert = normalizedPromptText.length > 4000 || promptLineCount > 80;
+        clearContentEditableEditor(candidate);
+        await new Promise(resolve => setTimeout(resolve, 120));
+
+        let insertedByCommand = false;
+        if (!shouldPreferChunkedInsert && typeof document.execCommand === 'function') {
+          try {
+            insertedByCommand = document.execCommand('insertText', false, normalizedPromptText);
+          } catch (e) {
+            console.warn("⚠️ insertText failed:", e);
+          }
+        } else if (shouldPreferChunkedInsert) {
+          console.log(`ℹ️ Pomijam bulk insertText dla dużego prompta (${normalizedPromptText.length} znaków, ${promptLineCount} linii)`);
+        }
+
+        let insertedText = getEditorCurrentText(candidate, false);
+        let newlinePreserved = !newlineExpected || insertedText.includes('\n');
+
+        if (!shouldPreferChunkedInsert && (!insertedByCommand || !newlinePreserved || compactText(insertedText).length === 0)) {
+          clearContentEditableEditor(candidate);
+          await new Promise(resolve => setTimeout(resolve, 80));
+          const pasteResult = await tryPasteIntoContentEditable(candidate, normalizedPromptText);
+          insertedText = pasteResult.text || getEditorCurrentText(candidate, false);
+          newlinePreserved = !newlineExpected || insertedText.includes('\n');
+          if (pasteResult.success) {
+            insertedByCommand = true;
+          }
+        }
+
+        if (!insertedByCommand || !newlinePreserved) {
+          clearContentEditableEditor(candidate);
+          await new Promise(resolve => setTimeout(resolve, 80));
+          const chunkedInsertResult = await insertTextIntoContentEditableInChunks(candidate, normalizedPromptText);
+          insertedText = chunkedInsertResult.text || getEditorCurrentText(candidate, false);
+          newlinePreserved = !newlineExpected || insertedText.includes('\n');
+          if (chunkedInsertResult.success) {
+            insertedByCommand = true;
+          }
+        }
+
+        if (!newlinePreserved) {
+          clearContentEditableEditor(candidate);
+          const fragment = document.createDocumentFragment();
+          const lines = normalizedPromptText.split('\n');
+          lines.forEach((line, index) => {
+            if (index > 0) fragment.appendChild(document.createElement('br'));
+            fragment.appendChild(document.createTextNode(line));
+          });
+          candidate.appendChild(fragment);
+        }
+
+        moveContentEditableCaretToEnd(candidate);
+        dispatchContentEditableChangeEvents(candidate, 'insertText');
+      }
+
+      const postInsertText = getEditorCurrentText(candidate, candidateIsTextInput);
+      const compactInsertedText = compactText(postInsertText);
+      const hasInsertedText = compactInsertedText.length > 0;
+      const postInsertLines = postInsertText.split('\n').length;
+      console.log(`✓ Tekst wstawiony do ${getComposerEditorDescriptor(candidate)} (${normalizedPromptText.length} znaków, linie=${postInsertLines}, inserted=${compactInsertedText.length})`);
+
+      if (!hasInsertedText) {
+        console.warn(`⚠️ Kandydat composera nie przyjął tekstu: ${getComposerEditorDescriptor(candidate)}`);
+        clearEditorCandidate(candidate, candidateIsTextInput);
+        continue;
+      }
+
+      updateCounter(counter, promptIndex, promptTotal, 'Uzbrajam wysylke...');
+      const buttonWaitResult = await waitForEnabledSubmitButton(candidate, sendArmWaitMs);
+      if (buttonWaitResult?.aborted) return false;
+      const fallbackForm = candidate.closest('form');
+      if (buttonWaitResult?.button && !buttonWaitResult.button.disabled) {
+        editor = candidate;
+        submitButton = buttonWaitResult.button;
+        submitForm = fallbackForm;
+        isTextInputEditor = candidateIsTextInput;
+        console.log(`✅ Przycisk Send gotowy (${buttonWaitResult.waitTime}ms)`, {
+          editor: getComposerEditorDescriptor(editor),
+          submit: getComposerSubmitButtonDescriptor(submitButton)
+        });
         break;
       }
-      
-      // Loguj co 2s
-      if (waitTime > 0 && waitTime % 2000 === 0) {
-        console.log(`⏳ Czekam na przycisk Send... (${waitTime}ms / ${maxButtonWait}ms)`);
+
+      if (fallbackForm) {
+        editor = candidate;
+        submitButton = buttonWaitResult?.button || null;
+        submitForm = fallbackForm;
+        isTextInputEditor = candidateIsTextInput;
+        console.warn(`⚠️ Przycisk Send nie uzbroił się w czasie - użyję fallback submit dla ${getComposerEditorDescriptor(candidate)}`, {
+          submitCandidate: buttonWaitResult?.button ? getComposerSubmitButtonDescriptor(buttonWaitResult.button) : 'none'
+        });
+        break;
       }
-      
-      await new Promise(resolve => setTimeout(resolve, 100));
-      waitTime += 100;
+
+      console.warn(`⚠️ Kandydat composera nie uzbroił wysyłki: ${getComposerEditorDescriptor(candidate)}`, {
+        submitCandidate: buttonWaitResult?.button ? getComposerSubmitButtonDescriptor(buttonWaitResult.button) : 'none'
+      });
+      clearEditorCandidate(candidate, candidateIsTextInput);
     }
-    
-    if (!submitButton) {
-      console.error("❌ Nie znaleziono przycisku Send po " + maxButtonWait + "ms");
-      return false;
-    }
-    
-    if (submitButton.disabled) {
-      console.error("❌ Przycisk Send jest disabled po " + maxButtonWait + "ms");
+
+    if (!editor || (!submitButton && !submitForm)) {
+      console.error("❌ Nie udało się znaleźć composera z aktywnym przyciskiem Send");
       return false;
     }
     
     // Poczekaj dłużej przed kliknięciem - daj czas na stabilizację UI
     await new Promise(resolve => setTimeout(resolve, 500));
     
-    console.log("✓ Klikam Send...");
-    submitButton.click();
+    console.log("✓ Wysyłam prompt...");
+    let submitMethod = await dispatchSubmitAction(editor, submitButton, submitForm);
+    let submitRetried = false;
+    console.log("✓ Submit dispatched", {
+      method: submitMethod,
+      submit: submitButton ? getComposerSubmitButtonDescriptor(submitButton) : 'form-only',
+      form: !!submitForm
+    });
     
     // WERYFIKACJA: Sprawdź czy kliknięcie zadziałało
     console.log("🔍 Weryfikuję czy prompt został wysłany...");
@@ -26244,16 +30991,12 @@ async function injectToChat(
       // 1. Pokazać stopButton (zacząć generować) - NAJBARDZIEJ PEWNY wskaźnik
       // 2. LUB wyczyścić/disabled editor + disabled sendButton + nowa wiadomość w DOM
       
-      const editorNow = document.querySelector('[role="textbox"]') ||
-                        document.querySelector('[contenteditable]');
+      const editorNow = findPreferredComposerEditor();
       
       // Fallbacki dla stopButton z dokumentacji
       const stopBtn = findActiveStopButton();
       
-      const sendBtn = document.querySelector('[data-testid="send-button"]') ||
-                      document.querySelector('#composer-submit-button') ||
-                      document.querySelector('button[aria-label="Send"]') ||
-                      document.querySelector('button[aria-label*="Send"]');
+      const sendBtn = findPreferredComposerSubmitButton(editorNow, { enabledOnly: false });
       
       const editorDisabled = editorNow && editorNow.getAttribute('contenteditable') === 'false';
       const editorEmpty = editorNow && (editorNow.textContent || '').trim().length === 0;
@@ -26296,6 +31039,12 @@ async function injectToChat(
         });
         verified = true;
         break;
+      }
+
+      if (!submitRetried && verifyTime >= 1500) {
+        submitRetried = true;
+        console.warn('⚠️ Brak potwierdzenia po pierwszym submit - ponawiam fallback wysylki');
+        submitMethod = await dispatchSubmitAction(editorNow || editor, sendBtn || submitButton, submitForm);
       }
       
       await new Promise(resolve => setTimeout(resolve, 100));
@@ -26391,9 +31140,7 @@ async function injectToChat(
     if (shouldStopNow()) {
       return forceStopResult();
     }
-    const editor = document.querySelector('[role="textbox"]') ||
-                   document.querySelector('[contenteditable]') ||
-                   document.querySelector('[data-testid="composer-input"]');
+    const editor = findPreferredComposerEditor();
     
     if (editor) {
       console.log("=== ROZPOCZYNAM PRZETWARZANIE ===");
@@ -27091,11 +31838,17 @@ async function injectToChat(
             const emergencyLocalSave = persistedSaveResult?.emergencyLocalSave && typeof persistedSaveResult.emergencyLocalSave === 'object'
               ? persistedSaveResult.emergencyLocalSave
               : null;
+            const pageEmergencyStage = persistedSaveResult?.pageEmergencyStage && typeof persistedSaveResult.pageEmergencyStage === 'object'
+              ? persistedSaveResult.pageEmergencyStage
+              : null;
             console.warn(
-              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}${emergencyLocalSave ? ` emergencyLocal=${emergencyLocalSave.success === true ? 'ok' : 'failed'}` : ''}`
+              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}${emergencyLocalSave ? ` emergencyLocal=${emergencyLocalSave.success === true ? 'ok' : 'failed'}` : ''}${pageEmergencyStage ? ` pageEmergency=${pageEmergencyStage.success === true ? 'staged' : 'failed'}` : ''}`
             );
             if (emergencyLocalSave) {
               console.warn('[copy-flow] [capture:tab-save:emergency-local]', emergencyLocalSave);
+            }
+            if (pageEmergencyStage) {
+              console.warn('[copy-flow] [capture:tab-save:page-emergency]', pageEmergencyStage);
             }
           }
         }
@@ -27188,6 +31941,7 @@ async function injectToChat(
     });
     return { success: false, lastResponse: '', error: `Critical error: ${error.message}`, metrics: buildMetricsSnapshot({ completed: false, reason: 'critical_error' }) };
   } finally {
+    stopAnalysisRunKeepalive();
     cleanupForceStopListener();
   }
 }

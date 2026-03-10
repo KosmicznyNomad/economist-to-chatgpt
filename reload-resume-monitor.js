@@ -15,7 +15,7 @@ const rawAutoCloseAfterMs = Number.parseInt(searchParams.get('autoCloseAfterMs')
 const autoCloseAfterMs = Number.isInteger(rawAutoCloseAfterMs) && rawAutoCloseAfterMs > 0
   ? Math.min(rawAutoCloseAfterMs, 10 * 60 * 1000)
   : 0;
-const autoCloseDeadline = autoCloseAfterMs > 0 ? Date.now() + autoCloseAfterMs : 0;
+let autoCloseDeadline = 0;
 let autoCloseTimeoutId = null;
 let autoCloseIntervalId = null;
 let lastRenderedSessionId = '';
@@ -66,7 +66,7 @@ function attemptAutoClose() {
 
 function renderAutoCloseInfo() {
   if (!autoCloseMeta) return;
-  if (!autoCloseDeadline) {
+  if (!autoCloseAfterMs) {
     autoCloseMeta.hidden = true;
     autoCloseMeta.textContent = '';
     return;
@@ -96,24 +96,60 @@ function renderAutoCloseInfo() {
   autoCloseMeta.textContent = `Minelo ${Math.ceil(autoCloseAfterMs / 1000)}s. Wstrzymuje auto-zamkniecie do czasu potwierdzenia wszystkich kart. ${verificationText}${pendingSummary ? ` Oczekuje: ${pendingSummary}` : ''}`;
 }
 
-function initializeAutoClose() {
-  if (!autoCloseAfterMs) {
+function clearAutoCloseSchedule() {
+  if (autoCloseTimeoutId !== null) {
+    window.clearTimeout(autoCloseTimeoutId);
+    autoCloseTimeoutId = null;
+  }
+  if (autoCloseIntervalId !== null) {
+    window.clearInterval(autoCloseIntervalId);
+    autoCloseIntervalId = null;
+  }
+  autoCloseDeadline = 0;
+}
+
+function isTerminalSessionState(state) {
+  const status = typeof state?.status === 'string'
+    ? state.status.trim().toLowerCase()
+    : '';
+  return TERMINAL_SESSION_STATUSES.has(status);
+}
+
+function armAutoCloseAfterCompletion() {
+  if (!autoCloseAfterMs || autoCloseDeadline > 0) {
     renderAutoCloseInfo();
     return;
   }
-
+  autoCloseDeadline = Date.now() + autoCloseAfterMs;
   renderAutoCloseInfo();
   autoCloseTimeoutId = window.setTimeout(() => {
     renderAutoCloseInfo();
     void attemptAutoClose();
   }, autoCloseAfterMs);
-
   autoCloseIntervalId = window.setInterval(() => {
     renderAutoCloseInfo();
     if (attemptAutoClose()) {
       return;
     }
   }, 1000);
+}
+
+function syncAutoCloseWithState(state) {
+  currentState = state && typeof state === 'object' ? state : null;
+  if (!autoCloseAfterMs) {
+    renderAutoCloseInfo();
+    return;
+  }
+  if (isTerminalSessionState(currentState)) {
+    armAutoCloseAfterCompletion();
+    return;
+  }
+  clearAutoCloseSchedule();
+  renderAutoCloseInfo();
+}
+
+function initializeAutoClose() {
+  renderAutoCloseInfo();
 }
 
 function sendRuntimeMessage(payload) {
@@ -273,20 +309,23 @@ function renderSessionMeta(state) {
 
   const statusBadge = document.createElement('span');
   const status = typeof state.status === 'string' ? state.status.trim().toLowerCase() : 'idle';
-  const badgeClass = (
-    status === 'running'
-    || status === 'completed'
-    || status === 'failed'
-    || status === 'idle'
-  ) ? status : 'idle';
+  const badgeClass = ({
+    running: 'running',
+    completed: 'completed',
+    completed_with_errors: 'completed',
+    failed: 'failed',
+    interrupted: 'failed',
+    idle: 'idle'
+  })[status] || 'idle';
   statusBadge.className = `badge badge-${badgeClass}`;
-  statusBadge.textContent = badgeClass;
+  statusBadge.textContent = status;
   sessionMeta.appendChild(statusBadge);
 
   const detail = document.createElement('div');
   const phase = typeof state.phase === 'string' && state.phase.trim() ? state.phase.trim() : '-';
   const lines = [
     `Sesja: ${state.sessionId || '-'}`,
+    `Tryb: ${formatResumeMode(state)}`,
     `Origin: ${state.origin || '-'}`,
     `Scope: ${state.scope || '-'}`,
     `Phase: ${phase}`,
@@ -337,6 +376,7 @@ function renderSummaryMeta(state) {
     : 'Auto-close verify: pending';
 
   summaryMeta.textContent = [
+    `Tryb: ${formatResumeMode(state)}`,
     `Strony: requested=${requested}, eligible=${eligible}`,
     `Wznowione: ${resumed}, pending: ${pending}, bledy: ${failed}`,
     `Summary: started=${summary.started || 0}, detect_failed=${summary.detect_failed || 0}, final=${summary.final_stage_completed || 0}, start_failed=${summary.start_failed || 0}`,

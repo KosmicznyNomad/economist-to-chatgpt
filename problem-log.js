@@ -12,6 +12,11 @@ let autoRefreshTimer = null;
 let refreshInFlight = false;
 let currentSupportId = '';
 let currentViewMode = 'local';
+const PROBLEM_LOG_REFRESH_INTERVAL_MS = 15000;
+
+function isProblemLogPageVisible() {
+  return document.visibilityState === 'visible';
+}
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve, reject) => {
@@ -384,12 +389,22 @@ if (chrome?.runtime?.onMessage?.addListener) {
 installProblemLogRuntimeProblemLogging();
 
 autoRefreshTimer = setInterval(() => {
+  if (!isProblemLogPageVisible()) return;
   if (currentViewMode === 'remote') {
     void refreshRemoteProblemLogs({ silent: true });
   } else {
     void refreshProblemLogs({ silent: true });
   }
-}, 15000);
+}, PROBLEM_LOG_REFRESH_INTERVAL_MS);
+
+document.addEventListener('visibilitychange', () => {
+  if (!isProblemLogPageVisible()) return;
+  if (currentViewMode === 'remote') {
+    void refreshRemoteProblemLogs({ force: true, silent: true });
+  } else {
+    void refreshProblemLogs({ force: true, silent: true });
+  }
+});
 
 window.addEventListener('beforeunload', () => {
   if (autoRefreshTimer) {
