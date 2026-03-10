@@ -129,6 +129,7 @@ const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 const unfinishedProcessesBtn = document.getElementById('unfinishedProcessesBtn');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
+const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -388,6 +389,15 @@ const DISPATCH_REASON_LABELS = {
   runtime_timeout: 'timeout mostu runtime',
   flush_in_progress: 'flush juz trwa',
   save_response: 'flush po zapisie odpowiedzi',
+  verify_disabled: 'weryfikacja DB wylaczona',
+  missing_verify_url: 'brak URL verify',
+  missing_response_id: 'brak responseId',
+  materialization_pending: 'materializacja DB oczekuje',
+  materialization_partial: 'materializacja DB czesciowa',
+  missing_fields: 'braki danych po stronie intake',
+  mismatch: 'niezgodnosc danych verify',
+  ingest_failed: 'ingest zakonczony bledem',
+  materialization_unavailable: 'materializacja DB niedostepna',
   timeout: 'timeout HTTP',
   dispatch_error: 'blad transportu dispatch',
   dispatch_failed: 'dispatch nieudany',
@@ -409,12 +419,19 @@ const DISPATCH_PROCESS_CODE_LABELS = {
   send_attempt_retry: 'retry wysylki',
   send_attempt_failed: 'proba nieudana',
   send_failed_all_candidates: 'wszystkie URL nieudane',
+  verify_attempt_start: 'start weryfikacji DB',
+  verify_attempt_ok: 'weryfikacja DB OK',
+  verify_attempt_pending: 'weryfikacja DB oczekuje',
+  verify_attempt_retry: 'retry weryfikacji DB',
+  verify_attempt_failed: 'weryfikacja DB nieudana',
   flush_skipped_disabled: 'flush pominiety (dispatch off)',
   flush_skipped_in_progress: 'flush pominiety (w toku)',
   flush_start: 'start flush',
   flush_empty: 'flush pustej kolejki',
   flush_item_invalid: 'pozycja kolejki niepoprawna',
   flush_item_deferred: 'pozycja odlozona',
+  flush_item_verify_pending: 'pozycja czeka na zapis DB',
+  flush_item_verify_failed: 'pozycja odrzucona przez verify DB',
   flush_item_failed: 'pozycja nieudana (requeue)',
   flush_budget_stop: 'osiagnieto budzet flush',
   flush_stale_lock_reset: 'reset stale lock flush',
@@ -550,7 +567,7 @@ function formatDispatchFlushResult(flushResult) {
   if (flushResult.success === false) {
     return `blad (${formatDispatchErrorText(flushResult.error || 'unknown') || 'unknown'})`;
   }
-  return `sent=${flushResult.sent || 0}, failed=${flushResult.failed || 0}, deferred=${flushResult.deferred || 0}, remaining=${flushResult.remaining || 0}`;
+  return `accepted=${flushResult.accepted || 0}, sent=${flushResult.sent || 0}, failed=${flushResult.failed || 0}, deferred=${flushResult.deferred || 0}, remaining=${flushResult.remaining || 0}`;
 }
 
 function isDispatchInlineManaged(status) {
@@ -576,6 +593,9 @@ function applyWatchlistCredentialsUi(status) {
     );
     return;
   }
+  if (watchlistKeyIdInput && !(typeof watchlistKeyIdInput.value === 'string' && watchlistKeyIdInput.value.trim())) {
+    watchlistKeyIdInput.value = WATCHLIST_DEFAULT_KEY_ID;
+  }
   setWatchlistCredentialsHint('', false);
 }
 
@@ -587,6 +607,8 @@ function applyDispatchStatusSnapshot(status) {
     }
     if (watchlistKeyIdInput && typeof watchlistDispatchStatusSnapshot.keyId === 'string' && watchlistDispatchStatusSnapshot.keyId.trim()) {
       watchlistKeyIdInput.value = watchlistDispatchStatusSnapshot.keyId.trim();
+    } else if (watchlistKeyIdInput && !(typeof watchlistKeyIdInput.value === 'string' && watchlistKeyIdInput.value.trim())) {
+      watchlistKeyIdInput.value = WATCHLIST_DEFAULT_KEY_ID;
     }
   }
   applyWatchlistCredentialsUi(watchlistDispatchStatusSnapshot);
@@ -1192,6 +1214,7 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
 
 function formatFinalStagePersistenceStatus(finalStagePersistence) {
   const sent = Number.isInteger(finalStagePersistence?.sent) ? finalStagePersistence.sent : null;
+  const accepted = Number.isInteger(finalStagePersistence?.accepted) ? finalStagePersistence.accepted : null;
   const failed = Number.isInteger(finalStagePersistence?.failed) ? finalStagePersistence.failed : null;
   const pending = Number.isInteger(finalStagePersistence?.pending)
     ? finalStagePersistence.pending
@@ -1229,6 +1252,18 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
   const conversationLogCount = Number.isInteger(finalStagePersistence?.conversationLogCount)
     ? Math.max(0, finalStagePersistence.conversationLogCount)
     : null;
+  const verifyState = typeof finalStagePersistence?.verifyState === 'string'
+    ? finalStagePersistence.verifyState.trim()
+    : '';
+  const verifyEventId = typeof finalStagePersistence?.verifyEventId === 'string'
+    ? finalStagePersistence.verifyEventId.trim()
+    : '';
+  const materializedRowCount = Number.isInteger(finalStagePersistence?.materializedRowCount)
+    ? finalStagePersistence.materializedRowCount
+    : null;
+  const expectedMaterializedRowCount = Number.isInteger(finalStagePersistence?.expectedMaterializedRowCount)
+    ? finalStagePersistence.expectedMaterializedRowCount
+    : null;
   const hasConversationUrl = finalStagePersistence?.hasConversationUrl === true;
   const conversationSnapshotRefreshed = finalStagePersistence?.conversationSnapshotRefreshed === true;
   const conversationSnapshotSource = typeof finalStagePersistence?.conversationSnapshotSource === 'string'
@@ -1240,6 +1275,11 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
   if (failureStatus !== null) diagnosticParts.push(`http=${failureStatus}`);
   if (failureRequestId) diagnosticParts.push(`request_id=${safePreview(failureRequestId, failureRequestId)}`);
   if (failureIntakeUrl) diagnosticParts.push(`url=${safePreview(failureIntakeUrl, failureIntakeUrl)}`);
+  if (accepted !== null) diagnosticParts.push(`accepted=${accepted}`);
+  if (verifyState) diagnosticParts.push(`verify=${verifyState}`);
+  if (verifyEventId) diagnosticParts.push(`event_id=${verifyEventId}`);
+  if (materializedRowCount !== null) diagnosticParts.push(`rows=${materializedRowCount}`);
+  if (expectedMaterializedRowCount !== null) diagnosticParts.push(`rows_expected=${expectedMaterializedRowCount}`);
   if (conversationLogCount !== null) diagnosticParts.push(`conv_logs=${conversationLogCount}`);
   if (hasConversationUrl) diagnosticParts.push('conv_url=1');
   if (conversationSnapshotRefreshed) diagnosticParts.push('conv_refresh=1');
@@ -1251,6 +1291,7 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
 
   if (hasNumericDispatch) {
     const safeSent = sent ?? 0;
+    const safeAccepted = Math.max(safeSent, accepted ?? 0);
     const safeFailed = failed ?? 0;
     const safePending = pending ?? 0;
 
@@ -1267,7 +1308,7 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
 
     if (safePending > 0 && safeSent === 0 && safeFailed === 0) {
       const reasonPart = skipReasonLabel ? `, powod=${skipReasonLabel}` : '';
-      return `BAZA: zapis lokalny OK, wysylka do bazy w kolejce (pending=${safePending}${reasonPart}).${diagnosticSuffix}`;
+      return `BAZA: zapis lokalny OK, oczekiwanie na materializacje w DB (accepted=${safeAccepted}, pending=${safePending}${reasonPart}).${diagnosticSuffix}`;
     }
 
     if (safeFailed > 0 && safeSent === 0) {

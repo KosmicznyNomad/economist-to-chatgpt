@@ -87,14 +87,23 @@ Manual PDF mode behavior:
 - Use `Zdalne` to fetch remote problem logs from Watchlist intake API (HMAC auth, optional `Support ID` filter).
 
 ### Watchlist intake setup
+Local unpacked override:
+- If you want the extension to start already configured, create `watchlist.inline-config.js` in repo root with `globalThis.WATCHLIST_INLINE_OVERRIDE = { intakeUrl, keyId, secret }`.
+- `background.js` loads this file automatically on startup; `.gitignore` keeps it local-only.
+
 1. Open popup -> `Watchlist intake`.
-2. Set `Intake URL`, `Key ID`, `Secret`.
+2. Set:
+   - `Intake URL`: `https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response`
+   - `Key ID`: `extension-primary`
+   - `Secret`: value mapped for `extension-primary` in Watchlist server env (`/etc/watchlist/watchlist.env`, `WATCHLIST_INTAKE_KEYS_JSON`)
 3. Save credentials and trigger flush.
 4. Worker sends `economist.response.v1` directly over HTTPS with HMAC headers and outbox retry.
 
 If current network blocks direct access to Watchlist HTTPS endpoint, start local SSH tunnel and use local intake URL:
 - tunnel: `ssh -N -L 18080:127.0.0.1:8080 iskierka`
 - intake URL: `http://127.0.0.1:18080/api/v1/intake/economist-response`
+
+Backend/source repo for this intake stack: `watchlist` (`https://github.com/KosmicznyNomad/watchlist`).
 
 ## Supported source updates
 Keep these in sync when adding/removing domains:
