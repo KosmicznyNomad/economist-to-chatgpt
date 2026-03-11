@@ -29,14 +29,6 @@ const AUTO_RECOVERY_MAX_ATTEMPTS = 2;
 const AUTO_RECOVERY_DELAY_MS = 2000;
 const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
 const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout'];
-const YT_TRANSCRIPT_PREFERRED_LANGUAGES = ['pl', 'en'];
-const YT_TRANSCRIPT_REQUEST_TIMEOUT_MS = 9000;
-const YT_TRANSCRIPT_MAX_RETRIES = 3;
-const YT_TRANSCRIPT_RETRY_DELAY_MS = 900;
-const YT_TRANSCRIPT_MIN_CHARS = 50;
-const YT_TRANSCRIPT_CACHE_TTL_MS = 10 * 60 * 1000;
-const YT_TRANSCRIPT_CACHE_MAX_ITEMS = 60;
-const YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS = 350;
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
@@ -174,8 +166,6 @@ const CLOSED_PROCESS_STATUSES = new Set([
   'interrupted'
 ]);
 const processRegistry = new Map();
-const ytTranscriptInFlightRequests = new Map();
-const ytTranscriptCache = new Map();
 const manualPdfProviderPorts = new Map();
 let processRegistryReady = null;
 let watchlistDispatchFlushInProgress = false;
@@ -885,16 +875,46 @@ async function getAnalysisQueueSnapshot() {
   return cloneAnalysisQueueState();
 }
 
+async function isLocalProcessActiveForQueue(process) {
+  if (!process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process.status);
+  if (isClosedProcessStatus(status)) return false;
+
+  const tabId = Number.isInteger(process.tabId) ? process.tabId : null;
+  if (tabId !== null) {
+    const tab = await getTabByIdSafe(tabId);
+    return !!tab;
+  }
+
+  const windowId = Number.isInteger(process.windowId) ? process.windowId : null;
+  if (windowId !== null) {
+    const queryResult = await queryTabsInWindowSafe(windowId);
+    if (queryResult?.ok !== true) return false;
+    return Array.isArray(queryResult.tabs) && queryResult.tabs.length > 0;
+  }
+
+  return false;
+}
+
 async function getAnalysisQueueStatusSnapshot() {
-  const snapshot = await getAnalysisQueueSnapshot();
+  const [snapshot] = await Promise.all([
+    getAnalysisQueueSnapshot(),
+    ensureProcessRegistryReady()
+  ]);
+  const activeChecks = await Promise.all(snapshot.activeJobs.map(async (job) => {
+    const runId = typeof job?.runId === 'string' ? job.runId.trim() : '';
+    if (!runId) return false;
+    return isLocalProcessActiveForQueue(processRegistry.get(runId) || null);
+  }));
+  const activeSlots = activeChecks.filter(Boolean).length;
   return {
     success: true,
     maxConcurrent: snapshot.maxConcurrent,
-    activeSlots: snapshot.activeJobs.length,
+    activeSlots,
     queueSize: snapshot.waitingJobs.length,
     waitingJobs: snapshot.waitingJobs.length,
-    activeJobs: snapshot.activeJobs.length,
-    totalJobs: snapshot.waitingJobs.length + snapshot.activeJobs.length
+    activeJobs: activeSlots,
+    totalJobs: snapshot.waitingJobs.length + activeSlots
   };
 }
 
@@ -3210,13 +3230,9 @@ function problemLogSourceMatches(sourceText, token) {
 
 function isLowSignalProblemLogEntry(entry) {
   if (!entry || typeof entry !== 'object') return false;
-  const level = normalizeProblemLogLevel(entry.level);
   const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
-  const error = typeof entry.error === 'string' ? entry.error.trim().toLowerCase() : '';
-  const message = typeof entry.message === 'string' ? entry.message.trim().toLowerCase() : '';
-  const noiseBlob = `${reason} ${error} ${message}`;
 
   if (reason === 'remote_connection_configured') return true;
   if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
@@ -3224,13 +3240,6 @@ function isLowSignalProblemLogEntry(entry) {
   if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
     return entry.heartbeat === true;
   }
-  if (
-    problemLogSourceMatches(source, 'youtube-content-window')
-    && noiseBlob.includes('resizeobserver loop completed with undelivered notifications')
-  ) {
-    return true;
-  }
-  if (level === 'info' && problemLogSourceMatches(source, 'youtube-content-window')) return true;
   return false;
 }
 
@@ -4359,31 +4368,12 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   const status = normalizeProcessStatus(process.status);
   if (status === 'completed') {
     const delivery = getProcessQueueDeliveryState(process);
-    if (delivery.confirmed) {
-      return { action: 'release', closeWindow: true, reason: 'dispatch_confirmed' };
-    }
-    if (delivery.saveOk === true) {
-      const dispatchDeadlineAt = Number.isInteger(job.dispatchDeadlineAt)
-        ? job.dispatchDeadlineAt
-        : (nowTs + ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS);
-      if (nowTs >= dispatchDeadlineAt) {
-        return {
-          action: 'release',
-          closeWindow: false,
-          reason: 'pending_dispatch_timeout',
-          dispatchDeadlineAt
-        };
-      }
-      return {
-        action: 'keep',
-        queueState: 'waiting_dispatch_confirmation',
-        dispatchDeadlineAt
-      };
-    }
+    // Queue turnover is driven only by local execution state.
+    // Remote dispatch/confirmation must not keep the slot occupied.
     return {
       action: 'release',
-      closeWindow: false,
-      reason: delivery.saveOk === false ? 'local_save_failed' : 'completed_without_dispatch_confirmation'
+      closeWindow: delivery.confirmed === true,
+      reason: delivery.saveOk === false ? 'local_save_failed' : 'local_completed'
     };
   }
 
@@ -4394,6 +4384,43 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   return {
     action: 'keep',
     queueState: status === 'queued' ? 'active' : 'running'
+  };
+}
+
+async function markTrackedProcessStoppedForClosedTab(tabId, removeInfo = null) {
+  if (!Number.isInteger(tabId)) return false;
+  const process = await getActiveProcessForTab(tabId);
+  if (!process || isClosedProcessStatus(process.status)) return false;
+
+  const now = Date.now();
+  const status = normalizeProcessStatus(process.status);
+  const statusText = status === 'queued'
+    ? 'Karta zamknieta przed startem procesu'
+    : 'Karta zamknieta podczas wykonywania procesu';
+  const reason = status === 'queued' ? 'tab_closed_before_start' : 'tab_closed_during_execution';
+
+  await upsertProcess(process.id, {
+    status: 'stopped',
+    statusText,
+    reason,
+    needsAction: false,
+    autoRecovery: null,
+    finishedAt: now,
+    timestamp: now
+  });
+  return true;
+}
+
+async function buildStaleQueueReleasePatch(process, now = Date.now()) {
+  if (!process || typeof process !== 'object') return null;
+  return {
+    status: 'stopped',
+    statusText: 'Brak aktywnej lokalnej karty procesu - slot zwolniony',
+    reason: 'local_context_missing',
+    needsAction: false,
+    autoRecovery: null,
+    finishedAt: now,
+    timestamp: now
   };
 }
 
@@ -4830,6 +4857,31 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
 
         for (const activeJob of state.activeJobs) {
           const process = processRegistry.get(activeJob.runId) || null;
+          const hasLiveLocalContext = await isLocalProcessActiveForQueue(process);
+          if (process && !hasLiveLocalContext) {
+            releaseJobs.push({
+              job: activeJob,
+              process,
+              reason: 'local_context_missing',
+              closeWindow: false
+            });
+            const stalePatch = await buildStaleQueueReleasePatch(process, now);
+            if (stalePatch) {
+              followUpProcessPatches.push({
+                runId: activeJob.runId,
+                patch: {
+                  queueManaged: true,
+                  queueJobId: activeJob.jobId,
+                  queueState: 'slot_released',
+                  slotReserved: false,
+                  slotReleasedAt: now,
+                  slotReleaseReason: 'local_context_missing',
+                  ...stalePatch
+                }
+              });
+            }
+            continue;
+          }
           const decision = resolveAnalysisQueueReleaseDecision(activeJob, process, now);
           if (decision.action === 'release') {
             releaseJobs.push({
@@ -5100,7 +5152,14 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     runId || null,
     responseId,
     stageMeta,
-    conversationUrl
+    conversationUrl,
+    {
+      sourceTitle: source,
+      sourceName: resolveSupportedSourceNameFromUrl(
+        typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+      ),
+      sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+    }
   );
 
   if (!saveResult?.success) {
@@ -7011,7 +7070,14 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
             processId,
             providedResponseId,
             Object.keys(stageMeta).length > 0 ? stageMeta : null,
-            normalizedConversationUrl || null
+            normalizedConversationUrl || null,
+            {
+              sourceTitle: processTitle,
+              sourceName: resolveSupportedSourceNameFromUrl(
+                typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+              ),
+              sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+            }
           );
         }
       } else {
@@ -12358,6 +12424,9 @@ function summarizeWatchlistDispatchPayload(payload) {
     runId: typeof payload.runId === 'string' ? payload.runId : '',
     analysisType: typeof payload.analysisType === 'string' ? payload.analysisType : '',
     source: typeof payload.source === 'string' ? payload.source : '',
+    sourceTitle: typeof payload.sourceTitle === 'string' ? payload.sourceTitle : '',
+    sourceName: typeof payload.sourceName === 'string' ? payload.sourceName : '',
+    hasSourceUrl: !!(typeof payload.sourceUrl === 'string' && payload.sourceUrl.trim()),
     timestamp: payload.timestamp ?? null,
     textLength: text.length,
     textFingerprint: textFingerprint(text),
@@ -12377,7 +12446,56 @@ function parseDecisionRecordLine(rawLine) {
     .filter((item, index, all) => !(index === all.length - 1 && item === ''));
 
   const count = parts.length;
-  if (count !== 12 && count !== 13) return null;
+  if (count !== 12 && count !== 13 && count !== 16) return null;
+
+  if (count === 16) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        canonicalLine: parts.join('; '),
+        recordFormat: 'current_16_role',
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        companyFamily: parts[11],
+        companyType: parts[12],
+        revenueModel: parts[13],
+        region: parts[14],
+        currency: parts[15]
+      };
+    }
+    return {
+      canonicalLine: parts.join('; '),
+      recordFormat: 'transitional_16',
+      decisionDate: parts[0],
+      decisionStatus: parts[1],
+      decisionRole: '',
+      company: parts[2],
+      sourceMaterial: parts[3],
+      thesis: parts[4],
+      asymmetry: parts[5],
+      bear: parts[6],
+      base: parts[7],
+      bull: parts[8],
+      voi: parts[9],
+      sector: parts[10],
+      companyFamily: parts[11],
+      companyType: parts[12],
+      revenueModel: parts[13],
+      region: parts[14],
+      currency: parts[15]
+    };
+  }
 
   if (count === 13) {
     const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
@@ -12398,6 +12516,9 @@ function parseDecisionRecordLine(rawLine) {
         bull: parts[8],
         voi: parts[9],
         sector: parts[10],
+        companyFamily: parts[10],
+        companyType: '',
+        revenueModel: '',
         region: parts[11],
         currency: parts[12]
       };
@@ -12417,6 +12538,9 @@ function parseDecisionRecordLine(rawLine) {
       bull: parts[8],
       voi: parts[9],
       sector: parts[10],
+      companyFamily: parts[10],
+      companyType: '',
+      revenueModel: '',
       region: parts[11],
       currency: parts[12]
     };
@@ -12439,6 +12563,9 @@ function parseDecisionRecordLine(rawLine) {
     bull: parts[7],
     voi: parts[8],
     sector: parts[9],
+    companyFamily: parts[9],
+    companyType: '',
+    revenueModel: '',
     region: parts[10],
     currency: parts[11]
   };
@@ -12485,6 +12612,7 @@ function normalizeWatchlistDispatchPayload(response) {
   const dispatchText = decisionRecords.length > 0
     ? decisionRecords.map((record) => record.canonicalLine).join('\n')
     : text;
+  const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
 
   const payload = {
     schema: "economist.response.v1",
@@ -12495,6 +12623,15 @@ function normalizeWatchlistDispatchPayload(response) {
     analysisType: typeof response.analysisType === 'string' ? response.analysisType : '',
     timestamp: response.timestamp ?? Date.now()
   };
+  if (sourceMeta.sourceTitle) {
+    payload.sourceTitle = sourceMeta.sourceTitle;
+  }
+  if (sourceMeta.sourceName) {
+    payload.sourceName = sourceMeta.sourceName;
+  }
+  if (sourceMeta.sourceUrl) {
+    payload.sourceUrl = sourceMeta.sourceUrl;
+  }
   if (decisionRecord) {
     payload.decisionRecord = {
       recordFormat: decisionRecord.recordFormat,
@@ -12510,6 +12647,9 @@ function normalizeWatchlistDispatchPayload(response) {
       bull: decisionRecord.bull,
       voi: decisionRecord.voi,
       sector: decisionRecord.sector,
+      companyFamily: decisionRecord.companyFamily || decisionRecord.sector || '',
+      companyType: decisionRecord.companyType || '',
+      revenueModel: decisionRecord.revenueModel || '',
       region: decisionRecord.region,
       currency: decisionRecord.currency
     };
@@ -12529,6 +12669,9 @@ function normalizeWatchlistDispatchPayload(response) {
         bull: record.bull,
         voi: record.voi,
         sector: record.sector,
+        companyFamily: record.companyFamily || record.sector || '',
+        companyType: record.companyType || '',
+        revenueModel: record.revenueModel || '',
         region: record.region,
         currency: record.currency
       }));
@@ -12563,6 +12706,7 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     : generateResponseId(runId);
   const source = trimProblemLogText(rawPayload.source || '', 140);
   const analysisType = trimProblemLogText(rawPayload.analysisType || '', 80);
+  const sourceMeta = normalizeResponseSourceMeta(rawPayload, source);
   const payload = {
     schema,
     responseId,
@@ -12575,6 +12719,15 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     analysisType,
     timestamp: rawPayload.timestamp ?? Date.now()
   };
+  if (sourceMeta.sourceTitle) {
+    payload.sourceTitle = sourceMeta.sourceTitle;
+  }
+  if (sourceMeta.sourceName) {
+    payload.sourceName = sourceMeta.sourceName;
+  }
+  if (sourceMeta.sourceUrl) {
+    payload.sourceUrl = sourceMeta.sourceUrl;
+  }
 
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
   if (conversationUrl) {
@@ -16050,8 +16203,6 @@ const SUPPORTED_SOURCES = [
   { pattern: "https://the-ken.com/*", name: "The Ken" },
   { pattern: "https://*.lazard.com/*", name: "Lazard" },
   { pattern: "https://*.rand.org/*", name: "RAND Corporation" },
-  { pattern: "https://www.youtube.com/*", name: "YouTube" },
-  { pattern: "https://youtu.be/*", name: "YouTube" },
   { pattern: "https://*.wsj.com/*", name: "Wall Street Journal" },
   { pattern: "https://*.barrons.com/*", name: "Barron's" },
   { pattern: "https://*.foreignaffairs.com/*", name: "Foreign Affairs" },
@@ -16062,6 +16213,66 @@ const SUPPORTED_SOURCES = [
 // Funkcja zwracająca tablicę URLi do query
 function getSupportedSourcesQuery() {
   return SUPPORTED_SOURCES.map(s => s.pattern);
+}
+
+function normalizeSourceContentUrl(rawUrl) {
+  const value = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!value) return '';
+  if (/^manual:\/\//i.test(value)) return trimProblemLogText(value, 320);
+  try {
+    return new URL(value).toString();
+  } catch {
+    return '';
+  }
+}
+
+function resolveSupportedSourceNameFromUrl(rawUrl) {
+  const normalizedUrl = normalizeSourceContentUrl(rawUrl);
+  if (!normalizedUrl) return '';
+  if (/^manual:\/\//i.test(normalizedUrl)) return '';
+  try {
+    const hostname = new URL(normalizedUrl).hostname.toLowerCase();
+    for (const source of SUPPORTED_SOURCES) {
+      const domain = String(source?.pattern || '')
+        .replace('*://*.', '')
+        .replace('*://', '')
+        .replace('/*', '')
+        .toLowerCase();
+      if (domain && hostname.includes(domain)) {
+        return typeof source?.name === 'string' ? source.name : '';
+      }
+    }
+    return hostname.replace(/^www\./, '');
+  } catch {
+    return '';
+  }
+}
+
+function normalizeResponseSourceMeta(sourceMeta = null, fallbackSource = '') {
+  const raw = sourceMeta && typeof sourceMeta === 'object' ? sourceMeta : {};
+  const sourceTitle = trimProblemLogText(
+    typeof raw.sourceTitle === 'string' && raw.sourceTitle.trim()
+      ? raw.sourceTitle
+      : fallbackSource,
+    240
+  );
+  const sourceUrl = normalizeSourceContentUrl(
+    typeof raw.sourceUrl === 'string'
+      ? raw.sourceUrl
+      : (typeof raw.source_url === 'string' ? raw.source_url : '')
+  );
+  const explicitSourceName = trimProblemLogText(
+    typeof raw.sourceName === 'string'
+      ? raw.sourceName
+      : (typeof raw.source_name === 'string' ? raw.source_name : ''),
+    140
+  );
+  const sourceName = explicitSourceName || resolveSupportedSourceNameFromUrl(sourceUrl);
+  return {
+    sourceTitle,
+    sourceName,
+    sourceUrl
+  };
 }
 
 // Tworzenie menu kontekstowego przy instalacji
@@ -16216,7 +16427,16 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
 });
 
 // Funkcja zapisująca odpowiedź do storage
-async function saveResponse(responseText, source, analysisType = 'company', runId = null, responseId = null, stage = null, conversationUrl = null) {
+async function saveResponse(
+  responseText,
+  source,
+  analysisType = 'company',
+  runId = null,
+  responseId = null,
+  stage = null,
+  conversationUrl = null,
+  sourceMeta = null
+) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
     console.log(`💾 💾 💾 [saveResponse] ROZPOCZĘTO ZAPISYWANIE 💾 💾 💾`);
@@ -16249,6 +16469,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
     const copyTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
     const copyFingerprint = textFingerprint(responseText);
     const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
+    const normalizedSourceMeta = normalizeResponseSourceMeta(sourceMeta, source);
     const conversationLogs = await buildConversationLogSnapshotForResponse({
       runId: normalizedRunId,
       conversationUrl: normalizedConversationUrl,
@@ -16266,6 +16487,7 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       runId: normalizedRunId || '',
       responseId: normalizedResponseId,
       hasStage: !!(stage && typeof stage === 'object' && !Array.isArray(stage)),
+      hasSourceUrl: !!normalizedSourceMeta.sourceUrl,
       hasConversationUrl: !!normalizedConversationUrl,
       conversationLogCount: conversationLogs.length
     });
@@ -16277,6 +16499,15 @@ async function saveResponse(responseText, source, analysisType = 'company', runI
       analysisType: analysisType,
       responseId: normalizedResponseId
     };
+    if (normalizedSourceMeta.sourceTitle) {
+      newResponse.sourceTitle = normalizedSourceMeta.sourceTitle;
+    }
+    if (normalizedSourceMeta.sourceName) {
+      newResponse.sourceName = normalizedSourceMeta.sourceName;
+    }
+    if (normalizedSourceMeta.sourceUrl) {
+      newResponse.sourceUrl = normalizedSourceMeta.sourceUrl;
+    }
     if (normalizedRunId) {
       newResponse.runId = normalizedRunId;
     }
@@ -16675,7 +16906,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       message.runId,
       message.responseId,
       message.stage || null,
-      message.conversationUrl || null
+      message.conversationUrl || null,
+      {
+        sourceTitle: message.sourceTitle || message.source || '',
+        sourceName: message.sourceName || '',
+        sourceUrl: message.sourceUrl || ''
+      }
     )
       .then((saveResult) => {
         if (typeof sendResponse === 'function') {
@@ -16788,76 +17024,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         success: false,
         error: error?.message || 'company_conversation_count_failed'
-      });
-    });
-    return true;
-  } else if (message.type === 'YT_FETCH_TRANSCRIPT_FOR_TAB') {
-    (async () => {
-      const targetTabId = Number.isInteger(message?.tabId)
-        ? message.tabId
-        : (Number.isInteger(sender?.tab?.id) ? sender.tab.id : null);
-
-      if (!Number.isInteger(targetTabId)) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'tab_id_missing',
-          error: 'Missing target tab id',
-        });
-        return;
-      }
-
-      let targetTab;
-      try {
-        targetTab = await chrome.tabs.get(targetTabId);
-      } catch (error) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'tab_not_found',
-          error: error?.message || 'Unable to get tab info',
-        });
-        return;
-      }
-
-      const targetUrl = typeof targetTab?.url === 'string' ? targetTab.url : '';
-      if (!isYouTubeTabUrl(targetUrl)) {
-        sendResponse({
-          success: false,
-          transcript: '',
-          lang: '',
-          method: 'none',
-          errorCode: 'not_youtube_tab',
-          error: 'Active tab is not a YouTube page',
-          tabId: targetTabId,
-          tabUrl: targetUrl,
-        });
-        return;
-      }
-
-      const preferredLanguages = Array.isArray(message?.preferredLanguages) && message.preferredLanguages.length > 0
-        ? message.preferredLanguages
-        : YT_TRANSCRIPT_PREFERRED_LANGUAGES;
-      const timeoutMs = Number.isInteger(message?.timeoutMs) ? message.timeoutMs : YT_TRANSCRIPT_REQUEST_TIMEOUT_MS;
-      const maxRetries = Number.isInteger(message?.maxRetries) ? message.maxRetries : YT_TRANSCRIPT_MAX_RETRIES;
-      const result = await fetchYouTubeTranscriptForTab(targetTabId, preferredLanguages, { timeoutMs, maxRetries });
-      sendResponse({
-        ...result,
-        tabId: targetTabId,
-        tabUrl: targetUrl,
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        transcript: '',
-        lang: '',
-        method: 'none',
-        errorCode: 'runtime_error',
-        error: error?.message || 'runtime_error',
       });
     });
     return true;
@@ -18102,418 +18268,13 @@ function isYouTubeTabUrl(rawUrl) {
   }
 }
 
-function extractYouTubeVideoId(rawUrl) {
-  if (typeof rawUrl !== 'string' || !rawUrl.trim()) return '';
-  try {
-    const parsed = new URL(rawUrl);
-    const host = String(parsed.hostname || '').toLowerCase();
-    if (host.includes('youtube.com')) {
-      const queryVideoId = String(parsed.searchParams.get('v') || '').trim();
-      if (queryVideoId) return queryVideoId;
-      const pathParts = String(parsed.pathname || '').split('/').filter(Boolean);
-      if (pathParts[0] === 'shorts' || pathParts[0] === 'live') {
-        return String(pathParts[1] || '').trim();
-      }
-      return '';
-    }
-    if (host.includes('youtu.be')) {
-      return String(parsed.pathname || '').replace(/^\/+/, '').split('/')[0].trim();
-    }
-    return '';
-  } catch (error) {
-    return '';
-  }
-}
-
-function normalizePreferredTranscriptLanguages(preferredLanguages) {
-  const fallback = Array.isArray(YT_TRANSCRIPT_PREFERRED_LANGUAGES) && YT_TRANSCRIPT_PREFERRED_LANGUAGES.length > 0
-    ? YT_TRANSCRIPT_PREFERRED_LANGUAGES
-    : ['pl', 'en'];
-  const source = Array.isArray(preferredLanguages) && preferredLanguages.length > 0
-    ? preferredLanguages
-    : fallback;
-
-  return Array.from(
-    new Set(
-      source
-        .map((item) => String(item || '').trim().toLowerCase().split('-')[0])
-        .filter(Boolean)
-    )
-  );
-}
-
-function buildYouTubeTranscriptCacheKey(videoId, preferredLanguages) {
-  const normalizedVideoId = String(videoId || '').trim();
-  if (!normalizedVideoId) return '';
-  const languages = normalizePreferredTranscriptLanguages(preferredLanguages);
-  return `${normalizedVideoId}::${languages.join(',') || 'default'}`;
-}
-
-function pruneYouTubeTranscriptCache() {
-  const now = Date.now();
-  for (const [cacheKey, cacheEntry] of ytTranscriptCache.entries()) {
-    if (!cacheEntry || !Number.isFinite(cacheEntry.expiresAt) || cacheEntry.expiresAt <= now) {
-      ytTranscriptCache.delete(cacheKey);
-    }
-  }
-  while (ytTranscriptCache.size > YT_TRANSCRIPT_CACHE_MAX_ITEMS) {
-    const oldestKey = ytTranscriptCache.keys().next().value;
-    if (!oldestKey) break;
-    ytTranscriptCache.delete(oldestKey);
-  }
-}
-
-function getCachedYouTubeTranscript(videoId, preferredLanguages) {
-  const cacheKey = buildYouTubeTranscriptCacheKey(videoId, preferredLanguages);
-  if (!cacheKey) return null;
-  pruneYouTubeTranscriptCache();
-  const cacheEntry = ytTranscriptCache.get(cacheKey);
-  if (!cacheEntry || !cacheEntry.result) {
-    return null;
-  }
-  return {
-    ...cacheEntry.result,
-    cacheHit: true,
-  };
-}
-
-function setCachedYouTubeTranscript(videoId, preferredLanguages, result) {
-  const cacheKey = buildYouTubeTranscriptCacheKey(videoId, preferredLanguages);
-  if (!cacheKey || !result || result.success !== true) return;
-  pruneYouTubeTranscriptCache();
-  if (ytTranscriptCache.has(cacheKey)) {
-    ytTranscriptCache.delete(cacheKey);
-  }
-  ytTranscriptCache.set(cacheKey, {
-    expiresAt: Date.now() + YT_TRANSCRIPT_CACHE_TTL_MS,
-    result: {
-      ...result,
-      cacheHit: false,
-    },
-  });
-  pruneYouTubeTranscriptCache();
-}
-
-function isRetryableYouTubeTranscriptError(errorCode) {
-  const normalized = String(errorCode || '').trim().toLowerCase();
-  return normalized === 'content_script_unreachable'
-    || normalized === 'caption_tracks_timeout'
-    || normalized === 'caption_tracks_missing'
-    || normalized === 'player_response_missing'
-    || normalized === 'timedtext_list_fetch_failed'
-    || normalized === 'runtime_error'
-    || normalized === 'runtime_timeout'
-    || normalized === 'invalid_transcript_response'
-    || normalized === 'transcript_fetch_failed';
-}
-
-function normalizeYouTubeTranscriptResponse(response) {
-  const hasObjectPayload = !!(response && typeof response === 'object');
-  const payload = hasObjectPayload ? response : {};
-  const transcript = typeof payload.transcript === 'string' ? payload.transcript.trim() : '';
-  const success = payload.success === true && transcript.length >= YT_TRANSCRIPT_MIN_CHARS;
-  const rawErrorCode = typeof payload.errorCode === 'string' && payload.errorCode.trim()
-    ? payload.errorCode.trim().toLowerCase()
-    : '';
-  const errorCode = success
-    ? ''
-    : (
-      rawErrorCode
-      || (!hasObjectPayload ? 'invalid_transcript_response' : '')
-      || (transcript.length > 0 && transcript.length < YT_TRANSCRIPT_MIN_CHARS ? 'transcript_too_short' : 'transcript_unavailable')
-    );
-  const error = success
-    ? ''
-    : (
-      typeof payload.error === 'string' && payload.error.trim()
-        ? payload.error.trim()
-        : (errorCode === 'invalid_transcript_response' ? 'Invalid response from YouTube content script' : (errorCode || 'transcript_unavailable'))
-    );
-
-  return {
-    success,
-    transcript: success ? transcript : '',
-    lang: typeof payload.lang === 'string' ? payload.lang.trim() : '',
-    method: typeof payload.method === 'string' ? payload.method.trim() : 'none',
-    videoId: typeof payload.videoId === 'string' ? payload.videoId.trim() : '',
-    title: typeof payload.title === 'string' ? payload.title : '',
-    errorCode,
-    error,
-    retryable: !success && isRetryableYouTubeTranscriptError(errorCode),
-    cacheHit: payload.cacheHit === true,
-  };
-}
-
-function normalizeYouTubeSendMessageError(error) {
-  const message = String(error?.message || error || '').trim();
-  const lowered = message.toLowerCase();
-  if (lowered.includes('no tab with id')) {
-    return {
-      errorCode: 'tab_not_found',
-      error: message || 'tab_not_found',
-      retryable: false,
-    };
-  }
-  if (
-    lowered.includes('cannot access contents of url')
-    || lowered.includes('cannot access a chrome://')
-    || lowered.includes('extensions gallery cannot be scripted')
-    || lowered.includes('missing host permission')
-  ) {
-    return {
-      errorCode: 'content_script_injection_blocked',
-      error: message || 'content_script_injection_blocked',
-      retryable: false,
-    };
-  }
-  if (
-    lowered.includes('receiving end does not exist')
-    || lowered.includes('could not establish connection')
-    || lowered.includes('message port closed')
-  ) {
-    return {
-      errorCode: 'content_script_unreachable',
-      error: message || 'content_script_unreachable',
-      retryable: true,
-    };
-  }
-  if (lowered.includes('timeout')) {
-    return {
-      errorCode: 'runtime_timeout',
-      error: message || 'runtime_timeout',
-      retryable: true,
-    };
-  }
-  return {
-    errorCode: 'runtime_error',
-    error: message || 'runtime_error',
-    retryable: true,
-  };
-}
-
-async function ensureYouTubeContentScriptInjected(tabId) {
-  try {
-    const probeResults = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => Boolean(window.__iskraYtTranscriptScriptReady),
-    });
-    if (Array.isArray(probeResults) && probeResults.some((row) => row?.result === true)) {
-      return {
-        success: true,
-        errorCode: '',
-        error: '',
-      };
-    }
-
-    await chrome.scripting.executeScript({
-      target: { tabId },
-      files: ['youtube-content.js'],
-    });
-    return {
-      success: true,
-      errorCode: '',
-      error: '',
-    };
-  } catch (error) {
-    const message = String(error?.message || error || '').trim();
-    const lowered = message.toLowerCase();
-    const blocked = lowered.includes('cannot access contents of url')
-      || lowered.includes('cannot access a chrome://')
-      || lowered.includes('extensions gallery cannot be scripted')
-      || lowered.includes('missing host permission');
-    return {
-      success: false,
-      errorCode: blocked ? 'content_script_injection_blocked' : 'content_script_injection_failed',
-      error: message || (blocked ? 'content_script_injection_blocked' : 'content_script_injection_failed'),
-    };
-  }
-}
-
-async function fetchYouTubeTranscriptForTabInternal(tabId, preferredLanguages = YT_TRANSCRIPT_PREFERRED_LANGUAGES, options = {}) {
-  const maxRetriesRaw = Number.isInteger(options?.maxRetries) ? options.maxRetries : YT_TRANSCRIPT_MAX_RETRIES;
-  const timeoutMsRaw = Number.isInteger(options?.timeoutMs) ? options.timeoutMs : YT_TRANSCRIPT_REQUEST_TIMEOUT_MS;
-  const maxRetries = Math.max(1, Math.min(6, maxRetriesRaw));
-  const timeoutMs = Math.max(1000, Math.min(30000, timeoutMsRaw));
-  const preferred = normalizePreferredTranscriptLanguages(preferredLanguages);
-  const useCache = options?.useCache !== false;
-  let tabUrl = '';
-
-  try {
-    const tab = await chrome.tabs.get(tabId);
-    tabUrl = typeof tab?.url === 'string' ? tab.url : '';
-  } catch (error) {
-    return {
-      success: false,
-      transcript: '',
-      lang: '',
-      method: 'none',
-      videoId: '',
-      title: '',
-      errorCode: 'tab_not_found',
-      error: error?.message || 'tab_not_found',
-      retryable: false,
-      attempts: maxRetries,
-      attemptUsed: 0,
-      cacheHit: false,
-    };
-  }
-
-  if (!isYouTubeTabUrl(tabUrl)) {
-    return {
-      success: false,
-      transcript: '',
-      lang: '',
-      method: 'none',
-      videoId: '',
-      title: '',
-      errorCode: 'not_youtube_tab',
-      error: 'Active tab is not a YouTube page',
-      retryable: false,
-      attempts: maxRetries,
-      attemptUsed: 0,
-      cacheHit: false,
-    };
-  }
-
-  const initialVideoId = extractYouTubeVideoId(tabUrl);
-  if (useCache && initialVideoId) {
-    const cached = getCachedYouTubeTranscript(initialVideoId, preferred);
-    if (cached && cached.success) {
-      return {
-        ...cached,
-        attempts: maxRetries,
-        attemptUsed: 0,
-      };
-    }
-  }
-
-  let lastResult = {
-    success: false,
-    transcript: '',
-    lang: '',
-    method: 'none',
-    videoId: '',
-    title: '',
-    errorCode: 'transcript_unavailable',
-    error: 'transcript_unavailable',
-    retryable: true,
-    cacheHit: false,
-  };
-  let injectionAttempted = false;
-  let attemptUsed = 0;
-
-  for (let attempt = 1; attempt <= maxRetries; attempt += 1) {
-    attemptUsed = attempt;
-    try {
-      const response = await chrome.tabs.sendMessage(tabId, {
-        type: 'GET_TRANSCRIPT',
-        preferredLanguages: preferred,
-        timeoutMs,
-      });
-
-      const normalized = normalizeYouTubeTranscriptResponse(response);
-      if (normalized.success) {
-        const resolvedVideoId = String(normalized.videoId || initialVideoId || '').trim();
-        const normalizedSuccess = {
-          ...normalized,
-          videoId: resolvedVideoId,
-          cacheHit: normalized.cacheHit === true,
-        };
-        if (useCache && resolvedVideoId) {
-          setCachedYouTubeTranscript(resolvedVideoId, preferred, normalizedSuccess);
-        }
-        return {
-          ...normalizedSuccess,
-          attempts: maxRetries,
-          attemptUsed: attempt,
-        };
-      }
-
-      lastResult = {
-        ...normalized,
-        videoId: normalized.videoId || initialVideoId || '',
-      };
-    } catch (error) {
-      const normalizedError = normalizeYouTubeSendMessageError(error);
-      lastResult = {
-        success: false,
-        transcript: '',
-        lang: '',
-        method: 'none',
-        videoId: initialVideoId,
-        title: '',
-        errorCode: normalizedError.errorCode,
-        error: normalizedError.error,
-        retryable: normalizedError.retryable,
-        cacheHit: false,
-      };
-    }
-
-    if (attempt < maxRetries && lastResult.retryable) {
-      if (lastResult.errorCode === 'content_script_unreachable' && !injectionAttempted) {
-        injectionAttempted = true;
-        const injectResult = await ensureYouTubeContentScriptInjected(tabId);
-        if (!injectResult.success) {
-          return {
-            success: false,
-            transcript: '',
-            lang: '',
-            method: 'none',
-            videoId: initialVideoId || '',
-            title: '',
-            errorCode: injectResult.errorCode || 'content_script_injection_failed',
-            error: injectResult.error || injectResult.errorCode || 'content_script_injection_failed',
-            retryable: false,
-            attempts: maxRetries,
-            attemptUsed: attempt,
-            cacheHit: false,
-          };
-        }
-        await sleep(YT_TRANSCRIPT_INJECT_RETRY_DELAY_MS);
-        continue;
-      }
-      await sleep(YT_TRANSCRIPT_RETRY_DELAY_MS * attempt);
-      continue;
-    }
-    break;
-  }
-
-  return {
-    ...lastResult,
-    attempts: maxRetries,
-    attemptUsed: Math.max(1, attemptUsed || maxRetries),
-    videoId: lastResult.videoId || initialVideoId || '',
-    cacheHit: false,
-  };
-}
-
-async function fetchYouTubeTranscriptForTab(tabId, preferredLanguages = YT_TRANSCRIPT_PREFERRED_LANGUAGES, options = {}) {
-  const preferred = normalizePreferredTranscriptLanguages(preferredLanguages);
-  const useCache = options?.useCache !== false;
-  const inFlightKey = `${tabId}::${preferred.join(',') || 'default'}::${useCache ? 'cache' : 'nocache'}`;
-  const existingRequest = ytTranscriptInFlightRequests.get(inFlightKey);
-  if (existingRequest) {
-    return existingRequest;
-  }
-
-  let requestPromise = null;
-  requestPromise = fetchYouTubeTranscriptForTabInternal(tabId, preferred, options)
-    .finally(() => {
-      if (ytTranscriptInFlightRequests.get(inFlightKey) === requestPromise) {
-        ytTranscriptInFlightRequests.delete(inFlightKey);
-      }
-    });
-
-  ytTranscriptInFlightRequests.set(inFlightKey, requestPromise);
-  return requestPromise;
-}
-
 chrome.tabs.onRemoved.addListener((tabId) => {
-  for (const [cacheKey, requestPromise] of ytTranscriptInFlightRequests.entries()) {
-    if (cacheKey.startsWith(`${tabId}::`) && ytTranscriptInFlightRequests.get(cacheKey) === requestPromise) {
-      ytTranscriptInFlightRequests.delete(cacheKey);
-    }
-  }
+  void markTrackedProcessStoppedForClosedTab(tabId).catch((error) => {
+    console.warn('[monitor] Failed to mark process stopped after tab close:', {
+      tabId,
+      error: error?.message || String(error)
+    });
+  });
 });
 
 function clampWindowMetric(value, minValue, maxValue) {
@@ -18626,7 +18387,6 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ? tab.manualPdfAttachment
       : null;
     let extractedText = '';
-    let transcriptLang = null;
 
     await upsertProcess(processId, {
       title: processTitle,
@@ -18688,36 +18448,31 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       }
 
       if (isYouTubeTabUrl(tab.url)) {
-        const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
-          timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
-          maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
+        await upsertProcess(processId, {
+          title: processTitle,
+          analysisType,
+          status: 'failed',
+          needsAction: false,
+          statusText: 'YouTube nie jest wspierane',
+          reason: 'unsupported_youtube_source',
+          error: 'unsupported_youtube_source',
+          autoRecovery: null,
+          finishedAt: Date.now(),
+          timestamp: Date.now()
         });
-        if (!transcriptResult.success || !transcriptResult.transcript) {
-          const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
-          const ytError = transcriptResult.error || ytReason;
-          await upsertProcess(processId, {
-            title: processTitle,
-            analysisType,
-            status: 'failed',
-            needsAction: false,
-            statusText: 'Brak transkryptu YouTube',
-            reason: `youtube_${ytReason}`,
-            error: ytError,
-            autoRecovery: null,
-            finishedAt: Date.now(),
-            timestamp: Date.now()
-          });
-          return { success: false, title: processTitle, reason: `youtube_${ytReason}`, error: ytError };
-        }
-        extractedText = transcriptResult.transcript;
-        transcriptLang = transcriptResult.lang || 'unknown';
-      } else {
-        const extractionResults = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          function: extractText
-        });
-        extractedText = extractionResults?.[0]?.result || '';
+        return {
+          success: false,
+          title: processTitle,
+          reason: 'unsupported_youtube_source',
+          error: 'unsupported_youtube_source'
+        };
       }
+
+      const extractionResults = await chrome.scripting.executeScript({
+        target: { tabId: tab.id },
+        function: extractText
+      });
+      extractedText = extractionResults?.[0]?.result || '';
 
       if (!extractedText || extractedText.length < 50) {
         const errorCode = `text_too_short_${extractedText?.length || 0}`;
@@ -19024,7 +18779,14 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           processId,
           providedResponseId,
           Object.keys(stageMeta).length > 0 ? stageMeta : null,
-          conversationUrl || null
+          conversationUrl || null,
+          {
+            sourceTitle: title,
+            sourceName: resolveSupportedSourceNameFromUrl(
+              typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+            ),
+            sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+          }
         );
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: true,
@@ -19245,7 +19007,6 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       const isManualSource = manualUrl.startsWith('manual://');
       const isManualPdf = manualUrl === 'manual://pdf';
       let extractedText;
-      let transcriptLang = null; // Moze byc ustawiony przez YouTube content script
       const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
         ? tab.manualPdfAttachment
         : null;      
@@ -19260,53 +19021,22 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           return { success: false, title: processTitle, reason: 'pusty tekst', error: 'manual_source_empty' };
         }
       } else {
-        // Wykryj źródło najpierw, aby wiedzieć czy to YouTube
-        const isYouTube = isYouTubeTabUrl(tab.url);
-        
-        if (isYouTube) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube detected - fetching transcript`);
-          const transcriptResult = await fetchYouTubeTranscriptForTab(tab.id, YT_TRANSCRIPT_PREFERRED_LANGUAGES, {
-            timeoutMs: YT_TRANSCRIPT_REQUEST_TIMEOUT_MS,
-            maxRetries: YT_TRANSCRIPT_MAX_RETRIES,
-          });
-
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript result:`, {
-            success: transcriptResult.success,
-            length: transcriptResult.transcript?.length || 0,
-            lang: transcriptResult.lang,
-            method: transcriptResult.method,
-            cacheHit: transcriptResult.cacheHit,
-            errorCode: transcriptResult.errorCode,
-            error: transcriptResult.error,
-            attemptUsed: transcriptResult.attemptUsed,
-            attempts: transcriptResult.attempts,
-          });
-
-          if (!transcriptResult.success || !transcriptResult.transcript) {
-            const ytReason = transcriptResult.errorCode || 'transcript_unavailable';
-            const ytError = transcriptResult.error || ytReason;
-            console.warn(
-              `[${analysisType}] [${index + 1}/${tabs.length}] YouTube transcript failed: reason=${ytReason} retryable=${transcriptResult.retryable === true} attempt=${transcriptResult.attemptUsed || 0}/${transcriptResult.attempts || YT_TRANSCRIPT_MAX_RETRIES} error=${truncateDispatchLogText(ytError, 220)}`
-            );
-            return {
-              success: false,
-              title: processTitle,
-              reason: `youtube_${ytReason}`,
-              error: ytError
-            };
-          }
-
-          extractedText = transcriptResult.transcript;
-          transcriptLang = transcriptResult.lang || 'unknown';
-        } else {
-          // === NON-YOUTUBE: Użyj executeScript z extractText ===
-          const results = await chrome.scripting.executeScript({
-            target: { tabId: tab.id },
-            function: extractText
-          });
-          extractedText = results[0]?.result;
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
+        if (isYouTubeTabUrl(tab.url)) {
+          console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube source is no longer supported`);
+          return {
+            success: false,
+            title: processTitle,
+            reason: 'unsupported_youtube_source',
+            error: 'unsupported_youtube_source'
+          };
         }
+
+        const results = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          function: extractText
+        });
+        extractedText = results[0]?.result;
+        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
         
         // Dla automatycznych źródeł: walidacja minimum 50 znaków
         if (!extractedText || extractedText.length < 50) {
@@ -19324,23 +19054,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       const title = tab.title || "Bez tytułu";
       processTitle = title;
       
-      // Wykryj źródło artykułu (dla non-YouTube lub dla payload metadata)
-      let sourceName;
-      
-      if (isManualSource) {
-        sourceName = isManualPdf ? "Manual PDF" : "Manual Source";
-      } else {
-        const url = new URL(tab.url);
-        const hostname = url.hostname;
-        sourceName = "Unknown";
-        for (const source of SUPPORTED_SOURCES) {
-          const domain = source.pattern.replace('*://*.', '').replace('*://', '').replace('/*', '');
-          if (hostname.includes(domain)) {
-            sourceName = source.name;
-            break;
-          }
-        }
-      }
+      // Wykryj źródło artykułu i zachowaj pełne metadane do finalnego payloadu.
+      const sourceUrl = isManualSource ? (tab.url || 'manual://source') : (tab.url || '');
+      const sourceName = isManualSource
+        ? (isManualPdf ? "Manual PDF" : "Manual Source")
+        : (resolveSupportedSourceNameFromUrl(sourceUrl) || "Unknown");
 
       // Wyciągnij treść pierwszego prompta z promptChain
       const firstPrompt = promptChain[0] || '';
@@ -19362,7 +19080,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
-        sourceUrl: isManualSource ? (tab.url || 'manual://source') : (tab.url || ''),
+        sourceUrl,
         chatUrl,
         ...(invocationWindowId !== null ? { invocationWindowId } : {}),
         ...(sourceWindowId !== null ? { sourceWindowId } : {}),
@@ -19450,7 +19168,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           {
             persistFinalResponseViaMessage: true,
             mode: 'runtime_message',
-            saveTimeoutMs: 15000
+            saveTimeoutMs: 15000,
+            sourceTitle: title,
+            sourceName,
+            sourceUrl
           },
           manualPdfAttachmentContext
         ];
@@ -19744,7 +19465,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
             processId,
             providedResponseId,
             Object.keys(stageMeta).length > 0 ? stageMeta : null,
-            conversationUrl || null
+            conversationUrl || null,
+            {
+              sourceTitle: title,
+              sourceName,
+              sourceUrl
+            }
           );
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
@@ -20657,8 +20383,7 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
 // Uwaga: chrome.action.onClicked NIE działa gdy jest default_popup w manifest
 // Ikona uruchamia popup, a popup wysyła message RUN_ANALYSIS
 
-// Funkcja ekstrakcji tekstu (content script) - tylko dla non-YouTube sources
-// YouTube używa dedykowanego content script (youtube-content.js)
+// Funkcja ekstrakcji tekstu dla wspieranych źródeł webowych.
 async function extractText() {
   const hostname = window.location.hostname;
   const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
@@ -21090,6 +20815,19 @@ async function injectToChat(
     console.log(`  Analysis: ${analysisType}`);
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
+
+    const persistenceMeta = persistenceContext && typeof persistenceContext === 'object'
+      ? persistenceContext
+      : {};
+    const sourceTitleForSave = typeof persistenceMeta.sourceTitle === 'string' && persistenceMeta.sourceTitle.trim()
+      ? persistenceMeta.sourceTitle.trim()
+      : (typeof articleTitle === 'string' ? articleTitle.trim() : '');
+    const sourceNameForSave = typeof persistenceMeta.sourceName === 'string'
+      ? persistenceMeta.sourceName.trim()
+      : '';
+    const sourceUrlForSave = typeof persistenceMeta.sourceUrl === 'string'
+      ? persistenceMeta.sourceUrl.trim()
+      : '';
 
     if (chrome?.runtime?.onMessage?.addListener) {
       forceStopListener = (message, sender, sendResponse) => {
@@ -21663,7 +21401,7 @@ async function injectToChat(
         ? runId.trim()
         : '';
       const timestamp = Date.now();
-      const source = typeof articleTitle === 'string' ? articleTitle : '';
+      const source = sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : '');
       const normalizedAnalysisType = typeof analysisType === 'string' ? analysisType : '';
       const stage = stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
         ? stageMeta
@@ -21677,6 +21415,15 @@ async function injectToChat(
         analysisType: normalizedAnalysisType,
         responseId: normalizedResponseId
       };
+      if (sourceTitleForSave) {
+        responseRecord.sourceTitle = sourceTitleForSave;
+      }
+      if (sourceNameForSave) {
+        responseRecord.sourceName = sourceNameForSave;
+      }
+      if (sourceUrlForSave) {
+        responseRecord.sourceUrl = sourceUrlForSave;
+      }
       if (normalizedRunId) {
         responseRecord.runId = normalizedRunId;
       }
@@ -21696,6 +21443,15 @@ async function injectToChat(
         analysisType: normalizedAnalysisType,
         timestamp
       };
+      if (sourceTitleForSave) {
+        dispatchPayload.sourceTitle = sourceTitleForSave;
+      }
+      if (sourceNameForSave) {
+        dispatchPayload.sourceName = sourceNameForSave;
+      }
+      if (sourceUrlForSave) {
+        dispatchPayload.sourceUrl = sourceUrlForSave;
+      }
       if (conversationUrl) {
         dispatchPayload.conversationUrl = conversationUrl;
       }
@@ -22397,7 +22153,10 @@ async function injectToChat(
       const messagePayload = {
         type: 'SAVE_RESPONSE',
         text: normalizedText,
-        source: articleTitle || '',
+        source: sourceTitleForSave || articleTitle || '',
+        sourceTitle: sourceTitleForSave || articleTitle || '',
+        sourceName: sourceNameForSave || '',
+        sourceUrl: sourceUrlForSave || '',
         analysisType,
         runId: typeof runId === 'string' ? runId : '',
         responseId: typeof responseId === 'string' ? responseId : '',
@@ -24711,7 +24470,7 @@ async function injectToChat(
     while (parts.length > 0 && parts[parts.length - 1] === '') {
       parts.pop();
     }
-    if (parts.length === 12 || parts.length === 13 || parts.length === 15) {
+    if (parts.length === 12 || parts.length === 13 || parts.length === 15 || parts.length === 16) {
       return parts;
     }
     return null;

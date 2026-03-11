@@ -23,8 +23,6 @@
     "https://the-ken.com/*",
     "https://*.lazard.com/*",
     "https://*.rand.org/*",
-    "https://www.youtube.com/*",
-    "https://youtu.be/*",
     "https://*.wsj.com/*",
     "https://*.foreignaffairs.com/*",
     "https://*.barrons.com/*",
@@ -38,13 +36,6 @@
   "background": {
     "service_worker": "background.js"
   },
-  "content_scripts": [
-    {
-      "matches": ["*://*.youtube.com/*", "*://youtu.be/*"],
-      "js": ["youtube-content.js"],
-      "run_at": "document_end"
-    }
-  ],
   "icons": {
     "16": "icon16.png",
     "48": "icon48.png",

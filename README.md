@@ -3,7 +3,7 @@
 Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
 
 ## What it does
-- Extracts text from supported news pages, Spotify transcripts, open Gmail emails, and YouTube transcripts.
+- Extracts text from supported news pages, Spotify transcripts, and open Gmail emails.
 - Runs two flows:
   - `company` on all supported tabs.
   - `portfolio` on selected tabs.
@@ -21,7 +21,6 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 - `problem-log.js` - diagnostics panel for runtime/process errors.
 - `responses.js` - responses view, copy/clear, storage migration.
 - `reload-resume-monitor.js` - monitored reload+resume workflow.
-- `youtube-content.js` - transcript extraction for YouTube.
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains.
 - `COMPANY_CHAIN_STAGE_MAP.md` - readable stage contract for `prompts-company.txt` + runtime mapping.
 
@@ -49,19 +48,6 @@ Chrome extension (Manifest V3) that extracts content from open tabs and runs mul
 2. Click extension icon (`Ctrl+Shift+E`).
 3. Choose tabs for portfolio analysis.
 4. Let both flows run.
-
-### YouTube transcript copy (one click)
-1. Open a YouTube video tab.
-2. Open popup and click `Kopiuj transkrypcje (YouTube)`.
-3. Transcript is copied to clipboard immediately (without running ChatGPT chain).
-
-Transcript fetch behavior:
-- Language priority: `pl` -> `en` -> next available track.
-- Within preferred language, manual captions are preferred over auto-generated (`asr`) tracks.
-- Fetch order: `json3` -> `srv3` -> default XML.
-- If content script is missing in an already-open YouTube tab, worker attempts runtime re-injection and retries automatically.
-- Short-lived transcript cache (`videoId + languages`) reduces duplicate fetches across repeated runs/copy actions.
-- If a video has no captions, popup shows a controlled error instead of fallbacking to external API.
 
 ### Manual source flow
 1. Open popup.
@@ -117,7 +103,6 @@ Keep these in sync when adding/removing domains:
 - `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
 - Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
 - Process monitor uses periodic heartbeat sweep (`chrome.alarms`) with stale TTL warnings to improve near-live remote state visibility.
-- YouTube transcript support is best-effort and depends on caption availability for a given video.
 - On restart/restore flows, ChatGPT tabs are automatically ungrouped from Chrome tab groups to keep workflow tabs independent.
 
 ## Quick validation (before commit)

@@ -338,13 +338,60 @@ function parseDecisionRecordParts(raw) {
     .split(';')
     .map((part) => part.trim())
     .filter((item, index, all) => !(index === all.length - 1 && item === ''));
-  if (parts.length !== 12 && parts.length !== 13) return null;
+  if (parts.length !== 12 && parts.length !== 13 && parts.length !== 16) return null;
   return parts;
 }
 
 function parseDecisionRecordLine(rawLine) {
   const parts = parseDecisionRecordParts(rawLine);
   if (!parts) return null;
+
+  if (parts.length === 16) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        companyFamily: parts[11],
+        companyType: parts[12],
+        revenueModel: parts[13],
+        region: parts[14],
+        currency: parts[15],
+        recordFormat: 'current_16_role'
+      };
+    }
+    return {
+      decisionDate: parts[0],
+      decisionStatus: parts[1],
+      decisionRole: '',
+      company: parts[2],
+      sourceMaterial: parts[3],
+      thesis: parts[4],
+      asymmetry: parts[5],
+      bear: parts[6],
+      base: parts[7],
+      bull: parts[8],
+      voi: parts[9],
+      sector: parts[10],
+      companyFamily: parts[11],
+      companyType: parts[12],
+      revenueModel: parts[13],
+      region: parts[14],
+      currency: parts[15],
+      recordFormat: 'transitional_16'
+    };
+  }
 
   if (parts.length === 13) {
     const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
@@ -363,6 +410,9 @@ function parseDecisionRecordLine(rawLine) {
         bull: parts[8],
         voi: parts[9],
         sector: parts[10],
+        companyFamily: parts[10],
+        companyType: '',
+        revenueModel: '',
         region: parts[11],
         currency: parts[12],
         recordFormat: 'current_13_role'
@@ -381,6 +431,9 @@ function parseDecisionRecordLine(rawLine) {
       bull: parts[8],
       voi: parts[9],
       sector: parts[10],
+      companyFamily: parts[10],
+      companyType: '',
+      revenueModel: '',
       region: parts[11],
       currency: parts[12],
       recordFormat: 'transitional_13'
@@ -402,6 +455,9 @@ function parseDecisionRecordLine(rawLine) {
     bull: parts[7],
     voi: parts[8],
     sector: parts[9],
+    companyFamily: parts[9],
+    companyType: '',
+    revenueModel: '',
     region: parts[10],
     currency: parts[11],
     recordFormat: 'current_12'
@@ -453,6 +509,8 @@ function formatDecisionRecordTable(text) {
     if (flattenedParts) parsedParts.push(flattenedParts);
   }
   const parts = parsedParts.find(
+    (item) => item.length === 16 && /^(PRIMARY|SECONDARY)$/i.test(item[2] || '') && String(item[2]).toUpperCase() === 'PRIMARY'
+  ) || parsedParts.find(
     (item) => item.length === 13 && /^(PRIMARY|SECONDARY)$/i.test(item[2] || '') && String(item[2]).toUpperCase() === 'PRIMARY'
   ) || parsedParts[parsedParts.length - 1];
   if (!parts) return null;
@@ -468,6 +526,42 @@ function formatDecisionRecordTable(text) {
     'Bull scenario (TOTAL)',
     'VOI/Falsifiers/Primary risk',
     'Sektor',
+    'Region',
+    'Waluta'
+  ];
+  const labels16Role = [
+    'Data decyzji',
+    'Status decyzji',
+    'Rola',
+    'Spolka',
+    'Material zrodlowy',
+    'Teza inwestycyjna',
+    'Bear scenario (TOTAL)',
+    'Base scenario (TOTAL)',
+    'Bull scenario (TOTAL)',
+    'VOI/Falsifiers/Primary risk',
+    'Sektor (alias)',
+    'Rodzina spolki',
+    'Typ spolki',
+    'Model przychodu',
+    'Region',
+    'Waluta'
+  ];
+  const labels16Legacy = [
+    'Data decyzji',
+    'Status decyzji',
+    'Spolka',
+    'Material zrodlowy',
+    'Teza inwestycyjna',
+    'Asymetria/Divergence',
+    'Bear scenario (TOTAL)',
+    'Base scenario (TOTAL)',
+    'Bull scenario (TOTAL)',
+    'VOI/Falsifiers/Primary risk',
+    'Sektor (alias)',
+    'Rodzina spolki',
+    'Typ spolki',
+    'Model przychodu',
     'Region',
     'Waluta'
   ];
@@ -501,10 +595,13 @@ function formatDecisionRecordTable(text) {
     'Region',
     'Waluta'
   ];
-  const hasExplicitRole = parts.length === 13 && /^(PRIMARY|SECONDARY)$/i.test(parts[2] || '');
-  const labels = parts.length === 13
-    ? (hasExplicitRole ? labels13Role : labels13Legacy)
-    : labels12;
+  const hasExplicitRole = /^(PRIMARY|SECONDARY)$/i.test(parts[2] || '');
+  let labels = labels12;
+  if (parts.length === 16) {
+    labels = hasExplicitRole ? labels16Role : labels16Legacy;
+  } else if (parts.length === 13) {
+    labels = hasExplicitRole ? labels13Role : labels13Legacy;
+  }
 
   return labels
     .map((label, index) => `${index + 1} - ${label} - ${parts[index] || ''}`)
@@ -1237,6 +1334,9 @@ function buildMarketRowsFromResponses(responses) {
     const company = normalizeMarketText(decisionRecord.company || response?.source || '', 'brak');
     const ticker = extractTickerFromCompany(company);
     const sector = normalizeMarketText(decisionRecord.sector, '-');
+    const companyFamily = normalizeMarketText(decisionRecord.companyFamily || decisionRecord.sector, '-');
+    const companyType = normalizeMarketText(decisionRecord.companyType, '-');
+    const revenueModel = normalizeMarketText(decisionRecord.revenueModel, '-');
     const decisionStatus = normalizeMarketText(decisionRecord.decisionStatus, '-');
     const region = normalizeMarketText(decisionRecord.region, '-');
     const currency = normalizeMarketText(decisionRecord.currency, '-');
@@ -1251,9 +1351,12 @@ function buildMarketRowsFromResponses(responses) {
       ticker: ticker || '-',
       companyFuzzy: normalizeFuzzyText(company),
       tickerFuzzy: normalizeFuzzyText(ticker || '-'),
-      searchHaystack: normalizeFuzzyText([company, ticker, sector, decisionStatus, region, currency].join(' ')),
-      searchTokens: tokenizeFuzzyText([company, ticker, sector, decisionStatus, region, currency].join(' ')),
+      searchHaystack: normalizeFuzzyText([company, ticker, sector, companyFamily, companyType, revenueModel, decisionStatus, region, currency].join(' ')),
+      searchTokens: tokenizeFuzzyText([company, ticker, sector, companyFamily, companyType, revenueModel, decisionStatus, region, currency].join(' ')),
       sector,
+      companyFamily,
+      companyType,
+      revenueModel,
       decisionStatus,
       asymmetryText,
       asymmetryValue,

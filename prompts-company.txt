@@ -4093,7 +4093,7 @@ Wewnątrz pola używaj:
 
 ---
 
-## ?? STRUKTURA OUTPUT — 13 pol oddzielonych srednikami
+## ?? STRUKTURA OUTPUT — 16 pol oddzielonych srednikami
 
 | Kolumna | Nazwa pola             | Przyklad                                           |
 |---------|------------------------|----------------------------------------------------|
@@ -4107,15 +4107,18 @@ Wewnątrz pola używaj:
 | 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
 | 9       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
 | 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z              |
-| 11      | Sektor                 | Handel & zachowania konsumenta                     |
-| 12      | Region                 | Szwajcaria                                          |
-| 13      | Waluta                 | CHF                                                |
+| 11      | Sektor (alias)         | Technologia i oprogramowanie                       |
+| 12      | Rodzina spolki         | Technologia i oprogramowanie                       |
+| 13      | Typ spolki             | Cyberbezpieczenstwo i tozsamosc                    |
+| 14      | Model przychodu        | Subskrypcja oprogramowania                         |
+| 15      | Region                 | USA                                                |
+| 16      | Waluta                 | USD                                                |
 
 ---
 
 ## Kontrakt danych (obowiazkowy)
 
-- Ten format ma **dokladnie 13 pol** i sluzy do bezposredniego importu do Watchlist.
+- Ten format ma **dokladnie 16 pol** i sluzy do bezposredniego importu do Watchlist.
 - Generuj zawsze **2 linie**: pierwsza = PRIMARY, druga = SECONDARY.
 - Jesli Stage 11 wyprodukowal tylko 1 spolke (SHORTFALL): generuj 1 linie i dopisz na koncu: # SHORTFALL: only 1 company passed Stage 10 gates
 - Nie dodawaj ani nie usuwaj pol.
@@ -4123,8 +4126,11 @@ Wewnątrz pola używaj:
 - Pole 5 (`Material zrodlowy`) ma zawierac `THESIS_SOURCE` ze Stage 1 HANDOFF, nie analize.
 - Pole 6 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
 - Pola 7-9 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
-- Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ...`.
-- Nie uzywaj formatu legacy 15-polowego (`watpliwosci`, `gate rating`, `why buy`, `why avoid`) w tym rekordzie.
+- Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ..., Composite: ..., Sizing: ...`.
+- Pole 11 (`Sektor`) jest aliasem kompatybilnosci i ma powielac wartosc z pola 12 (`Rodzina spolki`).
+- Pola 12-14 musza byc zgodne z aktualna taxonomia spolek w Watchlist: `rodzina_spolki`, `typ_spolki`, `model_przychodu`.
+- Jesli nie umiesz wiarygodnie przypisac pola 12-14, wpisz literalnie `NIEZNANY` zamiast zgadywac.
+- Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.
 
 ---
 
@@ -4348,26 +4354,77 @@ Zawiera piec elementow oddzielonych przecinkami:
 
 ---
 
-### 11. Sektor
+### 11. Sektor (alias kompatybilnosci)
 
-Wybierz **TYLKO** jedna nazwe z ponizszej listy (bez opisow, nawiasow, myslnikow):
+To pole istnieje tylko po to, zeby zachowac zgodnosc ze starszym importem i widokami.
 
-| Sektor                                   | Teza sektorowa (kontekst)                                                                        |
-|------------------------------------------|---------------------------------------------------------------------------------------------------|
-| AI & infrastruktura danych               | Wzrost popytu na compute i dane napedza nowa fale CAPEX-u infrastrukturalnego                    |
-| Aplikacje AI & automatyzacja decyzji     | AI przesuwa wartosc z pracy ludzkiej do oprogramowania decyzyjnego                               |
-| Bezpieczenstwo & odpornosc systemowa     | Swiat z rosnaca niepewnoscia strukturalna premiuje dostawcow bezpieczenstwa                      |
-| Energia & elektryfikacja                 | Zmiana kosztu kapitalu i regulacji przesuwa marze w strone infrastruktury elektrycznej           |
-| Zaawansowany przemysl & robotyka         | Wzrost produktywnosci i deficyt pracy fizycznej napedza automatyzacje procesow realnych          |
-| Biologia & zdrowie obliczeniowe          | Cyfryzacja biologii zmienia medycyne z reaktywnej na predykcyjna                                 |
-| Finanse & infrastruktura rynkow          | Monetyzacja przeplywu wartosci i danych w gospodarce kapitalu                                    |
-| Handel & zachowania konsumenta           | Zachowania konsumentow staja sie algorytmiczne  przewaga zalezy od danych o intencji            |
+**Zasada obowiazkowa:**
 
- **WAZNE:** W outputcie wpisz **TYLKO** nazwe sektora (np. Biologia & zdrowie obliczeniowe), bez dodatkowych opisow.
+- wpisz **dokladnie ta sama wartosc**, co w polu 12 `Rodzina spolki`
+- nie uzywaj dawnej listy sektorow tematycznych
+- bez opisow, nawiasow i komentarzy
+
+Przyklad:
+
+- `Technologia i oprogramowanie`
 
 ---
 
-### 12. Region
+### 12. Rodzina spolki
+
+Wpisz znormalizowana `rodzina_spolki` zgodna z aktualna taxonomia Watchlist.
+
+**Zasady:**
+
+- wpisz tylko nazwe rodziny
+- bez dopiskow typu `rodzina:`, bez komentarzy, bez nawiasow
+- ma to byc najwyzszy poziom klasyfikacji firmy
+- jesli nie masz wiarygodnej pewnosci, wpisz `NIEZNANY`
+
+Przyklady:
+
+- `Technologia i oprogramowanie`
+- `Dobra luksusowe i konsument premium`
+
+---
+
+### 13. Typ spolki
+
+Wpisz znormalizowany `typ_spolki` zgodny z aktualna taxonomia Watchlist.
+
+**Zasady:**
+
+- wpisz tylko nazwe typu
+- poziom bardziej szczegolowy niz `Rodzina spolki`
+- bez komentarzy, bez nawiasow, bez zgadywania
+- jesli nie masz wiarygodnej pewnosci, wpisz `NIEZNANY`
+
+Przyklady:
+
+- `Cyberbezpieczenstwo i tozsamosc`
+- `Bizuteria i zegarki premium`
+
+---
+
+### 14. Model przychodu
+
+Wpisz znormalizowany `model_przychodu` zgodny z aktualna taxonomia Watchlist.
+
+**Zasady:**
+
+- wpisz tylko nazwe modelu
+- opis ma mowic **jak firma zarabia**, nie w jakim jest sektorze
+- bez komentarzy, bez nawiasow, bez zgadywania
+- jesli nie masz wiarygodnej pewnosci, wpisz `NIEZNANY`
+
+Przyklady:
+
+- `Subskrypcja oprogramowania`
+- `Sprzedaz produktowa DTC i retail`
+
+---
+
+### 15. Region
 
 Glowny region operacyjny lub ekspozycji.
 
@@ -4375,7 +4432,7 @@ Przyklady: USA, Szwajcaria, Chiny, Europa, Globalny
 
 ---
 
-### 13. Waluta
+### 16. Waluta
 
 Waluta raportowania lub glowna waluta przychodow.
 
@@ -4387,9 +4444,9 @@ Przyklady: USD, CHF, EUR, PLN
 
 ### Bez numeracji (finalna forma):
 
-```
-2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Handel & zachowania konsumenta; Szwajcaria; CHF
-2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Handel & zachowania konsumenta; Szwajcaria; CHF
+``` 
+2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Bizuteria i zegarki premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
+2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, rozmowa ogolna.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Zegarki i akcesoria premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
 ```
 
 ---
@@ -4407,7 +4464,7 @@ Przyklady: USD, CHF, EUR, PLN
 
 ##  Walidacja przed zwrotem (obowiazkowa)
 
-- Sprawdz liczbe separatorow: rekord ma miec dokladnie **12** srednikow separatora (13 pol).
+- Sprawdz liczbe separatorow: rekord ma miec dokladnie **15** srednikow separatora (16 pol).
 - Generuj dokladnie 2 linie (chyba ze SHORTFALL).
 - PRIMARY jest zawsze pierwsza linia.
 - Pole 5 ma byc zgodne z `THESIS_SOURCE` ze Stage 1 HANDOFF i miec max 15 slow.
@@ -4417,14 +4474,16 @@ Przyklady: USD, CHF, EUR, PLN
 - Pole 8 zaczyna sie od `Base_TOTAL:`
 - Pole 9 zaczyna sie od `Bull_TOTAL:`
 - Pole 10 zaczyna sie od `VOI:`
+- Pole 11 jest identyczne jak pole 12.
+- Pola 12-14 nie sa puste; jesli brakuje pewnosci, wpisz `NIEZNANY`.
 - Jesli brak danych Stage 9 i Stage 4, w polach 7-9 wpisz literalnie: `N/A (brak danych w Stage 9 i Stage 4)`.
-- Nie zwracaj formatu legacy 15-polowego.
+- Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.
 
 ---
 
 ##  Finalna instrukcja
 
-Wygeneruj dokladnie dwie linie tekstu zgodne z powyzsza struktura — 13 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy. PRIMARY jako pierwsza linia, SECONDARY jako druga.
+Wygeneruj dokladnie dwie linie tekstu zgodne z powyzsza struktura — 16 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy. PRIMARY jako pierwsza linia, SECONDARY jako druga.
 This will help for the next stage: Final output delivery.
 
 

@@ -1,7 +1,7 @@
 ﻿# AGENTS.md
 
 ## Project summary
-- Chrome extension (Manifest V3) that extracts article/transcript text and runs prompt chains in ChatGPT.
+- Chrome extension (Manifest V3) that extracts article/text content and runs prompt chains in ChatGPT.
 - Main orchestrator: `background.js` service worker.
 - Two analysis modes:
   - `company` for all supported tabs.
@@ -19,7 +19,6 @@
 - `problem-log.html` / `problem-log.js` - diagnostics panel for runtime/process issues.
 - `responses.html` / `responses.js` - local responses UI with copy/clear.
 - `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored resume-all workflow.
-- `youtube-content.js` - YouTube transcript capture and fetch.
 - `content-script.js` - separate Google Sheets bridge.
 - `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains split by `◄PROMPT_SEPARATOR►`.
 - `COMPANY_CHAIN_STAGE_MAP.md` - stage-by-stage readable mapping for company chain (prompt index <-> stage id/name/description).
@@ -43,7 +42,7 @@ Process heartbeat flow (near-live Watchlist state):
 
 Detailed analysis steps:
 1. Worker scans supported tabs.
-2. Text is extracted (`extractText` for web, `GET_TRANSCRIPT` for YouTube).
+2. Text is extracted with `extractText`.
 3. Prompt #1 receives `{{articlecontent}}` payload.
 4. Remaining prompts are executed in ChatGPT.
 5. Final chain response is saved and then dispatched to Watchlist intake queue.
@@ -166,7 +165,6 @@ Popup numeric shortcuts:
 - `5` open responses
 - `6` open process panel
 - `7` stop in current window
-- `8` copy YouTube transcript
 - `9` restore process windows
 - `0` toggle auto-restore
 - `Esc` close popup

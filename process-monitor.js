@@ -1093,7 +1093,54 @@ function parseDecisionRecordLine(text) {
     .map((item) => item.trim())
     .filter((item, index, all) => !(index === all.length - 1 && item === ''));
   const fieldCount = parts.length;
-  if (fieldCount !== 12 && fieldCount !== 13) return null;
+  if (fieldCount !== 12 && fieldCount !== 13 && fieldCount !== 16) return null;
+
+  if (fieldCount === 16) {
+    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
+    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+    if (hasExplicitRole) {
+      return {
+        decisionDate: parts[0],
+        decisionStatus: parts[1],
+        decisionRole,
+        company: parts[3],
+        sourceMaterial: parts[4],
+        thesis: parts[5],
+        asymmetry: '',
+        bear: parts[6],
+        base: parts[7],
+        bull: parts[8],
+        voi: parts[9],
+        sector: parts[10],
+        companyFamily: parts[11],
+        companyType: parts[12],
+        revenueModel: parts[13],
+        region: parts[14],
+        currency: parts[15],
+        recordFormat: 'current_16_role'
+      };
+    }
+    return {
+      decisionDate: parts[0],
+      decisionStatus: parts[1],
+      decisionRole: '',
+      company: parts[2],
+      sourceMaterial: parts[3],
+      thesis: parts[4],
+      asymmetry: parts[5],
+      bear: parts[6],
+      base: parts[7],
+      bull: parts[8],
+      voi: parts[9],
+      sector: parts[10],
+      companyFamily: parts[11],
+      companyType: parts[12],
+      revenueModel: parts[13],
+      region: parts[14],
+      currency: parts[15],
+      recordFormat: 'transitional_16'
+    };
+  }
 
   if (fieldCount === 13) {
     const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
@@ -1112,6 +1159,9 @@ function parseDecisionRecordLine(text) {
         bull: parts[8],
         voi: parts[9],
         sector: parts[10],
+        companyFamily: parts[10],
+        companyType: '',
+        revenueModel: '',
         region: parts[11],
         currency: parts[12],
         recordFormat: 'current_13_role'
@@ -1130,6 +1180,9 @@ function parseDecisionRecordLine(text) {
       bull: parts[8],
       voi: parts[9],
       sector: parts[10],
+      companyFamily: parts[10],
+      companyType: '',
+      revenueModel: '',
       region: parts[11],
       currency: parts[12],
       recordFormat: 'transitional_13'
@@ -1151,6 +1204,9 @@ function parseDecisionRecordLine(text) {
     bull: parts[7],
     voi: parts[8],
     sector: parts[9],
+    companyFamily: parts[9],
+    companyType: '',
+    revenueModel: '',
     region: parts[10],
     currency: parts[11],
     recordFormat: 'current_12'
@@ -1284,6 +1340,9 @@ async function fetchProcessCompanySnapshot(process, options = {}) {
       base: decisionRecord?.base || '',
       bull: decisionRecord?.bull || '',
       sector: decisionRecord?.sector || '',
+      companyFamily: decisionRecord?.companyFamily || decisionRecord?.sector || '',
+      companyType: decisionRecord?.companyType || '',
+      revenueModel: decisionRecord?.revenueModel || '',
       region: decisionRecord?.region || '',
       currency: decisionRecord?.currency || '',
       voi: decisionRecord?.voi || '',
@@ -2712,7 +2771,7 @@ function formatCompanySnapshotText(snapshot) {
   lines.push(`Spolka: ${companyLabel}`);
 
   if (!snapshot.hasDecisionRecord) {
-    lines.push('Rekord Four-Gate (12/13/15 pol) nie zostal jeszcze rozpoznany.');
+    lines.push('Rekord Four-Gate (12/13/15/16 pol) nie zostal jeszcze rozpoznany.');
     if (snapshot.hasCompletedResponse) {
       lines.push('Jest zapisana odpowiedz koncowa, ale bez finalnej linii decyzyjnej.');
     } else {
@@ -2723,7 +2782,8 @@ function formatCompanySnapshotText(snapshot) {
 
   lines.push(`Decyzja: ${snapshot.decisionStatus || 'brak'} | Asymetria: ${snapshot.asymmetry || 'brak'}`);
   lines.push(`Scenariusze: ${snapshot.bear || 'Bear N/A'} | ${snapshot.base || 'Base N/A'} | ${snapshot.bull || 'Bull N/A'}`);
-  lines.push(`Sektor/Region/Waluta: ${snapshot.sector || '-'} | ${snapshot.region || '-'} | ${snapshot.currency || '-'}`);
+  lines.push(`Taxonomia: ${(snapshot.companyFamily || snapshot.sector || '-')} | ${snapshot.companyType || '-'} | ${snapshot.revenueModel || '-'}`);
+  lines.push(`Region/Waluta: ${snapshot.region || '-'} | ${snapshot.currency || '-'}`);
   if (snapshot.voi) {
     lines.push(`VOI/Fals: ${snapshot.voi}`);
   }
