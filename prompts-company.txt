@@ -20,7 +20,7 @@ You will work through a strict sequence to maintain auditability and avoid narra
 8. **Map impact** › Walk from obvious to non-obvious through 4+ causal loops
 9. **Select best opportunities** › Present 1-3 investable Layer 3+ opportunities with full analysis
 
-**Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
+**Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Assuming the thesis is true authorizes conditional deduction only. It does not imply that the thesis creates incremental equity value for a listed company. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
 # DATA_GAP PROTOCOL
 See DATA_GAP_PROTOCOL in the preamble DEFINITIONS (5-step protocol).
@@ -31,7 +31,7 @@ Refer to DEFINITIONS in the preamble for evidence grades, proxy ladder, data gap
 Additional Stage 0 definitions:
 - **Thesis (premise)**: The author's implicit "If X, then Y" claim about a persistent structural shift.
 - **Worldview**: The author's success/failure model, including priorities, constraints, agency, and critical path.
-- **Dollar gravity**: (magnitude of spend) × (inevitability) × (time-to-spend).
+- **Dollar gravity**: Dollar gravity measures spend pressure, not value capture. High dollar gravity without a constrained capture point is not an investable edge.
 - **Layer 0-1**: Obvious beneficiaries (likely priced in). **Layer 2**: First bottlenecks. **Layer 3+**: Indirect, mispriced beneficiaries (2-3 steps removed).
 
 # Evidence Discipline
@@ -42,6 +42,7 @@ Stage 0 evidence rules:
 3. Core thesis and top 2 spend buckets must be mainly E1/E2
 4. E3-heavy chains: lower confidence and state what could break
 5. Always cite anchor IDs (A1, A2, etc.)
+6. If the source material is a stock-pick article, recap, or listicle rather than a worldview-dense text, keep the reconstructed thesis narrow, rely mainly on E1/E2 factual claims, and lower confidence in inferred worldview.
 
 # Anti-Drift Guardrails
 - **Speaker Lock**: Identify Thesis Carrier. Interviewer prompts = context only, not thesis drivers.
@@ -49,7 +50,7 @@ Stage 0 evidence rules:
 - **Compliance Guardrail**: Compliance cannot be CORE thesis unless: (1) true critical-path gate, (2) >5% of incremental spend or highly recurring, (3) structurally limited supplier set. Otherwise treat as timing/catalyst.
 
 # Contract-Form Test (Mandatory Gate)
-Every thesis must trace: **Payer › Contract Vehicle › Invoice Line Items › Bottlenecks/Gates › Timing** with primarily E1/E2 evidence. If not: refine or reject.
+Every thesis must trace: **Payer › Contract Vehicle › Invoice Line Items › Bottlenecks/Gates › Timing** with primarily E1/E2 evidence. If not: refine or reject. Prefer invoice items that are economically material or gating. Do not pad the list with commodity sub-items unless they gate commissioning, qualification, or uptime.
 
 # Alpha Archetypes (for Layer 3+ Discovery)
 
@@ -126,7 +127,7 @@ Generate 3 thesis candidates. Each must be one conditional sentence:
 Score each candidate 1-5 on:
 - **Explicitness**: supported by E1/E2 anchors
 - **Agency clarity**: who decides/pays is clear
-- **Transmission to invoices**: can name invoice-level items without major guessing
+- **Transmission to invoices**: can name invoice-level items and explain why at least one item is margin-bearing or schedule-gating rather than a commodity pass-through
 - **Persistence**: structural, not a one-off event
 - **Specificity**: uses Author Tokens, avoids generic filler
 
@@ -515,10 +516,10 @@ Begin your analysis now.
 This will help for the next stage: Stage 1 - Sub-segment Validation (thesis-derived only).
 ◄PROMPT_SEPARATOR►
 ROLE
-You are a PhD-level investment analyst and systems thinker; you assume the thesis is TRUE, deduce where capital must flow, then select the best public stocks to capture that flow with the best risk/reward.
+You are a PhD-level investment analyst and systems thinker; you assume the thesis is TRUE, deduce where capital must flow, then select the best public stocks to capture that flow with the best risk/reward. Assuming the thesis is TRUE authorizes conditional deduction only; it does not imply incremental equity value for any listed company.
 
 OPERATING PRINCIPLES
-Assume the thesis is correct; do not debate it.
+Assume the thesis is correct for conditional analysis; do not debate it. This does not mean the thesis is material to equity value or mispriced in a public stock.
 Use first principles and deduction; avoid generic MBA frameworks unless a stage explicitly calls for a tool. When structure is needed, use the workflow’s invoice-first mechanics: payer › contract mechanism › invoice items › gates/bottlenecks › timing funnel › delivered pool.
 Be conservative when data is missing; label DATA vs ASSUMPTION vs INFERENCE.
 
@@ -541,9 +542,10 @@ DEFINITIONS (use consistently across ALL stages — do not redefine downstream)
 
 Thesis premise: "If X, then Y because Z" structural claim we assume is true.
 Capital flow: who pays, via what contract/budget, for what invoice-level items, on what timeline.
-Invoice-level item: a concrete purchasable line item (equipment, component, project, service contract).
+Invoice-level item: a concrete purchasable line item (equipment, component, project, service contract). Prefer invoice items that are economically material or gating. Do not pad the list with commodity sub-items unless they gate commissioning, qualification, or uptime.
 Gating constraint: the bottleneck that must be solved for scaling (capacity, lead time, qualification, physics, logistics).
 Layer 3+: indirect beneficiaries 2–3 steps removed that sit on big dollars or unblock gates.
+Dollar gravity: spend pressure, not value capture. High dollar gravity without a constrained capture point is not an investable edge.
 
 VALUATION OBJECTS (global, all stages):
 - CORE: base business value without thesis effect.
@@ -691,6 +693,7 @@ Every sub-segment must include a hard-format, invoice-first definition with exac
 2. **Contract form and budget type**: The specific contracting mechanism (e.g., "DoD procurement contract," "utility Rate-Based CAPEX," "corporate OPEX subscription")
 3. **Invoice issuer**: Who sends the invoice and receives payment
 4. **Invoice items**: 6–12 concrete, specific line items—things that can actually be purchased and have identifiable suppliers (e.g., "thermal management modules," "AI inference accelerators," "per-seat SaaS licenses," "certification testing services")
+   - Prefer invoice items that are economically material or gating. Do not pad the list with commodity sub-items unless they gate commissioning, qualification, or uptime.
 5. **Gates/bottlenecks**: 1–3 specific gates, each including:
    - What exactly blocks scaling
    - Who controls the gate
@@ -700,7 +703,7 @@ Every sub-segment must include a hard-format, invoice-first definition with exac
      - **B (Soft Process)**: Regulatory/procedural, but can be scaled with hiring and process
      - **C (Price-Controlled)**: Utility-style regulation, visible margin caps, limited rent capture
    - **Implication for margin sustainability**: 1–2 sentences on whether this gate protects margin or allows fast commoditization
-6. **Capture point**: Where margin can realistically be retained (e.g., prime contractor, gatekeeper, systems integrator, aftermarket/service provider)—this is the seed of competitive moat and filters against confusing large spending pools with large profit pools
+6. **Capture point**: Where margin can realistically be retained after prime/customer bargaining power, fixed-price pass-through, and upstream leakage.
 
 ### MECHANIC 3: Future Capital Flow Mapping
 
@@ -728,6 +731,8 @@ Apply strict labeling discipline:
 - **ASSUMPTION**: Your analytical inference or estimation
 
 Under uncertainty, shrink the Base case conservatively.
+Do not sum overlapping procurement, RDT&E, sustainment, and industrial-base support lines unless their scopes are clearly non-overlapping. Where overlap is plausible, shrink the Base case conservatively.
+Procurement, RDT&E, industrial-base support, and sustainment are different economic objects. Do not treat them as equally convertible into supplier revenue or margin.
 
 Then convert the Invoice Pool to a **Delivered Pool** for Y1/Y2/Y3 by applying **feasibility caps** based on gate lead times. 
 
@@ -770,7 +775,7 @@ This prevents the error of treating regulatory approval processes as durable moa
 
 Rank all 5–8 sub-segments across these four axes:
 
-1. **Strength of forced capital flow**: How certain is it that capital MUST flow through this channel if the thesis is true? (Consider contract maturity: announced vs awarded vs in backlog)
+1. **Strength of forced capital flow through a margin-bearing or gate-bearing node**: How certain is it that capital MUST flow through this channel if the thesis is true? (Consider contract maturity: announced vs awarded vs in backlog)
 2. **Gate scarcity/control quality**: Based on gate quality classification (A/B/C), how durable is the barrier? Who controls it?
 3. **Supply response risk**: Based on your Supply Response Check, how fast can competitors scale to capture the opportunity?
 4. **Timing / contracting maturity**: How far along is the budget›award›backlog›delivery funnel? Earlier stages carry higher uncertainty.
@@ -847,7 +852,7 @@ Invoice-First Definition:
      - Gate 1: [What blocks scale] | [Who controls] | [Lead time] | Quality: [A/B/C] | Margin implication: [1-2 sentences]
      - Gate 2: [if applicable]
      - Gate 3: [if applicable]
-  6. Capture point: [Where margin is retained]
+  6. Capture point: [Where margin is realistically retained after bargaining power, pass-through, and leakage]
 
 Timing Funnel:
   - Budget decision: [timing and status]
@@ -1025,21 +1030,22 @@ Work through these seven phases systematically. Conduct all reasoning, research 
    - What backlog or order book details are provided?
    - What recurring revenue mix is disclosed?
    - If using peers: which specific peers disclose relevant data, and what are those numbers?
+   - Prefer thesis-linked EBIT, gross profit, contribution margin, or backlog conversion sensitivity where disclosed. Use revenue share only as a fallback and downgrade confidence when the thesis stream has structurally different margins than the rest of the company.
    
    **Then, compute thesis exposure using one of these methods:**
 
    **Method A: Backlog/Orders-Based (for project businesses)**
-   - Formula: Exposure  (Revenue or backlog tied to thesis sub-segment invoice items) / Total revenue
+   - Formula: Prefer Exposure = (Thesis-linked EBIT / gross profit / contribution margin or backlog conversion sensitivity) / company EBIT or EV. If not disclosed, fallback to (Revenue or backlog tied to thesis sub-segment invoice items) / Total revenue and downgrade confidence.
    - Data sources: Filings/IR segment revenue disclosures, backlog disclosures
    - If only backlog disclosed: Annual conversion = Backlog / Average project duration (use range)
    - If data missing: Cap exposure at 20% maximum and downgrade to Material or Catalytic tier
 
    **Method B: Budget/Program-Based (for defense/government services integrators)**
-   - Formula: Exposure  (Revenue from relevant agencies/programs/budget line items) / Total revenue
+   - Formula: Prefer Exposure = thesis-linked EBIT / gross profit / contribution margin sensitivity to relevant agencies/programs/budget line items. If unavailable, fallback to revenue exposure and downgrade confidence.
    - Data sources: Customer concentration disclosures, agency revenue mix, contract backlog by customer
 
    **Method C: Installed Base/Recurring Mix (for software/subscription businesses)**
-   - Formula: Exposure  (Recurring revenue tied to thesis invoice items) / Total revenue
+   - Formula: Prefer Exposure = contribution margin or gross profit tied to thesis invoice items / company contribution margin or gross profit. If unavailable, fallback to recurring revenue tied to thesis invoice items / Total revenue.
    - Data sources: ARR disclosures, recurring revenue mix, product segment breakdowns
 
    **Method D: Peer-Implied Exposure (ALWAYS-RUN fallback when A/B/C unavailable)**
@@ -1049,6 +1055,10 @@ Work through these seven phases systematically. Conduct all reasoning, research 
    - Apply shrinkage toward conservative end for Base case
    - **Important limitation**: This method may NOT create a Core Play. Cap at Material unless you later validate with Method A/B/C evidence
    - Document: "Using [Peer]'s disclosed [segment] exposure of X%, adjusted for [factors], yields estimated range [Y%-Z%] for [Company]"
+
+   **Across all methods:**
+   - If the company link is supported mainly by a broad defense segment, total backlog, or company-wide disclosure rather than invoice-item evidence, cap exposure confidence and avoid promoting the name on thematic fit alone.
+   - For diversified companies, strategic relevance is not enough. Assess whether the thesis stream is material relative to company EBIT, FCF, or EV, not only to narrative importance.
 
    **If None of A/B/C/D Can Be Supported:**
    - Set exposure range = 0%-20% (conservative)
@@ -1062,9 +1072,10 @@ Work through these seven phases systematically. Conduct all reasoning, research 
    - "Company's filing discloses segment: [Y]"
    - "These match because: [reasoning]"
    - "Segment revenue: $[A]B, Total revenue: $[B]B"
+   - "If thesis stream margins differ from company average: show EBIT / gross profit / contribution margin sensitivity or explicitly downgrade confidence"
    - "Exposure: [A/B]% (Method [A/B/C/D], Confidence: [HIGH/MEDIUM/LOW])"
    
-   **Red flag question:** "Am I assuming this company benefits because it sounds right, or do I have documentary evidence of revenue tied to the thesis invoice items?"
+   **Red flag question:** "Am I assuming this company benefits because it sounds right, or do I have documentary evidence of revenue, profit sensitivity, or funded backlog conversion tied to the thesis invoice items?"
 
 4. **Classify Each Candidate:**
    - Core Play (>40% exposure)
@@ -1094,10 +1105,12 @@ Do NOT run full moat scoring here. Stage 5 performs comprehensive competitive po
 
 ### Phase 5: Rough Valuation Screen (light-touch — full DCF in Stage 4/9)
 
+Any asymmetry or valuation output in this stage is provisional and cannot override later TOTAL-object valuation in Stage 4 or Stage 9.
+
 For each remaining candidate, compute only:
 - **Current EV/Sales** and position vs 5-year historical range
-- **Thesis revenue today** ($ and % of total) using exposure method from Phase 3
-- **Thesis revenue Year 3** (rough estimate: today × segment growth × capture)
+- **Thesis-linked economics today** (prefer EBIT / gross profit / contribution margin; revenue only as fallback) using exposure method from Phase 3
+- **Thesis-linked economics Year 3** (rough estimate using the same economics object as above: today × segment growth × capture)
 - **Quick asymmetry check**: Is bull case plausibly >2× current price with bear case survivable? If not: ELIMINATE.
 
 Do NOT run full Bear/Base/Bull DCF, scenario probability weighting, or NPV calculations. Stage 4 performs Reverse DCF Lite and Stage 9 performs full Reverse DCF.
@@ -1105,6 +1118,7 @@ Do NOT run full Bear/Base/Bull DCF, scenario probability weighting, or NPV calcu
 ### Phase 6: Market Timing & Risk Filter
 
 **Objective:** Assess current market sentiment and timing for each passing candidate.
+Timing and sentiment indicators are execution context only. They must not change thesis exposure, moat assessment, or capture classification.
 
 **Calculate Context-Adjusted Overheating Risk Score (0-10 scale):**
 
@@ -1191,7 +1205,7 @@ After completing your systematic analysis, present your final 15 stock recommend
 
 **Value flow position:** [Specify which order (1st/2nd/3rd/4th) in the value chain and describe the specific revenue or cost impact mechanism. Reference the inherited invoice items and pool. Example: "1st order recipient—directly invoiced for [specific invoice item] through [contract type] with timing of [X months from award to revenue]."]
 
-**Financial snapshot:** [Present key metrics with specific numbers and sources. Include: current revenue, thesis-related revenue (amount and %), growth rates (historical and projected), profitability metrics, balance sheet strength (debt/cash position). Example: "FY2023 revenue $2.4B, thesis-related ~$960M (40%), growing at 15% vs company avg 8%. EBIT margin 18% vs company 12%. Net cash $400M. Source: 10-K, IR presentation."]
+**Financial snapshot:** [Present key metrics with specific numbers and sources. Include: current revenue, thesis-related economics (prefer EBIT / gross profit / contribution margin; revenue only if that is the best disclosed proxy), growth rates (historical and projected), profitability metrics, balance sheet strength (debt/cash position). Example: "FY2023 revenue $2.4B, thesis-related EBIT stream ~$180M (~28% of company EBIT), growing at 15% vs company avg 8%. EBIT margin 18% vs company 12%. Net cash $400M. Source: 10-K, IR presentation."]
 
 **Competitive moat:** [State classification (Strong/Moderate/Weak), list sustainable advantages with evidence, describe market position, explain differentiation. Example: "Strong moat (score 8/12): regulatory barriers (3-year qualification), proprietary IP (12 patents), scale economies (40% market share drives 25% cost advantage vs #2 player). Category leader in [segment]."]
 
@@ -1218,7 +1232,7 @@ If found: USE THEM. Do not reconstruct.
 If NOT found: output DATA_GAP_STAGE=1 or DATA_GAP_STAGE=2 and STOP.
 
 You are an investment research engineer working inside a thesis-driven pipeline.
-Assume the thesis is TRUE. Do not debate it.
+Assume the thesis is TRUE for conditional traction analysis. Do not debate it. Do not infer from that assumption alone that the thesis creates incremental equity value for this company.
 Your job is to measure “traction under the thesis” for the Stage 2 universe (15 public companies) in a way that is:
 - invoice-linked (tied to the thesis sub-segment invoice stream, not generic company momentum),
 - contract-semantic correct (ceiling vs obligated/funded vs delivered),
@@ -1267,7 +1281,7 @@ For each company:
 
 CORE DEFINITIONS (keep consistent)
 TS (0–5): position in money funnel. TQ (0–5): contract semantics + cash realism. CP (0–5): structural capture ability.
-PrimaryTractionKPI: ONE public KPI for customer footprint. VOI Window: next concrete traction update event.
+PrimaryTractionKPI: ONE public KPI for customer footprint. Prefer the narrowest thesis-stream KPI available over broader company-wide proxies. VOI Window: next concrete traction update event.
 Scalars: TractionNow = (TS+TQ)/10, Capture = CP/5.
 Full scoring rubrics in the detailed process section below.
 
@@ -1359,7 +1373,7 @@ Position in the money funnel for the thesis-linked stream.
 | 2 | Tendered/Active Procurement | Active procurement underway (RFP issued, prequalification completed, regulatory approval in process), no binding award yet | Procurement notice, RFP document, prequalification list, regulatory docket |
 | 3 | Awarded/Obligated | Binding award with **obligated or funded amount** (not ceiling), customer has committed real money | Award notice with obligated value, funded contract document, binding purchase order |
 | 4 | Backlog Converting | Funded backlog exists AND delivery schedule implies revenue recognition within modeling horizon | Backlog disclosure + delivery milestones + revenue recognition schedule |
-| 5 | Delivered + Cash Proven | Revenue delivered, cash collected, AND repeatability visible (renewals, option exercises, recompetes) | Revenue recognition from thesis stream + cash flow evidence + repeat activity |
+| 5 | Delivered + Cash Proven | Delivered + cash proven for the thesis stream itself, not only at the company level, with visible repeat activity | Revenue recognition from thesis stream + cash flow evidence + repeat activity |
 
 ### TQ: Traction Quality (0-5)
 Contract realism and cash-conversion quality.
@@ -1374,6 +1388,7 @@ Contract realism and cash-conversion quality.
 | 5 | Repeatable + Cash-Clean | Repeatability proven (renewals, option exercises, recompete wins) AND consistent cash conversion (DSO stable, FCF tracks revenue) |
 
 **Mandatory TQ cap**: If persistent cash conversion red flags exist (DSO stretching, FCF deteriorating despite growing backlog, unbilled receivables growing faster than revenue, management commentary about payment delays) AND no evidence these are temporary › **cap TQ at 3 maximum**, regardless of other qualities.
+If contract semantics are Mixed, Partially Funded, or Proxy-heavy, Base scoring must rely only on funded or directly evidenced portions.
 
 ### CP: Capture Potential (0-5)
 Structural ability to capture the thesis invoice stream, even before awards.
@@ -1388,6 +1403,7 @@ Structural ability to capture the thesis invoice stream, even before awards.
 | 5 | Structurally Compounding | Non-bypassable position + repeat-win dynamics (renewals, high recompete win rate, standards lock-in), structurally advantaged to compound awards |
 
 **CP justification requirement**: Reference specific gates from Stage 1's gate taxonomy. Identify gate type (A/B/C) and nature of barrier (allocation node, certification requirement, installed-base lock-in, standards control, etc.).
+CP4/CP5 require evidence of slot protection, qualification density, scarce capacity, or repeat win dynamics on the thesis invoice item, not only general sector reputation.
 
 ## TS-TQ Coherence Rules
 
@@ -1468,6 +1484,7 @@ Choose the single KPI that most directly reflects "customer is buying the thesis
 Record: KPI name, latest value with units/currency, reporting period, source (filing name + page or transcript timestamp), and whether thesis-specific or proxy.
 
 If proxy: estimate thesis share of proxy KPI and flag DILUTION_RISK.
+If the PrimaryTractionKPI is company-wide rather than thesis-stream specific, treat it as a proxy and score TS/TQ one notch more conservatively unless the thesis share is triangulated with program-specific awards, backlog, deliveries, or funded orders.
 
 ### Step 4: Contract Semantics Audit
 Answer explicitly:
@@ -1531,6 +1548,7 @@ Routing label for Stage 4 threshold logic:
 | LOW_QUALITY | TS ? 1 AND TQ ? 1 AND CP ? 2 | Contract marketing trap: narrative without substance, Stage 4 treats with maximum skepticism or skips |
 
 **Edge cases**: If qualifies for both SOFT_TRACTION and OPTION_ONLY, classify as OPTION_ONLY. If TS or TQ is 0 and the other is ? 3, classify as SOFT_TRACTION and flag ASYMMETRIC_SCORES.
+Company-wide backlog or broad segment disclosure alone is not sufficient for HARD_TRACTION when the thesis stream is narrow and dilution risk is high.
 
 ## Your Analysis Process
 
@@ -1832,11 +1850,14 @@ Compute TOTAL equity value per share for:
 • Bull
 
 Avoid mechanically “uplifting” the entire business unless the thesis truly alters the core economics.
+Do not require the thesis to reset whole-company growth or margins unless the thesis stream is large enough to do so. For diversified companies, bound the thesis effect to the affected economic slice.
 You must state explicitly whether thesis effects are modeled as:
 
 * revenue acceleration, or
 * margin reset, or
 * both (and why both are justified).
+
+Before using the Base case for mispricing or reverse-DCF-lite interpretation, reconcile it with current company guidance, funded backlog, and disclosed near-term conversion. A Base case that understates near-term reality is not admissible.
 
 ---
 
@@ -1851,6 +1872,7 @@ Compute:
 Interpretation matters:
 • A small wedge does not invalidate the stock.
 • A large wedge with weak asymmetry often does.
+• A thesis stream may be operationally important and still valuation-immaterial. If the implied wedge is small relative to EV or price, state that explicitly.
 
 Mandatory “wedge realism” computation (how to check wedge is not fantasy):
 
@@ -1994,7 +2016,7 @@ Path B — Margin-reset monetization
 › Stage 8 should focus on pricing power, mix, utilization, and cost structure.
 
 Path C — Macro-beta monetization
-› Stage 8 only makes sense with explicit macro scenarios. Otherwise, treat as a regime bet.
+› Path C means duration-sensitive valuation. It is not automatically macro-only. If a real incremental thesis cash-flow stream exists, keep it separate and conservative rather than letting rerating substitute for cash-flow evidence.
 
 Also assign the Stage 8 modeling template (how Stage 8 should compute the wedge cash flows):
 
@@ -2081,7 +2103,8 @@ Before providing your final selections, conduct a comprehensive analysis using t
 Apply this 7-phase framework to evaluate each company:
 
 **PHASE 1: UNIVERSE QUALIFICATION**
-For each company, ask: "If this company disappeared tomorrow, who specifically would take their place?"
+For each company, ask: "If this company disappeared tomorrow, who specifically would take their qualified program slot or invoice position?"
+- For component suppliers and sub-tier gatekeepers, assess replaceability at the qualified program-slot level, not the broad industry-category level.
 - If no one specific could replace them / value would fragment › unique position, continue analyzing
 - If anyone can easily replace them › commoditized offering, eliminate from consideration
 
@@ -2113,12 +2136,14 @@ CP measures structural positioning to capture the thesis invoice stream using ga
   automatically passes the replaceability test for the thesis stream.
 
 Then score moat sources (0=absent, 1=developing, 2=strong):
-Network effects, Data/platform effects, Switching costs (>$1M + >6mo), Regulatory barriers (>2yr qualification), Proprietary assets, Scale economies.
+In procurement, industrial, regulated, and safety-critical markets, qualification, scarce capacity, installed base, switching frictions, and standards/control can be as economically powerful as network effects. Rank moats by ability to preserve incremental economic profit, not by software-style category.
+Qualification density / regulatory barriers, scarce capacity / allocation control, installed base + switching frictions, standards / control points, proprietary assets, scale economies / network-data effects.
 Total 0-12. Strong ≥6, Moderate 3-5, Weak 0-2 (eliminate unless emerging category first-mover).
 Classify moat leverage: HIGH (network/data), MODERATE (switching), LOW (regulatory/brand only).
 
 **PHASE 4: S-CURVE POSITIONING**
 Determine where each company sits on the market adoption curve:
+For procurement-driven markets, use funded program penetration, installed-base replenishment penetration, replacement-cycle penetration, or constrained capacity utilization as the adoption variable, not end-user TAM adoption.
 
 Critical Metrics to Calculate:
 - **TAM Adoption %**: What percentage of the served addressable market (realistic, not theoretical) has adopted this solution category?
@@ -2140,6 +2165,7 @@ Classifications:
 
 **PHASE 5: ASYMMETRY ANALYSIS**
 Calculate both intrinsic and actual asymmetry ratios for each qualifying company:
+Stage 5 asymmetry must be treated as provisional unless it is built on the same whole-company valuation object used later in Stage 9. Competitive strength must not be confused with present-day equity mispricing.
 
 **TIME HORIZON FRAMEWORK:**
 All asymmetry calculations must use a standardized 3-year investment horizon for consistency and comparability.
@@ -2156,8 +2182,8 @@ Exception: If S-curve inflection point is >4 years away, note this explicitly an
 
 **A) INTRINSIC ASYMMETRY (business quality, independent of current valuation):**
 **S-CURVE CALIBRATION:**
-Expected 3-year upside by position: Pre-Inflection 5-10×, Inflection Zone 3-5×, Growth Phase 1.5-3×, Maturity 1-1.5×.
-If your upside deviates >50% from these ranges: re-examine S-curve classification or upside assumptions, document justification.
+Upside ranges must be calibrated to business type. Do not apply venture-style 5-10× or 3-5× ranges to mature industrial, defense, or regulated equities.
+If your upside assumptions are extreme for the business type, re-examine S-curve classification or upside assumptions and document justification.
 Upside Analysis:
 - Primary upside driver (network effects activation, pricing power expansion, margin improvement, TAM expansion)
 - Magnitude if materialized: +X% from intrinsic value
@@ -2228,15 +2254,15 @@ Valuation Screen:
 - Actual downside remains similar to intrinsic (floor doesn't change with valuation)
 - Actual Asymmetry Ratio = (Adjusted upside) / (Downside)
 
-ELIMINATE companies where >70% of bull case is already priced in.
+If >70% of bull case appears already priced in, flag it and down-rank confidence. Do not let this provisional Stage 5 valuation screen override later Stage 9 TOTAL-object valuation.
 
 **PHASE 7: FINAL SELECTION**
 Select 4 companies using these prioritization criteria:
 
-Primary Filters (must pass all):
-1. Actual asymmetry ratio >2.5:1 (after valuation adjustment)
-2. Competitive moat durability >2 years  
-3. Not in maturity phase (>60% TAM adoption)
+Primary Filters (screening defaults, not binding against later Stage 9 valuation):
+1. Competitive moat durability >2 years  
+2. Not in maturity phase (>60% of the relevant adoption variable)
+3. Provisional actual asymmetry preferably >2.5:1 after valuation adjustment; if lower, require stronger moat/capture evidence to stay in the top 4
 
 Ranking Criteria (apply in order):
 1. **Traction-Weighted Asymmetry** (30% weight)
@@ -2378,6 +2404,7 @@ DuPont framework disaggregates ROE into three components revealing whether retur
 ## Framework Application
 
 Calculate ROE decomposition using most recent fiscal year data. Return on Equity equals Net Profit Margin multiplied by Asset Turnover multiplied by Equity Multiplier. Net Profit Margin measures operational efficiency through net income divided by revenue. Asset Turnover measures asset utilization through revenue divided by total assets. Equity Multiplier measures financial leverage through total assets divided by shareholders equity.
+When one-off legal, program, pension, or settlement items distort net income, calculate statutory DuPont first, then interpret normalized driver quality separately.
 
 Show your calculations for each component and verify that their multiplication produces the reported ROE. If discrepancies exist, explain the variance source.
 
@@ -2385,9 +2412,9 @@ Show your calculations for each component and verify that their multiplication p
 
 Evaluate each driver independently then assess their interaction. For Net Profit Margin, determine whether current margin reflects sustainable operational efficiency or temporary factors. Compare to industry benchmarks and identify margin trajectory over past three years. Assess whether margin expansion or compression is occurring and what drives the trend.
 
-For Asset Turnover, evaluate how efficiently the company generates revenue from its asset base. Compare to capital-intensive versus asset-light peers in the sector. Determine whether low turnover reflects strategic positioning requiring heavy assets or operational inefficiency. Identify turnover trajectory and whether asset base is growing faster or slower than revenue.
+For Asset Turnover, evaluate how efficiently the company generates revenue from its asset base. Compare to capital-intensive versus asset-light peers in the sector. Determine whether low turnover reflects strategic positioning requiring heavy assets or operational inefficiency. In capital-intensive and qualification-heavy businesses, low asset turnover may reflect strategic capacity positioning rather than weak operations. Judge turnover versus the relevant industrial peer set, not against asset-light models. Identify turnover trajectory and whether asset base is growing faster or slower than revenue.
 
-For Equity Multiplier, assess leverage appropriateness for the business model and industry. Distinguish between financial leverage enhancing returns and leverage creating financial fragility. Evaluate debt maturity profile, interest coverage, and covenant headroom. Determine whether leverage is increasing or decreasing and the strategic rationale.
+For Equity Multiplier, assess leverage appropriateness for the business model and industry. Distinguish between financial leverage enhancing returns and leverage creating financial fragility. Evaluate debt maturity profile, interest coverage, and covenant headroom. If the equity multiplier is structurally inflated by buybacks, pension accounting, or a very small book-equity base, treat headline ROE as accounting-distorted and base the quality verdict primarily on margin and asset turnover. Determine whether leverage is increasing or decreasing and the strategic rationale.
 
 ## Thesis Impact on ROE Drivers
 
@@ -2420,6 +2447,7 @@ Assess whether thesis transformation improves ROE quality by strengthening opera
 - ROE = NPM × Turnover × Multiplier = ___%
 
 Verify calculation matches reported ROE.
+If one-offs or book-equity distortion are material, report statutory DuPont first and then a separate normalized interpretation.
 
 **Thesis Impact (Year 3 projection):**
 - Net Profit Margin: baseline __% › thesis-adjusted __% (reason: ___)
@@ -2430,6 +2458,7 @@ Verify calculation matches reported ROE.
 **Quality Assessment:**
 Does ROE stem from operational excellence (margins + efficiency) or financial leverage?
 Does thesis improve or degrade ROE quality?
+If headline ROE is accounting-distorted, say so explicitly and base the verdict on margin and turnover more than the multiplier.
 
 **Pass to Thesis Monetization:**
 - Current Net Profit Margin: ___%
@@ -2491,7 +2520,7 @@ You must adhere to ALL of the following constraints:
 2. Each company gets exactly ONE Revaluation Parameter (not a list of metrics)
 3. The RP must be measurable from public sources within the VOI window (6-18 months)
 4. The RP must map to a DCF lever that the market cannot ignore
-5. If DominantDriver = WACC and the RP is not cash-flow linked, the company cannot win
+5. If DominantDriver = WACC, the RP must improve actual cash-flow confidence, cash conversion, funded visibility, or duration de-risking. Narrative or theme-level KPIs cannot win.
 6. Companies with WedgeRealism = FAIL AND PoolConfidence = Medium or High: FLAG as DISQUALIFIED (Stage 11 enforces elimination, not this stage)
 7. Companies with Asymmetry_TOTAL < 3:1: FLAG as LOW_ASYMMETRY (do not eliminate)
 
@@ -2507,6 +2536,8 @@ Identify exactly one metric that can surprise positively within 6-18 months. Def
 - Measurement source (earnings call, 10-Q filing, disclosed KPI, etc.)
 - Upside surprise threshold (the specific number that would clearly beat market expectations)
 - One-sentence explanation of why this metric is the best "model toggle" for this company
+
+Prefer the narrowest public thesis-stream KPI over broader company-wide proxies, even if the broader KPI is cleaner or more frequent.
 
 **How to execute this step:**
 - Use the Stage 5 outputs to identify operational KPIs and upcoming VOI events
@@ -2740,6 +2771,7 @@ D) Do not allocate acquisition-driven amortization/intangibles to thesis cash fl
 E) Treat wedge NPV as EV-additive. Do not subtract net debt from the wedge. Net debt is handled once at the core/total level.
    Exception: if thesis requires material financing or causes dilution, flag it and reflect it (either adjust shares / net debt or show a clearly labeled variant).
 F) Anti-double-count: incremental means “thesis path minus the same baseline path embedded in CORE assumptions.” If baseline differs, reconcile before proceeding.
+Do not let procurement, industrial-base support, sustainment, and service tails stand in for one another inside the same wedge unless the incremental link is explicit.
 G) Wedge persistence: do not assume the wedge is perpetual by default. Classify persistence (wave/cycle vs durable steady-state change) and only then decide whether a long-term component exists.
 H) Wedge sanity checks: wedge should be monotonic (Bear ? Base ? Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
 
@@ -2768,7 +2800,7 @@ If any of the following are missing from context: price, diluted shares, and a u
 ANCHOR INHERITANCE: Inherit Anchor Date from Stage 4. See Anchor Date Rule in the preamble DEFINITIONS.
 STEP 2 — DEFINE THE WEDGE OBJECT (PRECISELY)
 A) Thesis stream: explicitly list inclusions/exclusions (products, services, segment scope, geography).
-B) Baseline: identify what is already in Year 0 financials (thesis already partially present, if applicable).
+B) Baseline: identify what is already in Year 0 financials (thesis already partially present, if applicable). For mature primes, Year 0 thesis exposure is often already present in baseline revenue. The wedge must be tied to new funded volume, better pricing, better utilization, or better economics above the current run-rate, not to total thesis-linked revenue.
 C) Incremental definition: state clearly that wedge is the difference between “thesis path” and “no-thesis baseline path” that matches the CORE baseline.
 D) Horizon: Years 1–3 plus a possible long-term component (only if persistence is durable). Currency: reporting currency.
 
@@ -2788,7 +2820,7 @@ PATH B — MARGIN-RESET (Margin-dominated)
 Do NOT do TAM theater by default. Model wedge primarily as incremental cash flow from margin/efficiency changes on the baseline revenue base plus any implementation reinvestment.
 
 PATH C — MACRO-BETA (WACC-dominated)
-Do NOT fabricate a cash-flow wedge if the thesis is primarily rerating/discount-regime. Produce a “Macro Pack” (valuation sensitivity vs discount rate/multiple regime) and set wedge cash-flow NPV to N/A unless the context clearly specifies a real incremental cash-flow mechanism.
+For Path C companies, model a cash-flow wedge only if the thesis stream is contractually identifiable and incrementally material. Otherwise keep the wedge explicitly de minimis rather than inflating it. Produce a “Macro Pack” (valuation sensitivity vs discount rate/multiple regime) and set wedge cash-flow NPV to N/A unless the context clearly specifies a real incremental cash-flow mechanism.
 
 STEP 5 — BUILD BEAR/BASE/BULL SCENARIOS (REALISTIC)
 Define Bear/Base/Bull for the wedge, consistent with the thesis timing and constraints.
@@ -2796,6 +2828,7 @@ Define Bear/Base/Bull for the wedge, consistent with the thesis timing and const
 - Bear: realistic friction (slower adoption, pricing pressure, qualification delays, tighter capacity, higher reinvestment, etc.).
 - Bull: realistic acceleration; if it requires capacity expansion not evidenced, explicitly mark “capacity-dependent bull”.
 Assign probabilities 25/50/25 unless the context specifies otherwise.
+If Expected Wedge is de minimis relative to price or EV, state explicitly that the thesis may be real but too small to move the whole stock materially.
 
 STAGE 3 TRACTION CALIBRATION (mandatory for all paths):
 
@@ -2927,6 +2960,8 @@ If you discount to EV using WACC, the cash flow must be FCFF-consistent. If only
 
 OBJECTIVE OF THIS REVERSE DCF
 Compute the market-implied assumptions (growth and/or margin and/or reinvestment intensity) that justify today’s price, then compare those assumptions to your Base case thesis assumptions to quantify mispricing.
+Before solving market-implied assumptions, verify that the Base scenario is consistent with current management guidance, funded backlog, and disclosed near-term conversion. If not, rebase the Base scenario before reverse DCF.
+For mature industrial and defense equities, reverse DCF conclusions must be checked against guidance, funded backlog conversion, replacement cycles, and segment materiality before classifying a stock as genuinely mispriced.
 
 STEP-BY-STEP PROCESS
 
@@ -2948,6 +2983,7 @@ Persistence (inherit from Stage 8):
 Discounting:
 • Use consistent WACC/g across parts unless you explicitly justify different risk rates.
 • Avoid double-discounting (do not combine extreme probabilities with extreme wedge discount premium without justification).
+Before moving to root-finding, confirm the Base whole-company scenario remains consistent with current guidance, funded backlog, and disclosed near-term conversion. If not, adjust the Base scenario first.
 
 STEP 2 — DEFINE THE WHOLE-COMPANY DCF FUNCTION (PYTHON)
 In Python, implement a whole-company DCF function returning Equity Value per share given assumptions:
@@ -3073,7 +3109,7 @@ Optional reporting (do NOT use to compute asymmetry):
 
 NEW — Terminal share diagnostic (mandatory reporting):
 • TerminalShare = PV_TV / (PV_FCF + PV_TV)
-If TerminalShare is very high, state explicitly that the result is WACC-sensitive and resembles a duration/regime bet.
+If TerminalShare is very high, interpret WACC sensitivity as duration sensitivity. Do not confuse high duration with the true economic engine of the thesis.
 
 Step 5.5 CONTRACT-BASED BEAR FLOOR (mandatory stress test)
 Compute DCF-independent Bear:
@@ -3092,13 +3128,15 @@ Explain precisely why your Base case differs from market-implied assumptions. An
 * margin durability vs mix shift
 * reinvestment intensity and working-capital drag
 * competitive response and customer concentration
+A thesis that is material to one segment but small relative to the whole company may be valid even if it does not reset whole-company CAGR. Interpret implied assumptions in that context.
 Provide a clear catalyst timeline (6–12 months) and what specific data would confirm/refute your view (VOI).
 
 TIER CLASSIFICATION (WHOLE-COMPANY ONLY)
-Tier 1 — Strong Buy: Market-implied CAGR > 500 bps below Base, Expected value > 50% above current, Asymmetry > 4:1, Bull > 5×, Base > 2.5×, Bear downside < 40%
-Tier 2 — Attractive: Market-implied CAGR > 300 bps below Base, Expected value > 30% above current, Asymmetry > 3:1, Bull > 3×, Base > 1.8×, Bear downside < 50%
-Tier 3 — Fair Value: Market within ±200 bps of Base, Expected value 10–30% above current, Asymmetry 2–3:1
-Tier 4 — Avoid: Market at/above Base, Expected value < 10% above current, Asymmetry < 2:1, Bear downside > 50%
+For mature industrial, defense, and regulated businesses, multiplicative thresholds such as Bull > 5× and Base > 2.5× are not binding. Use divergence, asymmetry, downside resilience, and consistency versus guidance/backlog as the operative tests.
+Tier 1 — Strong Buy: Large and credible divergence versus Base, strong asymmetry with resilient downside, and Base scenario is consistent with guidance/backlog and near-term conversion.
+Tier 2 — Attractive: Meaningful divergence versus Base with acceptable downside and no major guidance/backlog inconsistency.
+Tier 3 — Fair Value: Limited divergence, mixed asymmetry, or valuation signal is constrained by duration/guidance uncertainty.
+Tier 4 — Avoid: Market at/above credible Base, downside fragile, or reverse DCF signal fails guidance/backlog/materiality checks.
 
 Tier integrity guard:
 If HORIZON_DEPENDENT or RANK_UNSTABLE is flagged from Step 4.5,
@@ -3125,7 +3163,7 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 * Asymmetry ratio (and check via multiples)
 * Bear_DCF vs Bear_Contract vs Effective_Bear_TOTAL (and BEAR_FLOOR_DIVERGENCE if triggered)
 * 5-year returns (multiples and CAGRs, Python)
-* Threshold checks: Bull > 5×, Base > 2×, Bear survivable
+* Threshold checks: divergence vs Base, downside resilience, and consistency with guidance/backlog/materiality
 
 4. The Divergence
 * What the market is assuming that you disagree with
