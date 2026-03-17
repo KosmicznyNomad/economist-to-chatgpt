@@ -3691,6 +3691,95 @@ function reportAdminActionEvent(actionName, options = {}) {
   });
 }
 
+function buildCopyLatestInvestFinalResponseMessage(options = {}) {
+  const parts = [];
+  const targetTitle = trimProblemLogText(options?.targetTitle || '', 72);
+  const textLength = Number.isInteger(options?.textLength) && options.textLength >= 0
+    ? options.textLength
+    : null;
+  const persistenceMode = trimProblemLogText(options?.persistenceMode || '', 40);
+  const persistenceReason = trimProblemLogText(options?.persistenceReason || '', 80);
+  const dispatchSummary = truncateDispatchLogText(options?.dispatchSummary || '', 120);
+
+  if (targetTitle) parts.push(`target=${targetTitle}`);
+  if (textLength !== null) parts.push(`len=${textLength}`);
+  if (options?.persistenceAttempted === true) {
+    if (persistenceMode) parts.push(`save=${persistenceMode}`);
+    parts.push(`fallback=${options?.persistenceSuccess === true ? 'ok' : 'failed'}`);
+  }
+  if (persistenceReason && persistenceReason !== 'saved') {
+    parts.push(`reason=${persistenceReason}`);
+  }
+  parts.push(`url=${options?.hasConversationUrl === true ? 'yes' : 'no'}`);
+  if (dispatchSummary) parts.push(dispatchSummary);
+
+  return trimProblemLogText(parts.join(' | '), 260) || 'copy_latest_invest_final_response';
+}
+
+function reportCopyLatestInvestFinalResponseEvent(options = {}) {
+  const operationId = trimProblemLogText(options?.operationId || '', 120)
+    || `copylatest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const level = normalizeProblemLogLevel(options?.level || 'info');
+  const status = trimProblemLogText(options?.status || '', 40)
+    || (level === 'error' ? 'failed' : 'completed');
+  const reason = trimProblemLogText(options?.reason || '', 140)
+    || (level === 'error' ? 'copy_latest_invest_final_response_failed' : 'copy_latest_invest_final_response_completed');
+  const errorText = trimProblemLogText(options?.error || '', 200);
+  const sourceUrl = normalizeProblemLogSourceUrl(options?.sourceUrl || '');
+  const chatUrl = normalizeChatConversationUrl(options?.conversationUrl || options?.chatUrl || '');
+  const origin = trimProblemLogText(options?.origin || '', 80);
+  const copyTrace = trimProblemLogText(options?.copyTrace || '', 120);
+  const persistenceMode = trimProblemLogText(options?.persistenceMode || '', 40);
+  const persistenceReason = trimProblemLogText(options?.persistenceReason || '', 80);
+  const statusText = trimProblemLogText([
+    origin ? `origin=${origin}` : '',
+    copyTrace ? `trace=${copyTrace}` : '',
+    options?.persistenceAttempted === true ? `fallback=${options?.persistenceSuccess === true ? 'ok' : 'failed'}` : '',
+    persistenceMode ? `mode=${persistenceMode}` : '',
+    persistenceReason ? `persistence_reason=${persistenceReason}` : ''
+  ].filter(Boolean).join(' | '), 240);
+  const message = buildCopyLatestInvestFinalResponseMessage({
+    targetTitle: options?.targetTitle,
+    textLength: options?.textLength,
+    persistenceAttempted: options?.persistenceAttempted === true,
+    persistenceSuccess: options?.persistenceSuccess === true,
+    persistenceMode,
+    persistenceReason,
+    hasConversationUrl: !!chatUrl,
+    dispatchSummary: options?.dispatchSummary || ''
+  });
+  const signature = trimProblemLogText([
+    'copy-latest-invest-final-response',
+    operationId,
+    status,
+    reason,
+    errorText,
+    message
+  ].join('|'), 380);
+
+  void appendProblemLog({
+    timestamp: Date.now(),
+    level,
+    source: 'copy-latest-invest-final-response',
+    title: 'Copy latest Invest final response',
+    category: 'copy_flow',
+    analysisType: 'admin',
+    status,
+    reason,
+    error: errorText,
+    statusText,
+    message,
+    runId: typeof options?.runId === 'string' ? options.runId.trim() : '',
+    tabId: Number.isInteger(options?.tabId) ? options.tabId : null,
+    windowId: Number.isInteger(options?.windowId) ? options.windowId : null,
+    sourceUrl: sourceUrl || '',
+    chatUrl: chatUrl || '',
+    signature
+  }).catch((error) => {
+    console.warn('[problem-log] copy latest invest append failed:', error?.message || String(error));
+  });
+}
+
 installBackgroundConsoleProblemCapture();
 
 async function upsertProcess(runId, patch = {}) {
@@ -7333,6 +7422,251 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   };
 }
 
+async function resolveLatestInvestCopyTarget(options = {}) {
+  const contextSnapshot = await collectCompanyInvestContextSnapshot({
+    includeClosedProcesses: options?.includeClosedProcesses === true,
+    includeInvestTabs: true,
+    includeProcessContextFallback: false
+  });
+
+  const investTabs = Array.isArray(contextSnapshot?.investTabs)
+    ? [...contextSnapshot.investTabs]
+    : [];
+  if (investTabs.length === 0) {
+    return { success: false, error: 'invest_tab_not_found' };
+  }
+
+  let activeInvestTabId = null;
+  try {
+    const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
+    const activeTab = Array.isArray(activeTabs) && activeTabs.length > 0 ? activeTabs[0] : null;
+    if (Number.isInteger(activeTab?.id) && isInvestGptUrl(getTabEffectiveUrl(activeTab))) {
+      activeInvestTabId = activeTab.id;
+    }
+  } catch (error) {
+    // Ignore and fall back to access-time ordering.
+  }
+
+  investTabs.sort((left, right) => {
+    if (Number.isInteger(activeInvestTabId)) {
+      const leftMatches = Number.isInteger(left?.id) && left.id === activeInvestTabId;
+      const rightMatches = Number.isInteger(right?.id) && right.id === activeInvestTabId;
+      if (leftMatches !== rightMatches) {
+        return leftMatches ? -1 : 1;
+      }
+    }
+    return compareTabsByRecentAccess(left, right);
+  });
+
+  const targetTab = investTabs[0] || null;
+  const tabId = Number.isInteger(targetTab?.id) ? targetTab.id : null;
+  const windowId = Number.isInteger(targetTab?.windowId) ? targetTab.windowId : null;
+  if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
+    return { success: false, error: 'invest_tab_context_missing' };
+  }
+
+  const process = contextSnapshot.processByTabId.get(tabId)
+    || contextSnapshot.processByWindowId.get(windowId)
+    || null;
+  const conversationUrl = normalizeChatConversationUrl(getTabEffectiveUrl(targetTab))
+    || normalizeChatConversationUrl(process?.chatUrl || process?.sourceUrl || '');
+
+  return {
+    success: true,
+    tabId,
+    windowId,
+    title: typeof targetTab?.title === 'string' ? targetTab.title : '',
+    url: getTabEffectiveUrl(targetTab) || '',
+    conversationUrl,
+    lastAccessed: Number.isFinite(targetTab?.lastAccessed) ? targetTab.lastAccessed : null,
+    process
+  };
+}
+
+async function copyLatestInvestFinalResponse(options = {}) {
+  const operationId = `copylatest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'copy_latest_invest_final_response';
+  const target = await resolveLatestInvestCopyTarget(options);
+  if (!target?.success) {
+    reportCopyLatestInvestFinalResponseEvent({
+      operationId,
+      origin,
+      level: 'warn',
+      status: 'failed',
+      reason: target?.error || 'invest_tab_not_found',
+      error: target?.error || '',
+      targetTitle: typeof target?.title === 'string' ? target.title : '',
+      sourceUrl: typeof target?.url === 'string' ? target.url : '',
+      conversationUrl: typeof target?.conversationUrl === 'string' ? target.conversationUrl : ''
+    });
+    return target;
+  }
+
+  const tabId = Number.isInteger(target?.tabId) ? target.tabId : null;
+  if (!Number.isInteger(tabId)) {
+    return { success: false, error: 'invest_tab_context_missing' };
+  }
+
+  const process = target?.process && typeof target.process === 'object'
+    ? target.process
+    : null;
+  const conversationUrl = normalizeChatConversationUrl(target?.conversationUrl || '');
+  const responseText = (
+    extractAssistantTextFromProcess(process)
+    || await extractLastAssistantResponseFromTab(
+      tabId,
+      Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2400
+    )
+  ).trim();
+
+  if (!responseText) {
+    reportCopyLatestInvestFinalResponseEvent({
+      operationId,
+      origin,
+      level: 'warn',
+      status: 'failed',
+      reason: 'missing_response_text',
+      error: 'missing_response_text',
+      runId: typeof process?.id === 'string' ? process.id : '',
+      tabId,
+      windowId: target.windowId,
+      targetTitle: typeof target?.title === 'string' ? target.title : '',
+      sourceUrl: typeof target?.url === 'string' ? target.url : '',
+      conversationUrl
+    });
+    return {
+      success: false,
+      error: 'missing_response_text',
+      tabId,
+      windowId: target.windowId,
+      conversationUrl,
+      processId: typeof process?.id === 'string' ? process.id : ''
+    };
+  }
+
+  const persistence = {
+    attempted: false,
+    success: false,
+    mode: '',
+    reason: '',
+    copyTrace: '',
+    dispatchSummary: '',
+    conversationLogCount: null
+  };
+
+  try {
+    if (process) {
+      const processPatch = {};
+      if (conversationUrl) processPatch.chatUrl = conversationUrl;
+      if (Number.isInteger(tabId)) processPatch.tabId = tabId;
+      if (Number.isInteger(target?.windowId)) processPatch.windowId = target.windowId;
+      if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
+        await upsertProcess(process.id.trim(), processPatch);
+      }
+
+      const replayResult = await ensureCompletedProcessResponsePersisted(
+        {
+          ...process,
+          ...processPatch
+        },
+        {
+          force: true,
+          tabId,
+          origin
+        }
+      );
+
+      persistence.attempted = true;
+      persistence.success = replayResult?.success === true;
+      persistence.mode = 'process_replay';
+      persistence.reason = typeof replayResult?.reason === 'string' ? replayResult.reason : '';
+      persistence.copyTrace = typeof replayResult?.copyTrace === 'string' ? replayResult.copyTrace : '';
+      persistence.dispatchSummary = typeof replayResult?.dispatchSummary === 'string'
+        ? replayResult.dispatchSummary
+        : '';
+      persistence.conversationLogCount = Number.isInteger(replayResult?.conversationAnalysis?.conversationLogCount)
+        ? replayResult.conversationAnalysis.conversationLogCount
+        : null;
+    } else {
+      const saveResult = await saveResponse(
+        responseText,
+        typeof target?.title === 'string' && target.title.trim()
+          ? target.title.trim()
+          : 'ChatGPT Invest fallback',
+        'company',
+        null,
+        buildRestartReplayResponseId('manual_copy_fallback', responseText, 0),
+        {
+          selected_response_reason: 'manual_copy_fallback'
+        },
+        conversationUrl || null,
+        {
+          sourceTitle: typeof target?.title === 'string' ? target.title : 'ChatGPT Invest',
+          sourceName: 'ChatGPT Invest',
+          sourceUrl: conversationUrl || ''
+        }
+      );
+
+      persistence.attempted = true;
+      persistence.success = saveResult?.success === true;
+      persistence.mode = 'direct_save';
+      persistence.reason = saveResult?.success === true ? 'saved' : 'save_failed';
+      persistence.copyTrace = typeof saveResult?.copyTrace === 'string' ? saveResult.copyTrace : '';
+      persistence.dispatchSummary = saveResult?.dispatch && typeof saveResult.dispatch === 'object'
+        ? formatDispatchUiSummary(saveResult.dispatch)
+        : '';
+      persistence.conversationLogCount = Number.isInteger(saveResult?.conversationAnalysis?.conversationLogCount)
+        ? saveResult.conversationAnalysis.conversationLogCount
+        : null;
+    }
+  } catch (error) {
+    persistence.attempted = true;
+    persistence.success = false;
+    persistence.mode = process ? 'process_replay' : 'direct_save';
+    persistence.reason = error?.message || String(error);
+  }
+
+  reportCopyLatestInvestFinalResponseEvent({
+    operationId,
+    origin,
+    level: persistence.success === true ? 'info' : 'warn',
+    status: persistence.success === true ? 'completed' : 'degraded',
+    reason: persistence.success === true
+      ? 'copy_latest_invest_final_response_completed'
+      : (typeof persistence.reason === 'string' && persistence.reason.trim()
+        ? persistence.reason.trim()
+        : 'copy_latest_invest_final_response_persistence_failed'),
+    error: persistence.success === true ? '' : (typeof persistence.reason === 'string' ? persistence.reason : ''),
+    runId: typeof process?.id === 'string' ? process.id : '',
+    tabId,
+    windowId: Number.isInteger(target?.windowId) ? target.windowId : null,
+    targetTitle: typeof target?.title === 'string' ? target.title : '',
+    textLength: responseText.length,
+    persistenceAttempted: persistence.attempted === true,
+    persistenceSuccess: persistence.success === true,
+    persistenceMode: persistence.mode,
+    persistenceReason: persistence.reason,
+    copyTrace: persistence.copyTrace,
+    dispatchSummary: persistence.dispatchSummary,
+    sourceUrl: typeof target?.url === 'string' ? target.url : '',
+    conversationUrl
+  });
+
+  return {
+    success: true,
+    text: responseText,
+    textLength: responseText.length,
+    tabId,
+    windowId: Number.isInteger(target?.windowId) ? target.windowId : null,
+    title: typeof target?.title === 'string' ? target.title : '',
+    conversationUrl,
+    processId: typeof process?.id === 'string' ? process.id : '',
+    persistence
+  };
+}
+
 async function runResetScanStartAllTabs(options = {}) {
   const monitorSessionId = typeof options?.monitorSessionId === 'string' && options.monitorSessionId.trim()
     ? options.monitorSessionId.trim()
@@ -9223,6 +9557,18 @@ function compareTabsByWindowAndIndex(left, right) {
   const leftId = Number.isInteger(left?.id) ? left.id : Number.MAX_SAFE_INTEGER;
   const rightId = Number.isInteger(right?.id) ? right.id : Number.MAX_SAFE_INTEGER;
   return leftId - rightId;
+}
+
+function compareTabsByRecentAccess(left, right) {
+  const leftActive = left?.active === true ? 1 : 0;
+  const rightActive = right?.active === true ? 1 : 0;
+  if (leftActive !== rightActive) return rightActive - leftActive;
+
+  const leftAccessed = Number.isFinite(left?.lastAccessed) ? left.lastAccessed : 0;
+  const rightAccessed = Number.isFinite(right?.lastAccessed) ? right.lastAccessed : 0;
+  if (leftAccessed !== rightAccessed) return rightAccessed - leftAccessed;
+
+  return compareTabsByWindowAndIndex(left, right);
 }
 
 function compareProcessesForRestore(left, right) {
@@ -17024,6 +17370,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       sendResponse({
         success: false,
         error: error?.message || 'company_conversation_count_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'COPY_LATEST_INVEST_FINAL_RESPONSE') {
+    (async () => {
+      const result = await copyLatestInvestFinalResponse({
+        origin: typeof message?.origin === 'string' && message.origin.trim()
+          ? message.origin.trim()
+          : 'runtime-copy-latest-invest-final-response',
+        tabReadTimeoutMs: Number.isInteger(message?.tabReadTimeoutMs)
+          ? message.tabReadTimeoutMs
+          : null
+      });
+      sendResponse(result);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'copy_latest_invest_final_response_failed'
       });
     });
     return true;

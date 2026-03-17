@@ -52,13 +52,18 @@ function reportProblemLogFromUi(rawEntry = {}) {
     chrome.runtime.sendMessage({
       type: 'REPORT_PROBLEM_LOG',
       entry: {
-        level: rawEntry?.level === 'warn' ? 'warn' : 'error',
+        level: rawEntry?.level === 'info'
+          ? 'info'
+          : (rawEntry?.level === 'warn' ? 'warn' : 'error'),
         source,
         title: typeof rawEntry?.title === 'string' ? rawEntry.title : '',
+        status: typeof rawEntry?.status === 'string' ? rawEntry.status : '',
         reason,
         error,
         message,
-        signature
+        signature,
+        tabId: Number.isInteger(rawEntry?.tabId) ? rawEntry.tabId : null,
+        windowId: Number.isInteger(rawEntry?.windowId) ? rawEntry.windowId : null
       }
     }, () => {});
   } catch {
@@ -117,6 +122,8 @@ const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
+const copyLatestInvestFinalResponseBtn = document.getElementById('copyLatestInvestFinalResponseBtn');
+const copyLatestInvestFinalResponseStatus = document.getElementById('copyLatestInvestFinalResponseStatus');
 const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn');
 const countCompanyMessagesBtn = document.getElementById('countCompanyMessagesBtn');
 const resumeAllExtendedBtn = document.getElementById('resumeAllExtendedBtn');
@@ -137,6 +144,7 @@ const POPUP_SHORTCUTS = Object.freeze({
   responses: '5',
   processPanel: '6',
   stop: '7',
+  copyFinalResponse: '8',
   restoreWindows: '9',
   autoRestoreToggle: '0'
 });
@@ -178,6 +186,10 @@ function setAnalysisQueueStatus(text, isError = false) {
 
 function setDispatchStatus(text, isError = false) {
   setStatusElement(watchlistDispatchStatus, text, isError);
+}
+
+function setCopyLatestInvestFinalResponseStatus(text, isError = false) {
+  setStatusElement(copyLatestInvestFinalResponseStatus, text, isError);
 }
 
 function setWatchlistCredentialsHint(text, isError = false) {
@@ -1452,6 +1464,150 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
   }
 }
 
+async function writeTextToClipboard(text) {
+  const safeText = typeof text === 'string' ? text : '';
+  if (!safeText) {
+    throw new Error('clipboard_text_empty');
+  }
+
+  if (navigator?.clipboard?.writeText) {
+    try {
+      await navigator.clipboard.writeText(safeText);
+      return;
+    } catch (error) {
+      // Fall back to execCommand below.
+    }
+  }
+
+  const textarea = document.createElement('textarea');
+  textarea.value = safeText;
+  textarea.setAttribute('readonly', 'readonly');
+  textarea.style.position = 'fixed';
+  textarea.style.top = '-9999px';
+  textarea.style.left = '-9999px';
+  document.body.appendChild(textarea);
+  textarea.focus();
+  textarea.select();
+
+  let copied = false;
+  try {
+    copied = document.execCommand('copy');
+  } finally {
+    textarea.remove();
+  }
+
+  if (!copied) {
+    throw new Error('clipboard_write_failed');
+  }
+}
+
+function formatCopyLatestInvestFinalResponseStatus(response) {
+  const title = safePreview(response?.title || '', 'Invest');
+  const textLength = Number.isInteger(response?.textLength) ? response.textLength : 0;
+  const persistence = response?.persistence && typeof response.persistence === 'object'
+    ? response.persistence
+    : null;
+  const lines = [`Skopiowano finalna odpowiedz z: ${title}.`, `Dlugosc: ${textLength} znakow.`];
+
+  if (typeof response?.conversationUrl === 'string' && response.conversationUrl.trim()) {
+    lines.push('URL konwersacji zachowany.');
+  } else {
+    lines.push('Brak URL konwersacji.');
+  }
+
+  if (persistence?.attempted) {
+    if (persistence.success === true) {
+      lines.push('Fallback save: OK.');
+    } else if (typeof persistence.reason === 'string' && persistence.reason.trim()) {
+      lines.push(`Fallback save: ${persistence.reason.trim()}.`);
+    } else {
+      lines.push('Fallback save: nieudany.');
+    }
+  }
+
+  return lines.join('\n');
+}
+
+async function executeCopyLatestInvestFinalResponseFromPopup(button) {
+  if (!button) return;
+
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  setShortcutButtonLabel(button, 'Kopiuje...', POPUP_SHORTCUTS.copyFinalResponse);
+  setCopyLatestInvestFinalResponseStatus('Pobieram finalna odpowiedz z ostatniej karty Invest...');
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'COPY_LATEST_INVEST_FINAL_RESPONSE',
+      origin: 'popup-copy-latest-invest-final-response',
+      tabReadTimeoutMs: 2600
+    });
+
+    if (response?.success === false) {
+      reportProblemLogFromUi({
+        source: 'popup-copy-latest-invest-final-response',
+        title: 'Popup copy latest Invest final response failed',
+        status: 'failed',
+        reason: typeof response?.error === 'string' ? response.error : 'copy_latest_invest_final_response_failed',
+        error: typeof response?.error === 'string' ? response.error : 'copy_latest_invest_final_response_failed',
+        message: 'Background did not return a final response payload.',
+        signature: [
+          'popup-copy-latest-invest-final-response',
+          'response-failed',
+          response?.error || 'copy_latest_invest_final_response_failed',
+          Date.now()
+        ].join('|'),
+        tabId: Number.isInteger(response?.tabId) ? response.tabId : null,
+        windowId: Number.isInteger(response?.windowId) ? response.windowId : null
+      });
+      setCopyLatestInvestFinalResponseStatus(
+        `Blad kopiowania: ${response.error || 'copy_latest_invest_final_response_failed'}.`,
+        true
+      );
+      return;
+    }
+
+    const text = typeof response?.text === 'string' ? response.text.trim() : '';
+    if (!text) {
+      reportProblemLogFromUi({
+        source: 'popup-copy-latest-invest-final-response',
+        title: 'Popup copy latest Invest final response failed',
+        status: 'failed',
+        reason: 'clipboard_text_empty',
+        error: 'clipboard_text_empty',
+        message: 'Background returned success without final response text.',
+        signature: ['popup-copy-latest-invest-final-response', 'empty-text', Date.now()].join('|'),
+        tabId: Number.isInteger(response?.tabId) ? response.tabId : null,
+        windowId: Number.isInteger(response?.windowId) ? response.windowId : null
+      });
+      setCopyLatestInvestFinalResponseStatus('Brak tekstu finalnej odpowiedzi.', true);
+      return;
+    }
+
+    await writeTextToClipboard(text);
+    setCopyLatestInvestFinalResponseStatus(formatCopyLatestInvestFinalResponseStatus(response), false);
+  } catch (error) {
+    reportProblemLogFromUi({
+      source: 'popup-copy-latest-invest-final-response',
+      title: 'Popup copy latest Invest final response failed',
+      status: 'failed',
+      reason: 'clipboard_write_failed',
+      error: error?.message || String(error),
+      message: 'Popup failed while copying the final response to clipboard.',
+      signature: [
+        'popup-copy-latest-invest-final-response',
+        'clipboard-failed',
+        error?.message || String(error),
+        Date.now()
+      ].join('|')
+    });
+    setCopyLatestInvestFinalResponseStatus(`Blad kopiowania: ${error?.message || String(error)}.`, true);
+  } finally {
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
 async function getActiveTabInCurrentWindow() {
   const tabs = await new Promise((resolve) => {
     chrome.tabs.query({ active: true, currentWindow: true }, (rows) => resolve(Array.isArray(rows) ? rows : []));
@@ -1527,6 +1683,12 @@ if (stopBtn) {
         }
       );
     });
+  });
+}
+
+if (copyLatestInvestFinalResponseBtn) {
+  copyLatestInvestFinalResponseBtn.addEventListener('click', () => {
+    void executeCopyLatestInvestFinalResponseFromPopup(copyLatestInvestFinalResponseBtn);
   });
 }
 
@@ -1693,6 +1855,7 @@ const popupShortcutHandlers = {
   [POPUP_SHORTCUTS.responses]: () => clickIfEnabled(responsesBtn),
   [POPUP_SHORTCUTS.processPanel]: () => clickIfEnabled(decisionPanelBtn),
   [POPUP_SHORTCUTS.stop]: () => clickIfEnabled(stopBtn),
+  [POPUP_SHORTCUTS.copyFinalResponse]: () => clickIfEnabled(copyLatestInvestFinalResponseBtn),
   [POPUP_SHORTCUTS.restoreWindows]: () => clickIfEnabled(restoreProcessWindowsBtn),
   [POPUP_SHORTCUTS.autoRestoreToggle]: () => clickIfEnabled(autoRestoreToggleBtn),
 };

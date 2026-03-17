@@ -155,6 +155,16 @@ function formatReason(entry) {
   return '-';
 }
 
+function formatSource(entry) {
+  if (!entry || typeof entry !== 'object') return '-';
+  const source = typeof entry.source === 'string' ? entry.source.trim() : '';
+  const category = typeof entry.category === 'string' ? entry.category.trim() : '';
+  if (source && category) return `${source} | ${category}`;
+  if (source) return source;
+  if (category) return category;
+  return '-';
+}
+
 function renderMeta(entries, total) {
   const safeEntries = Array.isArray(entries) ? entries : [];
   const safeTotal = Number.isInteger(total) ? total : safeEntries.length;
@@ -198,7 +208,7 @@ function renderRows(entries) {
   if (safeEntries.length === 0) {
     const row = document.createElement('tr');
     const cell = document.createElement('td');
-    cell.colSpan = 11;
+    cell.colSpan = 12;
     cell.className = 'placeholder';
     cell.textContent = 'Brak wpisow problemowych.';
     row.appendChild(cell);
@@ -214,6 +224,7 @@ function renderRows(entries) {
 
     appendCell(row, formatDateTime(entry?.timestamp));
     appendCell(row, entry?.level || 'info', levelClass);
+    appendCell(row, formatSource(entry));
     appendCell(row, entry?.runId || '');
     appendCell(row, entry?.title || '');
     appendCell(row, formatStage(entry));
@@ -234,6 +245,7 @@ function entriesToText(entries) {
   return `${header}\n\n${safeEntries.map((entry) => {
     const ts = formatDateTime(entry?.timestamp);
     const level = entry?.level || 'info';
+    const source = formatSource(entry);
     const runId = entry?.runId || '-';
     const title = entry?.title || '-';
     const stage = formatStage(entry);
@@ -243,7 +255,7 @@ function entriesToText(entries) {
     const message = entry?.message || '-';
     const prompt = formatPrompt(entry);
     const tabWindow = formatTabWindow(entry);
-    return `[${ts}] ${level.toUpperCase()} run=${runId} title="${title}" stage="${stage}" status=${status} reason=${reason} error=${error} prompt=${prompt} ${tabWindow}\n${message}`;
+    return `[${ts}] ${level.toUpperCase()} source=${source} run=${runId} title="${title}" stage="${stage}" status=${status} reason=${reason} error=${error} prompt=${prompt} ${tabWindow}\n${message}`;
   }).join('\n\n')}`;
 }
 
