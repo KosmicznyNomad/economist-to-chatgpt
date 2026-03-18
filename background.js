@@ -34,7 +34,10 @@ const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
 const ANALYSIS_QUEUE_MAX_CONCURRENT = 7;
-const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 60 * 1000;
+const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
+const ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS = 45 * 1000;
+const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
+const PROCESS_WINDOW_AUTO_MINIMIZE_DELAY_MS = 1200;
 const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
@@ -888,25 +891,167 @@ async function getAnalysisQueueSnapshot() {
   return cloneAnalysisQueueState();
 }
 
-async function isLocalProcessActiveForQueue(process) {
+function getProcessLastActivityTimestamp(process) {
+  if (!process || typeof process !== 'object') return 0;
+  if (Number.isInteger(process.timestamp) && process.timestamp > 0) return process.timestamp;
+  if (Number.isInteger(process.startedAt) && process.startedAt > 0) return process.startedAt;
+  return 0;
+}
+
+function getAnalysisQueueProcessContextKey(process) {
+  if (!process || typeof process !== 'object') return '';
+  if (Number.isInteger(process.tabId)) return `tab:${process.tabId}`;
+  if (Number.isInteger(process.windowId)) return `window:${process.windowId}`;
+  const runId = typeof process.id === 'string' ? process.id.trim() : '';
+  return runId ? `run:${runId}` : '';
+}
+
+function shouldProcessOccupyAnalysisQueueSlot(process) {
   if (!process || typeof process !== 'object') return false;
   const status = normalizeProcessStatus(process.status);
+  if (status === 'completed') {
+    if (!hasProcessReachedFinalStage(process)) return true;
+    const delivery = getProcessQueueDeliveryState(process);
+    if (delivery.confirmed === true) return false;
+    if (delivery.saveOk !== true) return false;
+    if (delivery.queueSkipped === true || delivery.flushSkipped === true) return false;
+    return true;
+  }
   if (isClosedProcessStatus(status)) return false;
+  if (status === 'queued') {
+    return process.queueManaged === true && process.slotReserved === true;
+  }
+  return true;
+}
+
+function isProcessWithinAnalysisQueueContextGrace(process, nowTs = Date.now()) {
+  if (!process || typeof process !== 'object') return false;
+  if (Number.isInteger(process.tabId) || Number.isInteger(process.windowId)) return false;
+  const lastSeenAt = getProcessLastActivityTimestamp(process);
+  if (lastSeenAt <= 0) return false;
+  return Math.max(0, nowTs - lastSeenAt) <= ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS;
+}
+
+async function getAnalysisQueueProcessActivityState(process, nowTs = Date.now()) {
+  const contextKey = getAnalysisQueueProcessContextKey(process);
+  if (!shouldProcessOccupyAnalysisQueueSlot(process)) {
+    return {
+      active: false,
+      live: false,
+      recent: false,
+      contextKey,
+      reason: 'not_counted'
+    };
+  }
+
+  const status = normalizeProcessStatus(process?.status);
+  if (status === 'completed') {
+    const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+    return {
+      active: true,
+      live: false,
+      recent: false,
+      contextKey: runId ? `run:${runId}` : contextKey,
+      reason: hasProcessReachedFinalStage(process)
+        ? 'completed_dispatch_pending'
+        : 'completed_final_stage_pending'
+    };
+  }
 
   const tabId = Number.isInteger(process.tabId) ? process.tabId : null;
   if (tabId !== null) {
     const tab = await getTabByIdSafe(tabId);
-    return !!tab;
+    if (tab) {
+      return {
+        active: true,
+        live: true,
+        recent: false,
+        contextKey: `tab:${tabId}`,
+        reason: 'tab_exists'
+      };
+    }
   }
 
   const windowId = Number.isInteger(process.windowId) ? process.windowId : null;
   if (windowId !== null) {
     const queryResult = await queryTabsInWindowSafe(windowId);
-    if (queryResult?.ok !== true) return false;
-    return Array.isArray(queryResult.tabs) && queryResult.tabs.length > 0;
+    if (queryResult?.ok === true) {
+      const hasTabs = Array.isArray(queryResult.tabs) && queryResult.tabs.length > 0;
+      if (hasTabs) {
+        return {
+          active: true,
+          live: true,
+          recent: false,
+          contextKey: `window:${windowId}`,
+          reason: 'window_exists'
+        };
+      }
+    }
   }
 
-  return false;
+  if (isProcessWithinAnalysisQueueContextGrace(process, nowTs)) {
+    return {
+      active: true,
+      live: false,
+      recent: true,
+      contextKey,
+      reason: 'recent_grace'
+    };
+  }
+
+  return {
+    active: false,
+    live: false,
+    recent: false,
+    contextKey,
+    reason: 'local_context_missing'
+  };
+}
+
+async function isLocalProcessActiveForQueue(process, nowTs = Date.now()) {
+  const activity = await getAnalysisQueueProcessActivityState(process, nowTs);
+  return activity.active === true;
+}
+
+function shouldReplaceAnalysisQueueActiveProcess(existingEntry, nextEntry) {
+  const existingScore = existingEntry?.activity?.live ? 2 : (existingEntry?.activity?.recent ? 1 : 0);
+  const nextScore = nextEntry?.activity?.live ? 2 : (nextEntry?.activity?.recent ? 1 : 0);
+  if (existingScore !== nextScore) return nextScore > existingScore;
+
+  const existingTs = getProcessLastActivityTimestamp(existingEntry?.process);
+  const nextTs = getProcessLastActivityTimestamp(nextEntry?.process);
+  if (existingTs !== nextTs) return nextTs > existingTs;
+
+  return String(nextEntry?.process?.id || '').localeCompare(String(existingEntry?.process?.id || '')) > 0;
+}
+
+async function collectAnalysisQueueActiveProcesses(options = {}) {
+  const nowTs = Number.isInteger(options?.nowTs) ? options.nowTs : Date.now();
+  const sourceProcesses = Array.isArray(options?.processes)
+    ? pruneProcessRecords(options.processes)
+    : pruneProcessRecords(Array.from(processRegistry.values()));
+  const excludedRunIds = options?.excludedRunIds instanceof Set
+    ? options.excludedRunIds
+    : new Set(Array.isArray(options?.excludedRunIds) ? options.excludedRunIds : []);
+  const candidates = await Promise.all(sourceProcesses.map(async (process) => {
+    const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+    if (!runId || excludedRunIds.has(runId)) return null;
+    const activity = await getAnalysisQueueProcessActivityState(process, nowTs);
+    if (!activity.active) return null;
+    return { process, activity };
+  }));
+
+  const deduped = new Map();
+  for (const entry of candidates) {
+    if (!entry) continue;
+    const key = entry.activity.contextKey || `run:${entry.process.id}`;
+    const existingEntry = deduped.get(key);
+    if (!existingEntry || shouldReplaceAnalysisQueueActiveProcess(existingEntry, entry)) {
+      deduped.set(key, entry);
+    }
+  }
+
+  return Array.from(deduped.values());
 }
 
 async function getAnalysisQueueStatusSnapshot() {
@@ -914,12 +1059,8 @@ async function getAnalysisQueueStatusSnapshot() {
     getAnalysisQueueSnapshot(),
     ensureProcessRegistryReady()
   ]);
-  const activeChecks = await Promise.all(snapshot.activeJobs.map(async (job) => {
-    const runId = typeof job?.runId === 'string' ? job.runId.trim() : '';
-    if (!runId) return false;
-    return isLocalProcessActiveForQueue(processRegistry.get(runId) || null);
-  }));
-  const activeSlots = activeChecks.filter(Boolean).length;
+  const activeProcesses = await collectAnalysisQueueActiveProcesses();
+  const activeSlots = activeProcesses.length;
   return {
     success: true,
     maxConcurrent: snapshot.maxConcurrent,
@@ -3391,6 +3532,20 @@ function resolveProcessStageSnapshot(process) {
   };
 }
 
+function hasProcessReachedFinalStage(process) {
+  if (!process || typeof process !== 'object') return false;
+  const status = normalizeProcessStatus(process.status);
+  if (status !== 'completed') return false;
+  const stage = resolveProcessStageSnapshot(process);
+  const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : 0;
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : 0;
+  const stageIndex = Number.isInteger(stage?.stageIndex) ? stage.stageIndex : null;
+  if (totalPrompts <= 0) return true;
+  if (currentPrompt < totalPrompts) return false;
+  if (stageIndex !== null && stageIndex < (totalPrompts - 1)) return false;
+  return true;
+}
+
 function buildProcessProblemLogEntry(runId, process, options = {}) {
   if (!runId || !process || typeof process !== 'object') return null;
 
@@ -4771,13 +4926,49 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
 
   const status = normalizeProcessStatus(process.status);
   if (status === 'completed') {
+    if (!hasProcessReachedFinalStage(process)) {
+      return {
+        action: 'keep',
+        queueState: 'awaiting_final_stage'
+      };
+    }
     const delivery = getProcessQueueDeliveryState(process);
-    // Queue turnover is driven only by local execution state.
-    // Remote dispatch/confirmation must not keep the slot occupied.
+    if (delivery.confirmed === true) {
+      return {
+        action: 'release',
+        closeWindow: true,
+        reason: 'dispatch_confirmed'
+      };
+    }
+    if (delivery.saveOk !== true) {
+      return {
+        action: 'release',
+        closeWindow: true,
+        reason: 'local_save_failed'
+      };
+    }
+    if (delivery.queueSkipped === true || delivery.flushSkipped === true) {
+      return {
+        action: 'release',
+        closeWindow: true,
+        reason: 'dispatch_skipped'
+      };
+    }
+
+    const dispatchDeadlineAt = Number.isInteger(job.dispatchDeadlineAt) && job.dispatchDeadlineAt > 0
+      ? job.dispatchDeadlineAt
+      : (nowTs + ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS);
+    if (dispatchDeadlineAt > nowTs) {
+      return {
+        action: 'keep',
+        queueState: 'awaiting_dispatch',
+        dispatchDeadlineAt
+      };
+    }
     return {
       action: 'release',
-      closeWindow: delivery.confirmed === true,
-      reason: delivery.saveOk === false ? 'local_save_failed' : 'local_completed'
+      closeWindow: true,
+      reason: 'pending_dispatch_timeout'
     };
   }
 
@@ -5786,6 +5977,16 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
 
         for (const activeJob of state.activeJobs) {
           const process = processRegistry.get(activeJob.runId) || null;
+          const decision = resolveAnalysisQueueReleaseDecision(activeJob, process, now);
+          if (decision.action === 'release') {
+            releaseJobs.push({
+              job: activeJob,
+              process,
+              reason: decision.reason,
+              closeWindow: decision.closeWindow === true
+            });
+            continue;
+          }
           const hasLiveLocalContext = await isLocalProcessActiveForQueue(process);
           if (process && !hasLiveLocalContext) {
             releaseJobs.push({
@@ -5809,16 +6010,6 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
                 }
               });
             }
-            continue;
-          }
-          const decision = resolveAnalysisQueueReleaseDecision(activeJob, process, now);
-          if (decision.action === 'release') {
-            releaseJobs.push({
-              job: activeJob,
-              process,
-              reason: decision.reason,
-              closeWindow: decision.closeWindow === true
-            });
             continue;
           }
 
@@ -5847,7 +6038,18 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         }
 
         state.activeJobs = nextActiveJobs;
-        while (state.activeJobs.length < state.maxConcurrent && state.waitingJobs.length > 0) {
+        const releasedRunIds = new Set(
+          releaseJobs
+            .map((entry) => (typeof entry?.job?.runId === 'string' ? entry.job.runId.trim() : ''))
+            .filter(Boolean)
+        );
+        const occupiedSlots = await collectAnalysisQueueActiveProcesses({
+          processes: Array.from(processRegistry.values()),
+          nowTs: now,
+          excludedRunIds: releasedRunIds
+        });
+        let reservedSlots = occupiedSlots.length;
+        while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
           const waitingJob = state.waitingJobs.shift();
           const activatedJob = sanitizeAnalysisQueueJob({
             ...waitingJob,
@@ -5858,6 +6060,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           if (!activatedJob) continue;
           state.activeJobs.push(activatedJob);
           startJobs.push(activatedJob);
+          reservedSlots += 1;
         }
 
         await persistAnalysisQueueState(state);
@@ -5869,18 +6072,27 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
 
       for (const release of releaseJobs) {
         if (release.process) {
+          const releaseQueueState = release.reason === 'dispatch_confirmed'
+            ? 'dispatch_confirmed'
+            : 'slot_released';
           const releasePatch = {
             queueManaged: true,
             queueJobId: release.job.jobId,
-            queueState: release.closeWindow ? 'dispatch_confirmed' : 'slot_released',
+            queueState: releaseQueueState,
             slotReserved: false,
             slotReleasedAt: now,
             slotReleaseReason: release.reason,
             timestamp: now
           };
           if (release.reason === 'pending_dispatch_timeout') {
-            releasePatch.statusText = 'Final zapisany lokalnie, brak dispatch_confirmed w 60s - slot zwolniony';
+            releasePatch.statusText = 'Final zapisany lokalnie, brak dispatch_confirmed w 10 min - zamykam okno';
             releasePatch.reason = 'pending_dispatch_timeout';
+          } else if (release.reason === 'local_save_failed') {
+            releasePatch.statusText = 'Final wygenerowany, zapis lokalny nieudany - zamykam okno';
+            releasePatch.reason = 'local_save_failed';
+          } else if (release.reason === 'dispatch_skipped') {
+            releasePatch.statusText = 'Final zapisany lokalnie, dispatch pominiety - zamykam okno';
+            releasePatch.reason = 'dispatch_skipped';
           }
           await upsertProcess(release.job.runId, releasePatch);
           let windowClosed = null;
@@ -13644,6 +13856,10 @@ function buildPersistenceUiSummary(options = {}) {
   const saveResult = options?.saveResult && typeof options.saveResult === 'object'
     ? options.saveResult
     : null;
+  const emergencyLocalSave = saveResult?.emergencyLocalSave && typeof saveResult.emergencyLocalSave === 'object'
+    ? saveResult.emergencyLocalSave
+    : null;
+  const emergencyLocalSaveOk = emergencyLocalSave?.success === true;
   const saveErrorRaw = typeof options?.saveError === 'string' ? options.saveError : '';
   const saveError = saveErrorRaw.trim();
   const bridgeErrorRaw = typeof options?.bridgeError === 'string' ? options.bridgeError : '';
@@ -13684,7 +13900,7 @@ function buildPersistenceUiSummary(options = {}) {
     };
   }
 
-  const saveOk = !!saveResult?.success;
+  const saveOk = !!saveResult?.success || emergencyLocalSaveOk;
   if (!saveOk) {
     const normalizedSaveError = saveError || 'save_failed';
     const storageSummary = `Baza: BLAD zapisu (${truncateDispatchLogText(normalizedSaveError, 140)})`;
@@ -13712,10 +13928,20 @@ function buildPersistenceUiSummary(options = {}) {
     };
   }
 
-  const verifiedCount = Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null;
-  const storageSummary = verifiedCount === null
-    ? 'Baza: OK'
-    : `Baza: OK (records=${verifiedCount})`;
+  const verifiedCount = Number.isInteger(saveResult?.verifiedCount)
+    ? saveResult.verifiedCount
+    : (Number.isInteger(emergencyLocalSave?.responseCount) ? emergencyLocalSave.responseCount : null);
+  const storageSummary = emergencyLocalSaveOk
+    ? (
+      verifiedCount === null
+        ? 'Baza: OK (fallback local)'
+        : `Baza: OK (fallback local, records=${verifiedCount})`
+    )
+    : (
+      verifiedCount === null
+        ? 'Baza: OK'
+        : `Baza: OK (records=${verifiedCount})`
+    );
   const copyTrace = typeof saveResult?.copyTrace === 'string' && saveResult.copyTrace.trim()
     ? saveResult.copyTrace.trim()
     : '';

@@ -1901,11 +1901,13 @@ async function filterActiveProcesses(processes) {
   if (active.length === 0) return [];
 
   const decisions = await Promise.all(active.map(async (process) => {
-    if (getNormalizedStatus(process) === 'queued') {
-      return { process, keep: true, reason: 'queued' };
-    }
+    const normalizedStatus = getNormalizedStatus(process);
     const tabId = Number.isInteger(process.tabId) ? process.tabId : null;
     const windowId = Number.isInteger(process.windowId) ? process.windowId : null;
+
+    if (normalizedStatus === 'queued' && !tabId && !windowId) {
+      return { process, keep: false, reason: 'queued_waiting' };
+    }
 
     if (!tabId && !windowId) {
       const lastSeenAt = Number.isInteger(process.timestamp)
