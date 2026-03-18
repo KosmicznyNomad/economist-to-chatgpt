@@ -2935,7 +2935,8 @@ function sanitizeProblemLogEntry(rawEntry) {
     sourceUrl: sourceUrl || '',
     chatUrl: chatUrl || '',
     conversationUrl: chatUrl || '',
-    heartbeat
+    heartbeat,
+    forceRemoteDispatch: rawEntry.forceRemoteDispatch === true
   };
 }
 
@@ -3701,6 +3702,233 @@ function reportAdminActionEvent(actionName, options = {}) {
     signature
   }).catch((error) => {
     console.warn('[problem-log] admin action append failed:', error?.message || String(error));
+  });
+}
+
+function resolveAnalysisQueueEventContext(options = {}) {
+  const job = options?.job && typeof options.job === 'object'
+    ? (sanitizeAnalysisQueueJob(options.job) || options.job)
+    : null;
+  const process = options?.process && typeof options.process === 'object'
+    ? options.process
+    : null;
+  const runId = trimProblemLogText(
+    options?.runId
+      || job?.runId
+      || process?.id
+      || '',
+    120
+  );
+  const jobId = trimProblemLogText(
+    options?.jobId
+      || job?.jobId
+      || process?.queueJobId
+      || '',
+    120
+  );
+  const kind = trimProblemLogText(
+    options?.kind
+      || job?.kind
+      || '',
+    60
+  );
+  const analysisType = trimProblemLogText(
+    options?.analysisType
+      || job?.analysisType
+      || process?.analysisType
+      || 'company',
+    40
+  );
+  const title = trimProblemLogText(
+    options?.title
+      || job?.title
+      || process?.title
+      || '',
+    160
+  );
+  const tabId = Number.isInteger(options?.tabId)
+    ? options.tabId
+    : (
+      kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE
+        ? (Number.isInteger(job?.resumeTargetTabId) ? job.resumeTargetTabId : (Number.isInteger(process?.tabId) ? process.tabId : null))
+        : (Number.isInteger(job?.tabSnapshot?.id) ? job.tabSnapshot.id : (Number.isInteger(process?.tabId) ? process.tabId : null))
+    );
+  const windowId = Number.isInteger(options?.windowId)
+    ? options.windowId
+    : (
+      kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE
+        ? (
+          Number.isInteger(job?.resumeTargetWindowId)
+            ? job.resumeTargetWindowId
+            : (Number.isInteger(process?.windowId) ? process.windowId : null)
+        )
+        : (
+          Number.isInteger(job?.tabSnapshot?.windowId)
+            ? job.tabSnapshot.windowId
+            : (Number.isInteger(process?.windowId) ? process.windowId : null)
+        )
+    );
+  const sourceUrl = normalizeProblemLogSourceUrl(
+    options?.sourceUrl
+      || job?.sourceUrl
+      || job?.tabSnapshot?.url
+      || process?.sourceUrl
+      || ''
+  );
+  const chatUrl = normalizeChatConversationUrl(
+    options?.chatUrl
+      || job?.chatUrl
+      || process?.chatUrl
+      || ''
+  );
+  const resumePromptNumber = Number.isInteger(options?.resumePromptNumber)
+    ? options.resumePromptNumber
+    : (
+      kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE && Number.isInteger(job?.resumeStartIndex)
+        ? (job.resumeStartIndex + 1)
+        : null
+    );
+  const currentPrompt = Number.isInteger(options?.currentPrompt)
+    ? options.currentPrompt
+    : (
+      resumePromptNumber !== null
+        ? resumePromptNumber
+        : (Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null)
+    );
+  const totalPrompts = Number.isInteger(options?.totalPrompts)
+    ? options.totalPrompts
+    : (Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null);
+
+  return {
+    job,
+    process,
+    runId,
+    jobId,
+    kind,
+    analysisType,
+    title,
+    tabId,
+    windowId,
+    sourceUrl,
+    chatUrl,
+    resumePromptNumber,
+    currentPrompt,
+    totalPrompts
+  };
+}
+
+function buildAnalysisQueueEventStatusText(eventName, context, options = {}) {
+  const parts = [];
+  if (context?.jobId) parts.push(`job=${context.jobId}`);
+  if (context?.kind) parts.push(`kind=${context.kind}`);
+  const queueState = trimProblemLogText(options?.queueState || '', 40);
+  if (queueState) parts.push(`queueState=${queueState}`);
+
+  const activeSlots = Number.isInteger(options?.activeSlots)
+    ? options.activeSlots
+    : (Number.isInteger(options?.activeJobs) ? options.activeJobs : null);
+  const waitingJobs = Number.isInteger(options?.waitingJobs)
+    ? options.waitingJobs
+    : (Number.isInteger(options?.queueSize) ? options.queueSize : null);
+  const maxConcurrent = Number.isInteger(options?.maxConcurrent) ? options.maxConcurrent : null;
+  if (activeSlots !== null || waitingJobs !== null || maxConcurrent !== null) {
+    parts.push(`slots=${activeSlots ?? '?'}/${maxConcurrent ?? '?'}`);
+    parts.push(`waiting=${waitingJobs ?? '?'}`);
+  }
+
+  if (Number.isInteger(options?.batchIndex) && Number.isInteger(options?.batchTotal) && options.batchTotal > 0) {
+    parts.push(`batch=${options.batchIndex}/${options.batchTotal}`);
+  }
+  if (Number.isInteger(options?.sequence) && options.sequence > 0) {
+    parts.push(`seq=${options.sequence}`);
+  }
+  if (Number.isInteger(context?.resumePromptNumber) && context.resumePromptNumber > 0) {
+    parts.push(`resume=P${context.resumePromptNumber}`);
+  }
+
+  const triggerReason = trimProblemLogText(options?.triggerReason || '', 80);
+  if (triggerReason) parts.push(`origin=${triggerReason}`);
+
+  const slotReleaseReason = trimProblemLogText(options?.slotReleaseReason || '', 80);
+  if (slotReleaseReason) parts.push(`release=${slotReleaseReason}`);
+
+  if (typeof options?.closeWindowRequested === 'boolean') {
+    parts.push(`closeReq=${options.closeWindowRequested ? 'yes' : 'no'}`);
+  }
+  if (typeof options?.closed === 'boolean') {
+    parts.push(`closed=${options.closed ? 'yes' : 'no'}`);
+  }
+
+  const dispatchState = trimProblemLogText(options?.dispatchState || '', 60);
+  if (dispatchState) parts.push(`dispatch=${dispatchState}`);
+  if (typeof options?.dispatchConfirmed === 'boolean') {
+    parts.push(`confirmed=${options.dispatchConfirmed ? 'yes' : 'no'}`);
+  }
+
+  if (Number.isInteger(options?.startedCount)) parts.push(`started=${options.startedCount}`);
+  if (Number.isInteger(options?.releasedCount)) parts.push(`released=${options.releasedCount}`);
+  if (Number.isInteger(options?.updatedCount)) parts.push(`updated=${options.updatedCount}`);
+
+  return trimProblemLogText(parts.join(' | '), 240) || trimProblemLogText(eventName, 240) || 'analysis_queue';
+}
+
+async function reportAnalysisQueueEvent(eventName, options = {}) {
+  const event = trimProblemLogText(eventName || '', 80) || 'analysis_queue_event';
+  const level = normalizeProblemLogLevel(options?.level || 'info');
+  const context = resolveAnalysisQueueEventContext(options);
+  const status = trimProblemLogText(options?.status || '', 40)
+    || (level === 'error' ? 'failed' : 'ok');
+  const reason = trimProblemLogText(options?.reason || event, 140)
+    || event;
+  const timestamp = Number.isInteger(options?.timestamp) ? options.timestamp : Date.now();
+  const statusText = trimProblemLogText(
+    options?.statusText || buildAnalysisQueueEventStatusText(event, context, options),
+    240
+  );
+  const title = trimProblemLogText(
+    options?.title || `Analysis queue: ${event}`,
+    160
+  );
+  const message = trimProblemLogText(
+    options?.message || [event, status, statusText].filter(Boolean).join(' | '),
+    260
+  ) || event;
+  const signature = trimProblemLogText(
+    options?.signature || [
+      'analysis-queue',
+      event,
+      context.runId,
+      context.jobId,
+      status,
+      reason,
+      statusText,
+      timestamp,
+      Math.random().toString(36).slice(2, 8)
+    ].join('|'),
+    380
+  );
+
+  return appendProblemLog({
+    timestamp,
+    level,
+    source: 'analysis-queue',
+    title,
+    category: 'analysis_queue',
+    analysisType: context.analysisType || 'company',
+    runId: context.runId || '',
+    status,
+    reason,
+    statusText,
+    message,
+    currentPrompt: Number.isInteger(context.currentPrompt) ? context.currentPrompt : null,
+    totalPrompts: Number.isInteger(context.totalPrompts) ? context.totalPrompts : null,
+    tabId: Number.isInteger(context.tabId) ? context.tabId : null,
+    windowId: Number.isInteger(context.windowId) ? context.windowId : null,
+    sourceUrl: context.sourceUrl || '',
+    chatUrl: context.chatUrl || '',
+    conversationUrl: context.chatUrl || '',
+    forceRemoteDispatch: options?.forceRemoteDispatch !== false,
+    signature
   });
 }
 
@@ -4884,6 +5112,24 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
     queueState: typeof process?.queueState === 'string' ? process.queueState : '',
     closed
   });
+  await reportAnalysisQueueEvent('job_window_close_after_confirm', {
+    process,
+    runId: normalizedRunId,
+    jobId: typeof process?.queueJobId === 'string' ? process.queueJobId : '',
+    status: closed ? 'closed' : 'close_skipped',
+    reason: typeof options?.origin === 'string' ? options.origin : 'dispatch_confirmed',
+    queueState: typeof process?.queueState === 'string' ? process.queueState : 'dispatch_confirmed',
+    closeWindowRequested: true,
+    closed,
+    dispatchState: delivery?.state || 'dispatch_confirmed',
+    dispatchConfirmed: true,
+    title: 'Analysis queue: close after dispatch confirm'
+  }).catch((error) => {
+    console.warn('[analysis-queue] late close log failed:', {
+      runId: normalizedRunId,
+      error: error?.message || String(error)
+    });
+  });
   return closed;
 }
 
@@ -5196,6 +5442,35 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
 
   await reconcileAnalysisQueueState(typeof options?.reason === 'string' ? options.reason : 'enqueue');
   const queueSnapshot = await getAnalysisQueueStatusSnapshot();
+  const enqueueReason = typeof options?.reason === 'string' && options.reason.trim()
+    ? options.reason.trim()
+    : 'enqueue';
+  await Promise.all(
+    queuedJobs.map((job, index) => reportAnalysisQueueEvent('job_enqueued', {
+      job,
+      process: processRegistry.get(job.runId) || null,
+      status: 'queued',
+      reason: enqueueReason,
+      queueState: typeof processRegistry.get(job.runId)?.queueState === 'string'
+        ? processRegistry.get(job.runId).queueState
+        : 'waiting',
+      queueSize: queueSnapshot.queueSize,
+      waitingJobs: queueSnapshot.waitingJobs,
+      activeSlots: queueSnapshot.activeSlots,
+      maxConcurrent: queueSnapshot.maxConcurrent,
+      batchIndex: index + 1,
+      batchTotal: queuedJobs.length,
+      sequence: Number.isInteger(job?.sequence) ? job.sequence : null,
+      triggerReason: enqueueReason,
+      title: `Analysis queue: enqueued ${job?.kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE ? 'resume' : 'analysis'}`
+    }).catch((error) => {
+      console.warn('[analysis-queue] enqueue log failed:', {
+        jobId: job?.jobId || '',
+        runId: job?.runId || '',
+        error: error?.message || String(error)
+      });
+    }))
+  );
 
   return {
     success: true,
@@ -5402,6 +5677,21 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
             finishedAt: now,
             timestamp: now
           });
+          await reportAnalysisQueueEvent('job_execution_failed', {
+            job: scheduledJob,
+            process: processRegistry.get(scheduledJob.runId) || null,
+            status: 'failed',
+            reason: resumeResult?.error || 'resume_queue_failed',
+            queueState: 'active',
+            triggerReason: reason,
+            title: 'Analysis queue: resume job failed'
+          }).catch((error) => {
+            console.warn('[analysis-queue] resume failure log failed:', {
+              jobId: scheduledJob.jobId,
+              runId: scheduledJob.runId,
+              error: error?.message || String(error)
+            });
+          });
         }
         requestAnalysisQueueReconcile('resume_job_finished');
         return;
@@ -5448,6 +5738,21 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         runId: scheduledJob.runId,
         error: error?.message || String(error)
       });
+      await reportAnalysisQueueEvent('job_execution_exception', {
+        job: scheduledJob,
+        process: processRegistry.get(scheduledJob.runId) || null,
+        status: 'failed',
+        reason: 'queue_execution_exception',
+        queueState: 'active',
+        triggerReason: reason,
+        title: 'Analysis queue: execution exception'
+      }).catch((logError) => {
+        console.warn('[analysis-queue] execution exception log failed:', {
+          jobId: scheduledJob.jobId,
+          runId: scheduledJob.runId,
+          error: logError?.message || String(logError)
+        });
+      });
       requestAnalysisQueueReconcile('queue_job_exception');
     });
 }
@@ -5473,6 +5778,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
       let startJobs = [];
       let releaseJobs = [];
       let followUpProcessPatches = [];
+      let releaseEventRecords = [];
 
       await withAnalysisQueueMutationLock(async () => {
         let state = cloneAnalysisQueueState();
@@ -5577,9 +5883,18 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             releasePatch.reason = 'pending_dispatch_timeout';
           }
           await upsertProcess(release.job.runId, releasePatch);
+          let windowClosed = null;
           if (release.closeWindow) {
-            await closeProcessWindowAfterQueueSuccess(release.process);
+            windowClosed = await closeProcessWindowAfterQueueSuccess(release.process);
           }
+          const releaseProcess = processRegistry.get(release.job.runId) || release.process;
+          releaseEventRecords.push({
+            job: release.job,
+            process: releaseProcess,
+            reason: release.reason,
+            closeWindowRequested: release.closeWindow === true,
+            windowClosed
+          });
         }
       }
 
@@ -5596,6 +5911,81 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           timestamp: now
         });
         runQueuedAnalysisJob(startJob, normalizedReason);
+      }
+
+      if (startJobs.length > 0 || releaseEventRecords.length > 0 || followUpProcessPatches.length > 0) {
+        const queueLogSnapshot = await getAnalysisQueueStatusSnapshot().catch(() => null);
+        await Promise.all(releaseEventRecords.map((releaseEvent) => {
+          const currentProcess = releaseEvent.process || processRegistry.get(releaseEvent.job.runId) || null;
+          const delivery = currentProcess ? getProcessQueueDeliveryState(currentProcess) : null;
+          return reportAnalysisQueueEvent('job_released', {
+            job: releaseEvent.job,
+            process: currentProcess,
+            status: releaseEvent.closeWindowRequested
+              ? (releaseEvent.windowClosed === true ? 'released_closed' : 'released_close_pending')
+              : 'released',
+            reason: releaseEvent.reason,
+            queueState: typeof currentProcess?.queueState === 'string'
+              ? currentProcess.queueState
+              : (releaseEvent.closeWindowRequested ? 'dispatch_confirmed' : 'slot_released'),
+            waitingJobs: Number.isInteger(queueLogSnapshot?.waitingJobs) ? queueLogSnapshot.waitingJobs : null,
+            activeSlots: Number.isInteger(queueLogSnapshot?.activeSlots) ? queueLogSnapshot.activeSlots : null,
+            maxConcurrent: Number.isInteger(queueLogSnapshot?.maxConcurrent) ? queueLogSnapshot.maxConcurrent : null,
+            slotReleaseReason: releaseEvent.reason,
+            closeWindowRequested: releaseEvent.closeWindowRequested,
+            closed: typeof releaseEvent.windowClosed === 'boolean' ? releaseEvent.windowClosed : null,
+            dispatchState: delivery?.state || '',
+            dispatchConfirmed: delivery?.confirmed === true,
+            triggerReason: normalizedReason,
+            title: 'Analysis queue: released job'
+          }).catch((error) => {
+            console.warn('[analysis-queue] release log failed:', {
+              jobId: releaseEvent.job?.jobId || '',
+              runId: releaseEvent.job?.runId || '',
+              error: error?.message || String(error)
+            });
+          });
+        }));
+
+        await Promise.all(startJobs.map((startJob) => {
+          const currentProcess = processRegistry.get(startJob.runId) || null;
+          return reportAnalysisQueueEvent('job_started', {
+            job: startJob,
+            process: currentProcess,
+            status: 'started',
+            reason: normalizedReason,
+            queueState: typeof currentProcess?.queueState === 'string' ? currentProcess.queueState : 'active',
+            waitingJobs: Number.isInteger(queueLogSnapshot?.waitingJobs) ? queueLogSnapshot.waitingJobs : null,
+            activeSlots: Number.isInteger(queueLogSnapshot?.activeSlots) ? queueLogSnapshot.activeSlots : null,
+            maxConcurrent: Number.isInteger(queueLogSnapshot?.maxConcurrent) ? queueLogSnapshot.maxConcurrent : null,
+            triggerReason: normalizedReason,
+            title: 'Analysis queue: started job'
+          }).catch((error) => {
+            console.warn('[analysis-queue] start log failed:', {
+              jobId: startJob?.jobId || '',
+              runId: startJob?.runId || '',
+              error: error?.message || String(error)
+            });
+          });
+        }));
+
+        await reportAnalysisQueueEvent('reconcile_summary', {
+          status: 'reconciled',
+          reason: normalizedReason,
+          waitingJobs: Number.isInteger(queueLogSnapshot?.waitingJobs) ? queueLogSnapshot.waitingJobs : null,
+          activeSlots: Number.isInteger(queueLogSnapshot?.activeSlots) ? queueLogSnapshot.activeSlots : null,
+          maxConcurrent: Number.isInteger(queueLogSnapshot?.maxConcurrent) ? queueLogSnapshot.maxConcurrent : null,
+          startedCount: startJobs.length,
+          releasedCount: releaseEventRecords.length,
+          updatedCount: followUpProcessPatches.length,
+          triggerReason: normalizedReason,
+          title: 'Analysis queue: reconcile summary'
+        }).catch((error) => {
+          console.warn('[analysis-queue] reconcile summary log failed:', {
+            reason: normalizedReason,
+            error: error?.message || String(error)
+          });
+        });
       }
 
       if (!analysisQueueReconcileRequested) {
