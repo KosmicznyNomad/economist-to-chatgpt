@@ -129,6 +129,11 @@ const PROCESS_MONITOR_HEARTBEAT = {
   staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
   staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2
 };
+const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
+  initialDelayMs: 2000,
+  maxDelayMs: 5 * 60 * 1000,
+  maxAttempts: 96
+};
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
 const PROBLEM_LOG_CONSOLE_CAPTURE_ENABLED = true;
@@ -198,6 +203,9 @@ let extensionInstallationIdReady = null;
 const problemLogLastSignatureByRunId = new Map();
 const processLogLastEmitTsByRunId = new Map();
 const processStaleWarnLastEmitTsByRunId = new Map();
+const completedProcessPersistenceRetryTimersByRunId = new Map();
+const completedProcessPersistenceRetryAttemptCountByRunId = new Map();
+const completedProcessPersistenceRetryInFlight = new Set();
 const manualPdfQueueBatches = new Map();
 const problemLogConsoleErrorDedup = new Map();
 let problemLogConsoleCaptureInstalled = false;
@@ -629,12 +637,17 @@ async function ensureProcessRegistryReady() {
           processRegistry.set(record.id, record);
         });
         rehydrateProcessProblemLogState(records);
+        scheduleCompletedProcessPersistenceRetriesForSnapshot(records, 'process_registry_ready');
       } catch (error) {
         console.warn('[monitor] Failed to read process monitor state:', error);
         processRegistry.clear();
         problemLogLastSignatureByRunId.clear();
         processLogLastEmitTsByRunId.clear();
         processStaleWarnLastEmitTsByRunId.clear();
+        completedProcessPersistenceRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
+        completedProcessPersistenceRetryTimersByRunId.clear();
+        completedProcessPersistenceRetryAttemptCountByRunId.clear();
+        completedProcessPersistenceRetryInFlight.clear();
       }
     })();
   }
@@ -3697,11 +3710,28 @@ function buildCopyLatestInvestFinalResponseMessage(options = {}) {
   const textLength = Number.isInteger(options?.textLength) && options.textLength >= 0
     ? options.textLength
     : null;
+  const batchRequested = Number.isInteger(options?.batchRequested) && options.batchRequested > 0
+    ? options.batchRequested
+    : null;
+  const batchSucceeded = Number.isInteger(options?.batchSucceeded) && options.batchSucceeded >= 0
+    ? options.batchSucceeded
+    : null;
+  const batchFailed = Number.isInteger(options?.batchFailed) && options.batchFailed >= 0
+    ? options.batchFailed
+    : null;
   const persistenceMode = trimProblemLogText(options?.persistenceMode || '', 40);
   const persistenceReason = trimProblemLogText(options?.persistenceReason || '', 80);
   const dispatchSummary = truncateDispatchLogText(options?.dispatchSummary || '', 120);
 
   if (targetTitle) parts.push(`target=${targetTitle}`);
+  if (batchRequested !== null) {
+    if (batchSucceeded !== null) {
+      parts.push(`batch=${batchSucceeded}/${batchRequested}`);
+    } else {
+      parts.push(`batch=${batchRequested}`);
+    }
+  }
+  if (batchFailed !== null) parts.push(`failed=${batchFailed}`);
   if (textLength !== null) parts.push(`len=${textLength}`);
   if (options?.persistenceAttempted === true) {
     if (persistenceMode) parts.push(`save=${persistenceMode}`);
@@ -3729,10 +3759,33 @@ function reportCopyLatestInvestFinalResponseEvent(options = {}) {
   const chatUrl = normalizeChatConversationUrl(options?.conversationUrl || options?.chatUrl || '');
   const origin = trimProblemLogText(options?.origin || '', 80);
   const copyTrace = trimProblemLogText(options?.copyTrace || '', 120);
+  const scope = trimProblemLogText(options?.scope || '', 40);
+  const targetOrdinal = Number.isInteger(options?.targetOrdinal) && options.targetOrdinal > 0
+    ? options.targetOrdinal
+    : null;
+  const targetTotal = Number.isInteger(options?.targetTotal) && options.targetTotal > 0
+    ? options.targetTotal
+    : null;
+  const batchRequested = Number.isInteger(options?.batchRequested) && options.batchRequested > 0
+    ? options.batchRequested
+    : null;
+  const batchSucceeded = Number.isInteger(options?.batchSucceeded) && options.batchSucceeded >= 0
+    ? options.batchSucceeded
+    : null;
+  const batchFailed = Number.isInteger(options?.batchFailed) && options.batchFailed >= 0
+    ? options.batchFailed
+    : null;
   const persistenceMode = trimProblemLogText(options?.persistenceMode || '', 40);
   const persistenceReason = trimProblemLogText(options?.persistenceReason || '', 80);
   const statusText = trimProblemLogText([
     origin ? `origin=${origin}` : '',
+    scope ? `scope=${scope}` : '',
+    Number.isInteger(targetOrdinal) && Number.isInteger(targetTotal) && targetTotal > 1
+      ? `target=${targetOrdinal}/${targetTotal}`
+      : '',
+    batchRequested !== null
+      ? `batch=${batchSucceeded !== null ? batchSucceeded : '?'}${batchFailed !== null ? `,failed=${batchFailed}` : ''}/${batchRequested}`
+      : '',
     copyTrace ? `trace=${copyTrace}` : '',
     options?.persistenceAttempted === true ? `fallback=${options?.persistenceSuccess === true ? 'ok' : 'failed'}` : '',
     persistenceMode ? `mode=${persistenceMode}` : '',
@@ -3745,6 +3798,9 @@ function reportCopyLatestInvestFinalResponseEvent(options = {}) {
     persistenceSuccess: options?.persistenceSuccess === true,
     persistenceMode,
     persistenceReason,
+    batchRequested,
+    batchSucceeded,
+    batchFailed,
     hasConversationUrl: !!chatUrl,
     dispatchSummary: options?.dispatchSummary || ''
   });
@@ -3852,6 +3908,9 @@ async function upsertProcess(runId, patch = {}) {
     processStaleWarnLastEmitTsByRunId.delete(runId);
   }
   processRegistry.set(runId, next);
+  scheduleCompletedProcessPersistenceRetry(next, {
+    origin: 'process_upsert'
+  });
   if (next.queueManaged === true || existing?.queueManaged === true || analysisQueueState?.waitingJobs?.length || analysisQueueState?.activeJobs?.length) {
     requestAnalysisQueueReconcile('process_upsert');
   }
@@ -4263,6 +4322,20 @@ function collectKnownProcessResponseIds(process, expectedRunId = '') {
   return ids;
 }
 
+function buildProcessCopyTrace(process, fallbackRunId = '') {
+  if (typeof process?.completedResponseSaveTrace === 'string' && process.completedResponseSaveTrace.trim()) {
+    return process.completedResponseSaveTrace.trim();
+  }
+  if (typeof process?.persistenceStatus?.copyTrace === 'string' && process.persistenceStatus.copyTrace.trim()) {
+    return process.persistenceStatus.copyTrace.trim();
+  }
+  const runId = typeof process?.id === 'string' && process.id.trim()
+    ? process.id.trim()
+    : (typeof fallbackRunId === 'string' && fallbackRunId.trim() ? fallbackRunId.trim() : '');
+  const knownResponseIds = Array.from(collectKnownProcessResponseIds(process, runId));
+  return buildCopyTrace(runId, knownResponseIds[0] || '');
+}
+
 function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '', details = {}) {
   const prev = previousDispatch && typeof previousDispatch === 'object'
     ? previousDispatch
@@ -4391,7 +4464,25 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
   }
 
   await upsertProcess(normalizedRunId, patch);
+  clearCompletedProcessPersistenceRetry(normalizedRunId);
+  await closeCompletedProcessAfterDispatchConfirmed(normalizedRunId, {
+    origin: 'verify_dispatch_success'
+  }).catch(() => false);
   return true;
+}
+
+function getProcessPersistenceDispatchSnapshot(process) {
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  return persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
+    ? persistenceStatus.dispatch
+    : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
+      ? process.completedResponseDispatch
+      : (finalStagePersistence && typeof finalStagePersistence === 'object' ? finalStagePersistence : null));
 }
 
 function getProcessQueueDeliveryState(process) {
@@ -4401,11 +4492,7 @@ function getProcessQueueDeliveryState(process) {
   const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
     ? process.finalStagePersistence
     : null;
-  const dispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
-    ? persistenceStatus.dispatch
-    : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
-      ? process.completedResponseDispatch
-      : (finalStagePersistence && typeof finalStagePersistence === 'object' ? finalStagePersistence : null));
+  const dispatch = getProcessPersistenceDispatchSnapshot(process);
 
   const saveOk = typeof persistenceStatus?.saveOk === 'boolean'
     ? persistenceStatus.saveOk
@@ -4483,6 +4570,67 @@ async function markTrackedProcessStoppedForClosedTab(tabId, removeInfo = null) {
 
   const now = Date.now();
   const status = normalizeProcessStatus(process.status);
+  const completedResponseText = extractAssistantTextFromProcess(process);
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const statusTextLower = typeof process?.statusText === 'string' ? process.statusText.toLowerCase() : '';
+  const likelyFinalStage = completedResponseText.length > 0 && (
+    (totalPrompts > 0 && currentPrompt >= totalPrompts)
+    || statusTextLower.includes('trwa zapis do bazy')
+    || statusTextLower.includes('zakonczono')
+    || Number.isInteger(process?.completedResponseCapturedAt)
+    || process?.completedResponseSaved === true
+  );
+
+  if (likelyFinalStage) {
+    const persistResult = await ensureCompletedProcessResponsePersisted(process, {
+      force: true,
+      origin: 'tab_closed_completed_response'
+    }).catch((error) => ({
+      attempted: false,
+      success: false,
+      reason: error?.message || String(error)
+    }));
+    const persistenceSummary = summarizeFinalStagePersistence(persistResult);
+    const refreshedProcess = processRegistry.get(process.id) || process;
+    const delivery = getProcessQueueDeliveryState(refreshedProcess);
+    await upsertProcess(process.id, {
+      status: 'completed',
+      statusText: delivery.confirmed === true
+        ? 'Zakonczono - odzyskano zapis po zamknieciu karty'
+        : 'Zakonczono - zapis odzyskany, oczekuje dispatch',
+      reason: delivery.confirmed === true
+        ? 'tab_closed_after_completion'
+        : 'tab_closed_after_completion_pending_dispatch',
+      needsAction: false,
+      autoRecovery: null,
+      finishedAt: now,
+      timestamp: now,
+      ...(persistenceSummary
+        ? {
+            finalStagePersistence: {
+              ...persistenceSummary,
+              origin: 'tab_closed_completed_response',
+              updatedAt: now
+            }
+          }
+        : {})
+    });
+    if (delivery.confirmed === true) {
+      clearCompletedProcessPersistenceRetry(process.id);
+      await closeCompletedProcessAfterDispatchConfirmed(process.id, {
+        origin: 'tab_closed_completed_response'
+      }).catch(() => false);
+    } else {
+      scheduleCompletedProcessPersistenceRetry(process.id, {
+        origin: 'tab_closed_completed_response',
+        force: true,
+        delayMs: 0
+      });
+    }
+    return true;
+  }
+
   const statusText = status === 'queued'
     ? 'Karta zamknieta przed startem procesu'
     : 'Karta zamknieta podczas wykonywania procesu';
@@ -4538,6 +4686,392 @@ async function closeProcessWindowAfterQueueSuccess(process) {
   }
 
   return tabClosed;
+}
+
+function getCompletedProcessPersistenceRetryDelayMs(attemptCount = 0) {
+  const attempts = Number.isInteger(attemptCount) && attemptCount > 0 ? attemptCount : 0;
+  if (attempts <= 0) {
+    return COMPLETED_PROCESS_PERSISTENCE_RETRY.initialDelayMs;
+  }
+  const scaledDelay = COMPLETED_PROCESS_PERSISTENCE_RETRY.initialDelayMs * Math.pow(2, Math.min(attempts, 8));
+  return Math.min(COMPLETED_PROCESS_PERSISTENCE_RETRY.maxDelayMs, scaledDelay);
+}
+
+function clearCompletedProcessPersistenceRetry(runId = '', options = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) return false;
+  const timerId = completedProcessPersistenceRetryTimersByRunId.get(normalizedRunId);
+  if (timerId) {
+    clearTimeout(timerId);
+  }
+  completedProcessPersistenceRetryTimersByRunId.delete(normalizedRunId);
+  if (options.keepAttempts !== true) {
+    completedProcessPersistenceRetryAttemptCountByRunId.delete(normalizedRunId);
+  }
+  if (options.keepInFlight !== true) {
+    completedProcessPersistenceRetryInFlight.delete(normalizedRunId);
+  }
+  return true;
+}
+
+function resolveCompletedProcessPersistenceRetryPlan(process) {
+  if (!process || typeof process !== 'object') {
+    return { needed: false, mode: '', reason: 'invalid_process', delivery: null };
+  }
+
+  const status = normalizeProcessStatus(process.status || '');
+  if (status !== 'completed') {
+    return { needed: false, mode: '', reason: 'status_not_completed', delivery: getProcessQueueDeliveryState(process) };
+  }
+
+  const delivery = getProcessQueueDeliveryState(process);
+  if (delivery.confirmed === true) {
+    return { needed: false, mode: '', reason: 'already_confirmed', delivery };
+  }
+
+  const dispatch = getProcessPersistenceDispatchSnapshot(process);
+  const hasResponsePayload = extractAssistantTextFromProcess(process).length > 0;
+
+  if (delivery.saveOk === true) {
+    const queueSkipReason = typeof dispatch?.queueSkipReason === 'string' ? dispatch.queueSkipReason.trim() : '';
+    if (delivery.queueSkipped === true) {
+      if (queueSkipReason === 'dispatch_disabled' || queueSkipReason === 'invalid_payload') {
+        return { needed: false, mode: '', reason: queueSkipReason || 'queue_skipped_not_retriable', delivery };
+      }
+      if (!hasResponsePayload) {
+        return { needed: false, mode: '', reason: 'missing_response_text', delivery };
+      }
+      return { needed: true, mode: 'replay', reason: 'queue_skipped', delivery };
+    }
+    if (dispatch && typeof dispatch === 'object') {
+      return {
+        needed: true,
+        mode: 'flush',
+        reason: delivery.state || 'dispatch_unconfirmed',
+        delivery
+      };
+    }
+    if (!hasResponsePayload) {
+      return { needed: false, mode: '', reason: 'missing_response_text', delivery };
+    }
+    return { needed: true, mode: 'replay', reason: 'missing_dispatch_state', delivery };
+  }
+
+  if (!hasResponsePayload) {
+    return { needed: false, mode: '', reason: 'missing_response_text', delivery };
+  }
+
+  return {
+    needed: true,
+    mode: 'replay',
+    reason: delivery.saveOk === false ? 'save_failed' : 'save_not_attempted',
+    delivery
+  };
+}
+
+function scheduleCompletedProcessPersistenceRetriesForSnapshot(records = [], origin = 'registry_ready') {
+  const snapshot = Array.isArray(records) ? records : [];
+  snapshot.forEach((process, index) => {
+    scheduleCompletedProcessPersistenceRetry(process, {
+      origin,
+      force: true,
+      delayMs: Math.min(15000, Math.max(0, index) * 350)
+    });
+  });
+}
+
+function scheduleCompletedProcessPersistenceRetry(processOrRunId, options = {}) {
+  const process = processOrRunId && typeof processOrRunId === 'object'
+    ? processOrRunId
+    : null;
+  const normalizedRunId = typeof processOrRunId === 'string' && processOrRunId.trim()
+    ? processOrRunId.trim()
+    : (typeof process?.id === 'string' ? process.id.trim() : '');
+  if (!normalizedRunId) return false;
+
+  const currentProcess = process || processRegistry.get(normalizedRunId) || null;
+  const plan = resolveCompletedProcessPersistenceRetryPlan(currentProcess);
+  if (!plan.needed) {
+    clearCompletedProcessPersistenceRetry(normalizedRunId);
+    return false;
+  }
+
+  if (completedProcessPersistenceRetryInFlight.has(normalizedRunId) && options.allowWhileInFlight !== true) {
+    return true;
+  }
+
+  const hasTimer = completedProcessPersistenceRetryTimersByRunId.has(normalizedRunId);
+  if (hasTimer && options.force !== true) {
+    return true;
+  }
+
+  clearCompletedProcessPersistenceRetry(normalizedRunId, { keepAttempts: true });
+  const attemptCount = completedProcessPersistenceRetryAttemptCountByRunId.get(normalizedRunId) || 0;
+  const delayMs = Number.isInteger(options?.delayMs)
+    ? Math.max(0, options.delayMs)
+    : getCompletedProcessPersistenceRetryDelayMs(attemptCount);
+  const trace = buildProcessCopyTrace(currentProcess, normalizedRunId);
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'schedule_completed_persist_retry';
+  emitWatchlistDispatchProcessLog('info', 'completed_persist_retry_scheduled', 'Scheduled completed process persistence retry', {
+    trace,
+    runId: normalizedRunId,
+    origin,
+    mode: plan.mode,
+    reason: plan.reason,
+    delayMs,
+    attemptCount,
+    queueState: typeof currentProcess?.queueState === 'string' ? currentProcess.queueState : '',
+    status: typeof currentProcess?.status === 'string' ? currentProcess.status : '',
+    confirmed: plan.delivery?.confirmed === true
+  });
+  const timerId = setTimeout(() => {
+    completedProcessPersistenceRetryTimersByRunId.delete(normalizedRunId);
+    void runCompletedProcessPersistenceRetry(normalizedRunId, {
+      origin,
+      scheduledMode: plan.mode,
+      scheduledReason: plan.reason
+    });
+  }, delayMs);
+  completedProcessPersistenceRetryTimersByRunId.set(normalizedRunId, timerId);
+  return true;
+}
+
+async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) return false;
+  await ensureProcessRegistryReady();
+
+  let process = processRegistry.get(normalizedRunId) || null;
+  if (!process || typeof process !== 'object') return false;
+  if (normalizeProcessStatus(process.status) !== 'completed') return false;
+  if (process.queueManaged !== true) return false;
+  const slotAlreadyReleased = process.slotReserved === false
+    || process.queueState === 'slot_released'
+    || process.queueState === 'dispatch_confirmed';
+  if (!slotAlreadyReleased) return false;
+
+  const delivery = getProcessQueueDeliveryState(process);
+  if (delivery.confirmed !== true) return false;
+
+  const trace = buildProcessCopyTrace(process, normalizedRunId);
+  const now = Date.now();
+  if (process.queueState !== 'dispatch_confirmed') {
+    await upsertProcess(normalizedRunId, {
+      queueManaged: true,
+      queueJobId: typeof process.queueJobId === 'string' ? process.queueJobId : '',
+      queueState: 'dispatch_confirmed',
+      slotReserved: false,
+      slotReleasedAt: Number.isInteger(process.slotReleasedAt) ? process.slotReleasedAt : now,
+      slotReleaseReason: typeof process.slotReleaseReason === 'string' && process.slotReleaseReason.trim()
+        ? process.slotReleaseReason.trim()
+        : 'dispatch_confirmed_late',
+      timestamp: now
+    });
+    process = processRegistry.get(normalizedRunId) || process;
+  }
+
+  const closed = await closeProcessWindowAfterQueueSuccess(process);
+  emitWatchlistDispatchProcessLog(closed ? 'info' : 'warn', 'completed_process_window_close', closed
+    ? 'Closed queued process window after dispatch confirmation'
+    : 'Completed queued process confirmed, but no process tab/window was closed', {
+    trace,
+    runId: normalizedRunId,
+    origin: typeof options?.origin === 'string' ? options.origin : 'dispatch_confirmed',
+    tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+    windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+    queueState: typeof process?.queueState === 'string' ? process.queueState : '',
+    closed
+  });
+  return closed;
+}
+
+async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) {
+    return { success: false, reason: 'missing_run_id' };
+  }
+  if (completedProcessPersistenceRetryInFlight.has(normalizedRunId)) {
+    return { success: false, skipped: true, reason: 'retry_in_flight' };
+  }
+
+  completedProcessPersistenceRetryInFlight.add(normalizedRunId);
+  try {
+    await ensureProcessRegistryReady();
+    let process = processRegistry.get(normalizedRunId) || null;
+    if (!process || typeof process !== 'object') {
+      clearCompletedProcessPersistenceRetry(normalizedRunId);
+      return { success: false, reason: 'missing_process' };
+    }
+
+    let plan = resolveCompletedProcessPersistenceRetryPlan(process);
+    if (!plan.needed) {
+      clearCompletedProcessPersistenceRetry(normalizedRunId);
+      if (plan.delivery?.confirmed === true) {
+        await closeCompletedProcessAfterDispatchConfirmed(normalizedRunId, {
+          origin: options?.origin || 'completed_process_retry'
+        }).catch(() => false);
+      }
+      return {
+        success: true,
+        skipped: true,
+        reason: plan.reason,
+        delivery: plan.delivery
+      };
+    }
+
+    const attemptCount = (completedProcessPersistenceRetryAttemptCountByRunId.get(normalizedRunId) || 0) + 1;
+    completedProcessPersistenceRetryAttemptCountByRunId.set(normalizedRunId, attemptCount);
+    const trace = buildProcessCopyTrace(process, normalizedRunId);
+    const origin = typeof options?.origin === 'string' && options.origin.trim()
+      ? options.origin.trim()
+      : 'completed_process_retry';
+    const attemptMode = plan.mode;
+    const attemptReason = plan.reason;
+    emitWatchlistDispatchProcessLog('info', 'completed_persist_retry_start', 'Started completed process persistence retry', {
+      trace,
+      runId: normalizedRunId,
+      origin,
+      attemptCount,
+      mode: attemptMode,
+      reason: attemptReason,
+      queueState: typeof process?.queueState === 'string' ? process.queueState : '',
+      status: typeof process?.status === 'string' ? process.status : ''
+    });
+
+    let actionResult = null;
+    if (attemptMode === 'flush') {
+      actionResult = await flushWatchlistDispatchOutbox(`completed_process_retry:${origin}`);
+    } else {
+      actionResult = await ensureCompletedProcessResponsePersisted(process, {
+        force: true,
+        tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+        tabReadTimeoutMs: 2200,
+        origin: `completed_process_retry:${origin}`
+      });
+    }
+
+    process = processRegistry.get(normalizedRunId) || process;
+    plan = resolveCompletedProcessPersistenceRetryPlan(process);
+    const delivery = plan.delivery || getProcessQueueDeliveryState(process);
+    const confirmed = delivery?.confirmed === true;
+    const shouldRetry = plan.needed === true;
+    const resultLogLevel = confirmed ? 'info' : (shouldRetry ? 'warn' : 'info');
+    const resultSummary = attemptMode === 'flush'
+      ? {
+          skipped: actionResult?.skipped === true,
+          accepted: Number.isInteger(actionResult?.accepted) ? actionResult.accepted : 0,
+          sent: Number.isInteger(actionResult?.sent) ? actionResult.sent : 0,
+          failed: Number.isInteger(actionResult?.failed) ? actionResult.failed : 0,
+          deferred: Number.isInteger(actionResult?.deferred) ? actionResult.deferred : 0,
+          remaining: Number.isInteger(actionResult?.remaining) ? actionResult.remaining : 0,
+          verifyState: typeof actionResult?.verifyState === 'string' ? actionResult.verifyState : '',
+          verifyReason: typeof actionResult?.verifyReason === 'string' ? actionResult.verifyReason : ''
+        }
+      : {
+          attempted: actionResult?.attempted === true,
+          success: actionResult?.success === true,
+          reason: typeof actionResult?.reason === 'string' ? actionResult.reason : '',
+          dispatchSummary: typeof actionResult?.dispatchSummary === 'string' ? actionResult.dispatchSummary : ''
+        };
+    emitWatchlistDispatchProcessLog(resultLogLevel, 'completed_persist_retry_result', confirmed
+      ? 'Completed process persistence retry confirmed dispatch'
+      : (shouldRetry ? 'Completed process persistence retry still pending' : 'Completed process persistence retry settled'), {
+      trace,
+      runId: normalizedRunId,
+      origin,
+      attemptCount,
+      mode: attemptMode,
+      reason: attemptReason,
+      confirmed,
+      nextReason: plan.reason,
+      deliveryState: delivery?.state || '',
+      saveOk: delivery?.saveOk === true,
+      pending: Number.isInteger(delivery?.pending) ? delivery.pending : null,
+      failed: Number.isInteger(delivery?.failed) ? delivery.failed : null,
+      queueState: typeof process?.queueState === 'string' ? process.queueState : '',
+      result: resultSummary
+    });
+
+    if (confirmed) {
+      clearCompletedProcessPersistenceRetry(normalizedRunId);
+      await closeCompletedProcessAfterDispatchConfirmed(normalizedRunId, {
+        origin
+      }).catch(() => false);
+      requestAnalysisQueueReconcile('completed_process_persist_retry_confirmed');
+      return {
+        success: true,
+        confirmed: true,
+        attemptCount,
+        delivery
+      };
+    }
+
+    if (!shouldRetry) {
+      clearCompletedProcessPersistenceRetry(normalizedRunId);
+      return {
+        success: true,
+        confirmed: false,
+        settled: true,
+        attemptCount,
+        delivery
+      };
+    }
+
+    if (attemptCount >= COMPLETED_PROCESS_PERSISTENCE_RETRY.maxAttempts) {
+      clearCompletedProcessPersistenceRetry(normalizedRunId, { keepAttempts: true });
+      emitWatchlistDispatchProcessLog('warn', 'completed_persist_retry_exhausted', 'Completed process persistence retry reached max attempts', {
+        trace,
+        runId: normalizedRunId,
+        origin,
+        attemptCount,
+        mode: plan.mode,
+        reason: plan.reason,
+        deliveryState: delivery?.state || ''
+      });
+      return {
+        success: false,
+        confirmed: false,
+        reason: 'max_attempts_reached',
+        attemptCount,
+        delivery
+      };
+    }
+
+    scheduleCompletedProcessPersistenceRetry(process, {
+      origin,
+      force: true,
+      allowWhileInFlight: true
+    });
+    return {
+      success: true,
+      confirmed: false,
+      pending: true,
+      attemptCount,
+      delivery
+    };
+  } catch (error) {
+    const process = processRegistry.get(normalizedRunId) || null;
+    const trace = buildProcessCopyTrace(process, normalizedRunId);
+    emitWatchlistDispatchProcessLog('error', 'completed_persist_retry_error', 'Completed process persistence retry failed with exception', {
+      trace,
+      runId: normalizedRunId,
+      origin: typeof options?.origin === 'string' ? options.origin : 'completed_process_retry',
+      error: error?.message || String(error)
+    });
+    scheduleCompletedProcessPersistenceRetry(normalizedRunId, {
+      origin: typeof options?.origin === 'string' ? options.origin : 'completed_process_retry',
+      force: true,
+      allowWhileInFlight: true
+    });
+    return {
+      success: false,
+      reason: error?.message || String(error)
+    };
+  } finally {
+    completedProcessPersistenceRetryInFlight.delete(normalizedRunId);
+  }
 }
 
 function generateAnalysisQueueRunId(prefix = 'analysis') {
@@ -7422,51 +7956,34 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   };
 }
 
-async function resolveLatestInvestCopyTarget(options = {}) {
-  const contextSnapshot = await collectCompanyInvestContextSnapshot({
-    includeClosedProcesses: options?.includeClosedProcesses === true,
-    includeInvestTabs: true,
-    includeProcessContextFallback: false
-  });
-
-  const investTabs = Array.isArray(contextSnapshot?.investTabs)
-    ? [...contextSnapshot.investTabs]
-    : [];
-  if (investTabs.length === 0) {
-    return { success: false, error: 'invest_tab_not_found' };
-  }
-
-  let activeInvestTabId = null;
+async function getActiveInvestTabIdInCurrentWindow() {
   try {
     const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const activeTab = Array.isArray(activeTabs) && activeTabs.length > 0 ? activeTabs[0] : null;
     if (Number.isInteger(activeTab?.id) && isInvestGptUrl(getTabEffectiveUrl(activeTab))) {
-      activeInvestTabId = activeTab.id;
+      return activeTab.id;
     }
   } catch (error) {
     // Ignore and fall back to access-time ordering.
   }
+  return null;
+}
 
-  investTabs.sort((left, right) => {
-    if (Number.isInteger(activeInvestTabId)) {
-      const leftMatches = Number.isInteger(left?.id) && left.id === activeInvestTabId;
-      const rightMatches = Number.isInteger(right?.id) && right.id === activeInvestTabId;
-      if (leftMatches !== rightMatches) {
-        return leftMatches ? -1 : 1;
-      }
-    }
-    return compareTabsByRecentAccess(left, right);
-  });
-
-  const targetTab = investTabs[0] || null;
+function buildInvestCopyTargetFromTab(targetTab, contextSnapshot) {
   const tabId = Number.isInteger(targetTab?.id) ? targetTab.id : null;
   const windowId = Number.isInteger(targetTab?.windowId) ? targetTab.windowId : null;
   if (!Number.isInteger(tabId) || !Number.isInteger(windowId)) {
-    return { success: false, error: 'invest_tab_context_missing' };
+    return null;
   }
 
-  const process = contextSnapshot.processByTabId.get(tabId)
-    || contextSnapshot.processByWindowId.get(windowId)
+  const processByTabId = contextSnapshot?.processByTabId instanceof Map
+    ? contextSnapshot.processByTabId
+    : new Map();
+  const processByWindowId = contextSnapshot?.processByWindowId instanceof Map
+    ? contextSnapshot.processByWindowId
+    : new Map();
+  const process = processByTabId.get(tabId)
+    || processByWindowId.get(windowId)
     || null;
   const conversationUrl = normalizeChatConversationUrl(getTabEffectiveUrl(targetTab))
     || normalizeChatConversationUrl(process?.chatUrl || process?.sourceUrl || '');
@@ -7483,64 +8000,215 @@ async function resolveLatestInvestCopyTarget(options = {}) {
   };
 }
 
-async function copyLatestInvestFinalResponse(options = {}) {
-  const operationId = `copylatest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+async function resolveInvestCopyTargets(options = {}) {
+  const scope = options?.scope === 'all_open_windows' ? 'all_open_windows' : 'latest';
+  const contextSnapshot = await collectCompanyInvestContextSnapshot({
+    includeClosedProcesses: options?.includeClosedProcesses === true,
+    includeInvestTabs: true,
+    includeProcessContextFallback: false
+  });
+
+  const investTabs = Array.isArray(contextSnapshot?.investTabs)
+    ? [...contextSnapshot.investTabs]
+    : [];
+  const openWindowIds = new Set(
+    investTabs
+      .map((tab) => (Number.isInteger(tab?.windowId) ? tab.windowId : null))
+      .filter((windowId) => Number.isInteger(windowId))
+  );
+  if (investTabs.length === 0) {
+    return {
+      success: false,
+      error: 'invest_tab_not_found',
+      scope,
+      investTabCount: 0,
+      windowCount: 0,
+      targets: []
+    };
+  }
+
+  const activeInvestTabId = await getActiveInvestTabIdInCurrentWindow();
+  investTabs.sort((left, right) => {
+    if (Number.isInteger(activeInvestTabId)) {
+      const leftMatches = Number.isInteger(left?.id) && left.id === activeInvestTabId;
+      const rightMatches = Number.isInteger(right?.id) && right.id === activeInvestTabId;
+      if (leftMatches !== rightMatches) {
+        return leftMatches ? -1 : 1;
+      }
+    }
+    return compareTabsByRecentAccess(left, right);
+  });
+
+  const selectedTabs = [];
+  if (scope === 'all_open_windows') {
+    const handledWindowIds = new Set();
+    investTabs.forEach((tab) => {
+      const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
+      if (!Number.isInteger(windowId) || handledWindowIds.has(windowId)) {
+        return;
+      }
+      handledWindowIds.add(windowId);
+      selectedTabs.push(tab);
+    });
+  } else if (investTabs[0]) {
+    selectedTabs.push(investTabs[0]);
+  }
+
+  const targets = selectedTabs
+    .map((tab) => buildInvestCopyTargetFromTab(tab, contextSnapshot))
+    .filter(Boolean);
+
+  if (targets.length === 0) {
+    return {
+      success: false,
+      error: 'invest_tab_context_missing',
+      scope,
+      investTabCount: investTabs.length,
+      windowCount: openWindowIds.size,
+      targets: []
+    };
+  }
+
+  return {
+    success: true,
+    scope,
+    investTabCount: investTabs.length,
+    windowCount: openWindowIds.size,
+    activeInvestTabId: Number.isInteger(activeInvestTabId) ? activeInvestTabId : null,
+    targets
+  };
+}
+
+async function resolveLatestInvestCopyTarget(options = {}) {
+  const resolved = await resolveInvestCopyTargets({
+    ...options,
+    scope: 'latest'
+  });
+  if (!resolved?.success) {
+    return {
+      success: false,
+      error: resolved?.error || 'invest_tab_not_found'
+    };
+  }
+
+  return {
+    success: true,
+    ...(resolved.targets[0] || {})
+  };
+}
+
+async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
+  const operationId = typeof options?.operationId === 'string' && options.operationId.trim()
+    ? options.operationId.trim()
+    : `copylatest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
     : 'copy_latest_invest_final_response';
-  const target = await resolveLatestInvestCopyTarget(options);
-  if (!target?.success) {
-    reportCopyLatestInvestFinalResponseEvent({
-      operationId,
-      origin,
-      level: 'warn',
-      status: 'failed',
-      reason: target?.error || 'invest_tab_not_found',
-      error: target?.error || '',
-      targetTitle: typeof target?.title === 'string' ? target.title : '',
-      sourceUrl: typeof target?.url === 'string' ? target.url : '',
-      conversationUrl: typeof target?.conversationUrl === 'string' ? target.conversationUrl : ''
-    });
-    return target;
-  }
-
+  const scope = options?.scope === 'all_open_windows' ? 'all_open_windows' : 'latest';
+  const targetOrdinal = Number.isInteger(options?.targetOrdinal) && options.targetOrdinal > 0
+    ? options.targetOrdinal
+    : null;
+  const targetTotal = Number.isInteger(options?.targetTotal) && options.targetTotal > 0
+    ? options.targetTotal
+    : null;
   const tabId = Number.isInteger(target?.tabId) ? target.tabId : null;
-  if (!Number.isInteger(tabId)) {
-    return { success: false, error: 'invest_tab_context_missing' };
-  }
-
+  const windowId = Number.isInteger(target?.windowId) ? target.windowId : null;
+  const title = typeof target?.title === 'string' ? target.title : '';
   const process = target?.process && typeof target.process === 'object'
     ? target.process
     : null;
   const conversationUrl = normalizeChatConversationUrl(target?.conversationUrl || '');
-  const responseText = (
-    extractAssistantTextFromProcess(process)
-    || await extractLastAssistantResponseFromTab(
-      tabId,
-      Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2400
-    )
-  ).trim();
 
-  if (!responseText) {
+  console.log('[copy-latest-invest] Target start', {
+    operationId,
+    origin,
+    scope,
+    targetOrdinal,
+    targetTotal,
+    tabId,
+    windowId,
+    title,
+    processId: typeof process?.id === 'string' ? process.id : ''
+  });
+
+  if (!Number.isInteger(tabId)) {
+    const failureResult = {
+      success: false,
+      error: 'invest_tab_context_missing',
+      tabId: null,
+      windowId,
+      title,
+      conversationUrl,
+      processId: typeof process?.id === 'string' ? process.id : ''
+    };
     reportCopyLatestInvestFinalResponseEvent({
       operationId,
       origin,
+      scope,
+      targetOrdinal,
+      targetTotal,
       level: 'warn',
       status: 'failed',
-      reason: 'missing_response_text',
-      error: 'missing_response_text',
-      runId: typeof process?.id === 'string' ? process.id : '',
-      tabId,
-      windowId: target.windowId,
-      targetTitle: typeof target?.title === 'string' ? target.title : '',
+      reason: 'invest_tab_context_missing',
+      error: 'invest_tab_context_missing',
+      runId: failureResult.processId,
+      windowId,
+      targetTitle: title,
       sourceUrl: typeof target?.url === 'string' ? target.url : '',
       conversationUrl
     });
+    return failureResult;
+  }
+
+  let responseText = '';
+  let readError = '';
+  try {
+    responseText = (
+      extractAssistantTextFromProcess(process)
+      || await extractLastAssistantResponseFromTab(
+        tabId,
+        Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2400
+      )
+    ).trim();
+  } catch (error) {
+    readError = error?.message || String(error);
+  }
+
+  if (!responseText) {
+    const failureReason = readError || 'missing_response_text';
+    reportCopyLatestInvestFinalResponseEvent({
+      operationId,
+      origin,
+      scope,
+      targetOrdinal,
+      targetTotal,
+      level: 'warn',
+      status: 'failed',
+      reason: failureReason,
+      error: failureReason,
+      runId: typeof process?.id === 'string' ? process.id : '',
+      tabId,
+      windowId,
+      targetTitle: title,
+      sourceUrl: typeof target?.url === 'string' ? target.url : '',
+      conversationUrl
+    });
+    console.warn('[copy-latest-invest] Target missing response', {
+      operationId,
+      origin,
+      scope,
+      targetOrdinal,
+      targetTotal,
+      tabId,
+      windowId,
+      error: failureReason
+    });
     return {
       success: false,
-      error: 'missing_response_text',
+      error: failureReason,
       tabId,
-      windowId: target.windowId,
+      windowId,
+      title,
       conversationUrl,
       processId: typeof process?.id === 'string' ? process.id : ''
     };
@@ -7561,7 +8229,7 @@ async function copyLatestInvestFinalResponse(options = {}) {
       const processPatch = {};
       if (conversationUrl) processPatch.chatUrl = conversationUrl;
       if (Number.isInteger(tabId)) processPatch.tabId = tabId;
-      if (Number.isInteger(target?.windowId)) processPatch.windowId = target.windowId;
+      if (Number.isInteger(windowId)) processPatch.windowId = windowId;
       if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
         await upsertProcess(process.id.trim(), processPatch);
       }
@@ -7592,8 +8260,8 @@ async function copyLatestInvestFinalResponse(options = {}) {
     } else {
       const saveResult = await saveResponse(
         responseText,
-        typeof target?.title === 'string' && target.title.trim()
-          ? target.title.trim()
+        title && title.trim()
+          ? title.trim()
           : 'ChatGPT Invest fallback',
         'company',
         null,
@@ -7603,7 +8271,7 @@ async function copyLatestInvestFinalResponse(options = {}) {
         },
         conversationUrl || null,
         {
-          sourceTitle: typeof target?.title === 'string' ? target.title : 'ChatGPT Invest',
+          sourceTitle: title || 'ChatGPT Invest',
           sourceName: 'ChatGPT Invest',
           sourceUrl: conversationUrl || ''
         }
@@ -7631,6 +8299,9 @@ async function copyLatestInvestFinalResponse(options = {}) {
   reportCopyLatestInvestFinalResponseEvent({
     operationId,
     origin,
+    scope,
+    targetOrdinal,
+    targetTotal,
     level: persistence.success === true ? 'info' : 'warn',
     status: persistence.success === true ? 'completed' : 'degraded',
     reason: persistence.success === true
@@ -7641,8 +8312,8 @@ async function copyLatestInvestFinalResponse(options = {}) {
     error: persistence.success === true ? '' : (typeof persistence.reason === 'string' ? persistence.reason : ''),
     runId: typeof process?.id === 'string' ? process.id : '',
     tabId,
-    windowId: Number.isInteger(target?.windowId) ? target.windowId : null,
-    targetTitle: typeof target?.title === 'string' ? target.title : '',
+    windowId,
+    targetTitle: title,
     textLength: responseText.length,
     persistenceAttempted: persistence.attempted === true,
     persistenceSuccess: persistence.success === true,
@@ -7654,16 +8325,269 @@ async function copyLatestInvestFinalResponse(options = {}) {
     conversationUrl
   });
 
-  return {
+  const result = {
     success: true,
     text: responseText,
     textLength: responseText.length,
     tabId,
-    windowId: Number.isInteger(target?.windowId) ? target.windowId : null,
-    title: typeof target?.title === 'string' ? target.title : '',
+    windowId,
+    title,
     conversationUrl,
     processId: typeof process?.id === 'string' ? process.id : '',
-    persistence
+    persistence,
+    scope,
+    targetOrdinal,
+    targetTotal
+  };
+
+  console.log('[copy-latest-invest] Target completed', {
+    operationId,
+    origin,
+    scope,
+    targetOrdinal,
+    targetTotal,
+    tabId,
+    windowId,
+    title,
+    textLength: responseText.length,
+    persistenceMode: persistence.mode,
+    persistenceSuccess: persistence.success === true,
+    processId: result.processId
+  });
+
+  return result;
+}
+
+function buildCopyLatestInvestBatchClipboardText(results = []) {
+  const successfulResults = Array.isArray(results)
+    ? results.filter((row) => row?.success === true && typeof row?.text === 'string' && row.text.trim())
+    : [];
+
+  return successfulResults
+    .map((row, index) => {
+      const headerParts = [`Invest ${index + 1}/${successfulResults.length}`];
+      const title = typeof row?.title === 'string' && row.title.trim()
+        ? row.title.trim()
+        : 'ChatGPT Invest';
+      if (title) headerParts.push(title);
+      if (Number.isInteger(row?.windowId)) headerParts.push(`W:${row.windowId}`);
+      return `===== ${headerParts.join(' | ')} =====\n${row.text.trim()}`;
+    })
+    .join('\n\n');
+}
+
+async function copyLatestInvestFinalResponse(options = {}) {
+  const operationId = `copylatest-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'copy_latest_invest_final_response';
+  const scope = options?.scope === 'all_open_windows' ? 'all_open_windows' : 'latest';
+  const resolvedTargets = await resolveInvestCopyTargets({
+    ...options,
+    scope
+  });
+
+  console.log('[copy-latest-invest] Targets resolved', {
+    operationId,
+    origin,
+    scope,
+    investTabCount: Number.isInteger(resolvedTargets?.investTabCount) ? resolvedTargets.investTabCount : 0,
+    windowCount: Number.isInteger(resolvedTargets?.windowCount) ? resolvedTargets.windowCount : 0,
+    targetCount: Array.isArray(resolvedTargets?.targets) ? resolvedTargets.targets.length : 0,
+    targets: Array.isArray(resolvedTargets?.targets)
+      ? resolvedTargets.targets.map((target) => ({
+        tabId: target?.tabId ?? null,
+        windowId: target?.windowId ?? null,
+        title: typeof target?.title === 'string' ? target.title : '',
+        processId: typeof target?.process?.id === 'string' ? target.process.id : ''
+      }))
+      : []
+  });
+
+  if (!resolvedTargets?.success) {
+    reportCopyLatestInvestFinalResponseEvent({
+      operationId,
+      origin,
+      scope,
+      level: 'warn',
+      status: 'failed',
+      reason: resolvedTargets?.error || 'invest_tab_not_found',
+      error: resolvedTargets?.error || '',
+      batchRequested: 0,
+      batchSucceeded: 0,
+      batchFailed: 0
+    });
+    return {
+      success: false,
+      error: resolvedTargets?.error || 'invest_tab_not_found',
+      scope,
+      batch: scope === 'all_open_windows',
+      requested: 0,
+      copied: 0,
+      failed: 0,
+      results: []
+    };
+  }
+
+  if (scope !== 'all_open_windows') {
+    return copyLatestInvestFinalResponseForTarget(resolvedTargets.targets[0], {
+      operationId,
+      origin,
+      scope,
+      targetOrdinal: 1,
+      targetTotal: 1,
+      tabReadTimeoutMs: Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : null
+    });
+  }
+
+  const results = [];
+  for (let index = 0; index < resolvedTargets.targets.length; index += 1) {
+    const target = resolvedTargets.targets[index];
+    try {
+      const result = await copyLatestInvestFinalResponseForTarget(target, {
+        operationId,
+        origin,
+        scope,
+        targetOrdinal: index + 1,
+        targetTotal: resolvedTargets.targets.length,
+        tabReadTimeoutMs: Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : null
+      });
+      results.push(result);
+    } catch (error) {
+      const failureReason = error?.message || 'copy_latest_invest_final_response_failed';
+      const failureResult = {
+        success: false,
+        error: failureReason,
+        tabId: Number.isInteger(target?.tabId) ? target.tabId : null,
+        windowId: Number.isInteger(target?.windowId) ? target.windowId : null,
+        title: typeof target?.title === 'string' ? target.title : '',
+        conversationUrl: typeof target?.conversationUrl === 'string' ? target.conversationUrl : '',
+        processId: typeof target?.process?.id === 'string' ? target.process.id : ''
+      };
+      reportCopyLatestInvestFinalResponseEvent({
+        operationId,
+        origin,
+        scope,
+        targetOrdinal: index + 1,
+        targetTotal: resolvedTargets.targets.length,
+        level: 'error',
+        status: 'failed',
+        reason: failureReason,
+        error: failureReason,
+        runId: failureResult.processId,
+        tabId: failureResult.tabId,
+        windowId: failureResult.windowId,
+        targetTitle: failureResult.title,
+        conversationUrl: failureResult.conversationUrl,
+        sourceUrl: typeof target?.url === 'string' ? target.url : ''
+      });
+      console.error('[copy-latest-invest] Target failed with exception', {
+        operationId,
+        origin,
+        scope,
+        targetOrdinal: index + 1,
+        targetTotal: resolvedTargets.targets.length,
+        tabId: failureResult.tabId,
+        windowId: failureResult.windowId,
+        error: failureReason
+      });
+      results.push(failureResult);
+    }
+  }
+
+  const successfulResults = results.filter((row) => row?.success === true);
+  const failedResults = results.filter((row) => row?.success !== true);
+  const combinedText = buildCopyLatestInvestBatchClipboardText(successfulResults);
+  const conversationUrlCount = successfulResults.filter(
+    (row) => typeof row?.conversationUrl === 'string' && row.conversationUrl.trim()
+  ).length;
+  const persistenceAttemptedCount = successfulResults.filter(
+    (row) => row?.persistence && row.persistence.attempted === true
+  ).length;
+  const persistenceSuccessCount = successfulResults.filter(
+    (row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true
+  ).length;
+  const summaryReason = successfulResults.length <= 0
+    ? (
+      typeof failedResults[0]?.error === 'string' && failedResults[0].error.trim()
+        ? failedResults[0].error.trim()
+        : 'copy_latest_invest_final_response_failed'
+    )
+    : (failedResults.length > 0
+      ? 'copy_latest_invest_final_response_partial'
+      : 'copy_latest_invest_final_response_completed');
+  const summaryDispatch = [
+    `copied=${successfulResults.length}/${results.length}`,
+    `failed=${failedResults.length}`,
+    persistenceAttemptedCount > 0 ? `save=${persistenceSuccessCount}/${persistenceAttemptedCount}` : '',
+    `urls=${conversationUrlCount}`
+  ].filter(Boolean).join(', ');
+
+  reportCopyLatestInvestFinalResponseEvent({
+    operationId,
+    origin,
+    scope,
+    level: successfulResults.length > 0
+      ? (failedResults.length > 0 ? 'warn' : 'info')
+      : 'error',
+    status: successfulResults.length > 0
+      ? (failedResults.length > 0 ? 'completed_partial' : 'completed')
+      : 'failed',
+    reason: summaryReason,
+    error: successfulResults.length > 0 ? '' : summaryReason,
+    targetTitle: 'all_open_windows',
+    textLength: combinedText.length,
+    persistenceAttempted: persistenceAttemptedCount > 0,
+    persistenceSuccess: persistenceAttemptedCount > 0 && persistenceSuccessCount === persistenceAttemptedCount,
+    persistenceMode: 'batch_all_open_windows',
+    persistenceReason: persistenceAttemptedCount > 0 && persistenceSuccessCount !== persistenceAttemptedCount
+      ? `save_${persistenceSuccessCount}_of_${persistenceAttemptedCount}`
+      : '',
+    dispatchSummary: summaryDispatch,
+    conversationUrl: successfulResults.length === 1 ? successfulResults[0].conversationUrl : '',
+    batchRequested: results.length,
+    batchSucceeded: successfulResults.length,
+    batchFailed: failedResults.length
+  });
+
+  console.log('[copy-latest-invest] Batch completed', {
+    operationId,
+    origin,
+    scope,
+    requested: results.length,
+    copied: successfulResults.length,
+    failed: failedResults.length,
+    investTabCount: resolvedTargets.investTabCount,
+    windowCount: resolvedTargets.windowCount,
+    persistenceAttemptedCount,
+    persistenceSuccessCount,
+    conversationUrlCount,
+    textLength: combinedText.length
+  });
+
+  return {
+    success: successfulResults.length > 0,
+    scope,
+    batch: true,
+    requested: results.length,
+    copied: successfulResults.length,
+    failed: failedResults.length,
+    investTabCount: Number.isInteger(resolvedTargets?.investTabCount) ? resolvedTargets.investTabCount : results.length,
+    windowCount: Number.isInteger(resolvedTargets?.windowCount) ? resolvedTargets.windowCount : results.length,
+    conversationUrlCount,
+    persistenceAttemptedCount,
+    persistenceSuccessCount,
+    text: combinedText,
+    textLength: combinedText.length,
+    title: successfulResults.length === 1
+      ? (successfulResults[0].title || 'ChatGPT Invest')
+      : `Invest windows ${successfulResults.length}/${results.length}`,
+    conversationUrl: successfulResults.length === 1 ? successfulResults[0].conversationUrl : '',
+    tabId: successfulResults.length === 1 ? successfulResults[0].tabId : null,
+    windowId: successfulResults.length === 1 ? successfulResults[0].windowId : null,
+    processId: successfulResults.length === 1 ? successfulResults[0].processId : '',
+    error: successfulResults.length > 0 ? '' : summaryReason,
+    results
   };
 }
 
@@ -15933,7 +16857,7 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       firstFailureIntakeUrl: firstFailureIntakeUrl || '',
       verifyState: verificationState || '',
       verifyReason: verificationReason || '',
-      verifyAttemptCount,
+      verifyAttemptCount: verificationAttemptCount,
       verifyEventId: verificationEventId || '',
       materializedRowCount: verificationMaterializedRowCount,
       expectedMaterializedRowCount: verificationExpectedMaterializedRowCount,
@@ -17379,6 +18303,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         origin: typeof message?.origin === 'string' && message.origin.trim()
           ? message.origin.trim()
           : 'runtime-copy-latest-invest-final-response',
+        scope: typeof message?.scope === 'string' && message.scope.trim()
+          ? message.scope.trim()
+          : 'latest',
         tabReadTimeoutMs: Number.isInteger(message?.tabReadTimeoutMs)
           ? message.tabReadTimeoutMs
           : null

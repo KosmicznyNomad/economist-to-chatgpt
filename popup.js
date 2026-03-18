@@ -1502,6 +1502,67 @@ async function writeTextToClipboard(text) {
 }
 
 function formatCopyLatestInvestFinalResponseStatus(response) {
+  const results = Array.isArray(response?.results) ? response.results : [];
+  if (response?.batch === true || response?.scope === 'all_open_windows' || results.length > 1) {
+    const requested = Number.isInteger(response?.requested) ? response.requested : results.length;
+    const copied = Number.isInteger(response?.copied)
+      ? response.copied
+      : results.filter((row) => row?.success === true).length;
+    const failed = Number.isInteger(response?.failed)
+      ? response.failed
+      : Math.max(0, requested - copied);
+    const windowCount = Number.isInteger(response?.windowCount)
+      ? response.windowCount
+      : requested;
+    const textLength = Number.isInteger(response?.textLength) ? response.textLength : 0;
+    const conversationUrlCount = Number.isInteger(response?.conversationUrlCount)
+      ? response.conversationUrlCount
+      : results.filter((row) => typeof row?.conversationUrl === 'string' && row.conversationUrl.trim()).length;
+    const persistenceAttemptedCount = Number.isInteger(response?.persistenceAttemptedCount)
+      ? response.persistenceAttemptedCount
+      : results.filter((row) => row?.persistence && row.persistence.attempted === true).length;
+    const persistenceSuccessCount = Number.isInteger(response?.persistenceSuccessCount)
+      ? response.persistenceSuccessCount
+      : results.filter((row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true).length;
+    const lines = [
+      `Skopiowano finalne odpowiedzi z ${copied}/${requested} okien Invest.`,
+      `Otwarte okna Invest: ${windowCount}. Laczna dlugosc: ${textLength} znakow.`
+    ];
+
+    if (conversationUrlCount > 0) {
+      lines.push(`URL konwersacji: ${conversationUrlCount}/${Math.max(copied, 1)}.`);
+    } else {
+      lines.push('Brak URL konwersacji.');
+    }
+
+    if (persistenceAttemptedCount > 0) {
+      lines.push(`Fallback save: ${persistenceSuccessCount}/${persistenceAttemptedCount} OK.`);
+    }
+
+    if (failed > 0) {
+      const failedPreview = results
+        .filter((row) => row?.success !== true)
+        .slice(0, 3)
+        .map((row) => {
+          const label = safePreview(
+            row?.title || '',
+            Number.isInteger(row?.windowId) ? `W:${row.windowId}` : 'Invest'
+          );
+          const reason = typeof row?.error === 'string' && row.error.trim()
+            ? row.error.trim()
+            : 'blad';
+          return `${label}: ${reason}`;
+        });
+      if (failedPreview.length > 0) {
+        lines.push(`Nieudane: ${failed}. ${failedPreview.join(' | ')}`);
+      } else {
+        lines.push(`Nieudane: ${failed}.`);
+      }
+    }
+
+    return lines.join('\n');
+  }
+
   const title = safePreview(response?.title || '', 'Invest');
   const textLength = Number.isInteger(response?.textLength) ? response.textLength : 0;
   const persistence = response?.persistence && typeof response.persistence === 'object'
@@ -1534,12 +1595,13 @@ async function executeCopyLatestInvestFinalResponseFromPopup(button) {
   const originalHtml = button.innerHTML;
   button.disabled = true;
   setShortcutButtonLabel(button, 'Kopiuje...', POPUP_SHORTCUTS.copyFinalResponse);
-  setCopyLatestInvestFinalResponseStatus('Pobieram finalna odpowiedz z ostatniej karty Invest...');
+  setCopyLatestInvestFinalResponseStatus('Pobieram finalne odpowiedzi ze wszystkich otwartych okien Invest...');
 
   try {
     const response = await sendRuntimeMessage({
       type: 'COPY_LATEST_INVEST_FINAL_RESPONSE',
       origin: 'popup-copy-latest-invest-final-response',
+      scope: 'all_open_windows',
       tabReadTimeoutMs: 2600
     });
 
