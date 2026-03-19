@@ -280,6 +280,45 @@ async function testClosedWindowDoesNotConsumeSlot() {
   assert.strictEqual(status.activeSlots, 0, 'Process with missing tab/window should stop consuming a slot immediately.');
 }
 
+async function testReleasedRunningQueueManagedProcessDoesNotConsumeSlot() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-released', {
+    id: 'run-released',
+    status: 'running',
+    queueManaged: true,
+    slotReserved: false,
+    currentPrompt: 2,
+    totalPrompts: 10,
+    stageIndex: 1,
+    tabId: 330,
+    windowId: 430,
+    timestamp: now
+  });
+  context.liveTabs.add(330);
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(
+    status.activeSlots,
+    0,
+    'Queue-managed running process with a released slot must not consume another queue slot.'
+  );
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('released_slot_not_counted');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    ['run-2'],
+    'Queue should be able to reuse a slot released by a still-running ghost process.'
+  );
+}
+
 async function testCompletedPendingDispatchKeepsSlotReserved() {
   context = buildScenarioContext();
   const now = Date.now();
@@ -376,6 +415,62 @@ async function testLocalSaveFailureClosesCompletedProcessWindow() {
   );
 }
 
+async function testDuplicateActiveJobsReleaseSupersededContext() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-3', runId: 'run-3', sequence: 3, createdAt: now }],
+    activeJobs: [
+      { jobId: 'aq-1', runId: 'run-1', sequence: 1, createdAt: now - 2000, startedAt: now - 2000, slotReservedAt: now - 2000, resumeTargetTabId: 501, resumeTargetWindowId: 601 },
+      { jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now - 1000, startedAt: now - 1000, slotReservedAt: now - 1000, resumeTargetTabId: 501, resumeTargetWindowId: 601 }
+    ],
+    maxConcurrent: 1,
+    lastSequence: 3
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'running',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 10,
+    stageIndex: 4,
+    tabId: 501,
+    windowId: 601,
+    timestamp: now - 2000
+  });
+  context.processRegistry.set('run-2', {
+    id: 'run-2',
+    status: 'running',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 6,
+    totalPrompts: 10,
+    stageIndex: 5,
+    tabId: 501,
+    windowId: 601,
+    timestamp: now
+  });
+  context.liveTabs.add(501);
+
+  context.startedJobs = [];
+  context.upserts = [];
+  await context.reconcileAnalysisQueueState('duplicate_context');
+  assert.deepStrictEqual(
+    context.analysisQueueState.activeJobs.map((job) => job.runId),
+    ['run-2'],
+    'Reconcile should keep only the newest active job for the same tab/window context.'
+  );
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-3'],
+    'Duplicate slot cleanup must not accidentally start another waiting job.'
+  );
+  const releasedProcess = context.processRegistry.get('run-1');
+  assert.strictEqual(releasedProcess.slotReserved, false, 'Superseded duplicate should release its queue slot.');
+  assert.strictEqual(releasedProcess.status, 'stopped', 'Superseded duplicate should be marked as stopped.');
+}
+
 function buildScenarioContext() {
   const scenarioContext = {
     console,
@@ -384,7 +479,7 @@ function buildScenarioContext() {
     Map,
     Set,
     ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
-    ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 10 * 60 * 1000,
+    ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
       'completed',
@@ -439,6 +534,7 @@ function buildScenarioContext() {
       scenarioContext.closedRuns.push(runId);
       return true;
     },
+    reportAnalysisQueueEvent: async () => true,
     runQueuedAnalysisJob: (job, reason) => {
       scenarioContext.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
@@ -452,6 +548,8 @@ function buildScenarioContext() {
     'hasProcessReachedFinalStage',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'getAnalysisQueueCompletionTimestamp',
+    'resolveAnalysisQueueDispatchDeadlineAt',
     'getProcessLastActivityTimestamp',
     'getAnalysisQueueProcessContextKey',
     'shouldProcessOccupyAnalysisQueueSlot',
@@ -459,6 +557,8 @@ function buildScenarioContext() {
     'getAnalysisQueueProcessActivityState',
     'isLocalProcessActiveForQueue',
     'shouldReplaceAnalysisQueueActiveProcess',
+    'getAnalysisQueueJobContextKey',
+    'shouldReplaceAnalysisQueueActiveJob',
     'collectAnalysisQueueActiveProcesses',
     'getAnalysisQueueStatusSnapshot',
     'resolveAnalysisQueueReleaseDecision',
@@ -481,8 +581,10 @@ async function main() {
   await testCountsAllLiveProcesses();
   await testGracePreventsPrematureSlotRelease();
   await testClosedWindowDoesNotConsumeSlot();
+  await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();
   await testCompletedPendingDispatchKeepsSlotReserved();
   await testLocalSaveFailureClosesCompletedProcessWindow();
+  await testDuplicateActiveJobsReleaseSupersededContext();
   console.log('analysis queue active slot test: ok');
 }
 

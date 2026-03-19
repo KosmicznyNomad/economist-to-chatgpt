@@ -215,7 +215,7 @@ async function main() {
     Promise,
     Map,
     Set,
-    ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 10 * 60 * 1000,
+    ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
       'completed',
       'failed',
@@ -235,6 +235,7 @@ async function main() {
       maxConcurrent: 1,
       lastSequence: 2
     },
+    ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     processRegistry: new Map(),
     startedJobs: [],
     upserts: [],
@@ -244,6 +245,20 @@ async function main() {
     withAnalysisQueueMutationLock: async (task) => task(),
     cloneAnalysisQueueState: () => clone(context.analysisQueueState),
     isLocalProcessActiveForQueue: async () => true,
+    getAnalysisQueueProcessActivityState: async (process) => ({
+      active: true,
+      live: true,
+      recent: false,
+      contextKey: typeof process?.id === 'string' ? `run:${process.id}` : '',
+      reason: 'test_stub'
+    }),
+    getAnalysisQueueJobContextKey: (job) => (typeof job?.runId === 'string' ? `run:${job.runId}` : ''),
+    shouldReplaceAnalysisQueueActiveJob: () => false,
+    getAnalysisQueueStatusSnapshot: async () => ({
+      activeSlots: context.analysisQueueState.activeJobs.length,
+      waitingJobs: context.analysisQueueState.waitingJobs.length,
+      maxConcurrent: context.analysisQueueState.maxConcurrent
+    }),
     collectAnalysisQueueActiveProcesses: async ({ excludedRunIds } = {}) => {
       const excluded = excludedRunIds instanceof Set ? excludedRunIds : new Set();
       return Array.from(context.processRegistry.values())
@@ -290,6 +305,7 @@ async function main() {
       context.closedRuns.push(runId);
       return true;
     },
+    reportAnalysisQueueEvent: async () => true,
     runQueuedAnalysisJob: (job, reason) => {
       context.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
@@ -304,6 +320,8 @@ async function main() {
     'hasProcessReachedFinalStage',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'getAnalysisQueueCompletionTimestamp',
+    'resolveAnalysisQueueDispatchDeadlineAt',
     'resolveAnalysisQueueReleaseDecision',
     'reconcileAnalysisQueueState'
   ];
@@ -394,7 +412,36 @@ async function main() {
   );
   assert.strictEqual(pendingDispatchDecision.action, 'keep');
   assert.strictEqual(pendingDispatchDecision.queueState, 'awaiting_dispatch');
-  assert.strictEqual(pendingDispatchDecision.dispatchDeadlineAt, 601000);
+  assert.strictEqual(pendingDispatchDecision.dispatchDeadlineAt, 301000);
+
+  const cappedDispatchDeadlineDecision = context.resolveAnalysisQueueReleaseDecision(
+    { jobId: 'aq-1', runId: 'run-1', dispatchDeadlineAt: 601000 },
+    {
+      id: 'run-1',
+      status: 'completed',
+      currentPrompt: 5,
+      totalPrompts: 5,
+      stageIndex: 4,
+      finishedAt: 1000,
+      completedResponseSaved: true,
+      persistenceStatus: {
+        saveOk: true,
+        dispatch: {
+          state: 'queued',
+          sent: 0,
+          failed: 0,
+          pending: 1
+        }
+      }
+    },
+    1000
+  );
+  assert.strictEqual(cappedDispatchDeadlineDecision.action, 'keep');
+  assert.strictEqual(
+    cappedDispatchDeadlineDecision.dispatchDeadlineAt,
+    301000,
+    'Stored queue deadlines should be capped to 5 minutes after analysis completion.'
+  );
 
   const timedOutDispatchDecision = context.resolveAnalysisQueueReleaseDecision(
     { jobId: 'aq-1', runId: 'run-1', dispatchDeadlineAt: 999 },

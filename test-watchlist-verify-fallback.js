@@ -1,0 +1,321 @@
+const assert = require('assert');
+const fs = require('fs');
+const path = require('path');
+const vm = require('vm');
+
+const backgroundPath = path.join(__dirname, 'background.js');
+const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
+
+function extractFunctionSource(source, functionName) {
+  const pattern = new RegExp(`(?:async\\s+)?function\\s+${functionName}\\s*\\(`);
+  const match = pattern.exec(source);
+  if (!match) {
+    throw new Error(`Function not found: ${functionName}`);
+  }
+  const startIndex = match.index;
+  const paramsStart = source.indexOf('(', match.index);
+  if (paramsStart < 0) {
+    throw new Error(`Function params not found: ${functionName}`);
+  }
+
+  let parenDepth = 0;
+  let inSingle = false;
+  let inDouble = false;
+  let inTemplate = false;
+  let inLineComment = false;
+  let inBlockComment = false;
+  let escaped = false;
+  let braceStart = -1;
+
+  for (let i = paramsStart; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (inSingle) {
+      if (!escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === '\'') inSingle = false;
+      escaped = false;
+      continue;
+    }
+    if (inDouble) {
+      if (!escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === '"') inDouble = false;
+      escaped = false;
+      continue;
+    }
+    if (inTemplate) {
+      if (!escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === '`') inTemplate = false;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+    if (char === '\'') {
+      inSingle = true;
+      continue;
+    }
+    if (char === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (char === '`') {
+      inTemplate = true;
+      continue;
+    }
+
+    if (char === '(') {
+      parenDepth += 1;
+      continue;
+    }
+    if (char === ')') {
+      parenDepth -= 1;
+      if (parenDepth === 0) {
+        braceStart = source.indexOf('{', i);
+        break;
+      }
+    }
+  }
+
+  if (braceStart < 0) {
+    throw new Error(`Function body not found: ${functionName}`);
+  }
+
+  let depth = 0;
+  inSingle = false;
+  inDouble = false;
+  inTemplate = false;
+  inLineComment = false;
+  inBlockComment = false;
+  escaped = false;
+
+  for (let i = braceStart; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
+
+    if (inLineComment) {
+      if (char === '\n') inLineComment = false;
+      continue;
+    }
+    if (inBlockComment) {
+      if (char === '*' && next === '/') {
+        inBlockComment = false;
+        i += 1;
+      }
+      continue;
+    }
+    if (inSingle) {
+      if (!escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === '\'') inSingle = false;
+      escaped = false;
+      continue;
+    }
+    if (inDouble) {
+      if (!escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === '"') inDouble = false;
+      escaped = false;
+      continue;
+    }
+    if (inTemplate) {
+      if (!escaped && char === '\\') {
+        escaped = true;
+        continue;
+      }
+      if (!escaped && char === '`') inTemplate = false;
+      escaped = false;
+      continue;
+    }
+
+    if (char === '/' && next === '/') {
+      inLineComment = true;
+      i += 1;
+      continue;
+    }
+    if (char === '/' && next === '*') {
+      inBlockComment = true;
+      i += 1;
+      continue;
+    }
+    if (char === '\'') {
+      inSingle = true;
+      continue;
+    }
+    if (char === '"') {
+      inDouble = true;
+      continue;
+    }
+    if (char === '`') {
+      inTemplate = true;
+      continue;
+    }
+
+    if (char === '{') depth += 1;
+    if (char === '}') {
+      depth -= 1;
+      if (depth === 0) {
+        return source.slice(startIndex, i + 1);
+      }
+    }
+  }
+
+  throw new Error(`Function end not found: ${functionName}`);
+}
+
+function truncateDispatchLogText(value, maxLength = 200) {
+  const safe = typeof value === 'string' ? value.trim() : '';
+  if (!safe) return '';
+  if (!Number.isInteger(maxLength) || maxLength <= 0 || safe.length <= maxLength) return safe;
+  return `${safe.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+async function main() {
+  const context = {
+    console,
+    Date,
+    Promise,
+    URL,
+    AbortController,
+    setTimeout,
+    clearTimeout,
+    WATCHLIST_DISPATCH: {
+      enabled: true,
+      verifyEnabled: true,
+      verifyTimeoutMs: 12000
+    },
+    logs: [],
+    history: [],
+    processUpdates: [],
+    normalizeWatchlistEventId: (value) => {
+      if (typeof value === 'string') return value.trim();
+      if (Number.isInteger(value)) return String(value);
+      return '';
+    },
+    buildCopyTrace: (runId = '', responseId = '') => `${runId || 'no-run'}/${responseId || 'no-response'}`,
+    buildWatchlistVerifyUrlCandidates: () => ['https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response/verify'],
+    buildWatchlistVerifyPayload: (payload, item) => ({
+      responseId: payload?.responseId || '',
+      eventId: item?.deliveryEventId || ''
+    }),
+    resolveWatchlistDispatchConfiguration: async () => ({
+      ok: true,
+      intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+      keyId: 'extension-primary',
+      secret: 'secret'
+    }),
+    generateWatchlistNonce: () => 'nonce',
+    sha256HexForDispatch: async () => 'body-hash',
+    buildWatchlistCanonicalString: () => 'canonical',
+    hmacSha256Hex: async () => 'signature',
+    emitWatchlistDispatchProcessLog: (level, code, message, details) => {
+      context.logs.push({ level, code, message, details });
+    },
+    appendWatchlistDispatchHistory: async (entry) => {
+      context.history.push(entry);
+    },
+    updateProcessDispatchAfterSendSuccess: async (runId, responseId, details) => {
+      context.processUpdates.push({ runId, responseId, details });
+      return true;
+    },
+    truncateDispatchLogText,
+    createDispatchTimeoutError: (timeoutMs) => {
+      const error = new Error(`timeout ${timeoutMs}`);
+      error.name = 'TimeoutError';
+      return error;
+    },
+    normalizeWatchlistVerifyState: (state) => (typeof state === 'string' ? state.trim().toLowerCase() : ''),
+    isWatchlistVerificationPendingState: (state) => {
+      const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
+      return normalized === 'not_found'
+        || normalized === 'materialization_pending'
+        || normalized === 'materialization_partial';
+    },
+    isWatchlistVerificationTerminalState: (state) => {
+      const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
+      return normalized === 'missing_fields'
+        || normalized === 'mismatch'
+        || normalized === 'ingest_failed'
+        || normalized === 'materialization_unavailable';
+    },
+    fetch: async () => ({
+      ok: false,
+      status: 404,
+      headers: {
+        get: () => ''
+      },
+      text: async () => '{"detail":"Not Found"}'
+    })
+  };
+
+  vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'verifyWatchlistDispatchDelivery'), context, {
+    filename: 'background.js'
+  });
+
+  const result = await context.verifyWatchlistDispatchDelivery({
+    deliveryAcceptedAt: Date.now(),
+    deliveryEventId: '26992',
+    deliveryIntakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    payload: {
+      responseId: 'resp-1',
+      runId: 'run-1'
+    }
+  }, 'run-1/resp-1');
+
+  assert.strictEqual(result.success, true, '404 on missing verify endpoint should fall back to accepted delivery.');
+  assert.strictEqual(result.pending, false, '404 fallback should settle the delivery instead of retrying forever.');
+  assert.strictEqual(result.state, 'http_accepted');
+  assert.strictEqual(result.reason, 'verify_endpoint_missing');
+  assert.strictEqual(context.processUpdates.length, 1, 'Fallback should still confirm the process dispatch state.');
+  assert.strictEqual(
+    context.history.some((entry) => entry.reason === 'verify_endpoint_missing' && entry.success === true),
+    true,
+    'Fallback should write a successful verify history entry.'
+  );
+  assert.strictEqual(
+    context.logs.some((entry) => entry.code === 'verify_endpoint_missing'),
+    true,
+    'Fallback should emit a dedicated diagnostic log.'
+  );
+
+  console.log('watchlist verify fallback test: ok');
+}
+
+main().catch((error) => {
+  console.error(error?.stack || error?.message || String(error));
+  process.exitCode = 1;
+});

@@ -34,7 +34,7 @@ const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
 const ANALYSIS_QUEUE_MAX_CONCURRENT = 7;
-const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 10 * 60 * 1000;
+const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
 const ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS = 45 * 1000;
 const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
 const PROCESS_WINDOW_AUTO_MINIMIZE_DELAY_MS = 1200;
@@ -448,6 +448,13 @@ function normalizeProcessRecord(record) {
     currentPrompt: normalizedCounters.currentPrompt,
     totalPrompts: normalizedCounters.totalPrompts,
     timestamp: Number.isInteger(record.timestamp) ? record.timestamp : Date.now(),
+    lastProgressAt: Number.isInteger(record.lastProgressAt) && record.lastProgressAt > 0
+      ? record.lastProgressAt
+      : (
+        Number.isInteger(record.timestamp) && record.timestamp > 0
+          ? record.timestamp
+          : Date.now()
+      ),
     startedAt: Number.isInteger(record.startedAt)
       ? record.startedAt
       : (Number.isInteger(record.timestamp) ? record.timestamp : Date.now()),
@@ -457,6 +464,7 @@ function normalizeProcessRecord(record) {
 
   if (!Number.isInteger(normalized.windowId)) delete normalized.windowId;
   if (!Number.isInteger(normalized.tabId)) delete normalized.tabId;
+  if (!Number.isInteger(normalized.lastProgressAt)) delete normalized.lastProgressAt;
   if (typeof normalized.reason !== 'string') delete normalized.reason;
   if (typeof normalized.statusText !== 'string') delete normalized.statusText;
   if (typeof normalized.stageName !== 'string') delete normalized.stageName;
@@ -898,6 +906,39 @@ function getProcessLastActivityTimestamp(process) {
   return 0;
 }
 
+function getProcessLastProgressTimestamp(process) {
+  if (!process || typeof process !== 'object') return 0;
+  if (Number.isInteger(process.lastProgressAt) && process.lastProgressAt > 0) {
+    return process.lastProgressAt;
+  }
+  return getProcessLastActivityTimestamp(process);
+}
+
+function getAnalysisQueueCompletionTimestamp(process) {
+  if (!process || typeof process !== 'object') return 0;
+  const candidates = [
+    process.finishedAt,
+    process.completedResponseCapturedAt
+  ].filter((value) => Number.isInteger(value) && value > 0);
+  return candidates.length > 0 ? Math.max(...candidates) : 0;
+}
+
+function resolveAnalysisQueueDispatchDeadlineAt(job, process, nowTs = Date.now()) {
+  const explicitDeadlineAt = Number.isInteger(job?.dispatchDeadlineAt) && job.dispatchDeadlineAt > 0
+    ? job.dispatchDeadlineAt
+    : null;
+  const completedAt = getAnalysisQueueCompletionTimestamp(process);
+  const completionFallbackDeadlineAt = completedAt > 0
+    ? completedAt + ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS
+    : null;
+  if (Number.isInteger(explicitDeadlineAt) && Number.isInteger(completionFallbackDeadlineAt)) {
+    return Math.min(explicitDeadlineAt, completionFallbackDeadlineAt);
+  }
+  if (Number.isInteger(completionFallbackDeadlineAt)) return completionFallbackDeadlineAt;
+  if (Number.isInteger(explicitDeadlineAt)) return explicitDeadlineAt;
+  return nowTs + ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS;
+}
+
 function getAnalysisQueueProcessContextKey(process) {
   if (!process || typeof process !== 'object') return '';
   if (Number.isInteger(process.tabId)) return `tab:${process.tabId}`;
@@ -909,6 +950,9 @@ function getAnalysisQueueProcessContextKey(process) {
 function shouldProcessOccupyAnalysisQueueSlot(process) {
   if (!process || typeof process !== 'object') return false;
   const status = normalizeProcessStatus(process.status);
+  if (process.queueManaged === true && process.slotReserved === false && status !== 'completed') {
+    return false;
+  }
   if (status === 'completed') {
     if (!hasProcessReachedFinalStage(process)) return true;
     const delivery = getProcessQueueDeliveryState(process);
@@ -1023,6 +1067,45 @@ function shouldReplaceAnalysisQueueActiveProcess(existingEntry, nextEntry) {
   if (existingTs !== nextTs) return nextTs > existingTs;
 
   return String(nextEntry?.process?.id || '').localeCompare(String(existingEntry?.process?.id || '')) > 0;
+}
+
+function getAnalysisQueueJobContextKey(job, process = null) {
+  const processContextKey = getAnalysisQueueProcessContextKey(process);
+  if (processContextKey) return processContextKey;
+  if (!job || typeof job !== 'object') return '';
+
+  if (Number.isInteger(job.resumeTargetTabId)) return `tab:${job.resumeTargetTabId}`;
+  if (Number.isInteger(job?.tabSnapshot?.id)) return `tab:${job.tabSnapshot.id}`;
+  if (Number.isInteger(job.resumeTargetWindowId)) return `window:${job.resumeTargetWindowId}`;
+  if (Number.isInteger(job.invocationWindowId)) return `window:${job.invocationWindowId}`;
+  if (Number.isInteger(job.sourceWindowId)) return `window:${job.sourceWindowId}`;
+
+  const chatUrl = typeof job.chatUrl === 'string' ? job.chatUrl.trim() : '';
+  if (chatUrl) return `chat:${chatUrl}`;
+  const sourceUrl = typeof job.sourceUrl === 'string' ? job.sourceUrl.trim() : '';
+  if (sourceUrl) return `source:${sourceUrl}`;
+
+  const runId = typeof job.runId === 'string' ? job.runId.trim() : '';
+  return runId ? `run:${runId}` : '';
+}
+
+function shouldReplaceAnalysisQueueActiveJob(existingEntry, nextEntry) {
+  const existingHasProcess = !!(existingEntry?.process && typeof existingEntry.process === 'object');
+  const nextHasProcess = !!(nextEntry?.process && typeof nextEntry.process === 'object');
+  if (existingHasProcess && nextHasProcess) {
+    return shouldReplaceAnalysisQueueActiveProcess(existingEntry, nextEntry);
+  }
+  if (nextHasProcess !== existingHasProcess) return nextHasProcess;
+
+  const existingStartedAt = Number.isInteger(existingEntry?.job?.startedAt) ? existingEntry.job.startedAt : 0;
+  const nextStartedAt = Number.isInteger(nextEntry?.job?.startedAt) ? nextEntry.job.startedAt : 0;
+  if (existingStartedAt !== nextStartedAt) return nextStartedAt > existingStartedAt;
+
+  const existingSequence = Number.isInteger(existingEntry?.job?.sequence) ? existingEntry.job.sequence : 0;
+  const nextSequence = Number.isInteger(nextEntry?.job?.sequence) ? nextEntry.job.sequence : 0;
+  if (existingSequence !== nextSequence) return nextSequence > existingSequence;
+
+  return String(nextEntry?.job?.runId || '').localeCompare(String(existingEntry?.job?.runId || '')) > 0;
 }
 
 async function collectAnalysisQueueActiveProcesses(options = {}) {
@@ -1213,20 +1296,24 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       const runId = typeof process?.id === 'string' ? process.id : '';
       if (!runId) continue;
 
+      const lastProgressAt = getProcessLastProgressTimestamp(process);
+      const progressAgeMs = lastProgressAt > 0
+        ? Math.max(0, nowTs - lastProgressAt)
+        : Number.MAX_SAFE_INTEGER;
       const processTs = Number.isInteger(process.timestamp) ? process.timestamp : 0;
-      const ageMs = processTs > 0 ? Math.max(0, nowTs - processTs) : Number.MAX_SAFE_INTEGER;
+      const recordAgeMs = processTs > 0 ? Math.max(0, nowTs - processTs) : Number.MAX_SAFE_INTEGER;
 
-      if (ageMs >= PROCESS_MONITOR_HEARTBEAT.staleTtlMs) {
+      if (progressAgeMs >= PROCESS_MONITOR_HEARTBEAT.staleTtlMs) {
         staleDetected += 1;
         if (shouldEmitProcessStaleWarning(runId, nowTs)) {
-          const appended = await appendProcessHeartbeatStaleWarning(process, ageMs, origin, nowTs);
+          const appended = await appendProcessHeartbeatStaleWarning(process, progressAgeMs, origin, nowTs);
           if (appended) staleLogged += 1;
         }
       } else {
         processStaleWarnLastEmitTsByRunId.delete(runId);
       }
 
-      if (ageMs < PROCESS_MONITOR_HEARTBEAT.touchIntervalMs) {
+      if (recordAgeMs < PROCESS_MONITOR_HEARTBEAT.touchIntervalMs) {
         fresh += 1;
         continue;
       }
@@ -4955,9 +5042,7 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
       };
     }
 
-    const dispatchDeadlineAt = Number.isInteger(job.dispatchDeadlineAt) && job.dispatchDeadlineAt > 0
-      ? job.dispatchDeadlineAt
-      : (nowTs + ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS);
+    const dispatchDeadlineAt = resolveAnalysisQueueDispatchDeadlineAt(job, process, nowTs);
     if (dispatchDeadlineAt > nowTs) {
       return {
         action: 'keep',
@@ -5968,12 +6053,27 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
       const now = Date.now();
       let startJobs = [];
       let releaseJobs = [];
-      let followUpProcessPatches = [];
       let releaseEventRecords = [];
+      const followUpProcessPatchesByRunId = new Map();
+      const queueFollowUpProcessPatch = (runId, patch) => {
+        const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+        if (!normalizedRunId || !patch || typeof patch !== 'object') return;
+        const existing = followUpProcessPatchesByRunId.get(normalizedRunId);
+        const previousPatch = existing?.patch && typeof existing.patch === 'object'
+          ? existing.patch
+          : {};
+        followUpProcessPatchesByRunId.set(normalizedRunId, {
+          runId: normalizedRunId,
+          patch: {
+            ...previousPatch,
+            ...patch
+          }
+        });
+      };
 
       await withAnalysisQueueMutationLock(async () => {
         let state = cloneAnalysisQueueState();
-        const nextActiveJobs = [];
+        const nextActiveJobsByContext = new Map();
 
         for (const activeJob of state.activeJobs) {
           const process = processRegistry.get(activeJob.runId) || null;
@@ -5987,8 +6087,10 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             });
             continue;
           }
-          const hasLiveLocalContext = await isLocalProcessActiveForQueue(process);
-          if (process && !hasLiveLocalContext) {
+          const processActivity = process
+            ? await getAnalysisQueueProcessActivityState(process, now)
+            : null;
+          if (process && processActivity?.active !== true) {
             releaseJobs.push({
               job: activeJob,
               process,
@@ -5997,17 +6099,14 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             });
             const stalePatch = await buildStaleQueueReleasePatch(process, now);
             if (stalePatch) {
-              followUpProcessPatches.push({
-                runId: activeJob.runId,
-                patch: {
-                  queueManaged: true,
-                  queueJobId: activeJob.jobId,
-                  queueState: 'slot_released',
-                  slotReserved: false,
-                  slotReleasedAt: now,
-                  slotReleaseReason: 'local_context_missing',
-                  ...stalePatch
-                }
+              queueFollowUpProcessPatch(activeJob.runId, {
+                queueManaged: true,
+                queueJobId: activeJob.jobId,
+                queueState: 'slot_released',
+                slotReserved: false,
+                slotReleasedAt: now,
+                slotReleaseReason: 'local_context_missing',
+                ...stalePatch
               });
             }
             continue;
@@ -6019,25 +6118,69 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
               ? decision.dispatchDeadlineAt
               : activeJob.dispatchDeadlineAt
           });
-          if (nextActiveJob) {
-            nextActiveJobs.push(nextActiveJob);
+          if (!nextActiveJob) {
+            continue;
           }
-          if (process && typeof decision.queueState === 'string' && process.queueState !== decision.queueState) {
-            followUpProcessPatches.push({
-              runId: activeJob.runId,
-              patch: {
-                queueManaged: true,
-                queueJobId: activeJob.jobId,
-                queueState: decision.queueState,
-                slotReserved: true,
-                slotReservedAt: Number.isInteger(activeJob.slotReservedAt) ? activeJob.slotReservedAt : now,
-                timestamp: now
+
+          const contextKey = getAnalysisQueueJobContextKey(nextActiveJob, process) || `run:${nextActiveJob.runId}`;
+          const candidate = {
+            job: nextActiveJob,
+            process,
+            activity: processActivity && typeof processActivity === 'object'
+              ? processActivity
+              : {
+                active: false,
+                live: false,
+                recent: false,
+                contextKey,
+                reason: 'job_context'
               }
+          };
+          const existingEntry = nextActiveJobsByContext.get(contextKey);
+          if (existingEntry) {
+            const keepNext = shouldReplaceAnalysisQueueActiveJob(existingEntry, candidate);
+            const keptEntry = keepNext ? candidate : existingEntry;
+            const releasedEntry = keepNext ? existingEntry : candidate;
+            nextActiveJobsByContext.set(contextKey, keptEntry);
+            releaseJobs.push({
+              job: releasedEntry.job,
+              process: releasedEntry.process,
+              reason: 'duplicate_context_superseded',
+              closeWindow: false
+            });
+            if (releasedEntry.process) {
+              queueFollowUpProcessPatch(releasedEntry.job.runId, {
+                queueManaged: true,
+                queueJobId: releasedEntry.job.jobId,
+                queueState: 'slot_released',
+                slotReserved: false,
+                slotReleasedAt: now,
+                slotReleaseReason: 'duplicate_context_superseded',
+                status: 'stopped',
+                statusText: 'Zduplikowany aktywny job kolejki - slot zwolniony',
+                reason: 'duplicate_context_superseded',
+                needsAction: false,
+                autoRecovery: null,
+                finishedAt: now,
+                timestamp: now
+              });
+            }
+            continue;
+          }
+          nextActiveJobsByContext.set(contextKey, candidate);
+          if (process && typeof decision.queueState === 'string' && process.queueState !== decision.queueState) {
+            queueFollowUpProcessPatch(activeJob.runId, {
+              queueManaged: true,
+              queueJobId: activeJob.jobId,
+              queueState: decision.queueState,
+              slotReserved: true,
+              slotReservedAt: Number.isInteger(activeJob.slotReservedAt) ? activeJob.slotReservedAt : now,
+              timestamp: now
             });
           }
         }
 
-        state.activeJobs = nextActiveJobs;
+        state.activeJobs = Array.from(nextActiveJobsByContext.values()).map((entry) => entry.job);
         const releasedRunIds = new Set(
           releaseJobs
             .map((entry) => (typeof entry?.job?.runId === 'string' ? entry.job.runId.trim() : ''))
@@ -6066,6 +6209,8 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         await persistAnalysisQueueState(state);
       });
 
+      const followUpProcessPatches = Array.from(followUpProcessPatchesByRunId.values());
+
       for (const update of followUpProcessPatches) {
         await upsertProcess(update.runId, update.patch);
       }
@@ -6085,7 +6230,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             timestamp: now
           };
           if (release.reason === 'pending_dispatch_timeout') {
-            releasePatch.statusText = 'Final zapisany lokalnie, brak dispatch_confirmed w 10 min - zamykam okno';
+            releasePatch.statusText = 'Analiza zakonczona ponad 5 min temu, dispatch nadal niepotwierdzony - zamykam okno';
             releasePatch.reason = 'pending_dispatch_timeout';
           } else if (release.reason === 'local_save_failed') {
             releasePatch.statusText = 'Final wygenerowany, zapis lokalny nieudany - zamykam okno';
@@ -7053,12 +7198,99 @@ function applyMonotonicProcessPatch(existing, patch, message = null) {
   return next;
 }
 
+function extractPromptProgressFromChatTitle(rawTitle, promptCount = 0) {
+  const title = typeof rawTitle === 'string' ? rawTitle.trim() : '';
+  if (!title) {
+    return { currentPrompt: null, totalPrompts: null };
+  }
+
+  const bracketMatch = title.match(/\bP\s*(\d+)\s*\/\s*(\d+)\b/i);
+  const promptOnlyMatch = bracketMatch ? null : title.match(/\bPrompt\s+(\d+)\b/i);
+  let currentPrompt = bracketMatch
+    ? Number.parseInt(bracketMatch[1], 10)
+    : (promptOnlyMatch ? Number.parseInt(promptOnlyMatch[1], 10) : null);
+  let totalPrompts = bracketMatch ? Number.parseInt(bracketMatch[2], 10) : null;
+
+  if (!Number.isInteger(currentPrompt) || currentPrompt <= 0) currentPrompt = null;
+  if (!Number.isInteger(totalPrompts) || totalPrompts <= 0) totalPrompts = null;
+
+  if (Number.isInteger(promptCount) && promptCount > 0) {
+    if (Number.isInteger(currentPrompt) && currentPrompt > promptCount) currentPrompt = promptCount;
+    if (Number.isInteger(totalPrompts) && totalPrompts > promptCount) totalPrompts = promptCount;
+  }
+
+  return { currentPrompt, totalPrompts };
+}
+
+function resolveCompanyConversationAuditPromptFrontier(options = {}) {
+  const promptCount = Number.isInteger(options?.promptCount) && options.promptCount > 0
+    ? options.promptCount
+    : 0;
+  const candidates = [];
+  const recognizedPromptNumbers = Array.isArray(options?.recognizedPromptNumbers)
+    ? options.recognizedPromptNumbers
+    : [];
+
+  recognizedPromptNumbers.forEach((value) => {
+    if (Number.isInteger(value) && value > 0) candidates.push(value);
+  });
+
+  const activePrompt = Number.isInteger(options?.activeProcessPromptNumber) && options.activeProcessPromptNumber > 0
+    ? options.activeProcessPromptNumber
+    : null;
+  if (activePrompt !== null) candidates.push(activePrompt);
+
+  const scannedTitleProgress = extractPromptProgressFromChatTitle(options?.scannedTitle || '', promptCount);
+  if (Number.isInteger(scannedTitleProgress.currentPrompt)) candidates.push(scannedTitleProgress.currentPrompt);
+
+  const tabTitleProgress = extractPromptProgressFromChatTitle(options?.targetTabTitle || '', promptCount);
+  if (Number.isInteger(tabTitleProgress.currentPrompt)) candidates.push(tabTitleProgress.currentPrompt);
+
+  if (candidates.length === 0) return 0;
+  const frontier = Math.max(...candidates);
+  if (!Number.isInteger(promptCount) || promptCount <= 0) return frontier;
+  return Math.max(0, Math.min(frontier, promptCount));
+}
+
+function filterCompanyConversationMissingPromptNumbers(promptNumbers, recognizedPromptSet, frontierPromptNumber) {
+  const recognized = recognizedPromptSet && typeof recognizedPromptSet.has === 'function'
+    ? recognizedPromptSet
+    : new Set(Array.isArray(recognizedPromptSet) ? recognizedPromptSet : []);
+  const frontier = Number.isInteger(frontierPromptNumber) && frontierPromptNumber > 0
+    ? frontierPromptNumber
+    : 0;
+  if (frontier <= 0) return [];
+
+  return (Array.isArray(promptNumbers) ? promptNumbers : [])
+    .filter((promptNumber) => (
+      Number.isInteger(promptNumber)
+      && promptNumber > 0
+      && promptNumber <= frontier
+      && !recognized.has(promptNumber)
+    ));
+}
+
+function isCompanyConversationActiveProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  return normalizeProcessStatus(process.status || '') === 'running' && process.needsAction !== true;
+}
+
+function isCompanyConversationFrontierPromptPending(promptNumber, activeProcess, frontierPromptNumber) {
+  if (!Number.isInteger(promptNumber) || promptNumber <= 0) return false;
+  if (!Number.isInteger(frontierPromptNumber) || frontierPromptNumber <= 0) return false;
+  if (promptNumber !== frontierPromptNumber) return false;
+  if (!isCompanyConversationActiveProcess(activeProcess)) return false;
+  return Number.isInteger(activeProcess?.currentPrompt) && activeProcess.currentPrompt === frontierPromptNumber;
+}
+
 async function handleProcessProgressMessage(message, sender) {
   const runId = await resolveProcessId(message, sender);
   if (!runId) return false;
 
+  const nowTs = Date.now();
   const patch = {
-    timestamp: Date.now(),
+    timestamp: nowTs,
+    lastProgressAt: nowTs,
     needsAction: !!message?.needsAction
   };
 
@@ -7091,10 +7323,12 @@ async function handleProcessProgressMessage(message, sender) {
 async function handleProcessNeedsActionMessage(message, sender) {
   const runId = await resolveProcessId(message, sender);
   if (!runId) return false;
+  const nowTs = Date.now();
   const patch = {
     status: 'running',
     needsAction: true,
-    timestamp: Date.now()
+    timestamp: nowTs,
+    lastProgressAt: nowTs
   };
   if (Number.isInteger(message?.currentPrompt)) patch.currentPrompt = message.currentPrompt;
   if (Number.isInteger(message?.totalPrompts)) patch.totalPrompts = message.totalPrompts;
@@ -7123,12 +7357,14 @@ async function handleProcessActionResolvedMessage(message, sender) {
   const runId = await resolveProcessId(message, sender);
   if (!runId) return false;
   const decision = message?.decision === 'skip' ? 'skip' : 'wait';
+  const nowTs = Date.now();
   const patch = {
     status: 'running',
     needsAction: false,
     reason: '',
     statusText: getDecisionResolvedStatusText(decision),
-    timestamp: Date.now()
+    timestamp: nowTs,
+    lastProgressAt: nowTs
   };
   const conversationUrl = resolveProcessConversationUrlFromMessage(message, sender);
   if (conversationUrl) patch.chatUrl = conversationUrl;
@@ -12470,6 +12706,20 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     };
   }
 
+  await ensureProcessRegistryReady();
+  const activeProcessForTab = Array.from(processRegistry.values())
+    .filter((process) => (
+      process
+      && !isClosedProcessStatus(process.status)
+      && Number.isInteger(process.tabId)
+      && process.tabId === tabId
+    ))
+    .sort((left, right) => {
+      const leftTs = getProcessLastActivityTimestamp(left);
+      const rightTs = getProcessLastActivityTimestamp(right);
+      return rightTs - leftTs;
+    })[0] || null;
+
   const promptRecords = buildCompanyPromptMatchRecords(PROMPTS_COMPANY);
   const promptStats = new Map();
   promptRecords.forEach((entry) => {
@@ -12578,10 +12828,21 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     )
   ).sort((left, right) => left - right);
   const recognizedPromptSet = new Set(recognizedPromptNumbers);
+  const auditPromptFrontier = resolveCompanyConversationAuditPromptFrontier({
+    promptCount: promptRecords.length,
+    recognizedPromptNumbers,
+    scannedTitle: typeof scanned?.title === 'string' ? scanned.title : '',
+    targetTabTitle: typeof targetTab?.title === 'string' ? targetTab.title : '',
+    activeProcessPromptNumber: Number.isInteger(activeProcessForTab?.currentPrompt)
+      ? activeProcessForTab.currentPrompt
+      : null
+  });
 
-  const missingPromptNumbers = promptRecords
-    .map((entry) => entry.promptNumber)
-    .filter((promptNumber) => !recognizedPromptSet.has(promptNumber));
+  const missingPromptNumbers = filterCompanyConversationMissingPromptNumbers(
+    promptRecords.map((entry) => entry.promptNumber),
+    recognizedPromptSet,
+    auditPromptFrontier
+  );
   const duplicatePromptNumbers = Array.from(promptStats.values())
     .filter((entry) => entry.occurrences > 1)
     .map((entry) => entry.promptNumber)
@@ -12593,7 +12854,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
   const promptRepliesBelowThreshold = matchedRows.filter((row) => (
     row.hasAssistantReplyAfter && !row.assistantReplyPassThreshold
   )).length;
-  const missingReplyRows = matchedRows
+  const rawMissingReplyRows = matchedRows
     .filter((row) => !row.hasAssistantReplyAfter)
     .map((row) => ({
       userMessageIndex: row.userMessageIndex,
@@ -12602,7 +12863,7 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       stageName: row.stageName || '',
       detectionMethod: row.detectionMethod || ''
     }));
-  const lowQualityReplyRows = matchedRows
+  const rawLowQualityReplyRows = matchedRows
     .filter((row) => row.hasAssistantReplyAfter && !row.assistantReplyPassThreshold)
     .map((row) => ({
       userMessageIndex: row.userMessageIndex,
@@ -12616,6 +12877,18 @@ async function countCompanyConversationMessages(tabId, options = {}) {
         ? row.assistantReplySentenceCount
         : 0
     }));
+  const missingReplyRows = rawMissingReplyRows.filter((row) => !isCompanyConversationFrontierPromptPending(
+    row?.promptNumber,
+    activeProcessForTab,
+    auditPromptFrontier
+  ));
+  const lowQualityReplyRows = rawLowQualityReplyRows.filter((row) => !isCompanyConversationFrontierPromptPending(
+    row?.promptNumber,
+    activeProcessForTab,
+    auditPromptFrontier
+  ));
+  const effectivePromptRepliesMissing = missingReplyRows.length;
+  const effectivePromptRepliesBelowThreshold = lowQualityReplyRows.length;
   const missingReplyPromptNumbers = Array.from(
     new Set(
       missingReplyRows
@@ -12826,6 +13099,10 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       dataGapStopDetected,
       dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
       dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
+      auditPromptFrontier,
+      activeProcessPromptNumber: Number.isInteger(activeProcessForTab?.currentPrompt)
+        ? activeProcessForTab.currentPrompt
+        : null,
       missingReplyPromptNumbers,
       lowQualityReplyPromptNumbers,
       processIssueFlags,
@@ -12892,9 +13169,9 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       recognizedUniquePrompts: recognizedPromptNumbers.length,
       detectedRuns: detectedRuns.length,
       promptRepliesPresent,
-      promptRepliesMissing,
+      promptRepliesMissing: effectivePromptRepliesMissing,
       promptRepliesPassingThreshold,
-      promptRepliesBelowThreshold,
+      promptRepliesBelowThreshold: effectivePromptRepliesBelowThreshold,
       missingReplyPromptCount: missingReplyPromptNumbers.length,
       dataGapStopDetected: dataGapStopDetected ? 1 : 0,
       dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
@@ -12902,12 +13179,16 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     },
     verification: {
       allPromptsDetected: missingPromptNumbers.length === 0,
-      allMatchedPromptsHaveReply: promptRepliesMissing === 0,
-      allMatchedRepliesPassThreshold: promptRepliesBelowThreshold === 0,
+      allMatchedPromptsHaveReply: effectivePromptRepliesMissing === 0,
+      allMatchedRepliesPassThreshold: effectivePromptRepliesBelowThreshold === 0,
       sequenceNonDecreasing: sequenceIssues.length === 0,
       dataGapStopDetected,
       userMetaTruncated: scanned?.userMetaTruncated === true
     },
+    auditPromptFrontier,
+    activeProcessPromptNumber: Number.isInteger(activeProcessForTab?.currentPrompt)
+      ? activeProcessForTab.currentPrompt
+      : null,
     processState,
     processIssueFlags,
     recognizedPromptNumbers,
@@ -14828,6 +15109,48 @@ function isWatchlistOutboxDeliveryAccepted(item) {
   return Number.isInteger(item?.deliveryAcceptedAt) && item.deliveryAcceptedAt > 0;
 }
 
+function getWatchlistOutboxFlushPriority(item, nowTs = Date.now()) {
+  const nextAttemptAt = Number.isInteger(item?.nextAttemptAt) ? item.nextAttemptAt : 0;
+  const ready = nextAttemptAt <= nowTs;
+  const accepted = isWatchlistOutboxDeliveryAccepted(item);
+  if (ready && !accepted) return 0;
+  if (ready && accepted) return 1;
+  if (!ready && !accepted) return 2;
+  return 3;
+}
+
+function sortWatchlistOutboxForFlush(items, nowTs = Date.now()) {
+  const source = Array.isArray(items) ? items : [];
+  return source
+    .map((item, index) => ({ item, index }))
+    .sort((left, right) => {
+      const leftPriority = getWatchlistOutboxFlushPriority(left.item, nowTs);
+      const rightPriority = getWatchlistOutboxFlushPriority(right.item, nowTs);
+      if (leftPriority !== rightPriority) return leftPriority - rightPriority;
+
+      const leftNextAttemptAt = Number.isInteger(left.item?.nextAttemptAt) ? left.item.nextAttemptAt : 0;
+      const rightNextAttemptAt = Number.isInteger(right.item?.nextAttemptAt) ? right.item.nextAttemptAt : 0;
+      if (leftPriority >= 2 && leftNextAttemptAt !== rightNextAttemptAt) {
+        return leftNextAttemptAt - rightNextAttemptAt;
+      }
+
+      const leftQueuedAt = Number.isInteger(left.item?.queuedAt) ? left.item.queuedAt : 0;
+      const rightQueuedAt = Number.isInteger(right.item?.queuedAt) ? right.item.queuedAt : 0;
+      if (leftQueuedAt !== rightQueuedAt) return leftQueuedAt - rightQueuedAt;
+
+      const leftVerifyAttempts = Number.isInteger(left.item?.verifyAttemptCount) ? left.item.verifyAttemptCount : 0;
+      const rightVerifyAttempts = Number.isInteger(right.item?.verifyAttemptCount) ? right.item.verifyAttemptCount : 0;
+      if (leftVerifyAttempts !== rightVerifyAttempts) return leftVerifyAttempts - rightVerifyAttempts;
+
+      const leftAttempts = Number.isInteger(left.item?.attemptCount) ? left.item.attemptCount : 0;
+      const rightAttempts = Number.isInteger(right.item?.attemptCount) ? right.item.attemptCount : 0;
+      if (leftAttempts !== rightAttempts) return leftAttempts - rightAttempts;
+
+      return left.index - right.index;
+    })
+    .map((entry) => entry.item);
+}
+
 function isWatchlistVerificationPendingState(state) {
   const normalized = normalizeWatchlistVerifyState(state);
   return normalized === 'not_found'
@@ -16303,6 +16626,8 @@ async function verifyWatchlistDispatchDelivery(item, copyTrace = 'no-run/no-resp
   const responseId = bodyPayload.responseId;
   const runId = typeof payload?.runId === 'string' ? payload.runId.trim() : '';
   const traceForHistory = normalizedTrace || buildCopyTrace(runId, responseId);
+  let verifyEndpointMissingCandidate = null;
+  let encounteredNonNotFoundVerifyFailure = false;
   let lastFailure = {
     success: false,
     pending: true,
@@ -16551,6 +16876,18 @@ async function verifyWatchlistDispatchDelivery(item, copyTrace = 'no-run/no-resp
         materializedRowCount: null,
         expectedMaterializedRowCount: null
       };
+      if (dispatchMeta.reason === 'http_error' && Number.isInteger(dispatchMeta.status) && dispatchMeta.status === 404) {
+        verifyEndpointMissingCandidate = {
+          eventId: normalizeWatchlistEventId(item?.deliveryEventId || bodyPayload.eventId),
+          intakeUrl: typeof item?.deliveryIntakeUrl === 'string' && item.deliveryIntakeUrl.trim()
+            ? item.deliveryIntakeUrl.trim()
+            : url,
+          requestId: dispatchMeta.requestId || '',
+          status: dispatchMeta.status
+        };
+      } else {
+        encounteredNonNotFoundVerifyFailure = true;
+      }
       emitWatchlistDispatchProcessLog('warn', 'verify_attempt_retry', 'Dispatch verification failed; retry pending', {
         trace: copyTrace,
         intakeUrl: url,
@@ -16562,6 +16899,71 @@ async function verifyWatchlistDispatchDelivery(item, copyTrace = 'no-run/no-resp
         error: truncateDispatchLogText(errorMessage, 400)
       });
     }
+  }
+
+  if (verifyEndpointMissingCandidate && !encounteredNonNotFoundVerifyFailure) {
+    const fallbackEventId = normalizeWatchlistEventId(
+      verifyEndpointMissingCandidate.eventId || item?.deliveryEventId || bodyPayload.eventId
+    );
+    const fallbackIntakeUrl = typeof verifyEndpointMissingCandidate.intakeUrl === 'string'
+      && verifyEndpointMissingCandidate.intakeUrl.trim()
+      ? verifyEndpointMissingCandidate.intakeUrl.trim()
+      : (
+        typeof item?.deliveryIntakeUrl === 'string' && item.deliveryIntakeUrl.trim()
+          ? item.deliveryIntakeUrl.trim()
+          : ''
+      );
+    emitWatchlistDispatchProcessLog('warn', 'verify_endpoint_missing', 'Dispatch verify endpoint missing; accepting HTTP delivery without verify', {
+      trace: copyTrace,
+      intakeUrl: fallbackIntakeUrl || '',
+      responseId,
+      eventId: fallbackEventId || '',
+      requestId: verifyEndpointMissingCandidate.requestId || '',
+      status: verifyEndpointMissingCandidate.status || null
+    });
+    appendWatchlistDispatchHistory({
+      ts: Date.now(),
+      kind: 'verify',
+      reason: 'verify_endpoint_missing',
+      success: true,
+      queued: 0,
+      sent: 1,
+      failed: 0,
+      deferred: 0,
+      remaining: 0,
+      trace: traceForHistory,
+      runId,
+      responseId,
+      eventId: fallbackEventId || '',
+      requestId: verifyEndpointMissingCandidate.requestId || '',
+      intakeUrl: fallbackIntakeUrl || '',
+      status: verifyEndpointMissingCandidate.status || null
+    }).catch(() => {});
+    await updateProcessDispatchAfterSendSuccess(runId, responseId, {
+      status: verifyEndpointMissingCandidate.status || null,
+      eventId: fallbackEventId || '',
+      requestId: verifyEndpointMissingCandidate.requestId || '',
+      intakeUrl: fallbackIntakeUrl || ''
+    }).catch((error) => {
+      console.warn('[copy-flow] [dispatch:process-update-failed]', {
+        runId,
+        responseId,
+        error: error?.message || String(error)
+      });
+    });
+    return {
+      success: true,
+      pending: false,
+      state: 'http_accepted',
+      reason: 'verify_endpoint_missing',
+      eventId: fallbackEventId || '',
+      requestId: verifyEndpointMissingCandidate.requestId || '',
+      intakeUrl: fallbackIntakeUrl || '',
+      status: verifyEndpointMissingCandidate.status || null,
+      stage: 'verify_http_fallback',
+      materializedRowCount: null,
+      expectedMaterializedRowCount: null
+    };
   }
 
   return lastFailure;
@@ -17052,7 +17454,7 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   watchlistDispatchFlushStartedAt = Date.now();
   watchlistDispatchFlushStartedReason = normalizedReason;
   try {
-    const queued = await readWatchlistOutbox();
+    const queued = sortWatchlistOutboxForFlush(await readWatchlistOutbox(), ts);
     console.log(`[copy-flow] [dispatch:flush-start] reason=${normalizedReason} queued=${queued.length}`);
     emitWatchlistDispatchProcessLog('info', 'flush_start', 'Started flush of dispatch outbox', {
       reason: normalizedReason,
