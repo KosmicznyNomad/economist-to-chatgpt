@@ -43,6 +43,7 @@ const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
+const INJECT_SHARED_HELPER_FILES = ['decision-contract.js', 'response-storage.js'];
 
 // Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
 try {
@@ -52,6 +53,13 @@ try {
 } catch {
   // Local inline Watchlist config is optional for unpacked extension installs.
 }
+if (typeof importScripts === 'function') {
+  importScripts('decision-contract.js', 'response-storage.js', 'watchlist-api.js', 'watchlist-dispatch-shape.js');
+}
+const DecisionContractUtils = globalThis.DecisionContractUtils || {};
+const ResponseStorageUtils = globalThis.ResponseStorageUtils || {};
+const WatchlistApiUtils = globalThis.WatchlistApiUtils || {};
+const WatchlistDispatchShapeUtils = globalThis.WatchlistDispatchShapeUtils || {};
 
 const WATCHLIST_INLINE_CONFIG = (() => {
   const raw = globalThis?.WATCHLIST_INLINE_OVERRIDE;
@@ -103,7 +111,7 @@ const WATCHLIST_DISPATCH = {
   alarmName: "watchlist-dispatch-flush",
   alarmPeriodMinutes: 2
 };
-const WATCHLIST_PROBLEM_LOGS_PATH = '/api/v1/intake/problem-logs';
+const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -183,6 +191,7 @@ let watchlistDispatchFlushStartedAt = 0;
 let watchlistDispatchFlushStartedReason = '';
 let watchlistOutboxMutationQueue = Promise.resolve();
 let responseStorageMutationQueue = Promise.resolve();
+let canonicalResponseStorageReady = null;
 let analysisQueueMutationQueue = Promise.resolve();
 let watchlistDispatchCredentialsCache = null;
 let watchlistDispatchProcessLogEntries = [];
@@ -1144,14 +1153,21 @@ async function getAnalysisQueueStatusSnapshot() {
   ]);
   const activeProcesses = await collectAnalysisQueueActiveProcesses();
   const activeSlots = activeProcesses.length;
+  const reservedSlots = snapshot.activeJobs.length;
+  const liveSlots = activeProcesses.filter((entry) => entry?.activity?.live === true).length;
+  const startingSlots = Math.max(0, reservedSlots - liveSlots);
   return {
     success: true,
     maxConcurrent: snapshot.maxConcurrent,
     activeSlots,
+    reservedSlots,
+    liveSlots,
+    startingSlots,
     queueSize: snapshot.waitingJobs.length,
     waitingJobs: snapshot.waitingJobs.length,
-    activeJobs: activeSlots,
-    totalJobs: snapshot.waitingJobs.length + activeSlots
+    activeJobs: reservedSlots,
+    liveActiveJobs: liveSlots,
+    totalJobs: snapshot.waitingJobs.length + reservedSlots
   };
 }
 
@@ -5668,7 +5684,10 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
       jobs: [],
       queuedCount: 0,
       queueSize: emptySnapshot.queueSize,
-      activeSlots: emptySnapshot.activeSlots
+      activeSlots: emptySnapshot.activeSlots,
+      reservedSlots: emptySnapshot.reservedSlots,
+      liveSlots: emptySnapshot.liveSlots,
+      startingSlots: emptySnapshot.startingSlots
     };
   }
 
@@ -5753,7 +5772,10 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
     jobs: queuedJobs,
     queuedCount: queuedJobs.length,
     queueSize: queueSnapshot.queueSize,
-    activeSlots: queueSnapshot.activeSlots
+    activeSlots: queueSnapshot.activeSlots,
+    reservedSlots: queueSnapshot.reservedSlots,
+    liveSlots: queueSnapshot.liveSlots,
+    startingSlots: queueSnapshot.startingSlots
   };
 }
 
@@ -8374,6 +8396,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         results = await executeScriptWithTransientRetry({
           tabId,
           scriptFunction: injectToChat,
+          preloadFiles: INJECT_SHARED_HELPER_FILES,
           args: executionArgs,
           contextLabel: 'auto-resume:inject',
           onRetry: async ({ attempt, maxAttempts, errorText }) => {
@@ -11540,6 +11563,7 @@ function isRetryableExecuteScriptTransientError(error) {
 async function executeScriptWithTransientRetry({
   tabId,
   scriptFunction,
+  preloadFiles = [],
   args = [],
   contextLabel = 'executeScript',
   maxAttempts = EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS,
@@ -11563,6 +11587,15 @@ async function executeScriptWithTransientRetry({
   let lastError = null;
   for (let attempt = 1; attempt <= safeAttempts; attempt += 1) {
     try {
+      const safePreloadFiles = Array.isArray(preloadFiles)
+        ? preloadFiles.filter((value) => typeof value === 'string' && value.trim())
+        : [];
+      if (safePreloadFiles.length > 0) {
+        await chrome.scripting.executeScript({
+          target: { tabId },
+          files: safePreloadFiles
+        });
+      }
       const results = await chrome.scripting.executeScript({
         target: { tabId },
         function: scriptFunction,
@@ -13689,6 +13722,9 @@ async function handleProcessResumeNextStageMessage(message) {
       queueJobId: typeof resumeResult?.queueJobId === 'string' ? resumeResult.queueJobId : '',
       queueSize: Number.isInteger(resumeResult?.queueSize) ? resumeResult.queueSize : 0,
       activeSlots: Number.isInteger(resumeResult?.activeSlots) ? resumeResult.activeSlots : 0,
+      reservedSlots: Number.isInteger(resumeResult?.reservedSlots) ? resumeResult.reservedSlots : 0,
+      liveSlots: Number.isInteger(resumeResult?.liveSlots) ? resumeResult.liveSlots : 0,
+      startingSlots: Number.isInteger(resumeResult?.startingSlots) ? resumeResult.startingSlots : 0,
       startIndex: resolvedStartIndex,
       startPromptNumber: resolvedStartIndex + 1,
       detectedPromptIndex,
@@ -14605,164 +14641,50 @@ function summarizeWatchlistDispatchPayload(payload) {
 }
 
 function parseDecisionRecordLine(rawLine) {
-  const line = typeof rawLine === 'string' ? rawLine.trim() : '';
-  if (!line || !line.includes(';')) return null;
-  const parts = line
-    .split(';')
-    .map((item) => item.trim())
-    .filter((item, index, all) => !(index === all.length - 1 && item === ''));
-
-  const count = parts.length;
-  if (count !== 12 && count !== 13 && count !== 16) return null;
-
-  if (count === 16) {
-    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
-    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
-    if (hasExplicitRole) {
-      return {
-        canonicalLine: parts.join('; '),
-        recordFormat: 'current_16_role',
-        decisionDate: parts[0],
-        decisionStatus: parts[1],
-        decisionRole,
-        company: parts[3],
-        sourceMaterial: parts[4],
-        thesis: parts[5],
-        asymmetry: '',
-        bear: parts[6],
-        base: parts[7],
-        bull: parts[8],
-        voi: parts[9],
-        sector: parts[10],
-        companyFamily: parts[11],
-        companyType: parts[12],
-        revenueModel: parts[13],
-        region: parts[14],
-        currency: parts[15]
-      };
-    }
-    return {
-      canonicalLine: parts.join('; '),
-      recordFormat: 'transitional_16',
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      decisionRole: '',
-      company: parts[2],
-      sourceMaterial: parts[3],
-      thesis: parts[4],
-      asymmetry: parts[5],
-      bear: parts[6],
-      base: parts[7],
-      bull: parts[8],
-      voi: parts[9],
-      sector: parts[10],
-      companyFamily: parts[11],
-      companyType: parts[12],
-      revenueModel: parts[13],
-      region: parts[14],
-      currency: parts[15]
-    };
-  }
-
-  if (count === 13) {
-    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
-    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
-    if (hasExplicitRole) {
-      return {
-        canonicalLine: parts.join('; '),
-        recordFormat: 'current_13_role',
-        decisionDate: parts[0],
-        decisionStatus: parts[1],
-        decisionRole,
-        company: parts[3],
-        sourceMaterial: parts[4],
-        thesis: parts[5],
-        asymmetry: '',
-        bear: parts[6],
-        base: parts[7],
-        bull: parts[8],
-        voi: parts[9],
-        sector: parts[10],
-        companyFamily: parts[10],
-        companyType: '',
-        revenueModel: '',
-        region: parts[11],
-        currency: parts[12]
-      };
-    }
-    return {
-      canonicalLine: parts.join('; '),
-      recordFormat: 'transitional_13',
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      decisionRole: '',
-      company: parts[2],
-      sourceMaterial: parts[3],
-      thesis: parts[4],
-      asymmetry: parts[5],
-      bear: parts[6],
-      base: parts[7],
-      bull: parts[8],
-      voi: parts[9],
-      sector: parts[10],
-      companyFamily: parts[10],
-      companyType: '',
-      revenueModel: '',
-      region: parts[11],
-      currency: parts[12]
-    };
-  }
-
-  const thesisText = typeof parts[4] === 'string' ? parts[4] : '';
-  const asymmetryMatch = thesisText.match(/(?:Asymetria|Asymmetry)\s*:\s*[^,;]+/i);
-  return {
-    canonicalLine: parts.join('; '),
-    recordFormat: 'current_12',
-    decisionDate: parts[0],
-    decisionStatus: parts[1],
-    decisionRole: '',
-    company: parts[2],
-    sourceMaterial: parts[3],
-    thesis: parts[4],
-    asymmetry: asymmetryMatch ? asymmetryMatch[0].trim() : '',
-    bear: parts[5],
-    base: parts[6],
-    bull: parts[7],
-    voi: parts[8],
-    sector: parts[9],
-    companyFamily: parts[9],
-    companyType: '',
-    revenueModel: '',
-    region: parts[10],
-    currency: parts[11]
-  };
+  return typeof DecisionContractUtils.parseDecisionRecordLine === 'function'
+    ? DecisionContractUtils.parseDecisionRecordLine(rawLine)
+    : null;
 }
 
 function extractDecisionRecordsFromText(rawText) {
-  const text = typeof rawText === 'string' ? rawText : '';
-  if (!text.trim()) return [];
-
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const parsedRecords = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) parsedRecords.push(parsed);
-  }
-  if (parsedRecords.length > 0) return parsedRecords;
-
-  const flattened = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-  const parsedWhole = parseDecisionRecordLine(flattened);
-  return parsedWhole ? [parsedWhole] : [];
+  return typeof DecisionContractUtils.extractDecisionRecordsFromText === 'function'
+    ? DecisionContractUtils.extractDecisionRecordsFromText(rawText)
+    : [];
 }
 
 function extractDecisionRecordFromText(rawText) {
-  const decisionRecords = extractDecisionRecordsFromText(rawText);
-  if (decisionRecords.length === 0) return null;
-  return decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
-    || decisionRecords[decisionRecords.length - 1];
+  return typeof DecisionContractUtils.extractDecisionRecordFromText === 'function'
+    ? DecisionContractUtils.extractDecisionRecordFromText(rawText)
+    : null;
+}
+
+function mapDispatchDecisionRecord(record) {
+  if (typeof WatchlistDispatchShapeUtils.mapDecisionRecordForDispatch === 'function') {
+    return WatchlistDispatchShapeUtils.mapDecisionRecordForDispatch(record);
+  }
+  if (!record || typeof record !== 'object') return null;
+  return {
+    recordFormat: typeof record.recordFormat === 'string' ? record.recordFormat : '',
+    decisionDate: typeof record.decisionDate === 'string' ? record.decisionDate : '',
+    decisionStatus: typeof record.decisionStatus === 'string' ? record.decisionStatus : '',
+    decisionRole: typeof record.decisionRole === 'string' ? record.decisionRole : '',
+    company: typeof record.company === 'string' ? record.company : '',
+    sourceMaterial: typeof record.sourceMaterial === 'string' ? record.sourceMaterial : '',
+    thesis: typeof record.thesis === 'string' ? record.thesis : '',
+    asymmetry: typeof record.asymmetry === 'string' ? record.asymmetry : '',
+    bear: typeof record.bear === 'string' ? record.bear : '',
+    base: typeof record.base === 'string' ? record.base : '',
+    bull: typeof record.bull === 'string' ? record.bull : '',
+    voi: typeof record.voi === 'string' ? record.voi : '',
+    sector: typeof record.sector === 'string' ? record.sector : '',
+    companyFamily: typeof record.companyFamily === 'string' && record.companyFamily.trim()
+      ? record.companyFamily
+      : (typeof record.sector === 'string' ? record.sector : ''),
+    companyType: typeof record.companyType === 'string' ? record.companyType : '',
+    revenueModel: typeof record.revenueModel === 'string' ? record.revenueModel : '',
+    region: typeof record.region === 'string' ? record.region : '',
+    currency: typeof record.currency === 'string' ? record.currency : ''
+  };
 }
 
 function normalizeWatchlistDispatchPayload(response) {
@@ -14772,13 +14694,20 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
-  const decisionRecords = extractDecisionRecordsFromText(text);
-  const decisionRecord = decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
+  const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
+    ? DecisionContractUtils.validateDecisionContractText(text)
+    : null;
+  const decisionRecords = Array.isArray(validation?.records) ? validation.records : extractDecisionRecordsFromText(text);
+  const decisionRecord = validation?.primaryRecord
+    || validation?.selectedRecord
+    || decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
     || decisionRecords[decisionRecords.length - 1]
     || null;
-  const dispatchText = decisionRecords.length > 0
-    ? decisionRecords.map((record) => record.canonicalLine).join('\n')
-    : text;
+  const dispatchText = typeof validation?.canonicalText === 'string' && validation.canonicalText.trim()
+    ? validation.canonicalText
+    : (decisionRecords.length > 0
+      ? decisionRecords.map((record) => record.canonicalLine).join('\n')
+      : text);
   const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
 
   const payload = {
@@ -14800,49 +14729,18 @@ function normalizeWatchlistDispatchPayload(response) {
     payload.sourceUrl = sourceMeta.sourceUrl;
   }
   if (decisionRecord) {
-    payload.decisionRecord = {
-      recordFormat: decisionRecord.recordFormat,
-      decisionDate: decisionRecord.decisionDate,
-      decisionStatus: decisionRecord.decisionStatus,
-      decisionRole: decisionRecord.decisionRole || '',
-      company: decisionRecord.company,
-      sourceMaterial: decisionRecord.sourceMaterial,
-      thesis: decisionRecord.thesis,
-      asymmetry: decisionRecord.asymmetry,
-      bear: decisionRecord.bear,
-      base: decisionRecord.base,
-      bull: decisionRecord.bull,
-      voi: decisionRecord.voi,
-      sector: decisionRecord.sector,
-      companyFamily: decisionRecord.companyFamily || decisionRecord.sector || '',
-      companyType: decisionRecord.companyType || '',
-      revenueModel: decisionRecord.revenueModel || '',
-      region: decisionRecord.region,
-      currency: decisionRecord.currency
-    };
+    payload.decisionRecord = mapDispatchDecisionRecord(decisionRecord);
     payload.decisionRecordCount = decisionRecords.length;
-    if (decisionRecords.length > 1) {
-      payload.decisionRecords = decisionRecords.map((record) => ({
-        recordFormat: record.recordFormat,
-        decisionDate: record.decisionDate,
-        decisionStatus: record.decisionStatus,
-        decisionRole: record.decisionRole || '',
-        company: record.company,
-        sourceMaterial: record.sourceMaterial,
-        thesis: record.thesis,
-        asymmetry: record.asymmetry,
-        bear: record.bear,
-        base: record.base,
-        bull: record.bull,
-        voi: record.voi,
-        sector: record.sector,
-        companyFamily: record.companyFamily || record.sector || '',
-        companyType: record.companyType || '',
-        revenueModel: record.revenueModel || '',
-        region: record.region,
-        currency: record.currency
-      }));
-    }
+    payload.decisionRecords = typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
+      ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(decisionRecords)
+      : decisionRecords
+        .map((record) => mapDispatchDecisionRecord(record))
+        .filter((record) => !!record);
+  }
+  if (response.decisionContract && typeof response.decisionContract === 'object') {
+    payload.decisionContract = response.decisionContract;
+  } else if (validation?.decisionContract) {
+    payload.decisionContract = validation.decisionContract;
   }
   const conversationUrl = normalizeChatConversationUrl(response.conversationUrl);
   if (conversationUrl) {
@@ -14914,7 +14812,20 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     payload.stage = rawPayload.stage;
   }
   if (rawPayload.decisionRecord && typeof rawPayload.decisionRecord === 'object' && !Array.isArray(rawPayload.decisionRecord)) {
-    payload.decisionRecord = rawPayload.decisionRecord;
+    payload.decisionRecord = mapDispatchDecisionRecord(rawPayload.decisionRecord);
+  }
+  if (Number.isInteger(rawPayload.decisionRecordCount) && rawPayload.decisionRecordCount >= 0) {
+    payload.decisionRecordCount = rawPayload.decisionRecordCount;
+  }
+  if (Array.isArray(rawPayload.decisionRecords)) {
+    payload.decisionRecords = typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
+      ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(rawPayload.decisionRecords)
+      : rawPayload.decisionRecords
+        .map((record) => mapDispatchDecisionRecord(record))
+        .filter((record) => !!record);
+  }
+  if (rawPayload.decisionContract && typeof rawPayload.decisionContract === 'object' && !Array.isArray(rawPayload.decisionContract)) {
+    payload.decisionContract = rawPayload.decisionContract;
   }
   return payload;
 }
@@ -15105,6 +15016,122 @@ function normalizeWatchlistVerifyState(rawState) {
   return typeof rawState === 'string' ? rawState.trim().toLowerCase() : '';
 }
 
+function normalizeWatchlistOutboxPositiveInt(value) {
+  return Number.isInteger(value) && value > 0 ? value : 0;
+}
+
+function normalizeWatchlistOutboxNonNegativeInt(value) {
+  return Number.isInteger(value) && value >= 0 ? value : 0;
+}
+
+function rankWatchlistOutboxItem(item) {
+  if (normalizeWatchlistOutboxPositiveInt(item?.verifiedAt) > 0) return 4;
+  if (normalizeWatchlistOutboxPositiveInt(item?.deliveryAcceptedAt) > 0) return 3;
+  if (
+    normalizeWatchlistOutboxNonNegativeInt(item?.verifyAttemptCount) > 0
+    || normalizeWatchlistOutboxNonNegativeInt(item?.attemptCount) > 0
+  ) {
+    return 2;
+  }
+  return 1;
+}
+
+function choosePreferredWatchlistOutboxItem(left, right) {
+  const leftRank = rankWatchlistOutboxItem(left);
+  const rightRank = rankWatchlistOutboxItem(right);
+  if (leftRank !== rightRank) {
+    return leftRank >= rightRank ? left : right;
+  }
+
+  const leftVerifiedAt = normalizeWatchlistOutboxPositiveInt(left?.verifiedAt);
+  const rightVerifiedAt = normalizeWatchlistOutboxPositiveInt(right?.verifiedAt);
+  if (leftVerifiedAt !== rightVerifiedAt) {
+    return leftVerifiedAt >= rightVerifiedAt ? left : right;
+  }
+
+  const leftAcceptedAt = normalizeWatchlistOutboxPositiveInt(left?.deliveryAcceptedAt);
+  const rightAcceptedAt = normalizeWatchlistOutboxPositiveInt(right?.deliveryAcceptedAt);
+  if (leftAcceptedAt !== rightAcceptedAt) {
+    return leftAcceptedAt >= rightAcceptedAt ? left : right;
+  }
+
+  const leftVerifyAttempts = normalizeWatchlistOutboxNonNegativeInt(left?.verifyAttemptCount);
+  const rightVerifyAttempts = normalizeWatchlistOutboxNonNegativeInt(right?.verifyAttemptCount);
+  if (leftVerifyAttempts !== rightVerifyAttempts) {
+    return leftVerifyAttempts >= rightVerifyAttempts ? left : right;
+  }
+
+  const leftAttempts = normalizeWatchlistOutboxNonNegativeInt(left?.attemptCount);
+  const rightAttempts = normalizeWatchlistOutboxNonNegativeInt(right?.attemptCount);
+  if (leftAttempts !== rightAttempts) {
+    return leftAttempts >= rightAttempts ? left : right;
+  }
+
+  const leftMaterialized = normalizeWatchlistOutboxNonNegativeInt(left?.materializedRowCount);
+  const rightMaterialized = normalizeWatchlistOutboxNonNegativeInt(right?.materializedRowCount);
+  if (leftMaterialized !== rightMaterialized) {
+    return leftMaterialized >= rightMaterialized ? left : right;
+  }
+
+  return left;
+}
+
+function mergeWatchlistOutboxItems(previous, incoming) {
+  const left = previous && typeof previous === 'object' ? previous : null;
+  const right = incoming && typeof incoming === 'object' ? incoming : null;
+  if (!left) return right;
+  if (!right) return left;
+
+  const stronger = choosePreferredWatchlistOutboxItem(left, right);
+  const weaker = stronger === left ? right : left;
+  const nowTs = Date.now();
+  const leftQueuedAt = normalizeWatchlistOutboxPositiveInt(left.queuedAt);
+  const rightQueuedAt = normalizeWatchlistOutboxPositiveInt(right.queuedAt);
+  const leftAcceptedAt = normalizeWatchlistOutboxPositiveInt(left.deliveryAcceptedAt);
+  const rightAcceptedAt = normalizeWatchlistOutboxPositiveInt(right.deliveryAcceptedAt);
+  const queuedCandidates = [leftQueuedAt, rightQueuedAt].filter((value) => value > 0);
+  const queuedAt = queuedCandidates.length > 0 ? Math.min(...queuedCandidates) : nowTs;
+
+  return {
+    ...weaker,
+    ...stronger,
+    payload: stronger.payload || weaker.payload,
+    queuedAt,
+    attemptCount: Math.max(
+      normalizeWatchlistOutboxNonNegativeInt(left.attemptCount),
+      normalizeWatchlistOutboxNonNegativeInt(right.attemptCount)
+    ),
+    nextAttemptAt: Math.max(
+      normalizeWatchlistOutboxNonNegativeInt(left.nextAttemptAt),
+      normalizeWatchlistOutboxNonNegativeInt(right.nextAttemptAt)
+    ),
+    lastError: stronger.lastError || weaker.lastError || '',
+    deliveryAcceptedAt: Math.max(leftAcceptedAt, rightAcceptedAt),
+    deliveryEventId: stronger.deliveryEventId || weaker.deliveryEventId || '',
+    deliveryRequestId: stronger.deliveryRequestId || weaker.deliveryRequestId || '',
+    deliveryIntakeUrl: stronger.deliveryIntakeUrl || weaker.deliveryIntakeUrl || '',
+    verifyState: stronger.verifyState || weaker.verifyState || '',
+    verifyReason: stronger.verifyReason || weaker.verifyReason || '',
+    verifyAttemptCount: Math.max(
+      normalizeWatchlistOutboxNonNegativeInt(left.verifyAttemptCount),
+      normalizeWatchlistOutboxNonNegativeInt(right.verifyAttemptCount)
+    ),
+    verifyLastCheckedAt: Math.max(
+      normalizeWatchlistOutboxPositiveInt(left.verifyLastCheckedAt),
+      normalizeWatchlistOutboxPositiveInt(right.verifyLastCheckedAt)
+    ),
+    verifyLastError: stronger.verifyLastError || weaker.verifyLastError || '',
+    verifiedAt: Math.max(
+      normalizeWatchlistOutboxPositiveInt(left.verifiedAt),
+      normalizeWatchlistOutboxPositiveInt(right.verifiedAt)
+    ),
+    materializedRowCount: Math.max(
+      normalizeWatchlistOutboxNonNegativeInt(left.materializedRowCount),
+      normalizeWatchlistOutboxNonNegativeInt(right.materializedRowCount)
+    )
+  };
+}
+
 function isWatchlistOutboxDeliveryAccepted(item) {
   return Number.isInteger(item?.deliveryAcceptedAt) && item.deliveryAcceptedAt > 0;
 }
@@ -15188,7 +15215,7 @@ function sanitizeWatchlistOutbox(rawItems) {
     if (isLowSignalProblemLogPayload(payload)) continue;
     const key = getWatchlistOutboxDedupKey(item);
     if (!key) continue;
-    deduped.set(key, {
+    const sanitizedItem = {
       payload,
       queuedAt: Number.isInteger(item.queuedAt) ? item.queuedAt : Date.now(),
       attemptCount: Number.isInteger(item.attemptCount) && item.attemptCount >= 0 ? item.attemptCount : 0,
@@ -15221,7 +15248,12 @@ function sanitizeWatchlistOutbox(rawItems) {
       materializedRowCount: Number.isInteger(item.materializedRowCount) && item.materializedRowCount >= 0
         ? item.materializedRowCount
         : 0
-    });
+    };
+    const previousItem = deduped.get(key);
+    deduped.set(
+      key,
+      previousItem ? mergeWatchlistOutboxItems(previousItem, sanitizedItem) : sanitizedItem
+    );
   }
 
   const normalized = Array.from(deduped.values());
@@ -15270,6 +15302,55 @@ function withResponseStorageMutationLock(task) {
   return next;
 }
 
+function getResponseStorageAreas() {
+  return {
+    local: chrome.storage?.local || null,
+    session: chrome.storage?.session || null
+  };
+}
+
+function ensureCanonicalResponseStorageReady() {
+  if (!canonicalResponseStorageReady) {
+    canonicalResponseStorageReady = withResponseStorageMutationLock(async () => {
+      return ResponseStorageUtils.migrateLegacyResponseStorage(
+        getResponseStorageAreas(),
+        DecisionContractUtils,
+        { clearSession: true }
+      );
+    }).catch((error) => {
+      canonicalResponseStorageReady = null;
+      console.warn('[storage] Canonical response migration failed:', error?.message || error);
+      return {
+        responses: [],
+        rewritten: false,
+        migratedSessionCount: 0
+      };
+    });
+  }
+  return canonicalResponseStorageReady;
+}
+
+async function readCanonicalResponsesFromStorage() {
+  await ensureCanonicalResponseStorageReady();
+  return ResponseStorageUtils.readCanonicalResponses(getResponseStorageAreas(), DecisionContractUtils);
+}
+
+async function upsertCanonicalResponseToStorage(responseRecord, options = {}) {
+  return withResponseStorageMutationLock(async () => {
+    return ResponseStorageUtils.upsertCanonicalResponse(
+      responseRecord,
+      getResponseStorageAreas(),
+      DecisionContractUtils,
+      {
+        mirrorToSession: options.mirrorToSession === true,
+        clearSession: options.clearSession !== false
+      }
+    );
+  });
+}
+
+void ensureCanonicalResponseStorageReady();
+
 function sanitizeWatchlistDispatchHistory(rawItems) {
   const items = Array.isArray(rawItems) ? rawItems : [];
   const normalized = [];
@@ -15286,6 +15367,7 @@ function sanitizeWatchlistDispatchHistory(rawItems) {
       skipReason: typeof item.skipReason === 'string' ? item.skipReason : '',
       error: typeof item.error === 'string' ? item.error : '',
       queued: Number.isInteger(item.queued) ? item.queued : 0,
+      accepted: Number.isInteger(item.accepted) ? item.accepted : 0,
       sent: Number.isInteger(item.sent) ? item.sent : 0,
       failed: Number.isInteger(item.failed) ? item.failed : 0,
       deferred: Number.isInteger(item.deferred) ? item.deferred : 0,
@@ -15669,17 +15751,20 @@ function buildWatchlistVerifyUrlCandidates(primaryIntakeUrl) {
   return [...new Set(candidates)];
 }
 
-function convertWatchlistIntakeUrlToProblemLogsUrl(rawIntakeUrl) {
+function convertWatchlistIntakeUrlToProblemLogsQueryUrl(rawIntakeUrl) {
+  if (typeof WatchlistApiUtils.buildProblemLogsQueryUrl === 'function') {
+    return WatchlistApiUtils.buildProblemLogsQueryUrl(rawIntakeUrl);
+  }
   const normalized = normalizeWatchlistIntakeUrl(rawIntakeUrl);
   if (!normalized) return '';
   try {
     const parsed = new URL(normalized);
     const pathname = typeof parsed.pathname === 'string' ? parsed.pathname : '';
     if (/\/economist-response\/?$/i.test(pathname)) {
-      parsed.pathname = pathname.replace(/\/economist-response\/?$/i, '/problem-logs');
+      parsed.pathname = pathname.replace(/\/economist-response\/?$/i, '/problem-logs/query');
     } else {
       const basePath = pathname.replace(/\/+$/, '');
-      parsed.pathname = `${basePath}${WATCHLIST_PROBLEM_LOGS_PATH.startsWith('/') ? WATCHLIST_PROBLEM_LOGS_PATH : `/${WATCHLIST_PROBLEM_LOGS_PATH}`}`;
+      parsed.pathname = `${basePath}${WATCHLIST_PROBLEM_LOGS_QUERY_PATH.startsWith('/') ? WATCHLIST_PROBLEM_LOGS_QUERY_PATH : `/${WATCHLIST_PROBLEM_LOGS_QUERY_PATH}`}`;
     }
     parsed.search = '';
     parsed.hash = '';
@@ -15691,7 +15776,7 @@ function convertWatchlistIntakeUrlToProblemLogsUrl(rawIntakeUrl) {
 
 function buildWatchlistProblemLogUrlCandidates(primaryIntakeUrl) {
   const candidates = buildWatchlistDispatchUrlCandidates(primaryIntakeUrl)
-    .map((candidate) => convertWatchlistIntakeUrlToProblemLogsUrl(candidate))
+    .map((candidate) => convertWatchlistIntakeUrlToProblemLogsQueryUrl(candidate))
     .filter((candidate) => typeof candidate === 'string' && candidate.trim());
   return [...new Set(candidates)];
 }
@@ -15838,44 +15923,45 @@ async function fetchRemoteProblemLogs(options = {}) {
   const timeoutMs = Number.isInteger(options?.timeoutMs) && options.timeoutMs > 0
     ? Math.max(1000, options.timeoutMs)
     : Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
-  const emptyBodyHash = await sha256HexForDispatch('');
-
   let lastError = 'remote_problem_logs_unavailable';
   let lastStatus = null;
   let lastIntakeUrl = '';
 
   for (const candidate of urlCandidates) {
     try {
-      const endpoint = new URL(candidate);
-      endpoint.searchParams.set('limit', String(limit));
-      endpoint.searchParams.set('minutes', String(minutes));
-      if (supportId) {
-        endpoint.searchParams.set('support_id', supportId);
+      const signedRequest = typeof WatchlistApiUtils.buildSignedProblemLogsQueryRequest === 'function'
+        ? await WatchlistApiUtils.buildSignedProblemLogsQueryRequest({
+          intakeUrl: candidate,
+          keyId: dispatchConfig.keyId,
+          secret: dispatchConfig.secret,
+          limit,
+          minutes,
+          supportId
+        })
+        : null;
+      const endpoint = new URL(signedRequest?.url || candidate);
+      const requestBody = typeof signedRequest?.body === 'string'
+        ? signedRequest.body
+        : JSON.stringify({
+          limit,
+          minutes,
+          ...(supportId ? { supportId } : {})
+        });
+      const headers = signedRequest?.headers && typeof signedRequest.headers === 'object'
+        ? signedRequest.headers
+        : null;
+      if (!headers) {
+        throw new Error('problem_logs_request_signing_unavailable');
       }
       lastIntakeUrl = endpoint.toString();
-
-      const timestamp = Math.floor(Date.now() / 1000).toString();
-      const nonce = generateWatchlistNonce();
-      const canonical = buildWatchlistCanonicalString({
-        method: 'GET',
-        path: endpoint.pathname || '/',
-        timestamp,
-        nonce,
-        bodyHash: emptyBodyHash,
-      });
-      const signature = await hmacSha256Hex(dispatchConfig.secret, canonical);
       const controller = new AbortController();
       let timeoutId = null;
       try {
         const response = await Promise.race([
           fetch(endpoint.toString(), {
-            method: 'GET',
-            headers: {
-              'X-Watchlist-Key-Id': dispatchConfig.keyId,
-              'X-Watchlist-Timestamp': timestamp,
-              'X-Watchlist-Nonce': nonce,
-              'X-Watchlist-Signature': signature,
-            },
+            method: 'POST',
+            headers,
+            body: requestBody,
             signal: controller.signal
           }),
           new Promise((_, reject) => {
@@ -18743,8 +18829,8 @@ async function saveResponse(
       return;
     }
     
-    const result = await chrome.storage.session.get(['responses']);
-    const storedResponses = Array.isArray(result.responses) ? result.responses : [];
+    await ensureCanonicalResponseStorageReady();
+    const storedResponses = await readCanonicalResponsesFromStorage();
     
     console.log(`📦 Obecny stan storage: ${storedResponses.length} odpowiedzi`);
     
@@ -18819,75 +18905,48 @@ async function saveResponse(
     let lastSaved = null;
     let saveAttemptOk = false;
 
-    const saveAttemptResult = await withResponseStorageMutationLock(async () => {
-      let lockedVerifiedResponses = storedResponses;
-      let lockedLastSaved = null;
-      let lockedSaveAttemptOk = false;
+    for (let attempt = 1; attempt <= saveMaxAttempts; attempt += 1) {
+      try {
+        const persistResult = await upsertCanonicalResponseToStorage(newResponse, {
+          mirrorToSession: false,
+          clearSession: true
+        });
+        verifiedResponses = Array.isArray(persistResult?.responses)
+          ? persistResult.responses
+          : await readCanonicalResponsesFromStorage();
+        lastSaved = persistResult?.savedResponse
+          || ResponseStorageUtils.findMatchingResponse(verifiedResponses, newResponse)
+          || verifiedResponses[verifiedResponses.length - 1]
+          || null;
 
-      for (let attempt = 1; attempt <= saveMaxAttempts; attempt += 1) {
-        try {
-          const snapshot = await chrome.storage.session.get(['responses']);
-          const currentResponses = Array.isArray(snapshot.responses) ? snapshot.responses : [];
-          const existingIndex = currentResponses.findIndex((item) => item?.responseId === normalizedResponseId);
+        const candidateText = typeof lastSaved?.text === 'string' ? lastSaved.text : '';
+        const candidateFingerprint = textFingerprint(candidateText);
+        const textMatch = candidateText === responseText;
 
-          if (existingIndex >= 0) {
-            lockedVerifiedResponses = currentResponses;
-            lockedLastSaved = currentResponses[existingIndex];
-            lockedSaveAttemptOk = true;
-            console.log(`[copy-flow] [save:attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} dedupe=existing index=${existingIndex}`);
-            break;
-          }
+        console.log(
+          `[copy-flow] [save:verify-attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} count=${verifiedResponses.length} fp=${candidateFingerprint} textMatch=${textMatch}`
+        );
 
-          const responsesToStore = [...currentResponses, newResponse];
-          console.log(`[copy-flow] [save:attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} from=${currentResponses.length} target=${responsesToStore.length}`);
-
-          await chrome.storage.session.set({ responses: responsesToStore });
-
-          const verification = await chrome.storage.session.get(['responses']);
-          lockedVerifiedResponses = Array.isArray(verification.responses) ? verification.responses : [];
-          const candidate = lockedVerifiedResponses.find((item) => item?.responseId === normalizedResponseId) || lockedVerifiedResponses[lockedVerifiedResponses.length - 1];
-          const candidateText = typeof candidate?.text === 'string' ? candidate.text : '';
-          const candidateFingerprint = textFingerprint(candidateText);
-          const textMatch = candidateText === responseText;
-
-          console.log(
-            `[copy-flow] [save:verify-attempt] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} count=${lockedVerifiedResponses.length} fp=${candidateFingerprint} textMatch=${textMatch}`
-          );
-
-          if (candidate && textMatch) {
-            lockedLastSaved = candidate;
-            lockedSaveAttemptOk = true;
-            break;
-          }
-
-          if (attempt < saveMaxAttempts) {
-            console.warn(`[copy-flow] [save:retry] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} reason=verify_mismatch`);
-            await sleep(saveRetryDelayMs * attempt);
-          }
-        } catch (attemptError) {
-          if (attempt < saveMaxAttempts) {
-            console.warn(
-              `[copy-flow] [save:retry] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} reason=${attemptError.message || String(attemptError)}`
-            );
-            await sleep(saveRetryDelayMs * attempt);
-            continue;
-          }
-          throw attemptError;
+        if (lastSaved && textMatch) {
+          saveAttemptOk = true;
+          break;
         }
+
+        if (attempt < saveMaxAttempts) {
+          console.warn(`[copy-flow] [save:retry] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} reason=verify_mismatch`);
+          await sleep(saveRetryDelayMs * attempt);
+        }
+      } catch (attemptError) {
+        if (attempt < saveMaxAttempts) {
+          console.warn(
+            `[copy-flow] [save:retry] trace=${copyTrace} attempt=${attempt}/${saveMaxAttempts} reason=${attemptError.message || String(attemptError)}`
+          );
+          await sleep(saveRetryDelayMs * attempt);
+          continue;
+        }
+        throw attemptError;
       }
-
-      return {
-        verifiedResponses: lockedVerifiedResponses,
-        lastSaved: lockedLastSaved,
-        saveAttemptOk: lockedSaveAttemptOk
-      };
-    });
-
-    verifiedResponses = Array.isArray(saveAttemptResult?.verifiedResponses)
-      ? saveAttemptResult.verifiedResponses
-      : verifiedResponses;
-    lastSaved = saveAttemptResult?.lastSaved || null;
-    saveAttemptOk = saveAttemptResult?.saveAttemptOk === true;
+    }
 
     if (!saveAttemptOk || !lastSaved) {
       throw new Error('Storage verification failed after retries');
@@ -18950,7 +19009,7 @@ async function saveResponse(
 
     try {
       appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
-      const dispatchQueueResult = await enqueueWatchlistDispatch(newResponse, copyTrace);
+      const dispatchQueueResult = await enqueueWatchlistDispatch(lastSaved || newResponse, copyTrace);
       if (dispatchQueueResult?.queued) {
         dispatchOutcome.queued = true;
         dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
@@ -19166,7 +19225,7 @@ async function saveResponse(
     console.log(`${'*'.repeat(80)}\n`);
     return {
       success: true,
-      response: newResponse,
+      response: lastSaved || newResponse,
       copyTrace,
       verifiedCount: verifiedResponses.length,
       dispatch: dispatchOutcome,
@@ -19453,7 +19512,10 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         queued: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : normalizedInstances,
         queuedCount: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : normalizedInstances,
         queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
-        activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0
+        activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
+        reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
+        liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
+        startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0
       });
     })().catch((error) => {
       sendResponse({ success: false, error: error?.message || 'manual_source_start_failed' });
@@ -19505,9 +19567,13 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         success: false,
         maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
         activeSlots: 0,
+        reservedSlots: 0,
+        liveSlots: 0,
+        startingSlots: 0,
         queueSize: 0,
         waitingJobs: 0,
         activeJobs: 0,
+        liveActiveJobs: 0,
         totalJobs: 0,
         error: error?.message || 'analysis_queue_status_failed'
       });
@@ -20488,6 +20554,9 @@ async function resumeFromStage(startIndex, options = {}) {
       queuedCount: queueResult?.queuedCount || 1,
       queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
       activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
+      reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
+      liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
+      startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0,
       requestedStartIndex: startIndex,
       startIndex: resolvedStartIndex,
       startPromptNumber: resolvedStartIndex + 1,
@@ -20912,6 +20981,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         results = await executeScriptWithTransientRetry({
           tabId: chatTabId,
           scriptFunction: injectToChat,
+          preloadFiles: INJECT_SHARED_HELPER_FILES,
           args: executionArgs,
           contextLabel: `${analysisType}:inject`,
           onRetry: async ({ attempt, maxAttempts, errorText }) => {
@@ -21490,6 +21560,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
           results = await executeScriptWithTransientRetry({
             tabId: chatTabId,
             scriptFunction: injectToChat,
+            preloadFiles: INJECT_SHARED_HELPER_FILES,
             args: executionArgs,
             contextLabel: `${analysisType}:inject`,
             onRetry: async ({ attempt, maxAttempts, errorText }) => {
@@ -22121,6 +22192,9 @@ async function runAnalysis(options = {}) {
       queuedCount: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : orderedTabs.length,
       queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
       activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
+      reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
+      liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
+      startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0,
       totalTabs: orderedTabs.length
     };
 
@@ -22422,6 +22496,9 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
       queuedCount: enqueueResult?.queuedCount || 0,
       queueSize: Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : 0,
       activeSlots: Number.isInteger(enqueueResult?.activeSlots) ? enqueueResult.activeSlots : 0,
+      reservedSlots: Number.isInteger(enqueueResult?.reservedSlots) ? enqueueResult.reservedSlots : 0,
+      liveSlots: Number.isInteger(enqueueResult?.liveSlots) ? enqueueResult.liveSlots : 0,
+      startingSlots: Number.isInteger(enqueueResult?.startingSlots) ? enqueueResult.startingSlots : 0,
       batchId
     };
   }
@@ -23692,6 +23769,8 @@ async function injectToChat(
     }
 
     async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null) {
+      const storageUtils = globalThis.ResponseStorageUtils || null;
+      const decisionUtils = globalThis.DecisionContractUtils || null;
       const normalizedText = typeof responseText === 'string' ? responseText : '';
       if (!normalizedText.trim()) {
         return { success: false, reason: 'empty_response' };
@@ -23742,12 +23821,52 @@ async function injectToChat(
       if (conversationUrl) {
         responseRecord.conversationUrl = conversationUrl;
       }
+      let responseStored = false;
+      let responseCount = 0;
+      let savedResponse = responseRecord;
+
+      if (storageUtils && typeof storageUtils.upsertCanonicalResponse === 'function') {
+        const persistResult = await storageUtils.upsertCanonicalResponse(
+          responseRecord,
+          {
+            local: chrome.storage?.local || null,
+            session: chrome.storage?.session || null
+          },
+          decisionUtils,
+          {
+            mirrorToSession: false,
+            clearSession: true
+          }
+        );
+        savedResponse = persistResult?.savedResponse || responseRecord;
+        responseCount = Array.isArray(persistResult?.responses) ? persistResult.responses.length : 0;
+        responseStored = !!savedResponse;
+      } else {
+        const snapshot = await chrome.storage.local.get(['responses']);
+        const storedResponses = Array.isArray(snapshot?.responses) ? snapshot.responses : [];
+        const nextResponses = storedResponses.slice();
+        const existingResponseIndex = nextResponses.findIndex((item) => item?.responseId === normalizedResponseId);
+        if (existingResponseIndex === -1) {
+          nextResponses.push(responseRecord);
+          responseStored = true;
+        }
+        await chrome.storage.local.set({ responses: nextResponses });
+        responseCount = nextResponses.length;
+      }
+
+      const validation = decisionUtils && typeof decisionUtils.validateDecisionContractText === 'function'
+        ? decisionUtils.validateDecisionContractText(savedResponse?.text || normalizedText)
+        : null;
+      const decisionRecords = Array.isArray(validation?.records) ? validation.records : [];
+      const decisionRecord = validation?.primaryRecord || validation?.selectedRecord || decisionRecords[0] || null;
 
       const dispatchPayload = {
         schema: 'economist.response.v1',
         responseId: normalizedResponseId,
         runId: normalizedRunId || null,
-        text: normalizedText,
+        text: typeof validation?.canonicalText === 'string' && validation.canonicalText.trim()
+          ? validation.canonicalText
+          : normalizedText,
         source,
         analysisType: normalizedAnalysisType,
         timestamp
@@ -23764,18 +23883,21 @@ async function injectToChat(
       if (conversationUrl) {
         dispatchPayload.conversationUrl = conversationUrl;
       }
-
-      const snapshot = await chrome.storage.local.get(['responses', 'watchlist_dispatch_outbox']);
-      const storedResponses = Array.isArray(snapshot?.responses) ? snapshot.responses : [];
-      const storedOutbox = Array.isArray(snapshot?.watchlist_dispatch_outbox) ? snapshot.watchlist_dispatch_outbox : [];
-
-      let responseStored = false;
-      const nextResponses = storedResponses.slice();
-      const existingResponseIndex = nextResponses.findIndex((item) => item?.responseId === normalizedResponseId);
-      if (existingResponseIndex === -1) {
-        nextResponses.push(responseRecord);
-        responseStored = true;
+      if (decisionRecord) {
+        dispatchPayload.decisionRecord = mapDispatchDecisionRecord(decisionRecord);
+        dispatchPayload.decisionRecordCount = decisionRecords.length;
+        dispatchPayload.decisionRecords = typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
+          ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(decisionRecords)
+          : decisionRecords
+            .map((record) => mapDispatchDecisionRecord(record))
+            .filter((record) => !!record);
       }
+      if (savedResponse?.decisionContract && typeof savedResponse.decisionContract === 'object') {
+        dispatchPayload.decisionContract = savedResponse.decisionContract;
+      }
+
+      const snapshot = await chrome.storage.local.get(['watchlist_dispatch_outbox']);
+      const storedOutbox = Array.isArray(snapshot?.watchlist_dispatch_outbox) ? snapshot.watchlist_dispatch_outbox : [];
 
       let outboxQueued = false;
       const nextOutbox = storedOutbox.slice();
@@ -23792,7 +23914,6 @@ async function injectToChat(
       }
 
       await chrome.storage.local.set({
-        responses: nextResponses,
         watchlist_dispatch_outbox: nextOutbox
       });
 
@@ -23801,7 +23922,7 @@ async function injectToChat(
         responseId: normalizedResponseId,
         responseStored,
         outboxQueued,
-        responseCount: nextResponses.length,
+        responseCount,
         queueSize: nextOutbox.length
       };
     }
@@ -26769,62 +26890,23 @@ async function injectToChat(
   }
 
   function parseStructuredDecisionLineParts(text = '') {
-    const normalized = typeof text === 'string'
-      ? text.replace(/\r/g, '').trim()
-      : '';
-    if (!normalized) return null;
-    const parts = normalized
-      .split(';')
-      .map((part) => part.trim());
-    while (parts.length > 0 && parts[parts.length - 1] === '') {
-      parts.pop();
-    }
-    if (parts.length === 12 || parts.length === 13 || parts.length === 15 || parts.length === 16) {
-      return parts;
-    }
-    return null;
+    return typeof DecisionContractUtils.parseDecisionRecordParts === 'function'
+      ? DecisionContractUtils.parseDecisionRecordParts(text)
+      : null;
   }
 
   function analyzeStructuredDecisionText(text = '') {
-    const normalized = typeof text === 'string'
-      ? text.replace(/\r/g, '').trim()
-      : '';
-    if (!normalized) {
-      return {
-        totalLines: 0,
-        validLineCount: 0,
-        preferredRoleRows: false
-      };
-    }
-
-    const nonEmptyLines = normalized
-      .split('\n')
-      .map((line) => line.trim())
-      .filter((line) => line.length > 0);
-    if (nonEmptyLines.length === 0) {
-      return {
-        totalLines: 0,
-        validLineCount: 0,
-        preferredRoleRows: false
-      };
-    }
-
-    let validLineCount = 0;
-    let roleLineCount = 0;
-    for (const line of nonEmptyLines) {
-      const parts = parseStructuredDecisionLineParts(line);
-      if (!parts) continue;
-      validLineCount += 1;
-      const role = typeof parts[2] === 'string' ? parts[2].trim().toUpperCase() : '';
-      if (role === 'PRIMARY' || role === 'SECONDARY') {
-        roleLineCount += 1;
-      }
-    }
-
+    const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
+      ? DecisionContractUtils.validateDecisionContractText(text)
+      : null;
     return {
-      totalLines: nonEmptyLines.length,
-      validLineCount,
-      preferredRoleRows: nonEmptyLines.length === 2 && validLineCount === 2 && roleLineCount === 2
+      totalLines: Array.isArray(validation?.lines) ? validation.lines.length : 0,
+      validLineCount: Number.isInteger(validation?.recordCount) ? validation.recordCount : 0,
+      preferredRoleRows: validation?.status === 'current',
+      contractStatus: typeof validation?.status === 'string' ? validation.status : 'invalid',
+      contractScore: typeof DecisionContractUtils.getDecisionContractStatusScore === 'function'
+        ? DecisionContractUtils.getDecisionContractStatusScore(validation?.status)
+        : 1
     };
   }
 
@@ -26843,7 +26925,7 @@ async function injectToChat(
       const analysis = analyzeStructuredDecisionText(text);
       if (analysis.validLineCount === 0) continue;
 
-      const score = (analysis.preferredRoleRows ? 1000 : 0)
+      const score = ((Number.isInteger(analysis.contractScore) ? analysis.contractScore : 1) * 1000)
         + (analysis.validLineCount * 10)
         + (index === messages.length - 1 ? 1 : 0);
 
@@ -26856,7 +26938,7 @@ async function injectToChat(
         };
       }
 
-      if (analysis.preferredRoleRows && index === messages.length - 1) {
+      if ((analysis.contractStatus === 'current' || analysis.contractStatus === 'shortfall') && index === messages.length - 1) {
         break;
       }
     }
