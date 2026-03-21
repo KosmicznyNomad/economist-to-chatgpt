@@ -2,7 +2,7 @@
 <html>
 <head>
   <meta charset="UTF-8">
-  <title>Panel decyzyjny</title>
+  <title>Monitor procesow</title>
   <style>
     :root {
       --bg: #f2f3f5;
@@ -545,9 +545,9 @@
   </style>
 </head>
 <body>
-  <h1>Panel decyzyjny</h1>
+  <h1>Monitor procesow</h1>
   <div class="panel-hint">
-    Kliknij karte procesu, aby otworzyc ChatGPT. Dla procesow wymagajacych akcji wybierz decyzje na karcie.
+    Kliknij karte procesu, aby otworzyc ChatGPT. Panel pokazuje stan procesu i skrot kontraktu odpowiedzi koncowej.
   </div>
   <div class="layout">
     <div class="sidebar">
@@ -583,6 +583,10 @@
       <div id="process-details" style="display: none;"></div>
     </div>
   </div>
+  <script src="decision-contract.js"></script>
+  <script src="response-storage.js"></script>
+  <script src="problem-log-ui-shared.js"></script>
+  <script src="decision-view-model.js"></script>
   <script src="process-monitor.js"></script>
 </body>
 </html>

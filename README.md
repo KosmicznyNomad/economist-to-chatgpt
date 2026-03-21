@@ -1,117 +1,88 @@
-﻿# Iskra
+# Iskra
 
-Chrome extension (Manifest V3) that extracts content from open tabs and runs multi-stage prompt chains in ChatGPT.
+Chrome extension (Manifest V3) for running the company-analysis chain in ChatGPT, storing final responses locally, and dispatching them to Watchlist.
 
-## What it does
-- Extracts text from supported news pages, Spotify transcripts, and open Gmail emails.
-- Runs two flows:
-  - `company` on all supported tabs.
-  - `portfolio` on selected tabs.
-- Automates ChatGPT stage-by-stage with retries and resume support.
-- Saves final chain responses locally.
+## Current runtime
+- Company flow only. The extension no longer documents or depends on the old article-selector/portfolio UI.
+- Manual source flow supports pasted text and PDF-backed runs.
+- Final responses are persisted locally and exposed in `responses.html`.
+- Operational state is exposed in `process-monitor.html`.
+- Runtime/process diagnostics are exposed in `problem-log.html`.
+- Watchlist integration uses signed HTTPS requests with retry and verify.
 
-## Current runtime flow
-`popup -> RUN_ANALYSIS -> processArticles -> injectToChat -> saveResponse -> responses.html`
+## Main flows
 
-## Main files
-- `manifest.json` - permissions and service worker registration.
-- `background.js` - core orchestration and ChatGPT automation.
-- `popup.js` - run, stop, resume and navigation.
-- `process-monitor.js` - process control panel.
-- `problem-log.js` - diagnostics panel for runtime/process errors.
-- `responses.js` - responses view, copy/clear, storage migration.
-- `reload-resume-monitor.js` - monitored reload+resume workflow.
-- `prompts-company.txt` / `prompts-portfolio.txt` - prompt chains.
-- `COMPANY_CHAIN_STAGE_MAP.md` - readable stage contract for `prompts-company.txt` + runtime mapping.
+Primary analysis flow:
+`popup -> RUN_ANALYSIS -> processArticles -> injectToChat -> saveResponse -> response-storage.js -> responses.html`
+
+Stage 12 view flow:
+`saved response text -> decision-contract.js -> decision-view-model.js -> responses.html / process-monitor.html`
+
+Watchlist dispatch flow:
+`saveResponse -> enqueueWatchlistDispatch -> flushWatchlistDispatchOutbox -> POST /api/v1/intake/economist-response -> POST /api/v1/intake/economist-response/verify`
+
+Remote problem-log flow:
+`problem-log.html -> POST /api/v1/intake/problem-logs/query`
+
+## Shared core files
+- `decision-contract.js` - one source of truth for Stage 12 parsing, extraction, canonical text rebuild, and status validation (`current`, `shortfall`, `legacy`, `invalid`).
+- `response-storage.js` - canonical read/write, dedupe, merge and migration helpers for responses.
+- `decision-view-model.js` - UI-only Stage 12 view-model builder used by `responses.js` and `process-monitor.js`.
+- `watchlist-api.js` - shared signed Watchlist request builder for remote problem-log query.
+- `watchlist-dispatch-shape.js` - shared normalization for `decisionRecord`, `decisionRecords[]` and related dispatch payload shape.
+- `problem-log-ui-shared.js` - shared UI helper for `REPORT_PROBLEM_LOG` payloads.
 
 ## Storage
-- Responses are written in worker to `chrome.storage.session.responses`.
-- `responses.js` migrates and merges data to `chrome.storage.local.responses`.
-- Process monitor snapshot is stored in `chrome.storage.local.process_monitor_state`.
+- Canonical persisted responses: `chrome.storage.local.responses`
+- Transitional cache/mirror: `chrome.storage.session.responses`
+- Process monitor state: `chrome.storage.local.process_monitor_state`
+- Watchlist dispatch queue/history:
+  - `watchlist_dispatch_outbox`
+  - `watchlist_dispatch_history`
 
-## Prompt chains
-- Prompt separator: `◄PROMPT_SEPARATOR►`.
-- Prompt #1 is payload template with `{{articlecontent}}`.
-- Remaining prompts are executed as chain in ChatGPT.
-- Only final chain response is persisted.
-- Company stage labels/descriptions are served from `STAGE_METADATA_COMPANY` (`background.js`) and documented in `COMPANY_CHAIN_STAGE_MAP.md`.
+The UI reads through shared storage helpers. Migration from legacy session-only responses is handled in the worker, not in page scripts.
 
-## Install (unpacked)
-1. Open `chrome://extensions/`.
-2. Enable `Developer mode`.
-3. Click `Load unpacked`.
-4. Select `economist-to-chatgpt` folder.
+## Stage 12 contract
+- `current`: valid 2-line, 16-field contract with `PRIMARY` then `SECONDARY`
+- `shortfall`: valid `PRIMARY` line plus trailing `# SHORTFALL: only 1 company passed Stage 10 gates`
+- `legacy`: readable old format kept for compatibility-read only
+- `invalid`: malformed or non-contract output
 
-## Use
-### Web tab flow
-1. Open supported article/video/email tabs (for Gmail: open the specific email first).
-2. Click extension icon (`Ctrl+Shift+E`).
-3. Choose tabs for portfolio analysis.
-4. Let both flows run.
+The dashboard and monitor should build Stage 12 state from `DecisionContractUtils.validateDecisionContractText(response.text)`, not from local heuristics.
 
-### Manual source flow
-1. Open popup.
-2. Open manual source dialog.
-3. Paste title and text, or attach one/many PDF files.
-4. Start selected number of instances.
+## Watchlist integration
+Configured intake endpoints:
+- `POST /api/v1/intake/economist-response`
+- `POST /api/v1/intake/economist-response/verify`
+- `POST /api/v1/intake/problem-logs/query`
+- `GET /api/v1/intake/problem-logs` remains a compatibility alias
 
-Manual PDF mode behavior:
-- If at least one PDF is selected, text field is ignored.
-- Each PDF is processed as a separate run (separate ChatGPT window).
-- Instances multiply each file (e.g. 2 files and 3 instances = 6 runs).
-- PDF queue runs with controlled parallelism (up to 3 workers).
-- Keep `Wklej zrodlo` window open during PDF queue. It provides PDF chunks to active runs.
+Required auth headers:
+- `X-Watchlist-Key-Id`
+- `X-Watchlist-Timestamp`
+- `X-Watchlist-Nonce`
+- `X-Watchlist-Signature`
 
-### Responses view
-- Open from popup or shortcut `Ctrl+Shift+R`.
-- Copy single response or copy all by analysis type.
-
-### Problem log view
-- Open from popup (`Problem log` button).
-- Review runtime/process issues with stage/status/reason context.
-- Use refresh and clear controls to validate recovery after fixes.
-- Use `Zdalne` to fetch remote problem logs from Watchlist intake API (HMAC auth, optional `Support ID` filter).
-
-### Watchlist intake setup
-Local unpacked override:
-- If you want the extension to start already configured, create `watchlist.inline-config.js` in repo root with `globalThis.WATCHLIST_INLINE_OVERRIDE = { intakeUrl, keyId, secret }`.
-- `background.js` loads this file automatically on startup; `.gitignore` keeps it local-only.
-
-1. Open popup -> `Watchlist intake`.
-2. Set:
-   - `Intake URL`: `https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response`
-   - `Key ID`: `extension-primary`
-   - `Secret`: value mapped for `extension-primary` in Watchlist server env (`/etc/watchlist/watchlist.env`, `WATCHLIST_INTAKE_KEYS_JSON`)
-3. Save credentials and trigger flush.
-4. Worker sends `economist.response.v1` directly over HTTPS with HMAC headers and outbox retry.
-
-If current network blocks direct access to Watchlist HTTPS endpoint, start local SSH tunnel and use local intake URL:
-- tunnel: `ssh -N -L 18080:127.0.0.1:8080 iskierka`
-- intake URL: `http://127.0.0.1:18080/api/v1/intake/economist-response`
-
-Backend/source repo for this intake stack: `watchlist` (`https://github.com/KosmicznyNomad/watchlist`).
-
-## Supported source updates
-Keep these in sync when adding/removing domains:
-- `manifest.json` host permissions
-- `SUPPORTED_SOURCES` in `background.js`
-- `extractText()` selectors for source-specific parsing
+## Main files
+- `manifest.json` - permissions, commands and worker registration
+- `background.js` - orchestration, save path, dispatch, verify, heartbeat/recovery
+- `popup.html` / `popup.js` - start/stop/resume, manual source, Watchlist config
+- `manual-source.html` / `manual-source.js` - pasted/manual PDF sources
+- `resume-stage.html` / `resume-stage.js` - resume company chain from selected stage
+- `responses.html` / `responses.js` - local responses UI and Stage 12 market table
+- `process-monitor.html` / `process-monitor.js` - operational process monitor with Stage 12 snapshot
+- `problem-log.html` / `problem-log.js` - diagnostics view including remote problem logs
+- `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored reload/resume workflow
+- `unfinished-processes.html` / `unfinished-processes.js` - recovery helper for incomplete runs
+- `prompts-company.txt` - active company prompt chain
+- `COMPANY_CHAIN_STAGE_MAP.md` - readable stage map for the company chain
 
 ## Notes
-- `background.js` is the central runtime file and contains most of automation/recovery logic.
-- Keep `STAGE_NAMES_COMPANY` aligned with company prompt order/count.
-- `content-script.js` is a separate Google Sheets bridge and not the main response storage path.
-- Watchlist integration uses direct HTTPS intake (`POST /api/v1/intake/economist-response`) with HMAC headers and outbox/retry in extension worker.
-- Process monitor uses periodic heartbeat sweep (`chrome.alarms`) with stale TTL warnings to improve near-live remote state visibility.
-- On restart/restore flows, ChatGPT tabs are automatically ungrouped from Chrome tab groups to keep workflow tabs independent.
+- `prompts-portfolio.txt` may still exist in the repo as a legacy artifact; it is not part of the current documented runtime flow.
+- `content-script.js` remains an independent Google Sheets bridge, not the canonical response persistence path.
+- Shared helper scripts are loaded by extension pages and the worker; the manifest no longer exposes them broadly via `web_accessible_resources`.
 
-## Quick validation (before commit)
-1. JS syntax:
-   `Get-ChildItem -Filter *.js | ForEach-Object { node --check $_.FullName }`
-2. Manifest JSON validity:
-   `python -c "import json; json.load(open('manifest.json', encoding='utf-8')); print('manifest ok')"`
-3. Manual smoke:
-   - run one company chain and confirm response in `responses.html`
-   - open `problem-log.html` and verify refresh/clear behavior
-
-
+## Quick validation
+1. `Get-ChildItem -Path . -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName }`
+2. `Get-ChildItem -Filter test-*.js | Sort-Object Name | ForEach-Object { node $_.FullName }`
+3. `python -m pytest -q tests/test_intake_api.py tests/test_storage_backend.py`

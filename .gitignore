@@ -1,1 +1,4 @@
 watchlist.inline-config.js
+backend/.venv/
+**/__pycache__/
+**/*.pyc

@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 'use strict';
 
-const crypto = require('crypto');
+const WatchlistApiUtils = require('./watchlist-api.js');
 
 const DEFAULT_INTAKE_URL = 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response';
 const DEFAULT_KEY_ID = 'extension-primary';
@@ -19,13 +19,6 @@ function normalizeLevel(value) {
   if (normalized === 'error') return 'error';
   if (normalized === 'warn' || normalized === 'warning') return 'warn';
   return 'info';
-}
-
-function buildProblemLogsUrl(baseUrl) {
-  const parsed = new URL(baseUrl);
-  parsed.pathname = parsed.pathname.replace(/\/economist-response\/?$/i, '/problem-logs');
-  parsed.search = '';
-  return parsed;
 }
 
 function extractSupportIdFromSource(sourceText) {
@@ -139,29 +132,23 @@ async function fetchProblemLogs({
   minutes = 14 * 24 * 60,
   supportId = ''
 } = {}) {
-  const endpoint = buildProblemLogsUrl(intakeUrl);
-  endpoint.searchParams.set('limit', String(Math.max(1, Math.min(limit, 500))));
-  endpoint.searchParams.set('minutes', String(Math.max(1, Math.min(minutes, 14 * 24 * 60))));
-  if (supportId) endpoint.searchParams.set('support_id', supportId);
+  const signedRequest = await WatchlistApiUtils.buildSignedProblemLogsQueryRequest({
+    intakeUrl,
+    keyId,
+    secret,
+    limit,
+    minutes,
+    supportId
+  });
 
-  const timestamp = Math.floor(Date.now() / 1000).toString();
-  const nonce = `n-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
-  const bodyHash = crypto.createHash('sha256').update('').digest('hex');
-  const canonical = ['GET', endpoint.pathname || '/', timestamp, nonce, bodyHash].join('\n');
-  const signature = crypto.createHmac('sha256', secret).update(canonical).digest('hex');
-
-  const response = await fetch(endpoint.toString(), {
-    method: 'GET',
-    headers: {
-      'X-Watchlist-Key-Id': keyId,
-      'X-Watchlist-Timestamp': timestamp,
-      'X-Watchlist-Nonce': nonce,
-      'X-Watchlist-Signature': signature,
-    }
+  const response = await fetch(signedRequest.url, {
+    method: signedRequest.method,
+    headers: signedRequest.headers,
+    body: signedRequest.body,
   });
   const payload = await response.json();
   const items = Array.isArray(payload?.items) ? payload.items : [];
-  return { response, payload, items, endpoint: endpoint.toString() };
+  return { response, payload, items, endpoint: signedRequest.url };
 }
 
 function collectIssues(rawItem) {

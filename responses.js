@@ -21,19 +21,19 @@ const copyAllCompanyBtn = document.getElementById('copyAllCompanyBtn');
 const copyAllCompanyWithLinkBtn = document.getElementById('copyAllCompanyWithLinkBtn');
 const companySortSelect = document.getElementById('companySortSelect');
 
-const RESPONSE_STORAGE_KEY = 'responses';
-let responseStorageReady = null;
+const DecisionContractUtils = globalThis.DecisionContractUtils || {};
+const ResponseStorageUtils = globalThis.ResponseStorageUtils || {};
+const DecisionViewModelUtils = globalThis.DecisionViewModelUtils || {};
+const RESPONSE_STORAGE_KEY = ResponseStorageUtils.RESPONSE_STORAGE_KEY || 'responses';
+let responseStorageReady = Promise.resolve();
 let marketRows = [];
 let marketSortState = {
-  key: 'rank',
-  direction: 'asc'
+  key: 'composite',
+  direction: 'desc'
 };
 let marketFilters = {
   companyQuery: '',
-  sector: '',
-  decisionStatus: '',
-  region: '',
-  currency: ''
+  sector: ''
 };
 let marketSuggestionItems = [];
 let marketSuggestionActiveIndex = -1;
@@ -56,40 +56,23 @@ function logClipboard(event, extra = {}) {
 }
 
 function getStorageAreas() {
-  return {
-    local: chrome.storage?.local || null,
-    session: chrome.storage?.session || null
-  };
+  return typeof ResponseStorageUtils.getStorageAreas === 'function'
+    ? ResponseStorageUtils.getStorageAreas()
+    : {
+      local: chrome.storage?.local || null,
+      session: chrome.storage?.session || null
+    };
 }
 
 function makeResponseKey(response) {
-  if (!response) return '';
-  const timestamp = response.timestamp || 0;
-  const runId = response.runId || '';
-  const responseId = response.responseId || '';
-  const analysisType = response.analysisType || '';
-  const source = response.source || '';
-  const text = response.text || '';
-  const head = text.slice(0, 64);
-  return `${timestamp}|${runId}|${responseId}|${analysisType}|${source}|${text.length}|${head}`;
+  if (typeof ResponseStorageUtils.buildResponseIdentityKeys !== 'function') return '';
+  return ResponseStorageUtils.buildResponseIdentityKeys(response).join('|');
 }
 
 function mergeResponses(primary, secondary) {
-  const merged = [];
-  const seen = new Set();
-
-  const add = (response) => {
-    if (!response || typeof response !== 'object') return;
-    const key = makeResponseKey(response);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    merged.push(response);
-  };
-
-  primary.forEach(add);
-  secondary.forEach(add);
-
-  return merged;
+  return typeof ResponseStorageUtils.mergeResponseCollections === 'function'
+    ? ResponseStorageUtils.mergeResponseCollections(primary, secondary, DecisionContractUtils)
+    : [];
 }
 
 function countWords(text) {
@@ -121,6 +104,193 @@ function formatStageLine(response) {
   const words = Number.isFinite(stage.wordCount) ? stage.wordCount : countWords(response.text || '');
   if (Number.isFinite(words)) parts.push(`${words} slow`);
   return parts.join(' | ');
+}
+
+function getResponseDecisionContract(response) {
+  return typeof ResponseStorageUtils.buildDecisionContractSummaryForResponse === 'function'
+    ? ResponseStorageUtils.buildDecisionContractSummaryForResponse(response, DecisionContractUtils)
+    : null;
+}
+
+function normalizeDecisionContractSummaryForView(summary) {
+  return typeof DecisionContractUtils.normalizeDecisionContractSummary === 'function'
+    ? DecisionContractUtils.normalizeDecisionContractSummary(summary)
+    : (summary && typeof summary === 'object' ? summary : null);
+}
+
+function getDecisionContractRecordByRole(summary, role) {
+  if (!summary || typeof summary !== 'object') return null;
+  if (role === 'PRIMARY' && typeof DecisionContractUtils.getDecisionContractPrimaryRecord === 'function') {
+    return DecisionContractUtils.getDecisionContractPrimaryRecord(summary);
+  }
+  if (role === 'SECONDARY' && typeof DecisionContractUtils.getDecisionContractSecondaryRecord === 'function') {
+    return DecisionContractUtils.getDecisionContractSecondaryRecord(summary);
+  }
+  const records = Array.isArray(summary.records) ? summary.records : [];
+  if (role === 'PRIMARY') {
+    return records.find((record) => record?.role === 'PRIMARY') || records[0] || null;
+  }
+  if (role === 'SECONDARY') {
+    return records.find((record) => record?.role === 'SECONDARY') || null;
+  }
+  return null;
+}
+
+function mergeDecisionContractViewRecord(primary, fallback) {
+  const left = primary && typeof primary === 'object' ? primary : null;
+  const right = fallback && typeof fallback === 'object' ? fallback : null;
+  if (!left && !right) return null;
+  const result = { ...(right || {}), ...(left || {}) };
+  [
+    'role',
+    'format',
+    'decisionDate',
+    'decisionStatus',
+    'company',
+    'composite',
+    'entryScore',
+    'sizing',
+    'voi',
+    'fals',
+    'primaryRisk',
+    'sector',
+    'companyFamily',
+    'companyType',
+    'revenueModel',
+    'region',
+    'currency'
+  ].forEach((key) => {
+    const leftValue = typeof left?.[key] === 'string' ? left[key].trim() : '';
+    const rightValue = typeof right?.[key] === 'string' ? right[key].trim() : '';
+    result[key] = leftValue || rightValue || '';
+  });
+  ['compositeValue', 'entryScoreValue', 'sizingPercent'].forEach((key) => {
+    const leftValue = Number.isFinite(left?.[key]) ? left[key] : Number.NaN;
+    const rightValue = Number.isFinite(right?.[key]) ? right[key] : Number.NaN;
+    result[key] = Number.isFinite(leftValue) ? leftValue : rightValue;
+  });
+  return result;
+}
+
+function buildResponseDecisionContractView(response) {
+  if (typeof DecisionViewModelUtils.buildValidatedStage12State === 'function') {
+    return DecisionViewModelUtils.buildValidatedStage12State(response, DecisionContractUtils);
+  }
+  const storedSummary = response?.decisionContract && typeof response.decisionContract === 'object'
+    ? response.decisionContract
+    : getResponseDecisionContract(response);
+  const summary = normalizeDecisionContractSummaryForView(storedSummary);
+  const shouldUseFallbackValidation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
+    && typeof response?.text === 'string'
+    && response.text.trim()
+    && (
+      !summary
+      || !Array.isArray(summary.records)
+      || summary.records.length === 0
+      || summary.records.some((record) => !record?.decisionStatus || !record?.decisionDate || !record?.sector)
+    );
+  const validation = shouldUseFallbackValidation
+    ? DecisionContractUtils.validateDecisionContractText(response.text)
+    : null;
+  const fallbackSummary = normalizeDecisionContractSummaryForView(validation?.decisionContract);
+  const effectiveSummary = summary || fallbackSummary;
+  const snapshot = typeof DecisionContractUtils.buildDecisionContractSnapshot === 'function'
+    ? DecisionContractUtils.buildDecisionContractSnapshot(effectiveSummary)
+    : null;
+  const fallbackSnapshot = typeof DecisionContractUtils.buildDecisionContractSnapshot === 'function'
+    ? DecisionContractUtils.buildDecisionContractSnapshot(fallbackSummary)
+    : null;
+  const primaryRecord = mergeDecisionContractViewRecord(
+    snapshot?.primaryRecord || getDecisionContractRecordByRole(effectiveSummary, 'PRIMARY'),
+    fallbackSnapshot?.primaryRecord || getDecisionContractRecordByRole(fallbackSummary, 'PRIMARY')
+  );
+  const secondaryRecord = mergeDecisionContractViewRecord(
+    snapshot?.secondaryRecord || getDecisionContractRecordByRole(effectiveSummary, 'SECONDARY'),
+    fallbackSnapshot?.secondaryRecord || getDecisionContractRecordByRole(fallbackSummary, 'SECONDARY')
+  );
+  const company = normalizeMarketText(
+    primaryRecord?.company
+      || secondaryRecord?.company
+      || snapshot?.company
+      || fallbackSnapshot?.company
+      || response?.source
+      || '',
+    ''
+  );
+  const status = typeof effectiveSummary?.status === 'string'
+    ? effectiveSummary.status
+    : (typeof fallbackSummary?.status === 'string' ? fallbackSummary.status : 'invalid');
+  const issueCodes = Array.isArray(effectiveSummary?.issueCodes) && effectiveSummary.issueCodes.length > 0
+    ? effectiveSummary.issueCodes
+    : (Array.isArray(fallbackSummary?.issueCodes) ? fallbackSummary.issueCodes : []);
+  const recordCount = Number.isInteger(effectiveSummary?.recordCount)
+    ? effectiveSummary.recordCount
+    : (Number.isInteger(fallbackSummary?.recordCount) ? fallbackSummary.recordCount : 0);
+
+  return {
+    summary: effectiveSummary,
+    status,
+    issueCodes,
+    recordCount,
+    company,
+    primaryRecord,
+    secondaryRecord,
+    hasDecisionRecord: !!primaryRecord || !!secondaryRecord || recordCount > 0
+  };
+}
+
+function buildResponseStage12PairSummary(response) {
+  if (typeof DecisionViewModelUtils.buildStage12PairSummary === 'function') {
+    return DecisionViewModelUtils.buildStage12PairSummary(response, DecisionContractUtils);
+  }
+  return { status: 'invalid', issueCodes: [], lines: [], shortfall: false };
+}
+
+function describeDecisionContractBadge(summary, options = {}) {
+  const status = typeof summary?.status === 'string' ? summary.status : 'invalid';
+  const compact = options?.compact === true;
+  if (status === 'current') {
+    return {
+      text: compact ? 'current' : 'Stage 12: current',
+      className: 'response-contract-badge ok'
+    };
+  }
+  if (status === 'shortfall') {
+    return {
+      text: compact ? 'shortfall' : 'Stage 12: shortfall',
+      className: 'response-contract-badge info'
+    };
+  }
+  if (status === 'legacy') {
+    return {
+      text: compact ? 'legacy' : 'Stage 12: legacy read-only',
+      className: 'response-contract-badge warn'
+    };
+  }
+  const issueCodes = Array.isArray(summary?.issueCodes) && summary.issueCodes.length > 0
+    ? summary.issueCodes.join(', ')
+    : 'invalid_contract';
+  return {
+    text: compact ? 'invalid' : `Stage 12: invalid (${issueCodes})`,
+    className: 'response-contract-badge error'
+  };
+}
+
+function createStage12SummaryElement(response) {
+  const pairSummary = buildResponseStage12PairSummary(response);
+  if (!pairSummary || !Array.isArray(pairSummary.lines) || pairSummary.lines.length === 0) {
+    return null;
+  }
+
+  const wrapper = document.createElement('div');
+  wrapper.className = 'response-stage12-summary';
+  pairSummary.lines.forEach((line) => {
+    const item = document.createElement('div');
+    item.className = 'response-stage12-line';
+    item.textContent = line;
+    wrapper.appendChild(item);
+  });
+  return wrapper;
 }
 
 const ECONOMIST_PODCAST_NAMES = [
@@ -333,331 +503,47 @@ function getSortedResponsesForAnalysis(responses, analysisType) {
 }
 
 function parseDecisionRecordParts(raw) {
-  if (!raw || typeof raw !== 'string') return null;
-  const parts = raw
-    .split(';')
-    .map((part) => part.trim())
-    .filter((item, index, all) => !(index === all.length - 1 && item === ''));
-  if (parts.length !== 12 && parts.length !== 13 && parts.length !== 16) return null;
-  return parts;
+  return typeof DecisionContractUtils.parseDecisionRecordParts === 'function'
+    ? DecisionContractUtils.parseDecisionRecordParts(raw)
+    : null;
 }
 
 function parseDecisionRecordLine(rawLine) {
-  const parts = parseDecisionRecordParts(rawLine);
-  if (!parts) return null;
-
-  if (parts.length === 16) {
-    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
-    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
-    if (hasExplicitRole) {
-      return {
-        decisionDate: parts[0],
-        decisionStatus: parts[1],
-        decisionRole,
-        company: parts[3],
-        sourceMaterial: parts[4],
-        thesis: parts[5],
-        asymmetry: '',
-        bear: parts[6],
-        base: parts[7],
-        bull: parts[8],
-        voi: parts[9],
-        sector: parts[10],
-        companyFamily: parts[11],
-        companyType: parts[12],
-        revenueModel: parts[13],
-        region: parts[14],
-        currency: parts[15],
-        recordFormat: 'current_16_role'
-      };
-    }
-    return {
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      decisionRole: '',
-      company: parts[2],
-      sourceMaterial: parts[3],
-      thesis: parts[4],
-      asymmetry: parts[5],
-      bear: parts[6],
-      base: parts[7],
-      bull: parts[8],
-      voi: parts[9],
-      sector: parts[10],
-      companyFamily: parts[11],
-      companyType: parts[12],
-      revenueModel: parts[13],
-      region: parts[14],
-      currency: parts[15],
-      recordFormat: 'transitional_16'
-    };
-  }
-
-  if (parts.length === 13) {
-    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
-    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
-    if (hasExplicitRole) {
-      return {
-        decisionDate: parts[0],
-        decisionStatus: parts[1],
-        decisionRole,
-        company: parts[3],
-        sourceMaterial: parts[4],
-        thesis: parts[5],
-        asymmetry: '',
-        bear: parts[6],
-        base: parts[7],
-        bull: parts[8],
-        voi: parts[9],
-        sector: parts[10],
-        companyFamily: parts[10],
-        companyType: '',
-        revenueModel: '',
-        region: parts[11],
-        currency: parts[12],
-        recordFormat: 'current_13_role'
-      };
-    }
-    return {
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      decisionRole: '',
-      company: parts[2],
-      sourceMaterial: parts[3],
-      thesis: parts[4],
-      asymmetry: parts[5],
-      bear: parts[6],
-      base: parts[7],
-      bull: parts[8],
-      voi: parts[9],
-      sector: parts[10],
-      companyFamily: parts[10],
-      companyType: '',
-      revenueModel: '',
-      region: parts[11],
-      currency: parts[12],
-      recordFormat: 'transitional_13'
-    };
-  }
-
-  const thesisText = typeof parts[4] === 'string' ? parts[4] : '';
-  const asymmetryMatch = thesisText.match(/(?:Asymetria|Asymmetry)\s*:\s*[^,;]+/i);
-  return {
-    decisionDate: parts[0],
-    decisionStatus: parts[1],
-    decisionRole: '',
-    company: parts[2],
-    sourceMaterial: parts[3],
-    thesis: parts[4],
-    asymmetry: asymmetryMatch ? asymmetryMatch[0].trim() : '',
-    bear: parts[5],
-    base: parts[6],
-    bull: parts[7],
-    voi: parts[8],
-    sector: parts[9],
-    companyFamily: parts[9],
-    companyType: '',
-    revenueModel: '',
-    region: parts[10],
-    currency: parts[11],
-    recordFormat: 'current_12'
-  };
+  return typeof DecisionContractUtils.parseDecisionRecordLine === 'function'
+    ? DecisionContractUtils.parseDecisionRecordLine(rawLine)
+    : null;
 }
 
 function extractDecisionRecordsFromText(text) {
-  const source = typeof text === 'string' ? text : '';
-  if (!source.trim()) return [];
-  const lines = source
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const parsedRecords = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) parsedRecords.push(parsed);
-  }
-  if (parsedRecords.length > 0) return parsedRecords;
-
-  if (!source.includes(';')) return [];
-  const flattened = source.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-  const parsedWhole = parseDecisionRecordLine(flattened);
-  return parsedWhole ? [parsedWhole] : [];
+  return typeof DecisionContractUtils.extractDecisionRecordsFromText === 'function'
+    ? DecisionContractUtils.extractDecisionRecordsFromText(text)
+    : [];
 }
 
 function extractDecisionRecordFromText(text) {
-  const records = extractDecisionRecordsFromText(text);
-  if (records.length === 0) return null;
-  return records.find((record) => record.decisionRole === 'PRIMARY')
-    || records[records.length - 1];
+  return typeof DecisionContractUtils.extractDecisionRecordFromText === 'function'
+    ? DecisionContractUtils.extractDecisionRecordFromText(text)
+    : null;
 }
 
 function formatDecisionRecordTable(text) {
-  if (!text || typeof text !== 'string') return null;
-  const lines = text
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-
-  const parsedParts = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const current = parseDecisionRecordParts(lines[i]);
-    if (current) parsedParts.push(current);
-  }
-  if (parsedParts.length === 0) {
-    const flattened = text.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim();
-    const flattenedParts = parseDecisionRecordParts(flattened);
-    if (flattenedParts) parsedParts.push(flattenedParts);
-  }
-  const parts = parsedParts.find(
-    (item) => item.length === 16 && /^(PRIMARY|SECONDARY)$/i.test(item[2] || '') && String(item[2]).toUpperCase() === 'PRIMARY'
-  ) || parsedParts.find(
-    (item) => item.length === 13 && /^(PRIMARY|SECONDARY)$/i.test(item[2] || '') && String(item[2]).toUpperCase() === 'PRIMARY'
-  ) || parsedParts[parsedParts.length - 1];
-  if (!parts) return null;
-
-  const labels12 = [
-    'Data decyzji',
-    'Status decyzji',
-    'Spolka',
-    'Material zrodlowy',
-    'Teza inwestycyjna',
-    'Bear scenario (TOTAL)',
-    'Base scenario (TOTAL)',
-    'Bull scenario (TOTAL)',
-    'VOI/Falsifiers/Primary risk',
-    'Sektor',
-    'Region',
-    'Waluta'
-  ];
-  const labels16Role = [
-    'Data decyzji',
-    'Status decyzji',
-    'Rola',
-    'Spolka',
-    'Material zrodlowy',
-    'Teza inwestycyjna',
-    'Bear scenario (TOTAL)',
-    'Base scenario (TOTAL)',
-    'Bull scenario (TOTAL)',
-    'VOI/Falsifiers/Primary risk',
-    'Sektor (alias)',
-    'Rodzina spolki',
-    'Typ spolki',
-    'Model przychodu',
-    'Region',
-    'Waluta'
-  ];
-  const labels16Legacy = [
-    'Data decyzji',
-    'Status decyzji',
-    'Spolka',
-    'Material zrodlowy',
-    'Teza inwestycyjna',
-    'Asymetria/Divergence',
-    'Bear scenario (TOTAL)',
-    'Base scenario (TOTAL)',
-    'Bull scenario (TOTAL)',
-    'VOI/Falsifiers/Primary risk',
-    'Sektor (alias)',
-    'Rodzina spolki',
-    'Typ spolki',
-    'Model przychodu',
-    'Region',
-    'Waluta'
-  ];
-  const labels13Role = [
-    'Data decyzji',
-    'Status decyzji',
-    'Rola',
-    'Spolka',
-    'Material zrodlowy',
-    'Teza inwestycyjna',
-    'Bear scenario (TOTAL)',
-    'Base scenario (TOTAL)',
-    'Bull scenario (TOTAL)',
-    'VOI/Falsifiers/Primary risk',
-    'Sektor',
-    'Region',
-    'Waluta'
-  ];
-  const labels13Legacy = [
-    'Data decyzji',
-    'Status decyzji',
-    'Spolka',
-    'Material zrodlowy',
-    'Teza inwestycyjna',
-    'Asymetria/Divergence',
-    'Bear scenario (TOTAL)',
-    'Base scenario (TOTAL)',
-    'Bull scenario (TOTAL)',
-    'VOI/Falsifiers/Primary risk',
-    'Sektor',
-    'Region',
-    'Waluta'
-  ];
-  const hasExplicitRole = /^(PRIMARY|SECONDARY)$/i.test(parts[2] || '');
-  let labels = labels12;
-  if (parts.length === 16) {
-    labels = hasExplicitRole ? labels16Role : labels16Legacy;
-  } else if (parts.length === 13) {
-    labels = hasExplicitRole ? labels13Role : labels13Legacy;
-  }
-
-  return labels
-    .map((label, index) => `${index + 1} - ${label} - ${parts[index] || ''}`)
-    .join('\n');
+  return typeof DecisionContractUtils.formatDecisionRecordTable === 'function'
+    ? DecisionContractUtils.formatDecisionRecordTable(text)
+    : null;
 }
 
 async function migrateResponsesToLocal() {
-  const { local, session } = getStorageAreas();
-  if (!local || !session) return;
-
-  const [localResult, sessionResult] = await Promise.all([
-    local.get([RESPONSE_STORAGE_KEY]),
-    session.get([RESPONSE_STORAGE_KEY])
-  ]);
-
-  const localResponses = localResult.responses || [];
-  const sessionResponses = sessionResult.responses || [];
-
-  if (sessionResponses.length === 0) return;
-
-  const merged = mergeResponses(localResponses, sessionResponses);
-  const shouldWrite = merged.length !== localResponses.length || localResponses.length === 0;
-
-  if (shouldWrite) {
-    await local.set({ [RESPONSE_STORAGE_KEY]: merged });
-  }
-
-  await session.remove([RESPONSE_STORAGE_KEY]);
+  return Promise.resolve();
 }
 
 function ensureResponseStorageReady() {
-  if (!responseStorageReady) {
-    responseStorageReady = migrateResponsesToLocal().catch((error) => {
-      console.warn('[storage] Response migration failed:', error);
-    });
-  }
   return responseStorageReady;
 }
 
 async function readResponsesFromStorage() {
-  const { local, session } = getStorageAreas();
-
-  if (local) {
-    const localResult = await local.get([RESPONSE_STORAGE_KEY]);
-    const localResponses = localResult.responses || [];
-    if (localResponses.length > 0) {
-      return localResponses;
-    }
-  }
-
-  if (session) {
-    const sessionResult = await session.get([RESPONSE_STORAGE_KEY]);
-    return sessionResult.responses || [];
-  }
-
-  return [];
+  return typeof ResponseStorageUtils.readCanonicalResponses === 'function'
+    ? ResponseStorageUtils.readCanonicalResponses(getStorageAreas(), DecisionContractUtils)
+    : [];
 }
 
 // Wczytaj i wyĹ›wietl odpowiedzi przy starcie
@@ -669,11 +555,9 @@ loadResponses();
 clearBtn.addEventListener('click', async () => {
   if (confirm('Czy na pewno chcesz wyczyĹ›ciÄ‡ wszystkie zebrane odpowiedzi?')) {
     await ensureResponseStorageReady();
-    const { local, session } = getStorageAreas();
-    const tasks = [];
-    if (local) tasks.push(local.set({ [RESPONSE_STORAGE_KEY]: [] }));
-    if (session) tasks.push(session.set({ [RESPONSE_STORAGE_KEY]: [] }));
-    await Promise.all(tasks);
+    if (typeof ResponseStorageUtils.clearCanonicalResponses === 'function') {
+      await ResponseStorageUtils.clearCanonicalResponses(getStorageAreas());
+    }
     loadResponses();
   }
 });
@@ -956,6 +840,18 @@ function createResponseItem(response) {
     stageLine.className = 'response-stage';
     stageLine.textContent = stageLineText;
     meta.appendChild(stageLine);
+  }
+
+  const decisionContractBadge = describeDecisionContractBadge(getResponseDecisionContract(response));
+  if (decisionContractBadge) {
+    const badge = document.createElement('div');
+    badge.className = decisionContractBadge.className;
+    badge.textContent = decisionContractBadge.text;
+    meta.appendChild(badge);
+  }
+  const stage12Summary = createStage12SummaryElement(response);
+  if (stage12Summary) {
+    meta.appendChild(stage12Summary);
   }
   
   const copyBtn = document.createElement('button');
@@ -1322,80 +1218,32 @@ function formatMarketDate(timestamp, fallbackDate = '') {
   return normalizeMarketText(fallbackDate, '-');
 }
 
+function compareMarketRowsByDefault(left, right) {
+  if (typeof DecisionViewModelUtils.compareMarketRowsDefault === 'function') {
+    return DecisionViewModelUtils.compareMarketRowsDefault(left, right, DecisionContractUtils);
+  }
+  const leftTs = Number.isFinite(left?.decisionTs) ? left.decisionTs : 0;
+  const rightTs = Number.isFinite(right?.decisionTs) ? right.decisionTs : 0;
+  if (rightTs !== leftTs) return rightTs - leftTs;
+  return safeLocaleCompare(left?.company, right?.company);
+}
+
 function buildMarketRowsFromResponses(responses) {
-  const byCompanyKey = new Map();
-  const sourceRows = Array.isArray(responses) ? responses : [];
-
-  sourceRows.forEach((response) => {
-    if ((response?.analysisType || 'company') !== 'company') return;
-    const decisionRecord = extractDecisionRecordFromText(response?.text || '');
-    if (!decisionRecord) return;
-
-    const company = normalizeMarketText(decisionRecord.company || response?.source || '', 'brak');
-    const ticker = extractTickerFromCompany(company);
-    const sector = normalizeMarketText(decisionRecord.sector, '-');
-    const companyFamily = normalizeMarketText(decisionRecord.companyFamily || decisionRecord.sector, '-');
-    const companyType = normalizeMarketText(decisionRecord.companyType, '-');
-    const revenueModel = normalizeMarketText(decisionRecord.revenueModel, '-');
-    const decisionStatus = normalizeMarketText(decisionRecord.decisionStatus, '-');
-    const region = normalizeMarketText(decisionRecord.region, '-');
-    const currency = normalizeMarketText(decisionRecord.currency, '-');
-    const asymmetryText = normalizeMarketText(decisionRecord.asymmetry, '-');
-    const asymmetryValue = parseAsymmetryValue(decisionRecord.asymmetry, decisionRecord.thesis || '');
-    const responseTs = Number.isInteger(response?.timestamp) ? response.timestamp : 0;
-    const decisionTs = parseDecisionDateToTimestamp(decisionRecord.decisionDate, responseTs);
-
-    const row = {
-      key: `${normalizeMarketToken(company)}|${normalizeMarketToken(ticker || '-')}`,
-      company,
-      ticker: ticker || '-',
-      companyFuzzy: normalizeFuzzyText(company),
-      tickerFuzzy: normalizeFuzzyText(ticker || '-'),
-      searchHaystack: normalizeFuzzyText([company, ticker, sector, companyFamily, companyType, revenueModel, decisionStatus, region, currency].join(' ')),
-      searchTokens: tokenizeFuzzyText([company, ticker, sector, companyFamily, companyType, revenueModel, decisionStatus, region, currency].join(' ')),
-      sector,
-      companyFamily,
-      companyType,
-      revenueModel,
-      decisionStatus,
-      asymmetryText,
-      asymmetryValue,
-      region,
-      currency,
-      decisionDateRaw: normalizeMarketText(decisionRecord.decisionDate, ''),
-      decisionTs,
-      responseTs
-    };
-
-    const existing = byCompanyKey.get(row.key);
-    if (!existing) {
-      byCompanyKey.set(row.key, row);
-      return;
-    }
-
-    const existingTs = Number.isFinite(existing.decisionTs) ? existing.decisionTs : existing.responseTs;
-    const nextTs = Number.isFinite(row.decisionTs) ? row.decisionTs : row.responseTs;
-    if (nextTs >= existingTs) {
-      byCompanyKey.set(row.key, row);
-    }
-  });
-
-  const rows = Array.from(byCompanyKey.values());
-  rows.sort((left, right) => {
-    const leftAsymmetry = Number.isFinite(left.asymmetryValue) ? left.asymmetryValue : Number.NEGATIVE_INFINITY;
-    const rightAsymmetry = Number.isFinite(right.asymmetryValue) ? right.asymmetryValue : Number.NEGATIVE_INFINITY;
-    if (rightAsymmetry !== leftAsymmetry) return rightAsymmetry - leftAsymmetry;
-    return safeLocaleCompare(left.company, right.company);
-  });
-  rows.forEach((row, index) => {
-    row.baseRank = index + 1;
-  });
-
-  return rows;
+  if (typeof DecisionViewModelUtils.buildMarketRowsFromResponses === 'function') {
+    return DecisionViewModelUtils.buildMarketRowsFromResponses(responses, DecisionContractUtils);
+  }
+  return [];
 }
 
 function getMarketDefaultSortDirection(key) {
-  if (key === 'asymmetry' || key === 'decisionTs') return 'desc';
+  if (
+    key === 'composite'
+    || key === 'sizing'
+    || key === 'role'
+    || key === 'decisionTs'
+  ) {
+    return 'desc';
+  }
   return 'asc';
 }
 
@@ -1407,12 +1255,16 @@ function getMarketSortValue(row, sortKey) {
       return normalizeMarketToken(row?.company);
     case 'ticker':
       return normalizeMarketToken(row?.ticker);
-    case 'sector':
-      return normalizeMarketToken(row?.sector);
     case 'decisionStatus':
       return normalizeMarketToken(row?.decisionStatus);
-    case 'asymmetry':
-      return Number.isFinite(row?.asymmetryValue) ? row.asymmetryValue : Number.NEGATIVE_INFINITY;
+    case 'role':
+      return Number.isFinite(row?.rolePriority) ? row.rolePriority : 0;
+    case 'composite':
+      return Number.isFinite(row?.compositeValue) ? row.compositeValue : Number.NEGATIVE_INFINITY;
+    case 'sizing':
+      return Number.isFinite(row?.sizingPercent) ? row.sizingPercent : Number.NEGATIVE_INFINITY;
+    case 'sector':
+      return normalizeMarketToken(row?.sector);
     case 'region':
       return normalizeMarketToken(row?.region);
     case 'currency':
@@ -1443,10 +1295,7 @@ function sortMarketRows(rows) {
     }
 
     if (diff === 0) {
-      diff = safeLocaleCompare(left?.company, right?.company);
-    }
-    if (diff === 0) {
-      diff = (left?.baseRank || 0) - (right?.baseRank || 0);
+      diff = compareMarketRowsByDefault(left, right);
     }
     return direction === 'desc' ? -diff : diff;
   });
@@ -1468,9 +1317,6 @@ function getActiveMarketFilterLabels() {
   const entries = [];
   if (marketFilters.companyQuery) entries.push(`Spolka: ${marketFilters.companyQuery}`);
   if (marketFilters.sector) entries.push(`Sektor: ${marketFilters.sector}`);
-  if (marketFilters.decisionStatus) entries.push(`Decyzja: ${marketFilters.decisionStatus}`);
-  if (marketFilters.region) entries.push(`Region: ${marketFilters.region}`);
-  if (marketFilters.currency) entries.push(`Waluta: ${marketFilters.currency}`);
   return entries;
 }
 
@@ -1482,15 +1328,6 @@ function applyMarketFilters(rows) {
       if (!match.matched) return false;
     }
     if (marketFilters.sector && normalizeMarketToken(row?.sector) !== normalizeMarketToken(marketFilters.sector)) {
-      return false;
-    }
-    if (marketFilters.decisionStatus && normalizeMarketToken(row?.decisionStatus) !== normalizeMarketToken(marketFilters.decisionStatus)) {
-      return false;
-    }
-    if (marketFilters.region && normalizeMarketToken(row?.region) !== normalizeMarketToken(marketFilters.region)) {
-      return false;
-    }
-    if (marketFilters.currency && normalizeMarketToken(row?.currency) !== normalizeMarketToken(marketFilters.currency)) {
       return false;
     }
     return true;
@@ -1505,12 +1342,12 @@ function updateMarketStatus(message) {
 function updateMarketCountLabel(filteredCount, totalCount) {
   if (!marketCount) return;
   if (totalCount <= 0) {
-    marketCount.textContent = '0 spolek';
+    marketCount.textContent = '0 rekordow';
     return;
   }
   marketCount.textContent = filteredCount === totalCount
-    ? `${totalCount} spolek`
-    : `${filteredCount}/${totalCount} spolek`;
+    ? `${totalCount} rekordow`
+    : `${filteredCount}/${totalCount} rekordow`;
 }
 
 function updateMarketFilterLabel(filteredCount, totalCount) {
@@ -1611,25 +1448,43 @@ function renderMarketRows(rows) {
     rank.textContent = String(row.baseRank || '-');
 
     const company = document.createElement('td');
-    company.textContent = row.company || '-';
+    const companyName = document.createElement('div');
+    companyName.textContent = row.company || '-';
+    company.appendChild(companyName);
+    const badgeMeta = describeDecisionContractBadge({
+      status: row.contractStatus,
+      issueCodes: row.contractIssueCodes
+    }, { compact: true });
+    if (badgeMeta) {
+      const badge = document.createElement('div');
+      badge.className = badgeMeta.className;
+      badge.textContent = badgeMeta.text;
+      company.appendChild(badge);
+    }
 
     const ticker = document.createElement('td');
     ticker.textContent = row.ticker || '-';
 
+    const decisionStatus = document.createElement('td');
+    decisionStatus.textContent = row.decisionStatus || '-';
+
+    const role = document.createElement('td');
+    role.textContent = row.role || '-';
+
+    const composite = document.createElement('td');
+    composite.textContent = row.compositeText || '-';
+
+    const sizing = document.createElement('td');
+    sizing.textContent = row.sizingText || '-';
+
     const sector = document.createElement('td');
     sector.appendChild(createMarketFilterChip('sector', row.sector));
 
-    const decisionStatus = document.createElement('td');
-    decisionStatus.appendChild(createMarketFilterChip('decisionStatus', row.decisionStatus));
-
-    const asymmetry = document.createElement('td');
-    asymmetry.textContent = row.asymmetryText || '-';
-
     const region = document.createElement('td');
-    region.appendChild(createMarketFilterChip('region', row.region));
+    region.textContent = row.region || '-';
 
     const currency = document.createElement('td');
-    currency.appendChild(createMarketFilterChip('currency', row.currency));
+    currency.textContent = row.currency || '-';
 
     const date = document.createElement('td');
     date.textContent = formatMarketDate(row.decisionTs, row.decisionDateRaw);
@@ -1637,9 +1492,11 @@ function renderMarketRows(rows) {
     tr.appendChild(rank);
     tr.appendChild(company);
     tr.appendChild(ticker);
-    tr.appendChild(sector);
     tr.appendChild(decisionStatus);
-    tr.appendChild(asymmetry);
+    tr.appendChild(role);
+    tr.appendChild(composite);
+    tr.appendChild(sizing);
+    tr.appendChild(sector);
     tr.appendChild(region);
     tr.appendChild(currency);
     tr.appendChild(date);
@@ -1662,16 +1519,17 @@ function buildMarketCompanySuggestions(query, limit = 8) {
   marketRows.forEach((row) => {
     const match = scoreCompanyQueryAgainstRow(normalizedQuery, row);
     if (!match.matched) return;
-    const existing = byKey.get(row.key);
+    const key = row.companyKey || row.key;
+    const existing = byKey.get(key);
     const candidate = {
-      key: row.key,
+      key,
       company: row.company || '-',
       ticker: row.ticker || '-',
       sector: row.sector || '-',
       score: match.score
     };
     if (!existing || candidate.score > existing.score) {
-      byKey.set(row.key, candidate);
+      byKey.set(key, candidate);
     }
   });
   return Array.from(byKey.values())
@@ -1756,7 +1614,7 @@ function renderMarketTable() {
     if (marketToolbar) marketToolbar.hidden = true;
     hideMarketSuggestions();
     updateMarketCountLabel(0, 0);
-    updateMarketStatus('Brak finalnych rekordow spolek (linia 12/13-polowa).');
+    updateMarketStatus('Brak finalnych rekordow kontraktu Stage 12.');
     updateMarketSortHeaders();
     return;
   }
@@ -1817,10 +1675,7 @@ function toggleMarketFilter(columnKey, value) {
 function resetMarketFilters() {
   marketFilters = {
     companyQuery: '',
-    sector: '',
-    decisionStatus: '',
-    region: '',
-    currency: ''
+    sector: ''
   };
   if (marketCompanySearch) {
     marketCompanySearch.value = '';

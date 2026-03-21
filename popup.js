@@ -1,3 +1,5 @@
+const ProblemLogUiUtils = globalThis.ProblemLogUiUtils || {};
+
 function withActiveWindowContext(callback) {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
     const activeTab = tabs && tabs.length > 0 ? tabs[0] : null;
@@ -26,6 +28,9 @@ function sendRuntimeMessage(payload) {
 }
 
 function summarizeClientErrorValue(rawValue) {
+  if (typeof ProblemLogUiUtils.summarizeClientErrorValue === 'function') {
+    return ProblemLogUiUtils.summarizeClientErrorValue(rawValue);
+  }
   if (rawValue == null) return '';
   if (typeof rawValue === 'string') return rawValue.trim();
   if (rawValue instanceof Error) return (rawValue.stack || rawValue.message || rawValue.name || '').trim();
@@ -37,6 +42,15 @@ function summarizeClientErrorValue(rawValue) {
 }
 
 function reportProblemLogFromUi(rawEntry = {}) {
+  if (typeof ProblemLogUiUtils.reportProblemLogFromUi === 'function') {
+    ProblemLogUiUtils.reportProblemLogFromUi(rawEntry, {
+      defaultSource: 'popup-ui',
+      defaultMessage: 'popup_problem',
+      signatureNamespace: 'popup-ui',
+      allowInfo: true
+    });
+    return;
+  }
   const source = typeof rawEntry?.source === 'string' && rawEntry.source.trim()
     ? rawEntry.source.trim()
     : 'popup-ui';
@@ -204,11 +218,53 @@ function setAutoRestoreStatus(text, isError = false) {
   setStatusElement(autoRestoreStatus, text, isError);
 }
 
-function formatAnalysisQueueStatus(status) {
+function getAnalysisQueueUiMetrics(status) {
   const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 7;
-  const activeSlots = Number.isInteger(status?.activeSlots) ? status.activeSlots : 0;
-  const queueSize = Number.isInteger(status?.queueSize) ? status.queueSize : 0;
-  return `Kolejka analiz: sloty ${activeSlots}/${maxConcurrent}, oczekuje ${queueSize}.`;
+  const reservedSlots = Number.isInteger(status?.reservedSlots)
+    ? Math.max(0, status.reservedSlots)
+    : (Number.isInteger(status?.activeSlots) ? Math.max(0, status.activeSlots) : 0);
+  const liveSlots = Number.isInteger(status?.liveSlots)
+    ? Math.max(0, status.liveSlots)
+    : reservedSlots;
+  const startingSlots = Number.isInteger(status?.startingSlots)
+    ? Math.max(0, status.startingSlots)
+    : Math.max(0, reservedSlots - liveSlots);
+  const queueSize = Number.isInteger(status?.queueSize) ? Math.max(0, status.queueSize) : 0;
+  return {
+    maxConcurrent,
+    reservedSlots,
+    liveSlots,
+    startingSlots,
+    queueSize
+  };
+}
+
+function formatAnalysisQueueSummary(status, options = {}) {
+  const metrics = getAnalysisQueueUiMetrics(status);
+  const includePrefix = options?.includePrefix !== false;
+  const includeQueue = options?.includeQueue !== false;
+  const parts = [];
+  if (includePrefix) {
+    parts.push('Kolejka analiz:');
+  }
+  parts.push(`sloty ${metrics.reservedSlots}/${metrics.maxConcurrent}`);
+  if (metrics.startingSlots > 0) {
+    parts.push(`zywe okna ${metrics.liveSlots}/${metrics.maxConcurrent}`);
+    parts.push(`startujace ${metrics.startingSlots}`);
+  } else {
+    parts.push(`okna ${metrics.liveSlots}/${metrics.maxConcurrent}`);
+  }
+  if (includeQueue) {
+    parts.push(`oczekuje ${metrics.queueSize}`);
+  }
+  return `${parts.join(', ')}.`;
+}
+
+function formatAnalysisQueueStatus(status) {
+  return formatAnalysisQueueSummary(status, {
+    includePrefix: true,
+    includeQueue: true
+  });
 }
 
 async function refreshAnalysisQueueStatus() {
@@ -1015,9 +1071,11 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
     }
 
     const queuedCount = Number.isInteger(response?.queuedCount) ? response.queuedCount : 0;
-    const queueSize = Number.isInteger(response?.queueSize) ? response.queueSize : 0;
-    const activeSlots = Number.isInteger(response?.activeSlots) ? response.activeSlots : 0;
-    setRunStatus(`Zakolejkowano ${queuedCount} analiz. Sloty ${activeSlots}/7, kolejka ${queueSize}.`);
+    const queueSummary = formatAnalysisQueueSummary(response, {
+      includePrefix: false,
+      includeQueue: true
+    });
+    setRunStatus(`Zakolejkowano ${queuedCount} analiz. ${queueSummary}`);
     void refreshAnalysisQueueStatus();
   } catch (error) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
@@ -1357,15 +1415,17 @@ function formatSmartResumeStatus(response) {
       return `Proces zakonczony. Zapisano odpowiedz koncowa. ${persistenceSummary}`;
     }
     if (response?.mode === 'queued') {
-      const queueSize = Number.isInteger(response?.queueSize) ? response.queueSize : 0;
-      const activeSlots = Number.isInteger(response?.activeSlots) ? response.activeSlots : 0;
+      const queueSummary = formatAnalysisQueueSummary(response, {
+        includePrefix: false,
+        includeQueue: true
+      });
       if (startPromptNumber && detectedPromptNumber) {
-        return `Wznowienie zakolejkowane od Prompt ${startPromptNumber} (wykryto ostatni: ${detectedPromptNumber}). Sloty ${activeSlots}/7, kolejka ${queueSize}.`;
+        return `Wznowienie zakolejkowane od Prompt ${startPromptNumber} (wykryto ostatni: ${detectedPromptNumber}). ${queueSummary}`;
       }
       if (startPromptNumber) {
-        return `Wznowienie zakolejkowane od Prompt ${startPromptNumber}. Sloty ${activeSlots}/7, kolejka ${queueSize}.`;
+        return `Wznowienie zakolejkowane od Prompt ${startPromptNumber}. ${queueSummary}`;
       }
-      return `Wznowienie zakolejkowane. Sloty ${activeSlots}/7, kolejka ${queueSize}.`;
+      return `Wznowienie zakolejkowane. ${queueSummary}`;
     }
     if (retrySamePrompt && startPromptNumber) {
       if (retryReason === 'assistant_reply_too_short') {

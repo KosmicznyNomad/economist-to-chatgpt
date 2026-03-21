@@ -593,6 +593,24 @@ ANCHOR DATE RULE (global, all stages):
 - Revenue0, FCF0/margin0, net debt/cash, diluted shares, and all CORE/WEDGE/TOTAL scenarios must use the same Anchor Date and convention.
 - If Anchor Date changes: rebase and recompute Stage 4, 8, 9, 10.
 
+NEAR-TERM SUCCESS DEFINITION (global; applies to Stages 7, 10, 11, 12)
+
+This pipeline distinguishes between:
+- Composite Score = holistic attractiveness of the investment opportunity
+- ENTRY_SCORE_0_10 = probability of a meaningful rerating in the next 2–4 quarters
+
+A setup counts as near-term successful only if MOST of the following are true:
+1) the market is not already pricing Base_TOTAL or better,
+2) proof exists in the real-money funnel, or a clearly scheduled VOI event exists within 12 months,
+3) timing friction allows evidence or revenue visibility within 2–4 quarters,
+4) the expected rerating is company-specific and cash-flow-linked, not mainly WACC / duration beta,
+5) wedge realism is PASS or WARN, not FAIL.
+
+ENTRY_SCORE_0_10 is a capped actionability score.
+It never overrides WATCH/AVOID.
+It must never be fed back into earlier valuation stages.
+It is used only for final ranking, role assignment, and export.
+
 DATA_GAP_PROTOCOL (5 steps, applies to every stage):
 1. Search full conversation context (all prior stage outputs, prose, tables, anchors)
 2. If missing: derive as [RECONSTRUCTED] from context, or state as [ASSUMPTION] with confidence
@@ -2587,6 +2605,23 @@ Name the specific VOI event and date/quarter window where the RP will be observa
 **Flag condition:**
 - If there is no clear VOI event within 6-18 months, FLAG: VOI_IMMINENCE_FAIL (do not eliminate)
 
+## STEP 4.5: Rerating Window Classification
+
+Classify how quickly the market can plausibly rerate the stock if the RP beats threshold.
+
+Choose exactly one:
+- IMMEDIATE: VOI event within 0–6 months and thesis evidence can affect reported numbers, funded visibility, or customer proof inside 0–12 months
+- NEAR: VOI within 6–9 months and timing friction still allows visible confirmation within 12–18 months
+- MID: VOI within 9–12 months or first meaningful economic confirmation slips into 18–24 months
+- LONG: VOI within 12–18 months or timing friction implies 24–36 months to visible proof
+- TOO_FAR: no concrete VOI inside 18 months, or timing friction is 36m+
+
+This is not a business-quality judgment.
+It is a rerating-timing judgment.
+
+Selection rule:
+Prefer the KPI most likely to force a model revision within 2–4 quarters, even if it is not the largest long-term value driver.
+
 ## STEP 5: Apply Flags (no eliminations)
 
 Check conditions and FLAG them (Stage 11 enforces elimination):
@@ -2631,7 +2666,7 @@ To answer this question properly:
 Work through your analysis systematically. It's OK for this section to be quite long. For each company, you must:
 
 - **First**, list out all companies from the company list to ensure you analyze every single one
-- **For each company**, work through all 5 steps explicitly:
+- **For each company**, work through all steps explicitly:
   - Quote or reference specific data points from Stage 4 outputs (market-implied assumptions, sensitivity values, DominantDriver, etc.)
   - Quote or reference specific data points from Stage 5 outputs (operational KPIs, VOI events, gates, WedgeRealism, PoolConfidence, Asymmetry_TOTAL, etc.)
   - Show your reasoning for choosing the specific RP and threshold
@@ -2647,7 +2682,7 @@ After completing your analysis, provide your final output in two parts:
 
 Create a table with one row per company (including those that failed) and these columns:
 
-| Company | RP (metric + units) | Upside threshold | VOI window | DCF lever | Valuation impact (%) | Probability (L/M/H) | REI score | Flags | Rank |
+| Company | RP (metric + units) | Upside threshold | VOI window | RERATING_WINDOW_CLASS | DCF lever | Valuation impact (%) | Probability (L/M/H) | REI score | Flags | Rank |
 
 **Notes:**
 - For companies that failed any step or were disqualified, indicate the failure reason in the appropriate column
@@ -2665,6 +2700,8 @@ For EACH of the 4 companies (in descending REI rank):
 
 **KPI to track**: [RP with threshold and VOI date]
 
+Rerating window: [IMMEDIATE / NEAR / MID / LONG / TOO_FAR]
+
 **Falsifier KPI**: [Metric + threshold + timeframe]
 
 **Biggest convexity killer risk**: [cause → effect]
@@ -2676,10 +2713,10 @@ For EACH of the 4 companies (in descending REI rank):
 Here is a generic example showing the required format (with placeholder content):
 
 
-| Company | RP (one metric with units) | Upside threshold | VOI window | Which DCF lever flips | Valuation impact (%) | Probability | Priced-in? | WedgeRealism | Asymmetry_TOTAL | RevaluationExpectedImpact |
-|---------|---------------------------|------------------|------------|----------------------|---------------------|-------------|-----------|--------------|----------------|--------------------------|
-| Company A | [Metric] [units] | [number] | [Q# YYYY] | [Revenue growth / Margin / Cash flow] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [score] |
-| Company B | [Metric] [units] | [number] | [Q# YYYY] | [Lever type] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [score] |
+| Company | RP (one metric with units) | Upside threshold | VOI window | RERATING_WINDOW_CLASS | Which DCF lever flips | Valuation impact (%) | Probability | Priced-in? | WedgeRealism | Asymmetry_TOTAL | RevaluationExpectedImpact |
+|---------|---------------------------|------------------|------------|-----------------------|----------------------|---------------------|-------------|-----------|--------------|----------------|--------------------------|
+| Company A | [Metric] [units] | [number] | [Q# YYYY] | [IMMEDIATE/NEAR/MID/LONG/TOO_FAR] | [Revenue growth / Margin / Cash flow] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [score] |
+| Company B | [Metric] [units] | [number] | [Q# YYYY] | [IMMEDIATE/NEAR/MID/LONG/TOO_FAR] | [Lever type] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [score] |
 
 
 
@@ -2704,6 +2741,7 @@ RANKED_ORDER: [Company1, Company2, Company3, Company4]
   RP: [metric + units + threshold]
   REI_SCORE: [number]
   VOI_EVENT: [event + quarter]
+  RERATING_WINDOW_CLASS: [IMMEDIATE / NEAR / MID / LONG / TOO_FAR]
   FALSIFIER: [metric + threshold + timeframe]
   FLAGS: [list or "None"]
 === END HANDOFF ===
@@ -3359,6 +3397,32 @@ You must list (inherit from Stage 3, refine with Stage 7):
 - KPI falsify: Stage 3 Downgrade Trigger (inherit directly)
 - VOI event: Stage 3 VOI Window (inherit, cross-reference with Stage 7 VOI event)
 
+GATE 3.5 — ENTRY BLOCKER CLASSIFICATION (for Stage 11 EntryScore)
+
+Purpose:
+Classify the main blocker to near-term rerating.
+Choose exactly one:
+
+- NONE = no material blocker; proof, timing, value, and realism are adequate for near-term rerating
+- PRICE = setup is valid but upside is blocked mainly by current valuation / priced-in expectations
+- PROOF = setup is valid but the money funnel has not progressed enough yet
+- TIMING = setup is valid but the confirming event or economics arrive too late for a 2–4 quarter rerating
+- REALISM = the wedge or pool-to-capture math is too weak or too speculative for near-term confidence
+- DURATION = upside is driven mainly by WACC / terminal value / horizon sensitivity rather than company-specific near-term economics
+- STRUCTURAL = permanent impairment / quality problem
+
+Classification rules:
+- If Gate 1 FAIL -> STRUCTURAL
+- Else if WedgeRealism = FAIL -> REALISM
+- Else if CATEGORY = TOO_EXPENSIVE or PRICE_CONTINGENT -> PRICE
+- Else if CATEGORY = INSUFFICIENT_PROOF or TractionClass = OPTION_ONLY or LOW_QUALITY -> PROOF
+- Else if CATEGORY = TIMING or VOI > 12 months or Timing Friction > 18 months -> TIMING
+- Else if DominantDriver = WACC or FLAGS contain HORIZON_DEPENDENT / TERMINAL_DOMINATED / RANK_UNSTABLE -> DURATION
+- Else -> NONE
+
+This field is diagnostic only.
+It does not replace WATCH/AVOID and it does not change prior gate outcomes.
+
 GATE 4 — EXECUTION PLAN (activate upon upgrade to position)
 Purpose: produce an implementable plan, not an essay.
 
@@ -3395,6 +3459,7 @@ OUTPUT FORMAT (per company — repeat for all 4 finalists)
 [Company] (Ticker:Exchange)
 DECISION: WATCH / AVOID
 CATEGORY: OK / PRICE_CONTINGENT / TOO_EXPENSIVE / STRUCTURAL / INSUFFICIENT_PROOF / TIMING
+ENTRY BLOCKER: [NONE / PRICE / PROOF / TIMING / REALISM / DURATION / STRUCTURAL]
 
 Gate 0 — Integrity: PASS/FAIL
 - If FAIL after applying DataGap Rule steps 1-2: STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number> (last resort).
@@ -3499,9 +3564,87 @@ Composite Score = SUM(dimension_score × weight)
 Scale 0-5.
 If company carries Evidence Tier C from Stage 0 Layer Discovery output, subtract 0.3 from final Composite Score.
 
+STEP 2.5 — ENTRY SCORE 0-10 (near-term actionability score)
+
+Purpose:
+ENTRY_SCORE_0_10 measures the probability of a meaningful rerating in the next 2–4 quarters.
+It is not a long-term business-quality score.
+It does not override WATCH/AVOID.
+
+Current-condition success definition:
+A high ENTRY_SCORE requires a setup where proof, value gap, and timing can plausibly force a rerating in the next 2–4 quarters.
+A great business with weak proof, long latency, or priced-in expectations must be capped.
+
+Base calculation:
+RawEntryScore = 2 × Composite Score
+
+Use the final Composite Score after all existing penalties.
+Do not recompute Composite.
+
+HardCap logic:
+HardCap = the minimum of all applicable caps below.
+If no cap applies, HardCap = 10.0.
+
+A) Structural / Reality caps
+- DECISION = AVOID or CATEGORY = STRUCTURAL -> cap 2.5
+- WedgeRealism = FAIL and PoolConfidence = Medium or High -> cap 3.5
+- TractionClass = LOW_QUALITY -> cap 4.0
+
+B) Timing / Latency caps
+- RERATING_WINDOW_CLASS = IMMEDIATE and Timing Friction = 0–12m -> no cap
+- RERATING_WINDOW_CLASS = NEAR or Timing Friction = 12–18m -> cap 8.0
+- RERATING_WINDOW_CLASS = MID or Timing Friction = 18–24m -> cap 7.0
+- RERATING_WINDOW_CLASS = LONG or Timing Friction = 24–36m -> cap 6.0
+- RERATING_WINDOW_CLASS = TOO_FAR or Timing Friction = 36m+ -> cap 5.0
+
+C) Proof caps
+- TractionClass = HARD_TRACTION -> no cap
+- TractionClass = SOFT_TRACTION -> cap 8.0
+- TractionClass = OPTION_ONLY -> cap 6.5
+- Gate 3 = LOW or CATEGORY = INSUFFICIENT_PROOF -> cap 6.0
+
+D) Price / expectations caps
+- CATEGORY = PRICE_CONTINGENT and price trigger not yet met -> cap 7.5
+- CATEGORY = TOO_EXPENSIVE -> cap 6.0
+- Asymmetry_TOTAL < 2.0 -> cap 5.5
+- Asymmetry_TOTAL >= 2.0 and < 3.0 -> cap 7.5
+
+E) Duration / regime caps
+- DominantDriver = WACC or Monetization Path = C without contract-grade cash-flow proof -> cap 6.5
+- FLAGS contain HORIZON_DEPENDENT or RANK_UNSTABLE -> cap 6.0
+- FLAGS contain TERMINAL_DOMINATED -> cap 6.5
+
+Soft penalties:
+PenaltyPoints = sum of applicable penalties
+- Cash Flag = Mild Drag -> +0.4
+- Cash Flag = Red Flag -> +1.0
+- DILUTION_RISK or proxy-heavy evidence for the thesis stream -> +0.5
+
+Formula:
+ENTRY_SCORE_0_10 = round(max(0, min(RawEntryScore, HardCap) - PenaltyPoints), 1)
+
+Interpretation:
+- 8.0–10.0 = actionable now
+- 6.5–7.9 = conditional actionable
+- 5.0–6.4 = watchlist only
+- below 5.0 = not actionable for near-term entry
+
+Important:
+ENTRY_SCORE_0_10 must never upgrade an AVOID to WATCH.
+It is a ranking overlay for surviving names, not a gate override.
+
 STEP 3 — RANK AND SELECT TOP 2
 
-Sort remaining WATCH companies by Composite Score descending.
+Sort remaining WATCH companies by:
+1. ENTRY_SCORE_0_10
+2. Composite Score
+3. Earlier VOI window
+4. Better downside floor
+
+Eligibility guidance:
+- PRIMARY normally requires ENTRY_SCORE_0_10 >= 7.5
+- SECONDARY normally requires ENTRY_SCORE_0_10 >= 6.5
+- If fewer than 2 WATCH names meet these thresholds, keep the highest-ranked WATCH names but flag ENTRY_SHORTFALL.
 
 Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap in invoice items:
 - Replace #2 with #3 if available
@@ -3523,20 +3666,20 @@ If CONCENTRATION_RISK: cap combined at 6%.
 STEP 5 — OUTPUT
 
 Comparison Table (all 4):
-| Company | Ticker | Decision | Category | D1 (30%) | D2 (20%) | D3 (15%) | D4 (15%) | D5 (10%) | D6 (10%) | Composite | Rank | Role | Sizing |
+| Company | Ticker | Decision | Category | EntryBlocker | D1 (30%) | D2 (20%) | D3 (15%) | D4 (15%) | D5 (10%) | D6 (10%) | Composite | EntryScore | Rank | Role | Sizing |
 
 Selection Summary:
-PRIMARY: [Company] — Composite [X.XX]/5.0 — Sizing [X%]
+PRIMARY: [Company] — Composite [X.XX]/5.0 — EntryScore [Y.Y]/10 — Sizing [X%]
   Why Primary: [2 sentences]
-SECONDARY: [Company] — Composite [X.XX]/5.0 — Sizing [X%]
+SECONDARY: [Company] — Composite [X.XX]/5.0 — EntryScore [Y.Y]/10 — Sizing [X%]
   Why Secondary: [2 sentences]
   Conditional on: [if applicable]
 ELIMINATED (AVOID): [list with 1-sentence reason]
-NOT SELECTED (WATCH): [list with score and upgrade condition]
+NOT SELECTED (WATCH): [list with Composite, EntryScore, and upgrade condition]
 
 === STAGE 11 HANDOFF ===
-PRIMARY: [Company] | [Ticker] | Composite: [X.XX] | Sizing: [X%]
-SECONDARY: [Company] | [Ticker] | Composite: [X.XX] | Sizing: [X%]
+PRIMARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | EntryBlocker: [blocker] | Sizing: [X%]
+SECONDARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | EntryBlocker: [blocker] | Sizing: [X%]
 CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
 === END HANDOFF ===
 
@@ -3552,7 +3695,7 @@ This will help for the next stage: Stage 12 - Four-Gate Framework — Decision O
 ## ?? Cel
 
 INHERITANCE LOCK:
-1. Search for '=== STAGE 11 HANDOFF ===' → extract PRIMARY, SECONDARY, Composite scores, Sizing
+1. Search for '=== STAGE 11 HANDOFF ===' → extract PRIMARY, SECONDARY, Composite scores, EntryScore, EntryBlocker, Sizing
 2. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: BEAR_TOTAL, BASE_TOTAL, BULL_TOTAL (for fields 7-9)
 3. Search for '=== STAGE 1 HANDOFF ===' → extract THESIS_SOURCE (for field 5)
 4. Search for Stage 10 output → extract per-company: VOI, Falsifier, Primary risk (for field 10)
@@ -3599,7 +3742,7 @@ Wewnątrz pola używaj:
 | 7       | Bear scenario (TOTAL)  | Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%       |
 | 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
 | 9       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
-| 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z              |
+| 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z, Composite: A, EntryScore: B, Sizing: C |
 | 11      | Sektor (alias)         | Technologia i oprogramowanie                       |
 | 12      | Rodzina spolki         | Technologia i oprogramowanie                       |
 | 13      | Typ spolki             | Cyberbezpieczenstwo i tozsamosc                    |
@@ -3619,7 +3762,7 @@ Wewnątrz pola używaj:
 - Pole 5 (`Material zrodlowy`) ma zawierac `THESIS_SOURCE` ze Stage 1 HANDOFF, nie analize.
 - Pole 6 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
 - Pola 7-9 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
-- Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ..., Composite: ..., Sizing: ...`.
+- Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ..., Composite: ..., EntryScore: ..., Sizing: ...`.
 - Pole 11 (`Sektor`) jest aliasem kompatybilnosci i ma powielac wartosc z pola 12 (`Rodzina spolki`).
 - Pola 12-14 musza byc zgodne z aktualna taxonomia spolek w Watchlist: `rodzina_spolki`, `typ_spolki`, `model_przychodu`.
 - Jesli nie umiesz wiarygodnie przypisac pola 12-14, wpisz literalnie `NIEZNANY` zamiast zgadywac.
@@ -3744,19 +3887,20 @@ Podaj scenariusz Bull jako osobne pole.
 
 ---
 
-### 10. VOI / Falsifiers / Primary risk + Sizing
+### 10. VOI / Falsifiers / Primary risk + Composite + EntryScore + Sizing
 
-Zawiera piec elementow oddzielonych przecinkami:
+Zawiera szesc elementow oddzielonych przecinkami:
 
 - **VOI** (Value of Information)  co musi sie wydarzyc, zeby zwiekszyc pozycje
 - **Falsifiers**  co uniewazni teze
 - **Primary risk**  glowny czynnik destrukcji wartosci
 - **Composite**  wynik Composite Rank ze Stage 11
+- **EntryScore**  near-term actionability score ze Stage 11
 - **Sizing**  sugerowany rozmiar pozycji ze Stage 11
 
 **Przyklad:**
 
-> VOI: udzial high jewelry w przychodach >10% przez 2Q, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow, Composite: 4.1/5.0, Sizing: 3%
+> VOI: udzial high jewelry w przychodach >10% przez 2Q, Fals: brak poprawy sprzedazy APAC do konca 2Q 2026 przy wzroscie rabatow, Primary risk: trwale przesuniecie popytu premium do substytutow, Composite: 4.1/5.0, EntryScore: 8.2/10, Sizing: 3%
 
 ---
 
@@ -3851,8 +3995,8 @@ Przyklady: USD, CHF, EUR, PLN
 ### Bez numeracji (finalna forma):
 
 ``` 
-2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, Sizing: 3%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Bizuteria i zegarki premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
-2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, Sizing: 2%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Zegarki i akcesoria premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
+2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, EntryScore: 8.2/10, Sizing: 3%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Bizuteria i zegarki premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
+2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, EntryScore: 6.9/10, Sizing: 2%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Zegarki i akcesoria premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
 ```
 
 ---
@@ -3880,6 +4024,7 @@ Przyklady: USD, CHF, EUR, PLN
 - Pole 8 zaczyna sie od `Base_TOTAL:`
 - Pole 9 zaczyna sie od `Bull_TOTAL:`
 - Pole 10 zaczyna sie od `VOI:`
+- Pole 10 zawiera kolejno: VOI, Fals, Primary risk, Composite, EntryScore, Sizing.
 - Pole 11 jest identyczne jak pole 12.
 - Pola 12-14 nie sa puste; jesli brakuje pewnosci, wpisz `NIEZNANY`.
 - Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.

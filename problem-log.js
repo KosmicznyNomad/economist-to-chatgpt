@@ -1,3 +1,5 @@
+const ProblemLogUiUtils = globalThis.ProblemLogUiUtils || {};
+
 const refreshBtn = document.getElementById('refresh-btn');
 const remoteBtn = document.getElementById('remote-btn');
 const copyBtn = document.getElementById('copy-btn');
@@ -26,6 +28,9 @@ function sendRuntimeMessage(payload) {
 }
 
 function summarizeClientErrorValue(rawValue) {
+  if (typeof ProblemLogUiUtils.summarizeClientErrorValue === 'function') {
+    return ProblemLogUiUtils.summarizeClientErrorValue(rawValue);
+  }
   if (rawValue == null) return '';
   if (typeof rawValue === 'string') return rawValue.trim();
   if (rawValue instanceof Error) return (rawValue.stack || rawValue.message || rawValue.name || '').trim();
@@ -37,6 +42,14 @@ function summarizeClientErrorValue(rawValue) {
 }
 
 function reportProblemLogFromUi(rawEntry = {}) {
+  if (typeof ProblemLogUiUtils.reportProblemLogFromUi === 'function') {
+    ProblemLogUiUtils.reportProblemLogFromUi(rawEntry, {
+      defaultSource: 'problem-log-ui',
+      defaultMessage: 'problem_log_ui_error',
+      signatureNamespace: 'problem-log-ui'
+    });
+    return;
+  }
   const source = typeof rawEntry?.source === 'string' && rawEntry.source.trim()
     ? rawEntry.source.trim()
     : 'problem-log-ui';

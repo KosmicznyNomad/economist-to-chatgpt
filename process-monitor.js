@@ -153,7 +153,11 @@ const persistenceErrorLabels = {
   storage_unavailable: 'storage niedostepny',
   empty_response: 'pusta odpowiedz'
 };
-const RESPONSE_STORAGE_KEY = 'responses';
+const DecisionContractUtils = globalThis.DecisionContractUtils || {};
+const ResponseStorageUtils = globalThis.ResponseStorageUtils || {};
+const DecisionViewModelUtils = globalThis.DecisionViewModelUtils || {};
+const ProblemLogUiUtils = globalThis.ProblemLogUiUtils || {};
+const RESPONSE_STORAGE_KEY = ResponseStorageUtils.RESPONSE_STORAGE_KEY || 'responses';
 
 function sendRuntimeMessage(payload) {
   return new Promise((resolve) => {
@@ -171,6 +175,9 @@ function sendRuntimeMessage(payload) {
 }
 
 function summarizeClientErrorValue(rawValue) {
+  if (typeof ProblemLogUiUtils.summarizeClientErrorValue === 'function') {
+    return ProblemLogUiUtils.summarizeClientErrorValue(rawValue);
+  }
   if (rawValue == null) return '';
   if (typeof rawValue === 'string') return rawValue.trim();
   if (rawValue instanceof Error) return (rawValue.stack || rawValue.message || rawValue.name || '').trim();
@@ -182,6 +189,14 @@ function summarizeClientErrorValue(rawValue) {
 }
 
 function reportProblemLogFromUi(rawEntry = {}) {
+  if (typeof ProblemLogUiUtils.reportProblemLogFromUi === 'function') {
+    ProblemLogUiUtils.reportProblemLogFromUi(rawEntry, {
+      defaultSource: 'process-monitor-ui',
+      defaultMessage: 'process_monitor_problem',
+      signatureNamespace: 'process-monitor-ui'
+    });
+    return;
+  }
   const source = typeof rawEntry?.source === 'string' && rawEntry.source.trim()
     ? rawEntry.source.trim()
     : 'process-monitor-ui';
@@ -991,18 +1006,25 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const queue = analysisQueueSnapshot && typeof analysisQueueSnapshot === 'object'
     ? analysisQueueSnapshot
     : null;
-  const queueSlots = Number.isInteger(queue?.activeSlots) ? queue.activeSlots : 0;
+  const queueSlots = Number.isInteger(queue?.reservedSlots)
+    ? queue.reservedSlots
+    : (Number.isInteger(queue?.activeSlots) ? queue.activeSlots : 0);
+  const queueLiveSlots = Number.isInteger(queue?.liveSlots) ? queue.liveSlots : queueSlots;
+  const queueStartingSlots = Number.isInteger(queue?.startingSlots)
+    ? queue.startingSlots
+    : Math.max(0, queueSlots - queueLiveSlots);
   const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 7;
   const queueSize = Number.isInteger(queue?.queueSize) ? queue.queueSize : 0;
 
   if (processSummary) {
-    const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
+    const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Okna ${queueLiveSlots}/${queueMax} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
     const details = [
       `DATA_GAPS: ${dataGapCount}`,
       `Braki odpowiedzi: ${missingReplyCount}`,
       `Sredni postep aktywnych: ${avgProgress}%`,
       `Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`,
       `Priorytety aktywnych: P1=${priorityCounts.P1}, P2=${priorityCounts.P2}, P3=${priorityCounts.P3}, P4=${priorityCounts.P4}`,
+      `Kolejka scheduler: sloty=${queueSlots}/${queueMax}, zywe_okna=${queueLiveSlots}/${queueMax}, startujace=${queueStartingSlots}, oczekuje=${queueSize}`,
       stageInfo
     ];
     if (consistencyIssues.length > 0) {
@@ -1021,62 +1043,29 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
 }
 
 function getStorageAreas() {
-  return {
-    local: chrome.storage?.local || null,
-    session: chrome.storage?.session || null
-  };
+  return typeof ResponseStorageUtils.getStorageAreas === 'function'
+    ? ResponseStorageUtils.getStorageAreas()
+    : {
+      local: chrome.storage?.local || null,
+      session: chrome.storage?.session || null
+    };
 }
 
 function makeResponseKey(response) {
-  if (!response || typeof response !== 'object') return '';
-  const timestamp = Number.isInteger(response.timestamp) ? response.timestamp : 0;
-  const runId = typeof response.runId === 'string' ? response.runId : '';
-  const responseId = typeof response.responseId === 'string' ? response.responseId : '';
-  const analysisType = response.analysisType || '';
-  const source = response.source || '';
-  const text = response.text || '';
-  const head = typeof text === 'string' ? text.slice(0, 64) : '';
-  return `${timestamp}|${runId}|${responseId}|${analysisType}|${source}|${text.length}|${head}`;
+  if (typeof ResponseStorageUtils.buildResponseIdentityKeys !== 'function') return '';
+  return ResponseStorageUtils.buildResponseIdentityKeys(response).join('|');
 }
 
 function mergeResponses(primary, secondary) {
-  const merged = [];
-  const seen = new Set();
-
-  const add = (response) => {
-    const key = makeResponseKey(response);
-    if (!key || seen.has(key)) return;
-    seen.add(key);
-    merged.push(response);
-  };
-
-  (Array.isArray(primary) ? primary : []).forEach(add);
-  (Array.isArray(secondary) ? secondary : []).forEach(add);
-  return merged;
+  return typeof ResponseStorageUtils.mergeResponseCollections === 'function'
+    ? ResponseStorageUtils.mergeResponseCollections(primary, secondary, DecisionContractUtils)
+    : [];
 }
 
 async function readResponsesFromStorage() {
-  const { local, session } = getStorageAreas();
-
-  if (local && session) {
-    const [localResult, sessionResult] = await Promise.all([
-      local.get([RESPONSE_STORAGE_KEY]),
-      session.get([RESPONSE_STORAGE_KEY])
-    ]);
-    return mergeResponses(localResult.responses || [], sessionResult.responses || []);
-  }
-
-  if (local) {
-    const result = await local.get([RESPONSE_STORAGE_KEY]);
-    return result.responses || [];
-  }
-
-  if (session) {
-    const result = await session.get([RESPONSE_STORAGE_KEY]);
-    return result.responses || [];
-  }
-
-  return [];
+  return typeof ResponseStorageUtils.readCanonicalResponses === 'function'
+    ? ResponseStorageUtils.readCanonicalResponses(getStorageAreas(), DecisionContractUtils)
+    : [];
 }
 
 function formatPromptList(values) {
@@ -1086,157 +1075,59 @@ function formatPromptList(values) {
 }
 
 function parseDecisionRecordLine(text) {
-  const raw = typeof text === 'string' ? text.trim() : '';
-  if (!raw) return null;
-  const parts = raw
-    .split(';')
-    .map((item) => item.trim())
-    .filter((item, index, all) => !(index === all.length - 1 && item === ''));
-  const fieldCount = parts.length;
-  if (fieldCount !== 12 && fieldCount !== 13 && fieldCount !== 16) return null;
-
-  if (fieldCount === 16) {
-    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
-    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
-    if (hasExplicitRole) {
-      return {
-        decisionDate: parts[0],
-        decisionStatus: parts[1],
-        decisionRole,
-        company: parts[3],
-        sourceMaterial: parts[4],
-        thesis: parts[5],
-        asymmetry: '',
-        bear: parts[6],
-        base: parts[7],
-        bull: parts[8],
-        voi: parts[9],
-        sector: parts[10],
-        companyFamily: parts[11],
-        companyType: parts[12],
-        revenueModel: parts[13],
-        region: parts[14],
-        currency: parts[15],
-        recordFormat: 'current_16_role'
-      };
-    }
-    return {
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      decisionRole: '',
-      company: parts[2],
-      sourceMaterial: parts[3],
-      thesis: parts[4],
-      asymmetry: parts[5],
-      bear: parts[6],
-      base: parts[7],
-      bull: parts[8],
-      voi: parts[9],
-      sector: parts[10],
-      companyFamily: parts[11],
-      companyType: parts[12],
-      revenueModel: parts[13],
-      region: parts[14],
-      currency: parts[15],
-      recordFormat: 'transitional_16'
-    };
-  }
-
-  if (fieldCount === 13) {
-    const decisionRole = typeof parts[2] === 'string' ? parts[2].toUpperCase() : '';
-    const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
-    if (hasExplicitRole) {
-      return {
-        decisionDate: parts[0],
-        decisionStatus: parts[1],
-        decisionRole,
-        company: parts[3],
-        sourceMaterial: parts[4],
-        thesis: parts[5],
-        asymmetry: '',
-        bear: parts[6],
-        base: parts[7],
-        bull: parts[8],
-        voi: parts[9],
-        sector: parts[10],
-        companyFamily: parts[10],
-        companyType: '',
-        revenueModel: '',
-        region: parts[11],
-        currency: parts[12],
-        recordFormat: 'current_13_role'
-      };
-    }
-    return {
-      decisionDate: parts[0],
-      decisionStatus: parts[1],
-      decisionRole: '',
-      company: parts[2],
-      sourceMaterial: parts[3],
-      thesis: parts[4],
-      asymmetry: parts[5],
-      bear: parts[6],
-      base: parts[7],
-      bull: parts[8],
-      voi: parts[9],
-      sector: parts[10],
-      companyFamily: parts[10],
-      companyType: '',
-      revenueModel: '',
-      region: parts[11],
-      currency: parts[12],
-      recordFormat: 'transitional_13'
-    };
-  }
-
-  const thesisText = typeof parts[4] === 'string' ? parts[4] : '';
-  const asymmetryMatch = thesisText.match(/(?:Asymetria|Asymmetry)\s*:\s*[^,;]+/i);
-  return {
-    decisionDate: parts[0],
-    decisionStatus: parts[1],
-    decisionRole: '',
-    company: parts[2],
-    sourceMaterial: parts[3],
-    thesis: parts[4],
-    asymmetry: asymmetryMatch ? asymmetryMatch[0].trim() : '',
-    bear: parts[5],
-    base: parts[6],
-    bull: parts[7],
-    voi: parts[8],
-    sector: parts[9],
-    companyFamily: parts[9],
-    companyType: '',
-    revenueModel: '',
-    region: parts[10],
-    currency: parts[11],
-    recordFormat: 'current_12'
-  };
+  return typeof DecisionContractUtils.parseDecisionRecordLine === 'function'
+    ? DecisionContractUtils.parseDecisionRecordLine(text)
+    : null;
 }
 
 function extractDecisionRecordsFromText(text) {
-  const source = typeof text === 'string' ? text : '';
-  if (!source.trim()) return [];
-  const lines = source
-    .split(/\r?\n/)
-    .map((line) => line.trim())
-    .filter((line) => line.length > 0);
-  const parsedRecords = [];
-  for (let i = 0; i < lines.length; i += 1) {
-    const parsed = parseDecisionRecordLine(lines[i]);
-    if (parsed) parsedRecords.push(parsed);
-  }
-  if (parsedRecords.length > 0) return parsedRecords;
-
-  if (!source.includes(';')) return [];
-  const parsedWhole = parseDecisionRecordLine(source.replace(/\r?\n/g, ' ').replace(/\s+/g, ' ').trim());
-  return parsedWhole ? [parsedWhole] : [];
+  return typeof DecisionContractUtils.extractDecisionRecordsFromText === 'function'
+    ? DecisionContractUtils.extractDecisionRecordsFromText(text)
+    : [];
 }
 
 function extractDecisionRecordFromText(text) {
-  const parsedRecords = extractDecisionRecordsFromText(text);
-  if (parsedRecords.length === 0) return null;
-  return parsedRecords.find((record) => record.decisionRole === 'PRIMARY')
-    || parsedRecords[parsedRecords.length - 1];
+  return typeof DecisionContractUtils.extractDecisionRecordFromText === 'function'
+    ? DecisionContractUtils.extractDecisionRecordFromText(text)
+    : null;
+}
+
+function normalizeDecisionContractSummaryForMonitor(summary) {
+  return typeof DecisionContractUtils.normalizeDecisionContractSummary === 'function'
+    ? DecisionContractUtils.normalizeDecisionContractSummary(summary)
+    : (summary && typeof summary === 'object' ? summary : null);
+}
+
+function getDecisionContractRecordForMonitor(summary, role) {
+  if (!summary || typeof summary !== 'object') return null;
+  if (role === 'PRIMARY' && typeof DecisionContractUtils.getDecisionContractPrimaryRecord === 'function') {
+    return DecisionContractUtils.getDecisionContractPrimaryRecord(summary);
+  }
+  if (role === 'SECONDARY' && typeof DecisionContractUtils.getDecisionContractSecondaryRecord === 'function') {
+    return DecisionContractUtils.getDecisionContractSecondaryRecord(summary);
+  }
+  const records = Array.isArray(summary.records) ? summary.records : [];
+  if (role === 'PRIMARY') return records.find((record) => record?.role === 'PRIMARY') || records[0] || null;
+  if (role === 'SECONDARY') return records.find((record) => record?.role === 'SECONDARY') || null;
+  return null;
+}
+
+function mergeDecisionContractMonitorRecord(primary, fallback) {
+  const left = primary && typeof primary === 'object' ? primary : null;
+  const right = fallback && typeof fallback === 'object' ? fallback : null;
+  if (!left && !right) return null;
+  const result = { ...(right || {}), ...(left || {}) };
+  ['role', 'company', 'decisionDate', 'decisionStatus', 'composite', 'sizing'].forEach((key) => {
+    const leftValue = typeof left?.[key] === 'string' ? left[key].trim() : '';
+    const rightValue = typeof right?.[key] === 'string' ? right[key].trim() : '';
+    result[key] = leftValue || rightValue || '';
+  });
+  ['compositeValue', 'sizingPercent'].forEach((key) => {
+    const leftValue = Number.isFinite(left?.[key]) ? left[key] : Number.NaN;
+    const rightValue = Number.isFinite(right?.[key]) ? right[key] : Number.NaN;
+    result[key] = Number.isFinite(leftValue) ? leftValue : rightValue;
+  });
+  return result;
 }
 
 function getProcessCompanySnapshotCacheEntry(process) {
@@ -1327,26 +1218,54 @@ async function fetchProcessCompanySnapshot(process, options = {}) {
     const responses = await readResponsesFromStorage();
     const completed = findCompletedResponseForProcess(process, responses);
     const rawText = extractResponseText(completed) || extractCompletedTextFromProcess(process);
-    const decisionRecord = extractDecisionRecordFromText(rawText);
+    const stage12State = typeof DecisionViewModelUtils.buildValidatedStage12State === 'function'
+      ? DecisionViewModelUtils.buildValidatedStage12State(
+        completed && typeof completed === 'object'
+          ? completed
+          : {
+            text: rawText,
+            timestamp: Number.isInteger(process?.finishedAt) ? process.finishedAt : Date.now(),
+            source: process?.title || '',
+            analysisType: 'company',
+            runId: String(processId)
+          },
+        DecisionContractUtils
+      )
+      : null;
+    const stage12Records = Array.isArray(stage12State?.records)
+      ? stage12State.records.map((record) => ({
+        decisionRole: record.role || '',
+        company: record.company || '',
+        decisionStatus: record.decisionStatus || '',
+        decisionDate: record.decisionDate || '',
+        bear: record.bear || '',
+        base: record.base || '',
+        bull: record.bull || '',
+        sector: record.sector || '',
+        companyFamily: record.companyFamily || '',
+        companyType: record.companyType || '',
+        revenueModel: record.revenueModel || '',
+        region: record.region || '',
+        currency: record.currency || '',
+        composite: record.composite || '',
+        sizing: record.sizing || '',
+        voi: record.voi || '',
+        fals: record.fals || '',
+        primaryRisk: record.primaryRisk || ''
+      }))
+      : [];
 
     const snapshot = {
       processId,
       hasCompletedResponse: !!completed || !!rawText,
       responseTimestamp: Number.isInteger(completed?.timestamp) ? completed.timestamp : null,
-      company: decisionRecord?.company || (process.title || ''),
-      decisionStatus: decisionRecord?.decisionStatus || '',
-      asymmetry: decisionRecord?.asymmetry || '',
-      bear: decisionRecord?.bear || '',
-      base: decisionRecord?.base || '',
-      bull: decisionRecord?.bull || '',
-      sector: decisionRecord?.sector || '',
-      companyFamily: decisionRecord?.companyFamily || decisionRecord?.sector || '',
-      companyType: decisionRecord?.companyType || '',
-      revenueModel: decisionRecord?.revenueModel || '',
-      region: decisionRecord?.region || '',
-      currency: decisionRecord?.currency || '',
-      voi: decisionRecord?.voi || '',
-      hasDecisionRecord: !!decisionRecord
+      company: stage12State?.company || (process.title || ''),
+      hasDecisionRecord: stage12Records.length > 0,
+      decisionContractStatus: typeof stage12State?.status === 'string' ? stage12State.status : 'invalid',
+      decisionContractIssues: Array.isArray(stage12State?.issueCodes) ? stage12State.issueCodes : [],
+      decisionRecordCount: Number.isInteger(stage12State?.recordCount) ? stage12State.recordCount : stage12Records.length,
+      decisionRecordFormats: Array.isArray(stage12State?.recordFormats) ? stage12State.recordFormats : [],
+      stage12Records
     };
 
     setProcessCompanySnapshotCache(process, snapshot);
@@ -2766,6 +2685,13 @@ function setAuditBody(body, text, level = '') {
   body.textContent = text;
 }
 
+function formatDecisionContractStatusLabel(status) {
+  if (status === 'current') return 'current';
+  if (status === 'shortfall') return 'shortfall';
+  if (status === 'legacy') return 'legacy read-only';
+  return 'invalid';
+}
+
 function formatCompanySnapshotText(snapshot) {
   if (!snapshot) return 'Brak danych o spolce dla wybranego procesu.';
   const lines = [];
@@ -2773,21 +2699,50 @@ function formatCompanySnapshotText(snapshot) {
   lines.push(`Spolka: ${companyLabel}`);
 
   if (!snapshot.hasDecisionRecord) {
-    lines.push('Rekord Four-Gate (12/13/15/16 pol) nie zostal jeszcze rozpoznany.');
+    lines.push(`Kontrakt Stage 12: ${formatDecisionContractStatusLabel(snapshot.decisionContractStatus)}`);
     if (snapshot.hasCompletedResponse) {
-      lines.push('Jest zapisana odpowiedz koncowa, ale bez finalnej linii decyzyjnej.');
+      lines.push('Jest zapisana odpowiedz koncowa, ale nie spelnia aktualnego kontraktu final record.');
     } else {
       lines.push('Brak zapisanej odpowiedzi koncowej dla tego runId.');
+    }
+    if (Array.isArray(snapshot.decisionContractIssues) && snapshot.decisionContractIssues.length > 0) {
+      lines.push(`Uwagi: ${snapshot.decisionContractIssues.join(', ')}`);
     }
     return lines.join('\n');
   }
 
-  lines.push(`Decyzja: ${snapshot.decisionStatus || 'brak'} | Asymetria: ${snapshot.asymmetry || 'brak'}`);
-  lines.push(`Scenariusze: ${snapshot.bear || 'Bear N/A'} | ${snapshot.base || 'Base N/A'} | ${snapshot.bull || 'Bull N/A'}`);
-  lines.push(`Taxonomia: ${(snapshot.companyFamily || snapshot.sector || '-')} | ${snapshot.companyType || '-'} | ${snapshot.revenueModel || '-'}`);
-  lines.push(`Region/Waluta: ${snapshot.region || '-'} | ${snapshot.currency || '-'}`);
-  if (snapshot.voi) {
-    lines.push(`VOI/Fals: ${snapshot.voi}`);
+  lines.push(
+    `Kontrakt Stage 12: ${formatDecisionContractStatusLabel(snapshot.decisionContractStatus)} | Rekordy: ${snapshot.decisionRecordCount || 0}`
+  );
+  if (Array.isArray(snapshot.decisionContractIssues) && snapshot.decisionContractIssues.length > 0) {
+    lines.push(`Uwagi: ${snapshot.decisionContractIssues.join(', ')}`);
+  }
+  const stage12Records = Array.isArray(snapshot.stage12Records) ? snapshot.stage12Records : [];
+  if (stage12Records.length === 0) {
+    lines.push('Brak rekordow Stage 12 do wyswietlenia.');
+    return lines.join('\n');
+  }
+  stage12Records.forEach((record) => {
+    const role = record?.decisionRole || 'RECORD';
+    lines.push(`${role}: ${record?.company || companyLabel} | ${record?.decisionStatus || 'brak'} | Composite: ${record?.composite || '-'} | Sizing: ${record?.sizing || '-'}`);
+    const voiBits = [record?.voi || '', record?.fals || '', record?.primaryRisk || '']
+      .filter((value) => typeof value === 'string' && value.trim());
+    if (voiBits.length > 0) {
+      lines.push(`VOI/Fals/Risk ${role}: ${voiBits.join(' | ')}`);
+    }
+    const taxonomy = [record?.sector || '', record?.companyFamily || '', record?.companyType || '', record?.revenueModel || '']
+      .filter((value) => typeof value === 'string' && value.trim());
+    if (taxonomy.length > 0) {
+      lines.push(`Taxonomia ${role}: ${taxonomy.join(' | ')}`);
+    }
+    const geo = [record?.region || '', record?.currency || '']
+      .filter((value) => typeof value === 'string' && value.trim());
+    if (geo.length > 0) {
+      lines.push(`Region/Waluta ${role}: ${geo.join(' | ')}`);
+    }
+  });
+  if (snapshot.decisionContractStatus === 'shortfall') {
+    lines.push('SHORTFALL: only 1 company passed Stage 10 gates');
   }
   return lines.join('\n');
 }
@@ -2835,7 +2790,11 @@ async function hydrateDetailsCards(process, snapshotBody, auditBody) {
   if (snapshotBody) {
     const cachedSnapshot = getCachedProcessCompanySnapshot(process);
     if (cachedSnapshot) {
-      setAuditBody(snapshotBody, formatCompanySnapshotText(cachedSnapshot), cachedSnapshot.hasDecisionRecord ? 'ok' : 'warn');
+      const cachedLevel = cachedSnapshot?.hasDecisionRecord
+        && (cachedSnapshot.decisionContractStatus === 'current' || cachedSnapshot.decisionContractStatus === 'shortfall')
+        ? 'ok'
+        : 'warn';
+      setAuditBody(snapshotBody, formatCompanySnapshotText(cachedSnapshot), cachedLevel);
     }
   }
 
@@ -2857,7 +2816,10 @@ async function hydrateDetailsCards(process, snapshotBody, auditBody) {
   if (selectedProcessId !== expectedProcessId) return;
 
   if (snapshotBody?.isConnected) {
-    const snapshotLevel = snapshot?.hasDecisionRecord ? 'ok' : 'warn';
+    const snapshotLevel = snapshot?.hasDecisionRecord
+      && (snapshot.decisionContractStatus === 'current' || snapshot.decisionContractStatus === 'shortfall')
+      ? 'ok'
+      : 'warn';
     setAuditBody(snapshotBody, formatCompanySnapshotText(snapshot), snapshotLevel);
   }
 

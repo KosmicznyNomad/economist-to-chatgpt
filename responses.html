@@ -216,6 +216,49 @@
       margin-top: 6px;
     }
 
+    .response-contract-badge {
+      display: inline-block;
+      margin-top: 6px;
+      padding: 3px 8px;
+      border-radius: 999px;
+      font-size: 11px;
+      font-weight: 600;
+      letter-spacing: 0.02em;
+    }
+
+    .response-contract-badge.ok {
+      background: #ecfdf3;
+      color: #166534;
+    }
+
+    .response-contract-badge.info {
+      background: #eff6ff;
+      color: #1d4ed8;
+    }
+
+    .response-contract-badge.warn {
+      background: #fff7ed;
+      color: #9a3412;
+    }
+
+    .response-contract-badge.error {
+      background: #fef2f2;
+      color: #991b1b;
+    }
+
+    .response-stage12-summary {
+      margin-top: 8px;
+      display: flex;
+      flex-direction: column;
+      gap: 4px;
+    }
+
+    .response-stage12-line {
+      font-size: 12px;
+      color: #374151;
+      line-height: 1.4;
+    }
+
     .market-table {
       width: 100%;
       border-collapse: collapse;
@@ -519,9 +562,11 @@
               <th class="sortable" data-sort-key="rank">#</th>
               <th class="sortable" data-sort-key="company">Spolka</th>
               <th class="sortable" data-sort-key="ticker">Ticker</th>
-              <th class="sortable" data-sort-key="sector">Sektor</th>
               <th class="sortable" data-sort-key="decisionStatus">Decyzja</th>
-              <th class="sortable" data-sort-key="asymmetry">Asymetria</th>
+              <th class="sortable" data-sort-key="role">Rola</th>
+              <th class="sortable" data-sort-key="composite">Composite</th>
+              <th class="sortable" data-sort-key="sizing">Sizing</th>
+              <th class="sortable" data-sort-key="sector">Sektor</th>
               <th class="sortable" data-sort-key="region">Region</th>
               <th class="sortable" data-sort-key="currency">Waluta</th>
               <th class="sortable" data-sort-key="decisionTs">Data</th>
@@ -555,6 +600,9 @@
     </div>
   </div>
 
+  <script src="decision-contract.js"></script>
+  <script src="response-storage.js"></script>
+  <script src="decision-view-model.js"></script>
   <script src="responses.js"></script>
 </body>
 </html>
