@@ -3743,7 +3743,7 @@ Wewnątrz pola używaj:
 | 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
 | 9       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
 | 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z, Composite: A, EntryScore: B, Sizing: C |
-| 11      | Sektor (alias)         | Technologia i oprogramowanie                       |
+| 11      | Sektor (1 z 5 bazowych)| Software steruje praca, pieniedzmi i ryzykiem     |
 | 12      | Rodzina spolki         | Technologia i oprogramowanie                       |
 | 13      | Typ spolki             | Cyberbezpieczenstwo i tozsamosc                    |
 | 14      | Model przychodu        | Subskrypcja oprogramowania                         |
@@ -3763,9 +3763,10 @@ Wewnątrz pola używaj:
 - Pole 6 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
 - Pola 7-9 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
 - Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ..., Composite: ..., EntryScore: ..., Sizing: ...`.
-- Pole 11 (`Sektor`) jest aliasem kompatybilnosci i ma powielac wartosc z pola 12 (`Rodzina spolki`).
+- Pole 11 (`Sektor`) musi byc jednym z 5 bazowych sektorow Watchlist i nie jest aliasem pola 12.
 - Pola 12-14 musza byc zgodne z aktualna taxonomia spolek w Watchlist: `rodzina_spolki`, `typ_spolki`, `model_przychodu`.
-- Jesli nie umiesz wiarygodnie przypisac pola 12-14, wpisz literalnie `NIEZNANY` zamiast zgadywac.
+- Pola 11-14 sa obowiazkowe i nie moga zawierac placeholderow typu `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a`.
+- Gdy nie ma idealnego matchu, wybierz najblizsze wiarygodne dopasowanie z taxonomii na podstawie tego, co firma sprzedaje, komu sprzedaje i jak fakturuje.
 - Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.
 
 ---
@@ -3904,19 +3905,25 @@ Zawiera szesc elementow oddzielonych przecinkami:
 
 ---
 
-### 11. Sektor (alias kompatybilnosci)
+### 11. Sektor (1 z 5 bazowych sektorow)
 
-To pole istnieje tylko po to, zeby zachowac zgodnosc ze starszym importem i widokami.
+To pole jest obowiazkowym bazowym sektorem Watchlist i sluzy do wspolnego grupowania spolek ponad szczegolowa rodzina firmy.
 
 **Zasada obowiazkowa:**
 
-- wpisz **dokladnie ta sama wartosc**, co w polu 12 `Rodzina spolki`
-- nie uzywaj dawnej listy sektorow tematycznych
+- wpisz **dokladnie jedna** z 5 ponizszych etykiet:
+- `AI pozera compute, energie i robotyke`
+- `Suwerennosc jest wazniejsza niz efektywnosc`
+- `Fizyczne waskie gardla dyktuja wartosc`
+- `Software steruje praca, pieniedzmi i ryzykiem`
+- `Zaufanie, zdrowie i rzadkosc utrzymuja premie`
+- nie wpisuj `Rodzina spolki`, jesli nie jest to jedna z 5 etykiet powyzej
 - bez opisow, nawiasow i komentarzy
+- jesli masz tylko szczegolowa rodzine spolki, zmapuj ja do najblizszego bazowego sektora z tej piatki
 
 Przyklad:
 
-- `Technologia i oprogramowanie`
+- `Software steruje praca, pieniedzmi i ryzykiem`
 
 ---
 
@@ -3929,7 +3936,8 @@ Wpisz znormalizowana `rodzina_spolki` zgodna z aktualna taxonomia Watchlist.
 - wpisz tylko nazwe rodziny
 - bez dopiskow typu `rodzina:`, bez komentarzy, bez nawiasow
 - ma to byc najwyzszy poziom klasyfikacji firmy
-- jesli nie masz wiarygodnej pewnosci, wpisz `NIEZNANY`
+- jesli opis spolki jest niepelny, wybierz najbardziej prawdopodobna rodzine wynikajaca z produktu, klienta i lancucha wartosci
+- nigdy nie wpisuj `NIEZNANY`, `Do weryfikacji`, pustego pola ani placeholdera
 
 Przyklady:
 
@@ -3946,8 +3954,9 @@ Wpisz znormalizowany `typ_spolki` zgodny z aktualna taxonomia Watchlist.
 
 - wpisz tylko nazwe typu
 - poziom bardziej szczegolowy niz `Rodzina spolki`
-- bez komentarzy, bez nawiasow, bez zgadywania
-- jesli nie masz wiarygodnej pewnosci, wpisz `NIEZNANY`
+- bez komentarzy i bez nawiasow
+- jesli brakuje idealnego matchu, wybierz najblizszy wiarygodny typ wynikajacy z produktu, klienta i pozycji w lancuchu wartosci
+- nigdy nie wpisuj `NIEZNANY`, `Do weryfikacji`, pustego pola ani placeholdera
 
 Przyklady:
 
@@ -3964,8 +3973,9 @@ Wpisz znormalizowany `model_przychodu` zgodny z aktualna taxonomia Watchlist.
 
 - wpisz tylko nazwe modelu
 - opis ma mowic **jak firma zarabia**, nie w jakim jest sektorze
-- bez komentarzy, bez nawiasow, bez zgadywania
-- jesli nie masz wiarygodnej pewnosci, wpisz `NIEZNANY`
+- bez komentarzy i bez nawiasow
+- jesli brakuje idealnego matchu, wybierz najblizszy wiarygodny model na podstawie tego, kto placi i za co placi
+- nigdy nie wpisuj `NIEZNANY`, `Do weryfikacji`, pustego pola ani placeholdera
 
 Przyklady:
 
@@ -3995,8 +4005,8 @@ Przyklady: USD, CHF, EUR, PLN
 ### Bez numeracji (finalna forma):
 
 ``` 
-2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, EntryScore: 8.2/10, Sizing: 3%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Bizuteria i zegarki premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
-2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, EntryScore: 6.9/10, Sizing: 2%; Dobra luksusowe i konsument premium; Dobra luksusowe i konsument premium; Zegarki i akcesoria premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
+2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, EntryScore: 8.2/10, Sizing: 3%; Zaufanie, zdrowie i rzadkosc utrzymuja premie; Dobra luksusowe i konsument premium; Bizuteria i zegarki premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
+2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, EntryScore: 6.9/10, Sizing: 2%; Zaufanie, zdrowie i rzadkosc utrzymuja premie; Dobra luksusowe i konsument premium; Zegarki i akcesoria premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF
 ```
 
 ---
@@ -4025,8 +4035,9 @@ Przyklady: USD, CHF, EUR, PLN
 - Pole 9 zaczyna sie od `Bull_TOTAL:`
 - Pole 10 zaczyna sie od `VOI:`
 - Pole 10 zawiera kolejno: VOI, Fals, Primary risk, Composite, EntryScore, Sizing.
-- Pole 11 jest identyczne jak pole 12.
-- Pola 12-14 nie sa puste; jesli brakuje pewnosci, wpisz `NIEZNANY`.
+- Pole 11 nalezy do dozwolonej piatki bazowych sektorow Watchlist.
+- Pola 11-14 sa wypelnione realnymi etykietami taxonomii i nie zawieraja `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a` ani pustej wartosci.
+- Pole 11 jest jednym z 5 bazowych sektorow wymienionych wyzej.
 - Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.
 
 ---
