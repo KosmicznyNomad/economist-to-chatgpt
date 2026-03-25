@@ -5,9 +5,10 @@
     module.exports = api;
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createDecisionContractUtils() {
-  const CONTRACT_VERSION = 'stage12.v1';
+  const CONTRACT_VERSION = 'stage12.v2';
   const SHORTFALL_MARKER = '# SHORTFALL: only 1 company passed Stage 10 gates';
-  const CURRENT_RECORD_FORMAT = 'current_16_role';
+  const CURRENT_RECORD_FORMAT = 'current_17_role';
+  const CURRENT_COMPATIBLE_RECORD_FORMATS = new Set(['current_17_role', 'current_16_role']);
   const LEGACY_RECORD_FORMATS = new Set([
     'current_12',
     'current_13_role',
@@ -17,6 +18,7 @@
   const CURRENT_FIELD_10_KEYS = ['voi', 'fals', 'primaryRisk', 'composite', 'entryScore', 'sizing'];
   const LEGACY_FIELD_10_KEYS = ['voi', 'fals', 'primaryRisk', 'composite', 'sizing'];
   const FIELD_10_LABEL_REGEX = /\b(VOI|Fals(?:ifiers)?|Primary risk|Composite|EntryScore|Sizing)\s*:/gi;
+  const KPI_SCORECARD_KEYS = ['FQ', 'TE', 'CM', 'VS', 'TQ', 'PP', 'CP', 'CD', 'NO', 'MR'];
 
   function normalizeText(value, fallback = '') {
     const text = typeof value === 'string' ? value.trim() : '';
@@ -34,8 +36,50 @@
       .split(';')
       .map((item) => item.trim())
       .filter((item, index, all) => !(index === all.length - 1 && item === ''));
-    if (parts.length !== 12 && parts.length !== 13 && parts.length !== 16) return null;
+    if (parts.length !== 12 && parts.length !== 13 && parts.length !== 16 && parts.length !== 17) return null;
     return parts;
+  }
+
+  function parseKpiScorecard(rawValue) {
+    const source = normalizeText(rawValue);
+    const meta = {
+      raw: source,
+      values: {},
+      orderedKeys: [],
+      issueCodes: [],
+      isComplete: false
+    };
+    if (!source) {
+      meta.issueCodes.push('kpi_empty');
+      return meta;
+    }
+
+    const segments = source.split(',').map((segment) => segment.trim()).filter(Boolean);
+    if (segments.length !== KPI_SCORECARD_KEYS.length) {
+      meta.issueCodes.push('kpi_wrong_segment_count');
+      return meta;
+    }
+
+    for (const segment of segments) {
+      const match = segment.match(/^([A-Za-z]{2})\s*:\s*(\d{1,2})$/);
+      if (!match) {
+        meta.issueCodes.push('kpi_invalid_segment_shape');
+        return meta;
+      }
+      const key = match[1].toUpperCase();
+      const value = Number.parseInt(match[2], 10);
+      meta.orderedKeys.push(key);
+      meta.values[key] = value;
+    }
+
+    const orderMatches = KPI_SCORECARD_KEYS.every((key, index) => meta.orderedKeys[index] === key);
+    const valuesInRange = KPI_SCORECARD_KEYS.every((key) => Number.isInteger(meta.values[key]) && meta.values[key] >= 1 && meta.values[key] <= 10);
+    if (!orderMatches) meta.issueCodes.push('kpi_invalid_order');
+    if (!valuesInRange) meta.issueCodes.push('kpi_invalid_value_range');
+    if (meta.issueCodes.length === 0) {
+      meta.isComplete = true;
+    }
+    return meta;
   }
 
   function mapField10Label(rawLabel) {
@@ -147,6 +191,41 @@
     const parts = parseDecisionRecordParts(line);
     if (!parts) return null;
 
+    if (parts.length === 17) {
+      const decisionRole = normalizeText(parts[2]).toUpperCase();
+      const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
+      const field10Meta = parseField10Meta(parts[9]);
+      const kpiMeta = parseKpiScorecard(parts[16]);
+      if (hasExplicitRole) {
+        return {
+          canonicalLine: parts.join('; '),
+          recordFormat: CURRENT_RECORD_FORMAT,
+          rawFieldCount: 17,
+          decisionDate: parts[0],
+          decisionStatus: parts[1],
+          decisionRole,
+          company: parts[3],
+          sourceMaterial: parts[4],
+          thesis: parts[5],
+          asymmetry: '',
+          bear: parts[6],
+          base: parts[7],
+          bull: parts[8],
+          voi: parts[9],
+          sector: parts[10],
+          companyFamily: parts[11],
+          companyType: parts[12],
+          revenueModel: parts[13],
+          region: parts[14],
+          currency: parts[15],
+          kpiScorecard: parts[16],
+          field10Meta,
+          kpiMeta
+        };
+      }
+      return null;
+    }
+
     if (parts.length === 16) {
       const decisionRole = normalizeText(parts[2]).toUpperCase();
       const hasExplicitRole = decisionRole === 'PRIMARY' || decisionRole === 'SECONDARY';
@@ -154,7 +233,7 @@
       if (hasExplicitRole) {
         return {
           canonicalLine: parts.join('; '),
-          recordFormat: CURRENT_RECORD_FORMAT,
+          recordFormat: 'current_16_role',
           rawFieldCount: 16,
           decisionDate: parts[0],
           decisionStatus: parts[1],
@@ -173,7 +252,9 @@
           revenueModel: parts[13],
           region: parts[14],
           currency: parts[15],
-          field10Meta
+          kpiScorecard: '',
+          field10Meta,
+          kpiMeta: parseKpiScorecard('')
         };
       }
       return {
@@ -197,7 +278,9 @@
         revenueModel: parts[13],
         region: parts[14],
         currency: parts[15],
-        field10Meta
+        kpiScorecard: '',
+        field10Meta,
+        kpiMeta: parseKpiScorecard('')
       };
     }
 
@@ -227,7 +310,9 @@
           revenueModel: '',
           region: parts[11],
           currency: parts[12],
-          field10Meta
+          kpiScorecard: '',
+          field10Meta,
+          kpiMeta: parseKpiScorecard('')
         };
       }
       return {
@@ -251,7 +336,9 @@
         revenueModel: '',
         region: parts[11],
         currency: parts[12],
-        field10Meta
+        kpiScorecard: '',
+        field10Meta,
+        kpiMeta: parseKpiScorecard('')
       };
     }
 
@@ -278,7 +365,9 @@
       revenueModel: '',
       region: parts[10],
       currency: parts[11],
-      field10Meta: parseField10Meta(parts[8])
+      kpiScorecard: '',
+      field10Meta: parseField10Meta(parts[8]),
+      kpiMeta: parseKpiScorecard('')
     };
   }
 
@@ -356,7 +445,8 @@
       companyType: normalizeText(record.companyType),
       revenueModel: normalizeText(record.revenueModel),
       region: normalizeText(record.region),
-      currency: normalizeText(record.currency)
+      currency: normalizeText(record.currency),
+      kpiScorecard: normalizeText(record.kpiScorecard)
     };
   }
 
@@ -394,7 +484,8 @@
       companyType: normalizeText(record.companyType),
       revenueModel: normalizeText(record.revenueModel),
       region: normalizeText(record.region),
-      currency: normalizeText(record.currency)
+      currency: normalizeText(record.currency),
+      kpiScorecard: normalizeText(record.kpiScorecard)
     };
     return normalized;
   }
@@ -510,11 +601,11 @@
     }
 
     const recordFormats = uniqueStrings(records.map((record) => record.recordFormat));
-    const current16Only = records.length > 0 && records.every((record) => record.recordFormat === CURRENT_RECORD_FORMAT);
+    const currentCompatibleOnly = records.length > 0 && records.every((record) => CURRENT_COMPATIBLE_RECORD_FORMATS.has(record.recordFormat));
     const legacyOnly = records.length > 0 && records.every((record) => LEGACY_RECORD_FORMATS.has(record.recordFormat));
 
     let status = 'invalid';
-    if (current16Only) {
+    if (currentCompatibleOnly) {
       if (shortfallLines.length === 0) {
         if (records.length !== 2 || nonShortfallLines.length !== 2) {
           issueCodes.push('expected_two_record_lines');
@@ -523,6 +614,9 @@
         }
         if (records.some((record) => !record.field10Meta || record.field10Meta.isComplete !== true)) {
           issueCodes.push('field10_invalid');
+        }
+        if (records.some((record) => record.recordFormat === CURRENT_RECORD_FORMAT && (!record.kpiMeta || record.kpiMeta.isComplete !== true))) {
+          issueCodes.push('kpi_scorecard_invalid');
         }
         if (issueCodes.length === 0) {
           status = 'current';
@@ -539,6 +633,9 @@
         }
         if (records.some((record) => !record.field10Meta || record.field10Meta.isComplete !== true)) {
           issueCodes.push('field10_invalid');
+        }
+        if (records.some((record) => record.recordFormat === CURRENT_RECORD_FORMAT && (!record.kpiMeta || record.kpiMeta.isComplete !== true))) {
+          issueCodes.push('kpi_scorecard_invalid');
         }
         if (issueCodes.length === 0) {
           status = 'shortfall';
@@ -615,6 +712,25 @@
       'Region',
       'Waluta'
     ];
+    const labels17Role = [
+      'Data decyzji',
+      'Status decyzji',
+      'Rola',
+      'Spolka',
+      'Material zrodlowy',
+      'Teza inwestycyjna',
+      'Bear scenario (TOTAL)',
+      'Base scenario (TOTAL)',
+      'Bull scenario (TOTAL)',
+      'VOI/Falsifiers/Primary risk + Composite + EntryScore + Sizing',
+      'Sektor (alias)',
+      'Rodzina spolki',
+      'Typ spolki',
+      'Model przychodu',
+      'Region',
+      'Waluta',
+      'KPI Scorecard'
+    ];
     const labels16Role = [
       'Data decyzji',
       'Status decyzji',
@@ -683,8 +799,10 @@
     ];
 
     let labels = labels12;
-    if (parts.length === 16) {
-      labels = record.recordFormat === CURRENT_RECORD_FORMAT ? labels16Role : labels16Legacy;
+    if (parts.length === 17) {
+      labels = labels17Role;
+    } else if (parts.length === 16) {
+      labels = record.recordFormat === 'transitional_16' ? labels16Legacy : labels16Role;
     } else if (parts.length === 13) {
       labels = record.recordFormat === 'current_13_role' ? labels13Role : labels13Legacy;
     }
@@ -713,6 +831,7 @@
     parseDecisionRecordLine,
     parseDecisionRecordParts,
     parseField10Meta,
+    parseKpiScorecard,
     validateDecisionContractText
   };
 });

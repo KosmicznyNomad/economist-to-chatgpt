@@ -46,7 +46,8 @@ function makeCurrent16Line(role, company) {
     'Software',
     'Subscription',
     'USA',
-    'USD'
+    'USD',
+    'FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6'
   ].join('; ');
 }
 

@@ -45,7 +45,8 @@ const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
 const INJECT_SHARED_HELPER_FILES = ['decision-contract.js', 'response-storage.js'];
 
-// Intake transport config: prefer local storage, keep sync backup, inline values are optional fallback.
+// Intake transport config: keep the HMAC secret local-only; non-secret routing
+// config may still use sync as a convenience fallback.
 try {
   if (typeof importScripts === 'function') {
     importScripts('watchlist.inline-config.js');
@@ -93,6 +94,7 @@ const WATCHLIST_DISPATCH = {
   keyIdStorageKey: "watchlist_intake_key_id",
   keyIdSyncStorageKey: "watchlist_intake_key_id",
   secretStorageKey: "watchlist_intake_secret",
+  // Legacy sync key kept only for one-time migration/cleanup of old installs.
   secretSyncStorageKey: "watchlist_intake_secret",
   timeoutMs: 20000,
   retryCount: 3,
@@ -16053,7 +16055,7 @@ function getWatchlistCredentialStorageKeys() {
     : '';
   return {
     secretLocalKey,
-    secretSyncKey: secretSyncKeyRaw || secretLocalKey,
+    secretSyncKey: secretSyncKeyRaw,
     intakeUrlLocalKey,
     intakeUrlSyncKey: intakeUrlSyncKeyRaw || intakeUrlLocalKey,
     keyIdLocalKey,
@@ -16074,6 +16076,55 @@ async function readWatchlistValueFromStorageArea(storageArea, storageKey, normal
     });
     return '';
   }
+}
+
+async function removeWatchlistValuesFromStorageArea(storageArea, storageKeys) {
+  if (!storageArea || typeof storageArea.remove !== 'function') return;
+  const keys = Array.isArray(storageKeys) ? storageKeys.filter(Boolean) : [];
+  if (keys.length === 0) return;
+  try {
+    await storageArea.remove(keys);
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:config-remove-failed]', {
+      storage: storageArea === chrome?.storage?.sync ? 'sync' : 'local',
+      keys,
+      error: error?.message || String(error)
+    });
+  }
+}
+
+async function migrateLegacyWatchlistSecretFromSync(keys) {
+  const legacySyncKey = typeof keys?.secretSyncKey === 'string' ? keys.secretSyncKey.trim() : '';
+  const localKey = typeof keys?.secretLocalKey === 'string' ? keys.secretLocalKey.trim() : '';
+  if (!legacySyncKey || !localKey || !chrome?.storage?.local?.set) {
+    return { value: '', source: 'missing' };
+  }
+
+  const legacySecret = await readWatchlistValueFromStorageArea(
+    chrome?.storage?.sync,
+    legacySyncKey,
+    normalizeWatchlistDispatchToken
+  );
+  if (!legacySecret) {
+    return { value: '', source: 'missing' };
+  }
+
+  try {
+    await chrome.storage.local.set({ [localKey]: legacySecret });
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:secret-sync-migration-failed]', {
+      key: localKey,
+      error: error?.message || String(error)
+    });
+    return { value: '', source: 'missing' };
+  }
+
+  await removeWatchlistValuesFromStorageArea(chrome?.storage?.sync, [legacySyncKey]);
+  console.warn('[copy-flow] [dispatch:secret-sync-migrated]', {
+    from: legacySyncKey,
+    to: localKey
+  });
+  return { value: legacySecret, source: 'storage_local' };
 }
 
 async function resolveWatchlistSetting({
@@ -16117,14 +16168,27 @@ async function resolveWatchlistSetting({
 
 async function resolveWatchlistDispatchToken(forceReload = false) {
   const keys = getWatchlistCredentialStorageKeys();
-  return resolveWatchlistSetting({
-    inlineValue: WATCHLIST_DISPATCH.secret,
-    localKey: keys.secretLocalKey,
-    syncKey: keys.secretSyncKey,
-    normalizer: normalizeWatchlistDispatchToken,
-    forceReload,
-    cacheKey: 'secret'
-  });
+  if (!forceReload && watchlistDispatchCredentialsCache && typeof watchlistDispatchCredentialsCache.secret === 'string') {
+    const cachedValue = watchlistDispatchCredentialsCache.secret;
+    const cachedSource = watchlistDispatchCredentialsCache.secretSource || 'missing';
+    return { value: cachedValue, source: cachedSource };
+  }
+
+  const inline = normalizeWatchlistDispatchToken(WATCHLIST_DISPATCH.secret);
+  if (inline) {
+    return { value: inline, source: 'inline_config' };
+  }
+
+  const local = await readWatchlistValueFromStorageArea(
+    chrome?.storage?.local,
+    keys.secretLocalKey,
+    normalizeWatchlistDispatchToken
+  );
+  if (local) {
+    return { value: local, source: 'storage_local' };
+  }
+
+  return migrateLegacyWatchlistSecretFromSync(keys);
 }
 
 async function resolveWatchlistDispatchConfiguration(forceReload = false) {
@@ -16485,9 +16549,12 @@ async function setWatchlistDispatchToken(rawInput) {
     }
   }
 
+  if (!localSaved) {
+    return { success: false, reason: 'storage_unavailable' };
+  }
+
   if (chrome?.storage?.sync?.set) {
     const syncPayload = {};
-    if (keys.secretSyncKey) syncPayload[keys.secretSyncKey] = secret;
     if (keys.intakeUrlSyncKey) syncPayload[keys.intakeUrlSyncKey] = intakeUrl;
     if (keys.keyIdSyncKey) syncPayload[keys.keyIdSyncKey] = keyId;
     if (Object.keys(syncPayload).length > 0) {
@@ -16500,19 +16567,19 @@ async function setWatchlistDispatchToken(rawInput) {
     }
   }
 
-  if (!localSaved && !syncSaved) {
-    return { success: false, reason: 'storage_unavailable' };
+  if (keys.secretSyncKey) {
+    await removeWatchlistValuesFromStorageArea(chrome?.storage?.sync, [keys.secretSyncKey]);
   }
 
   watchlistDispatchCredentialsCache = {
     secret,
-    secretSource: localSaved ? 'storage_local' : 'storage_sync',
+    secretSource: 'storage_local',
     intakeUrl,
-    intakeUrlSource: localSaved ? 'storage_local' : 'storage_sync',
+    intakeUrlSource: 'storage_local',
     keyId,
-    keyIdSource: localSaved ? 'storage_local' : 'storage_sync',
+    keyIdSource: 'storage_local',
   };
-  return { success: true, source: localSaved ? 'storage_local' : 'storage_sync', localSaved, syncSaved };
+  return { success: true, source: 'storage_local', localSaved, syncSaved };
 }
 
 async function clearWatchlistDispatchToken() {
@@ -16529,13 +16596,7 @@ async function clearWatchlistDispatchToken() {
   }
   if (chrome?.storage?.sync?.remove) {
     const syncKeys = [keys.secretSyncKey, keys.intakeUrlSyncKey, keys.keyIdSyncKey].filter(Boolean);
-    if (syncKeys.length > 0) {
-      try {
-        await chrome.storage.sync.remove(syncKeys);
-      } catch (error) {
-        console.warn('[copy-flow] [dispatch:token-sync-clear-failed]', error);
-      }
-    }
+    await removeWatchlistValuesFromStorageArea(chrome.storage.sync, syncKeys);
   }
 
   watchlistDispatchCredentialsCache = null;
@@ -16547,6 +16608,12 @@ async function clearWatchlistDispatchToken() {
 }
 
 async function sha256HexForDispatch(value) {
+  const apiUtils = (typeof WatchlistApiUtils !== 'undefined' && WatchlistApiUtils)
+    ? WatchlistApiUtils
+    : (globalThis?.WatchlistApiUtils || {});
+  if (typeof apiUtils.sha256Hex === 'function') {
+    return apiUtils.sha256Hex(value);
+  }
   const encoder = new TextEncoder();
   const data = encoder.encode(typeof value === 'string' ? value : String(value || ''));
   const digest = await crypto.subtle.digest('SHA-256', data);
@@ -16554,6 +16621,12 @@ async function sha256HexForDispatch(value) {
 }
 
 async function hmacSha256Hex(secret, canonical) {
+  const apiUtils = (typeof WatchlistApiUtils !== 'undefined' && WatchlistApiUtils)
+    ? WatchlistApiUtils
+    : (globalThis?.WatchlistApiUtils || {});
+  if (typeof apiUtils.hmacSha256Hex === 'function') {
+    return apiUtils.hmacSha256Hex(secret, canonical);
+  }
   const encoder = new TextEncoder();
   const key = await crypto.subtle.importKey(
     'raw',
@@ -16576,6 +16649,12 @@ function generateWatchlistNonce() {
 }
 
 function buildWatchlistCanonicalString({ method, path, timestamp, nonce, bodyHash }) {
+  const apiUtils = (typeof WatchlistApiUtils !== 'undefined' && WatchlistApiUtils)
+    ? WatchlistApiUtils
+    : (globalThis?.WatchlistApiUtils || {});
+  if (typeof apiUtils.buildCanonicalString === 'function') {
+    return apiUtils.buildCanonicalString({ method, path, timestamp, nonce, bodyHash });
+  }
   return [
     String(method || 'POST').toUpperCase(),
     String(path || '/'),
@@ -19221,7 +19300,7 @@ async function saveResponse(
     console.log(`✅ ✅ ✅ [saveResponse] ZAPIS LOKALNY ZWERYFIKOWANY ✅ ✅ ✅`);
     console.log(`${'*'.repeat(80)}`);
     console.log(`Nowy stan: ${verifiedResponses.length} odpowiedzi w storage (zweryfikowano lokalnie: ${verifiedResponses.length})`);
-    console.log(`Preview: "${responseText.substring(0, 150)}..."`);
+    console.log(`Fingerprint: ${copyFingerprint}`);
     console.log(`${'*'.repeat(80)}\n`);
     return {
       success: true,
@@ -21746,7 +21825,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.log(`  - lastResponse not null: ${result.lastResponse !== null}`);
         if (result.lastResponse !== undefined && result.lastResponse !== null) {
           console.log(`  - lastResponse length: ${result.lastResponse.length}`);
-          console.log(`  - lastResponse preview: "${result.lastResponse.substring(0, 100)}..."`);
+          console.log(`  - lastResponse fingerprint: ${textFingerprint(result.lastResponse)}`);
         }
         if (result.error) {
           console.log(`  - error: ${result.error}`);
@@ -21761,7 +21840,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       console.log(`  - result.lastResponse is null: ${result?.lastResponse === null}`);
       console.log(`  - result.lastResponse length: ${result?.lastResponse?.length || 0}`);
       console.log(`  - result.lastResponse trim length: ${result?.lastResponse?.trim()?.length || 0}`);
-      console.log(`  - result.lastResponse preview: "${result?.lastResponse?.substring(0, 100) || 'undefined'}..."`);
+      console.log(`  - result.lastResponse fingerprint: ${result?.lastResponse ? textFingerprint(result.lastResponse) : 'undefined'}`);
 
       const injectMetrics = (result && typeof result === 'object' && result.metrics && typeof result.metrics === 'object')
         ? result.metrics

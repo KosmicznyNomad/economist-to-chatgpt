@@ -19,7 +19,8 @@ function makeCurrent16Line(role, company, field10 = 'VOI: backlog > 10%, Fals: c
     'Software',
     'Subscription',
     'USA',
-    'USD'
+    'USD',
+    'FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6'
   ].join('; ');
 }
 
@@ -68,6 +69,7 @@ function testCurrentContract() {
   assert.strictEqual(validation.status, 'current');
   assert.strictEqual(validation.recordCount, 2);
   assert.strictEqual(validation.primaryRecord.decisionRole, 'PRIMARY');
+  assert.strictEqual(validation.primaryRecord.recordFormat, 'current_17_role');
   assert.strictEqual(validation.records[1].decisionRole, 'SECONDARY');
   assert.strictEqual(validation.primaryRecord.field10Meta.composite, '4.2/5.0');
   assert.strictEqual(validation.primaryRecord.field10Meta.entryScore, '8.1/10');
@@ -131,6 +133,14 @@ function testLegacyCompatibility() {
   const legacy13 = DecisionContractUtils.validateDecisionContractText(makeLegacy13RoleLine('PRIMARY', 'Legacy Thirteen'));
   assert.strictEqual(legacy13.status, 'legacy');
   assert.strictEqual(legacy13.recordCount, 1);
+
+  const oldCurrent16Text = [
+    makeCurrent16Line('PRIMARY', 'Compat Sixteen A').split('; ').slice(0, 16).join('; '),
+    makeCurrent16Line('SECONDARY', 'Compat Sixteen B').split('; ').slice(0, 16).join('; ')
+  ].join('\n');
+  const oldCurrent16 = DecisionContractUtils.validateDecisionContractText(oldCurrent16Text);
+  assert.strictEqual(oldCurrent16.status, 'current');
+  assert.strictEqual(oldCurrent16.primaryRecord.recordFormat, 'current_16_role');
 }
 
 function testFormattingAndExtraction() {
@@ -164,6 +174,7 @@ function testViewHelpers() {
   assert.strictEqual(primary.sector, 'Technology');
   assert.strictEqual(primary.compositeValue, 4.2);
   assert.strictEqual(primary.sizingPercent, 3);
+  assert.strictEqual(primary.kpiScorecard, 'FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6');
   assert.strictEqual(secondary.company, 'Beta Corp');
   assert.strictEqual(secondary.compositeValue, 3.8);
   assert.strictEqual(snapshot.company, 'Alpha Corp');

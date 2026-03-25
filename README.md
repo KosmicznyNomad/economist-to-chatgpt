@@ -43,7 +43,7 @@ Remote problem-log flow:
 The UI reads through shared storage helpers. Migration from legacy session-only responses is handled in the worker, not in page scripts.
 
 ## Stage 12 contract
-- `current`: valid 2-line, 16-field contract with `PRIMARY` then `SECONDARY`
+- `current`: valid 2-line contract with `PRIMARY` then `SECONDARY`; current prompt emits 17 fields including `KPI Scorecard`
 - `shortfall`: valid `PRIMARY` line plus trailing `# SHORTFALL: only 1 company passed Stage 10 gates`
 - `legacy`: readable old format kept for compatibility-read only
 - `invalid`: malformed or non-contract output

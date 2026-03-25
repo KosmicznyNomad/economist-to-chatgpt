@@ -1,0 +1,165 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Responses Preview</title>
+</head>
+<body>
+  <div id="boot" style="font: 14px/1.5 sans-serif; padding: 24px; color: #374151;">
+    Laduje preview dashboardu...
+  </div>
+  <script>
+    const current16Line = (role, company, options = {}) => {
+      const decisionStatus = options.decisionStatus || 'WATCH';
+      const composite = options.composite || '4.2/5.0';
+      const entryScore = options.entryScore || '8.1/10';
+      const sizing = options.sizing || '3%';
+      const field10 = options.field10 || `VOI: backlog > 10%, Fals: churn > 5%, Primary risk: pricing reset, Composite: ${composite}, EntryScore: ${entryScore}, Sizing: ${sizing}`;
+      return [
+        '2026-03-20',
+        decisionStatus,
+        role,
+        company,
+        'THESIS_SOURCE example',
+        `${company} thesis text`,
+        'Bear_TOTAL: 10',
+        'Base_TOTAL: 20',
+        'Bull_TOTAL: 30',
+        field10,
+        'Technology',
+        'Technology',
+        'Software',
+        'Subscription',
+        'USA',
+        'USD',
+        options.kpiScorecard || 'FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6'
+      ].join('; ');
+    };
+
+    const previewResponses = [
+      {
+        analysisType: 'company',
+        source: 'The Economist Podcast: Babbage',
+        timestamp: Date.parse('2026-03-24T10:15:00Z'),
+        conversationUrl: 'https://chatgpt.com/c/mock-nvidia',
+        stage: { number: 12, name: 'Final response', durationMs: 8200, wordCount: 410 },
+        text: [
+          current16Line('PRIMARY', 'Nvidia (NVDA)', { composite: '4.8/5.0', sizing: '4%' }),
+          current16Line('SECONDARY', 'Taiwan Semiconductor (TSM)', { composite: '4.3/5.0', sizing: '3%' })
+        ].join('\n')
+      },
+      {
+        analysisType: 'company',
+        source: 'Manual source: ASML note',
+        timestamp: Date.parse('2026-03-23T08:40:00Z'),
+        conversationUrl: 'https://chatgpt.com/c/mock-asml',
+        stage: { number: 12, name: 'Final response', durationMs: 7900, wordCount: 395 },
+        text: [
+          current16Line('PRIMARY', 'ASML Holding (ASML)', { composite: '4.5/5.0', sizing: '3%' }),
+          current16Line('SECONDARY', 'Applied Materials (AMAT)', { composite: '3.9/5.0', sizing: '2%' })
+        ].join('\n')
+      },
+      {
+        analysisType: 'company',
+        source: 'The Economist',
+        timestamp: Date.parse('2026-03-22T07:30:00Z'),
+        conversationUrl: 'https://chatgpt.com/c/mock-only-one',
+        stage: { number: 12, name: 'Final response', durationMs: 6500, wordCount: 280 },
+        text: [
+          current16Line('PRIMARY', 'Only One (ONE)', { composite: '4.1/5.0', sizing: '2%' }),
+          '# SHORTFALL: only 1 company passed Stage 10 gates'
+        ].join('\n')
+      }
+    ];
+
+    const previewBootstrap = [
+      '<script>',
+      '(() => {',
+      '  const listeners = [];',
+      '  const createArea = (namespace, initialStore) => {',
+      '    const store = { ...initialStore };',
+      '    return {',
+      '      async get(keys) {',
+      '        if (keys == null) return { ...store };',
+      '        if (Array.isArray(keys)) {',
+      '          return keys.reduce((acc, key) => {',
+      '            acc[key] = store[key];',
+      '            return acc;',
+      '          }, {});',
+      '        }',
+      '        if (typeof keys === \"string\") return { [keys]: store[keys] };',
+      '        if (typeof keys === \"object\") {',
+      '          return Object.keys(keys).reduce((acc, key) => {',
+      '            acc[key] = Object.prototype.hasOwnProperty.call(store, key) ? store[key] : keys[key];',
+      '            return acc;',
+      '          }, {});',
+      '        }',
+      '        return { ...store };',
+      '      },',
+      '      async set(values) {',
+      '        const changes = {};',
+      '        Object.entries(values || {}).forEach(([key, value]) => {',
+      '          const oldValue = store[key];',
+      '          store[key] = value;',
+      '          changes[key] = { oldValue, newValue: value };',
+      '        });',
+      '        listeners.forEach((listener) => listener(changes, namespace));',
+      '      },',
+      '      async remove(keys) {',
+      '        const list = Array.isArray(keys) ? keys : [keys];',
+      '        const changes = {};',
+      '        list.forEach((key) => {',
+      '          const oldValue = store[key];',
+      '          delete store[key];',
+      '          changes[key] = { oldValue, newValue: undefined };',
+      '        });',
+      '        listeners.forEach((listener) => listener(changes, namespace));',
+      '      }',
+      '    };',
+      '  };',
+      '  globalThis.chrome = {',
+      '    storage: {',
+      `      local: createArea('local', { responses: ${JSON.stringify(previewResponses)} }),`,
+      '      session: createArea(\'session\', {}),',
+      '      onChanged: {',
+      '        addListener(fn) { listeners.push(fn); },',
+      '        removeListener(fn) {',
+      '          const index = listeners.indexOf(fn);',
+      '          if (index >= 0) listeners.splice(index, 1);',
+      '        }',
+      '      }',
+      '    },',
+      '    tabs: {',
+      '      create({ url }) {',
+      '        window.open(url, \'_blank\', \'noopener,noreferrer\');',
+      '      }',
+      '    }',
+      '  };',
+      '})();',
+      '</' + 'script>'
+    ].join('\n');
+
+    fetch('./responses.html')
+      .then((response) => {
+        if (!response.ok) {
+          throw new Error(`HTTP ${response.status}`);
+        }
+        return response.text();
+      })
+      .then((html) => {
+        const scriptTag = '<script src="decision-contract.js"><' + '/script>';
+        const injected = html.replace(
+          scriptTag,
+          `${previewBootstrap}\n  ${scriptTag}`
+        );
+        document.open();
+        document.write(injected);
+        document.close();
+      })
+      .catch((error) => {
+        document.getElementById('boot').textContent = `Preview error: ${error.message}`;
+      });
+  </script>
+</body>
+</html>

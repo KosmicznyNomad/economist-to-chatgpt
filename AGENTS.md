@@ -44,7 +44,7 @@ Stage 12 render flow:
 `response.text -> decision-contract.js -> decision-view-model.js -> responses/process-monitor`
 
 ## Stage 12 contract
-- `current`: 2 lines, 16 fields each, `PRIMARY` then `SECONDARY`
+- `current`: 2 lines, current prompt emits 17 fields each with trailing `KPI Scorecard`, `PRIMARY` then `SECONDARY`
 - `shortfall`: 1 valid `PRIMARY` line plus shortfall marker
 - `legacy`: old format accepted for compatibility-read only
 - `invalid`: malformed or non-contract output

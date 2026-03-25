@@ -30,7 +30,8 @@
       companyType: normalizeText(record.companyType),
       revenueModel: normalizeText(record.revenueModel),
       region: normalizeText(record.region),
-      currency: normalizeText(record.currency)
+      currency: normalizeText(record.currency),
+      kpiScorecard: normalizeText(record.kpiScorecard)
     };
   }
 

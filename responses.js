@@ -6,6 +6,8 @@ const responseCount = document.getElementById('responseCount');
 const companyCount = document.getElementById('companyCount');
 const marketCount = document.getElementById('marketCount');
 const marketStatus = document.getElementById('marketStatus');
+const companyEmptyStateTitle = companyEmptyState ? companyEmptyState.querySelector('h2') : null;
+const companyEmptyStateBody = companyEmptyState ? companyEmptyState.querySelector('p') : null;
 const marketTable = document.getElementById('marketTable');
 const marketTableBody = marketTable ? marketTable.querySelector('tbody') : null;
 const marketToolbar = document.getElementById('marketToolbar');
@@ -237,6 +239,99 @@ function buildResponseDecisionContractView(response) {
     secondaryRecord,
     hasDecisionRecord: !!primaryRecord || !!secondaryRecord || recordCount > 0
   };
+}
+
+function buildResponseCompanyEntries(response) {
+  const view = buildResponseDecisionContractView(response);
+  const records = [view?.primaryRecord, view?.secondaryRecord].filter(Boolean);
+  const seen = new Set();
+
+  return records
+    .map((record) => {
+      const company = normalizeMarketText(record?.company);
+      if (!company) return null;
+
+      const ticker = normalizeMarketText(extractTickerFromCompany(company));
+      const key = `${normalizeMarketToken(company)}|${normalizeMarketToken(ticker || '-')}`;
+      if (seen.has(key)) return null;
+      seen.add(key);
+
+      const haystack = [
+        company,
+        ticker,
+        record?.role,
+        record?.decisionStatus,
+        record?.sector,
+        record?.region,
+        record?.currency
+      ].filter(Boolean).join(' ');
+
+      return {
+        key,
+        company,
+        ticker,
+        companyFuzzy: normalizeFuzzyText(company),
+        tickerFuzzy: normalizeFuzzyText(ticker),
+        searchHaystack: normalizeFuzzyText(haystack),
+        searchTokens: tokenizeFuzzyText(haystack)
+      };
+    })
+    .filter(Boolean);
+}
+
+function responseMatchesCompanyQuery(response, query) {
+  const normalizedQuery = normalizeMarketText(query);
+  if (!normalizedQuery) return true;
+
+  const entries = buildResponseCompanyEntries(response);
+  if (entries.length > 0) {
+    return entries.some((entry) => scoreCompanyQueryAgainstRow(normalizedQuery, entry).matched);
+  }
+
+  const fallbackHaystack = normalizeFuzzyText(`${response?.source || ''} ${response?.text || ''}`);
+  return fallbackHaystack.includes(normalizeFuzzyText(normalizedQuery));
+}
+
+function buildResponseCardHeaderModel(response) {
+  const sourceInfo = describeResponseSource(response);
+  const companyEntries = buildResponseCompanyEntries(response);
+  const companies = companyEntries
+    .map((entry) => normalizeMarketText(entry?.company))
+    .filter(Boolean);
+  const title = companies.length > 0 ? companies.join(' / ') : sourceInfo.display;
+  const detailParts = [];
+
+  if (companies.length > 0 && sourceInfo.display) {
+    detailParts.push(sourceInfo.display);
+  }
+  if (sourceInfo.detail) {
+    detailParts.push(sourceInfo.detail);
+  }
+
+  return {
+    title,
+    detail: detailParts.join(' | '),
+    tag: sourceInfo.tag || '',
+    source: sourceInfo,
+    companyEntries
+  };
+}
+
+function filterResponsesByAnalysisType(responses, analysisType, companyQuery = marketFilters.companyQuery) {
+  const filtered = Array.isArray(responses)
+    ? responses.filter((response) => (response.analysisType || 'company') === analysisType)
+    : [];
+  if (analysisType !== 'company') return filtered;
+  return filtered.filter((response) => responseMatchesCompanyQuery(response, companyQuery));
+}
+
+function flattenResponseTextForExport(text) {
+  if (typeof text !== 'string') return '';
+  return text
+    .replace(/\r?\n+/g, ' ⏎ ')
+    .replace(/\t+/g, ' ')
+    .replace(/\s{2,}/g, ' ')
+    .trim();
 }
 
 function buildResponseStage12PairSummary(response) {
@@ -540,32 +635,42 @@ function ensureResponseStorageReady() {
   return responseStorageReady;
 }
 
+function clearStage12ViewCache() {
+  if (typeof DecisionViewModelUtils.clearStage12ViewCache === 'function') {
+    DecisionViewModelUtils.clearStage12ViewCache();
+  }
+}
+
 async function readResponsesFromStorage() {
   return typeof ResponseStorageUtils.readCanonicalResponses === 'function'
     ? ResponseStorageUtils.readCanonicalResponses(getStorageAreas(), DecisionContractUtils)
     : [];
 }
 
-// Wczytaj i wyĹ›wietl odpowiedzi przy starcie
+// Wczytaj i wyświetl odpowiedzi przy starcie
 setupCompanyInteractions();
 setupMarketInteractions();
 loadResponses();
 
-// ObsĹ‚uga przycisku "WyczyĹ›Ä‡ wszystkie"
-clearBtn.addEventListener('click', async () => {
-  if (confirm('Czy na pewno chcesz wyczyĹ›ciÄ‡ wszystkie zebrane odpowiedzi?')) {
-    await ensureResponseStorageReady();
-    if (typeof ResponseStorageUtils.clearCanonicalResponses === 'function') {
-      await ResponseStorageUtils.clearCanonicalResponses(getStorageAreas());
+// Obsługa przycisku "Wyczyść wszystkie"
+if (clearBtn) {
+  clearBtn.addEventListener('click', async () => {
+    if (confirm('Czy na pewno chcesz wyczyścić wszystkie zebrane odpowiedzi?')) {
+      await ensureResponseStorageReady();
+      if (typeof ResponseStorageUtils.clearCanonicalResponses === 'function') {
+        await ResponseStorageUtils.clearCanonicalResponses(getStorageAreas());
+      }
+      loadResponses();
     }
-    loadResponses();
-  }
-});
+  });
+}
 
-// ObsĹ‚uga przycisku "Kopiuj wszystkie" dla analizy spĂłĹ‚ki
-copyAllCompanyBtn.addEventListener('click', async () => {
-  await copyAllByType('company', copyAllCompanyBtn);
-});
+// Obsługa przycisku "Kopiuj wszystkie" dla analizy spółki
+if (copyAllCompanyBtn) {
+  copyAllCompanyBtn.addEventListener('click', async () => {
+    await copyAllByType('company', copyAllCompanyBtn);
+  });
+}
 
 if (copyAllCompanyWithLinkBtn) {
   copyAllCompanyWithLinkBtn.addEventListener('click', async () => {
@@ -589,7 +694,7 @@ function resolveConversationUrl(response) {
   );
 }
 
-// Funkcja kopiujÄ…ca wszystkie odpowiedzi danego typu
+// Funkcja kopiująca wszystkie odpowiedzi danego typu
 async function copyAllByType(analysisType, button) {
   let opCounted = false;
   let attemptedCount = 0;
@@ -598,8 +703,7 @@ async function copyAllByType(analysisType, button) {
     await ensureResponseStorageReady();
     const responses = await readResponsesFromStorage();
     
-    // Filtruj po analysisType
-    const filteredResponses = responses.filter(r => (r.analysisType || 'company') === analysisType);
+    const filteredResponses = filterResponsesByAnalysisType(responses, analysisType);
     
     if (filteredResponses.length === 0) {
       return;
@@ -608,8 +712,9 @@ async function copyAllByType(analysisType, button) {
     // Sort order mirrors current UI for company responses.
     const sortedResponses = getSortedResponsesForAnalysis(filteredResponses, analysisType);
     
-    // PoĹ‚Ä…cz teksty z \n jako separator - kaĹĽda odpowiedĹş w nowym wierszu Google Sheets
-    const allText = sortedResponses.map(r => r.text).join('\n');
+    const allText = sortedResponses
+      .map((response) => flattenResponseTextForExport(response?.text))
+      .join('\n');
 
     attemptedCount = sortedResponses.length;
     attemptedChars = allText.length;
@@ -645,7 +750,7 @@ async function copyAllByType(analysisType, button) {
     clipboardCounters.opsFail += 1;
     clipboardCounters.messagesCopiedFail += attemptedCount;
     console.error('[clipboard] ERROR copy_all:', error);
-    button.textContent = '\u2717 Blad';
+    button.textContent = '\u2717 Błąd';
     setTimeout(() => {
       button.textContent = 'Kopiuj wszystkie';
     }, 2000);
@@ -662,7 +767,7 @@ async function copyAllByTypeWithLink(analysisType, button) {
     await ensureResponseStorageReady();
     const responses = await readResponsesFromStorage();
 
-    const filteredResponses = responses.filter(r => (r.analysisType || 'company') === analysisType);
+    const filteredResponses = filterResponsesByAnalysisType(responses, analysisType);
     if (filteredResponses.length === 0) {
       return;
     }
@@ -670,7 +775,7 @@ async function copyAllByTypeWithLink(analysisType, button) {
     const sortedResponses = getSortedResponsesForAnalysis(filteredResponses, analysisType);
     const allText = sortedResponses
       .map((response) => {
-        const text = typeof response?.text === 'string' ? response.text.replace(/\t/g, ' ') : '';
+        const text = flattenResponseTextForExport(response?.text);
         const url = resolveConversationUrl(response);
         return `${text}\t${url}`;
       })
@@ -709,7 +814,7 @@ async function copyAllByTypeWithLink(analysisType, button) {
     clipboardCounters.opsFail += 1;
     clipboardCounters.messagesCopiedFail += attemptedCount;
     console.error('[clipboard] ERROR copy_all_with_link:', error);
-    button.textContent = '\u2717 Blad';
+    button.textContent = '\u2717 Błąd';
     setTimeout(() => {
       button.textContent = 'Kopiuj z linkiem';
     }, 2000);
@@ -717,50 +822,59 @@ async function copyAllByTypeWithLink(analysisType, button) {
   }
 }
 
-// Funkcja wczytujÄ…ca odpowiedzi z storage
+// Funkcja wczytująca odpowiedzi z storage
 async function loadResponses() {
   try {
-    console.log(`đź“Ą [loadResponses] WczytujÄ™ odpowiedzi z storage...`);
+    console.log('[loadResponses] Wczytuję odpowiedzi z storage...');
+    clearStage12ViewCache();
     await ensureResponseStorageReady();
     const responses = await readResponsesFromStorage();
     lastLoadedResponses = Array.isArray(responses) ? responses.slice() : [];
     
-    console.log(`đź“¦ [loadResponses] Wczytano ${responses.length} odpowiedzi:`, responses);
+    console.log(`[loadResponses] Wczytano ${responses.length} odpowiedzi:`, responses);
     
     renderResponses(responses);
     loadMarketData(responses);
   } catch (error) {
-    console.error('âťŚ [loadResponses] BĹ‚Ä…d wczytywania odpowiedzi:', error);
+    console.error('[loadResponses] Błąd wczytywania odpowiedzi:', error);
     console.error('Stack trace:', error.stack);
     lastLoadedResponses = [];
     showEmptyStates();
   }
 }
 
-// Funkcja renderujÄ…ca listÄ™ odpowiedzi
+// Funkcja renderująca listę odpowiedzi
 function renderResponses(responses) {
-  console.log(`đźŽ¨ [renderResponses] RenderujÄ™ ${responses.length} odpowiedzi`);
+  const safeResponses = Array.isArray(responses) ? responses : [];
+  console.log(`[renderResponses] Renderuję ${safeResponses.length} odpowiedzi`);
   
-  // Starsze odpowiedzi bez analysisType domyĹ›lnie 'company'
-  const companyResponses = responses.filter(r => (r.analysisType || 'company') === 'company');
+  // Starsze odpowiedzi bez analysisType domyślnie 'company'
+  const companyResponses = filterResponsesByAnalysisType(safeResponses, 'company');
   
   console.log(`   Company: ${companyResponses.length}`);
   
   // Aktualizuj liczniki
-  const totalCount = responses.length;
-  responseCount.textContent = totalCount === 0 
-    ? '0 odpowiedzi' 
-    : totalCount === 1 
-      ? '1 odpowiedĹş' 
-      : `${totalCount} odpowiedzi`;
+  const totalCount = safeResponses.length;
+  if (responseCount) {
+    responseCount.textContent = totalCount === 0
+      ? '0 odpowiedzi'
+      : totalCount === 1
+        ? '1 odpowiedź'
+        : `${totalCount} odpowiedzi`;
+  }
   
   updateSectionCount(companyCount, companyResponses.length);
   
-  clearBtn.disabled = totalCount === 0;
-  copyAllCompanyBtn.disabled = companyResponses.length === 0;
+  if (clearBtn) {
+    clearBtn.disabled = totalCount === 0;
+  }
+  if (copyAllCompanyBtn) {
+    copyAllCompanyBtn.disabled = companyResponses.length === 0;
+  }
   if (copyAllCompanyWithLinkBtn) {
     copyAllCompanyWithLinkBtn.disabled = companyResponses.length === 0;
   }
+  updateCompanyEmptyState(marketFilters.companyQuery);
   
   if (companyResponses.length === 0) {
     showEmptyState(companyEmptyState);
@@ -772,30 +886,43 @@ function renderResponses(responses) {
   }
 }
 
-// Funkcja aktualizujÄ…ca licznik sekcji
+// Funkcja aktualizująca licznik sekcji
 function updateSectionCount(element, count) {
+  if (!element) return;
   element.textContent = count === 0 
     ? '0 odpowiedzi' 
     : count === 1 
-      ? '1 odpowiedĹş' 
+      ? '1 odpowiedź' 
       : `${count} odpowiedzi`;
 }
 
-// Funkcja renderujÄ…ca odpowiedzi w danej sekcji
+function updateCompanyEmptyState(query) {
+  if (!companyEmptyStateTitle || !companyEmptyStateBody) return;
+  const normalizedQuery = normalizeMarketText(query);
+  if (!normalizedQuery) {
+    companyEmptyStateTitle.textContent = 'Brak raportów spółek';
+    companyEmptyStateBody.textContent = 'Raporty spółek będą pojawiać się tutaj.';
+    return;
+  }
+  companyEmptyStateTitle.textContent = 'Brak raportów dla tej spółki';
+  companyEmptyStateBody.textContent = `Nie znaleziono raportów pasujących do: ${normalizedQuery}`;
+}
+
+// Funkcja renderująca odpowiedzi w danej sekcji
 function renderResponsesInSection(listElement, responses) {
   const sortedResponses = sortCompanyResponses(responses);
   
-  // WyczyĹ›Ä‡ listÄ™
+  // Wyczyść listę
   listElement.innerHTML = '';
   
-  // Renderuj kaĹĽdÄ… odpowiedĹş
+  // Renderuj każdą odpowiedź
   sortedResponses.forEach((response) => {
     const item = createResponseItem(response);
     listElement.appendChild(item);
   });
 }
 
-// Funkcja tworzÄ…ca element odpowiedzi
+// Funkcja tworząca element odpowiedzi
 function createResponseItem(response) {
   const item = document.createElement('div');
   item.className = 'response-item';
@@ -806,25 +933,25 @@ function createResponseItem(response) {
   const meta = document.createElement('div');
   meta.className = 'response-meta';
 
-  const sourceInfo = describeResponseSource(response);
+  const headerModel = buildResponseCardHeaderModel(response);
 
-  if (sourceInfo.tag) {
+  if (headerModel.tag) {
     const sourceTag = document.createElement('div');
     sourceTag.className = 'response-source-tag';
-    sourceTag.textContent = sourceInfo.tag;
+    sourceTag.textContent = headerModel.tag;
     meta.appendChild(sourceTag);
   }
 
   const source = document.createElement('div');
   source.className = 'response-source';
-  source.textContent = sourceInfo.display;
+  source.textContent = headerModel.title;
 
   meta.appendChild(source);
 
-  if (sourceInfo.detail) {
+  if (headerModel.detail) {
     const sourceDetail = document.createElement('div');
     sourceDetail.className = 'response-source-detail';
-    sourceDetail.textContent = sourceInfo.detail;
+    sourceDetail.textContent = headerModel.detail;
     meta.appendChild(sourceDetail);
   }
 
@@ -871,7 +998,7 @@ function createResponseItem(response) {
   if (conversationUrl) {
     const openChatBtn = document.createElement('button');
     openChatBtn.className = 'toggle-btn';
-    openChatBtn.textContent = 'Otworz chat';
+    openChatBtn.textContent = 'Otwórz chat';
     openChatBtn.addEventListener('click', () => {
       try {
         if (chrome?.tabs?.create) {
@@ -897,11 +1024,11 @@ function createResponseItem(response) {
     text.style.display = 'none';
     const toggleBtn = document.createElement('button');
     toggleBtn.className = 'toggle-btn';
-    toggleBtn.textContent = 'Rozwin';
+    toggleBtn.textContent = 'Rozwiń';
     toggleBtn.addEventListener('click', () => {
       const isHidden = text.style.display === 'none';
       text.style.display = isHidden ? 'block' : 'none';
-      toggleBtn.textContent = isHidden ? 'Ukryj' : 'Rozwin';
+      toggleBtn.textContent = isHidden ? 'Ukryj' : 'Rozwiń';
     });
     actions.appendChild(toggleBtn);
   }
@@ -914,7 +1041,7 @@ function createResponseItem(response) {
   return item;
 }
 
-// Funkcja kopiujÄ…ca tekst do clipboard
+// Funkcja kopiująca tekst do clipboard
 async function copyToClipboard(text, button) {
   const attemptedCount = 1;
   const attemptedChars = typeof text === 'string' ? text.length : 0;
@@ -940,7 +1067,7 @@ async function copyToClipboard(text, button) {
     clipboardCounters.opsFail += 1;
     clipboardCounters.messagesCopiedFail += attemptedCount;
     console.error('[clipboard] ERROR copy_one:', error);
-    button.textContent = '\u2717 Blad';
+    button.textContent = '\u2717 Błąd';
     setTimeout(() => {
       button.textContent = 'Kopiuj';
     }, 2000);
@@ -1315,7 +1442,7 @@ function getNormalizedFilterValue(value) {
 
 function getActiveMarketFilterLabels() {
   const entries = [];
-  if (marketFilters.companyQuery) entries.push(`Spolka: ${marketFilters.companyQuery}`);
+  if (marketFilters.companyQuery) entries.push(`Spółka: ${marketFilters.companyQuery}`);
   if (marketFilters.sector) entries.push(`Sektor: ${marketFilters.sector}`);
   return entries;
 }
@@ -1342,12 +1469,12 @@ function updateMarketStatus(message) {
 function updateMarketCountLabel(filteredCount, totalCount) {
   if (!marketCount) return;
   if (totalCount <= 0) {
-    marketCount.textContent = '0 rekordow';
+    marketCount.textContent = '0 rekordów';
     return;
   }
   marketCount.textContent = filteredCount === totalCount
-    ? `${totalCount} rekordow`
-    : `${filteredCount}/${totalCount} rekordow`;
+    ? `${totalCount} rekordów`
+    : `${filteredCount}/${totalCount} rekordów`;
 }
 
 function updateMarketFilterLabel(filteredCount, totalCount) {
@@ -1448,8 +1575,14 @@ function renderMarketRows(rows) {
     rank.textContent = String(row.baseRank || '-');
 
     const company = document.createElement('td');
-    const companyName = document.createElement('div');
+    const companyName = document.createElement('button');
+    companyName.type = 'button';
+    companyName.className = 'market-company-link';
     companyName.textContent = row.company || '-';
+    companyName.title = 'Pokaż raporty dla tej spółki';
+    companyName.addEventListener('click', () => {
+      activateCompanyQuery(row.company || row.ticker);
+    });
     company.appendChild(companyName);
     const badgeMeta = describeDecisionContractBadge({
       status: row.contractStatus,
@@ -1594,15 +1727,35 @@ function applyMarketCompanySuggestion(index) {
     return;
   }
   const picked = marketSuggestionItems[numericIndex];
-  const value = normalizeMarketText(picked?.company);
-  if (!value) return;
+  activateCompanyQuery(picked?.company || picked?.ticker);
+}
 
-  if (marketCompanySearch) {
-    marketCompanySearch.value = value;
+function setCompanyQuery(value, options = {}) {
+  const nextValue = normalizeMarketText(value);
+  marketFilters.companyQuery = nextValue;
+
+  if (options.syncInput !== false && marketCompanySearch) {
+    marketCompanySearch.value = nextValue;
   }
-  marketFilters.companyQuery = value;
-  hideMarketSuggestions();
+
+  if (options.hideSuggestions !== false) {
+    hideMarketSuggestions();
+  }
+
   renderMarketTable();
+  renderResponses(lastLoadedResponses);
+
+  if (options.scroll === true && companyResponsesList) {
+    companyResponsesList.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  }
+}
+
+function activateCompanyQuery(value) {
+  setCompanyQuery(value, {
+    syncInput: true,
+    hideSuggestions: true,
+    scroll: true
+  });
 }
 
 function renderMarketTable() {
@@ -1614,7 +1767,7 @@ function renderMarketTable() {
     if (marketToolbar) marketToolbar.hidden = true;
     hideMarketSuggestions();
     updateMarketCountLabel(0, 0);
-    updateMarketStatus('Brak finalnych rekordow kontraktu Stage 12.');
+    updateMarketStatus('Brak finalnych rekordów kontraktu Stage 12.');
     updateMarketSortHeaders();
     return;
   }
@@ -1632,16 +1785,16 @@ function renderMarketTable() {
 
   if (sorted.length === 0) {
     marketTable.style.display = 'none';
-    updateMarketStatus('Brak spolek dla wybranego filtra.');
+    updateMarketStatus('Brak spółek dla wybranego filtra.');
     return;
   }
 
   marketTable.style.display = 'table';
   if (hasActiveMarketFilters()) {
-    updateMarketStatus('Filtrowanie aktywne: wpisz nazwe/ticker spolki lub kliknij chip, aby zawezic/odfiltrowac.');
+    updateMarketStatus('Filtrowanie aktywne: tabela i raporty poniżej pokazują tylko pasujące spółki.');
     return;
   }
-  updateMarketStatus('Kliknij naglowek kolumny, aby sortowac. Po prawej wyszukasz spolke z tolerancja literowek.');
+  updateMarketStatus('Kliknij nazwę spółki w tabeli, aby od razu zobaczyć wszystkie pasujące raporty poniżej.');
 }
 
 function toggleMarketSort(sortKey) {
@@ -1682,13 +1835,17 @@ function resetMarketFilters() {
   }
   hideMarketSuggestions();
   renderMarketTable();
+  renderResponses(lastLoadedResponses);
 }
 
 function handleMarketCompanySearchInput() {
   if (!marketCompanySearch) return;
   const rawQuery = normalizeMarketText(marketCompanySearch.value);
-  marketFilters.companyQuery = rawQuery;
-  renderMarketTable();
+  setCompanyQuery(rawQuery, {
+    syncInput: false,
+    hideSuggestions: false,
+    scroll: false
+  });
 
   if (!rawQuery) {
     hideMarketSuggestions();
@@ -1702,8 +1859,8 @@ function handleMarketCompanySearchKeydown(event) {
   if (!marketCompanySearch) return;
   if (!marketSearchSuggestions?.classList.contains('show') || marketSuggestionItems.length === 0) {
     if (event.key === 'Enter') {
-      marketFilters.companyQuery = normalizeMarketText(marketCompanySearch.value);
-      renderMarketTable();
+      event.preventDefault();
+      activateCompanyQuery(marketCompanySearch.value);
     }
     return;
   }
@@ -1728,9 +1885,7 @@ function handleMarketCompanySearchKeydown(event) {
       applyMarketCompanySuggestion(marketSuggestionActiveIndex);
       return;
     }
-    marketFilters.companyQuery = normalizeMarketText(marketCompanySearch.value);
-    renderMarketTable();
-    hideMarketSuggestions();
+    activateCompanyQuery(marketCompanySearch.value);
     return;
   }
   if (event.key === 'Escape') {
@@ -1790,9 +1945,9 @@ async function loadMarketData(responsesOverride = null) {
 }
 
 chrome.storage.onChanged.addListener((changes, namespace) => {
-  console.log(`đź”” [responses.js] Storage changed:`, { namespace, changes });
+  console.log('[responses.js] Storage changed:', { namespace, changes });
   if ((namespace === 'local' || namespace === 'session') && changes[RESPONSE_STORAGE_KEY]) {
-    console.log(`âś… [responses.js] Responses changed, reloading...`);
+    console.log('[responses.js] Responses changed, reloading...');
     console.log(`   Old length: ${changes[RESPONSE_STORAGE_KEY].oldValue?.length || 0}`);
     console.log(`   New length: ${changes[RESPONSE_STORAGE_KEY].newValue?.length || 0}`);
     loadResponses();

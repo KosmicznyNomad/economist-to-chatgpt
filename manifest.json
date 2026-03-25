@@ -31,7 +31,8 @@
     "https://iskierka-watchlist.duckdns.org/*",
     "http://127.0.0.1/*",
     "http://localhost/*",
-    "https://chatgpt.com/*"
+    "https://chatgpt.com/*",
+    "https://chat.openai.com/*"
   ],
   "background": {
     "service_worker": "background.js"

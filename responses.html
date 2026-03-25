@@ -141,6 +141,50 @@
       color: #4b5563;
       margin-bottom: 4px;
     }
+
+    .secondary-tools {
+      background: white;
+      border-radius: 8px;
+      box-shadow: 0 2px 8px rgba(0,0,0,0.1);
+      margin: -4px 0 16px;
+      overflow: hidden;
+    }
+
+    .secondary-tools summary {
+      cursor: pointer;
+      padding: 14px 24px;
+      font-size: 13px;
+      font-weight: 600;
+      color: #374151;
+      list-style: none;
+    }
+
+    .secondary-tools summary::-webkit-details-marker {
+      display: none;
+    }
+
+    .secondary-tools summary::after {
+      content: 'Rozwiń';
+      float: right;
+      color: #6b7280;
+      font-weight: 500;
+    }
+
+    .secondary-tools[open] summary::after {
+      content: 'Ukryj';
+    }
+
+    .secondary-tools[open] summary {
+      border-bottom: 1px solid #eee;
+    }
+
+    .secondary-tools-body {
+      display: flex;
+      gap: 12px;
+      flex-wrap: wrap;
+      align-items: center;
+      padding: 16px 24px 20px;
+    }
     
     .response-time {
       font-size: 13px;
@@ -422,6 +466,27 @@
       white-space: nowrap;
     }
 
+    .market-company-link {
+      border: none;
+      background: transparent;
+      padding: 0;
+      color: #1d4ed8;
+      cursor: pointer;
+      font: inherit;
+      font-weight: 600;
+      text-align: left;
+    }
+
+    .market-company-link:hover {
+      text-decoration: underline;
+    }
+
+    .market-company-link:focus-visible {
+      outline: 2px solid #1d4ed8;
+      outline-offset: 2px;
+      border-radius: 4px;
+    }
+
     .market-chip {
       border: 1px solid #d1d5db;
       background: #f8fafc;
@@ -525,13 +590,10 @@
         <h1>Zebrane odpowiedzi ChatGPT</h1>
         <div class="count" id="responseCount">0 odpowiedzi</div>
       </div>
-      <div style="display: flex; gap: 12px;">
-        <button class="clear-btn" id="clearBtn">WyczyĹ›Ä‡ wszystkie</button>
-      </div>
     </div>
 
     <div class="section-header">
-      <h2 class="section-title">Ranking spolek</h2>
+      <h2 class="section-title">Przegląd spółek</h2>
       <div class="section-actions">
         <div class="market-search-wrap">
           <input
@@ -539,17 +601,17 @@
             class="market-search-input"
             type="text"
             autocomplete="off"
-            placeholder="Szukaj spolki (nazwa/ticker, tolerancja literowek)"
-            aria-label="Szukaj spolki"
+            placeholder="Szukaj spółki po nazwie lub tickerze"
+            aria-label="Szukaj spółki"
           />
           <div id="marketSearchSuggestions" class="market-search-suggestions" role="listbox"></div>
         </div>
-        <span class="section-count" id="marketCount">0 spolek</span>
+        <span class="section-count" id="marketCount">0 spółek</span>
       </div>
     </div>
     <div class="responses-list">
       <div class="response-item">
-        <div class="response-text" id="marketStatus">Brak danych rankingowych.</div>
+        <div class="response-text" id="marketStatus">Wpisz nazwę lub ticker spółki. Niżej zobaczysz wszystkie pasujące raporty.</div>
         <div class="market-toolbar" id="marketToolbar" hidden>
           <div class="market-filter-row tight">
             <span class="market-filter-label" id="marketFilterLabel">Filtry: brak</span>
@@ -560,7 +622,7 @@
           <thead>
             <tr>
               <th class="sortable" data-sort-key="rank">#</th>
-              <th class="sortable" data-sort-key="company">Spolka</th>
+              <th class="sortable" data-sort-key="company">Spółka</th>
               <th class="sortable" data-sort-key="ticker">Ticker</th>
               <th class="sortable" data-sort-key="decisionStatus">Decyzja</th>
               <th class="sortable" data-sort-key="role">Rola</th>
@@ -577,26 +639,32 @@
       </div>
     </div>
     
-    <!-- Sekcja: Analiza spĂłĹ‚ki -->
     <div class="section-header">
-      <h2 class="section-title">Analiza spĂłĹ‚ki</h2>
+      <h2 class="section-title">Raporty spółek</h2>
       <div class="section-actions">
-        <select id="companySortSelect" class="section-select" aria-label="Sortowanie odpowiedzi">
-          <option value="latest">Sort: Najnowsze</option>
-          <option value="source_asc">Sort: Zrodlo A-Z</option>
-          <option value="source_desc">Sort: Zrodlo Z-A</option>
-        </select>
         <span class="section-count" id="companyCount">0 odpowiedzi</span>
-        <button class="copy-all-btn" id="copyAllCompanyBtn">Kopiuj wszystkie</button>
-        <button class="copy-all-btn" id="copyAllCompanyWithLinkBtn">Kopiuj z linkiem</button>
       </div>
     </div>
+
+    <details class="secondary-tools">
+      <summary>Narzędzia</summary>
+      <div class="secondary-tools-body">
+        <select id="companySortSelect" class="section-select" aria-label="Sortowanie odpowiedzi">
+          <option value="latest">Sortowanie: najnowsze</option>
+          <option value="source_asc">Sortowanie: źródło A-Z</option>
+          <option value="source_desc">Sortowanie: źródło Z-A</option>
+        </select>
+        <button class="copy-all-btn" id="copyAllCompanyBtn">Kopiuj wszystkie</button>
+        <button class="copy-all-btn" id="copyAllCompanyWithLinkBtn">Kopiuj z linkiem</button>
+        <button class="clear-btn" id="clearBtn">Wyczyść wszystkie</button>
+      </div>
+    </details>
     
     <div id="companyResponsesList" class="responses-list"></div>
     
     <div id="companyEmptyState" class="empty-state" style="display: none;">
-      <h2>Brak odpowiedzi z analizy spĂłĹ‚ki</h2>
-      <p>Odpowiedzi z analizy spĂłĹ‚ki bÄ™dÄ… pojawiaÄ‡ siÄ™ tutaj</p>
+      <h2>Brak raportów spółek</h2>
+      <p>Raporty spółek będą pojawiać się tutaj.</p>
     </div>
   </div>
 
