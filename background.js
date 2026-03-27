@@ -14685,7 +14685,8 @@ function mapDispatchDecisionRecord(record) {
     companyType: typeof record.companyType === 'string' ? record.companyType : '',
     revenueModel: typeof record.revenueModel === 'string' ? record.revenueModel : '',
     region: typeof record.region === 'string' ? record.region : '',
-    currency: typeof record.currency === 'string' ? record.currency : ''
+    currency: typeof record.currency === 'string' ? record.currency : '',
+    kpiScorecard: typeof record.kpiScorecard === 'string' ? record.kpiScorecard : ''
   };
 }
 
