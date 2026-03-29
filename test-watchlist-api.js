@@ -48,6 +48,15 @@ function testBuildProblemLogsQueryPayloadAcceptsCamelAndSnakeCase() {
   });
 }
 
+function testCreateNonceUsesSecureRandomShape() {
+  const first = WatchlistApiUtils.createNonce(1_710_000_000_000);
+  const second = WatchlistApiUtils.createNonce(1_710_000_000_000);
+
+  assert.match(first, /^n-[0-9a-z]+-[0-9a-f]{24}$/i);
+  assert.match(second, /^n-[0-9a-z]+-[0-9a-f]{24}$/i);
+  assert.notStrictEqual(first, second);
+}
+
 async function testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest() {
   const signed = await WatchlistApiUtils.buildSignedProblemLogsQueryRequest({
     intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
@@ -82,6 +91,7 @@ async function testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest()
 async function main() {
   testBuildProblemLogsQueryUrlUsesCanonicalPostEndpoint();
   testBuildProblemLogsQueryPayloadAcceptsCamelAndSnakeCase();
+  testCreateNonceUsesSecureRandomShape();
   await testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest();
   console.log('test-watchlist-api.js: ok');
 }

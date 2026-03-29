@@ -63,8 +63,26 @@
     ].join('\n');
   }
 
+  function randomHex(byteCount = 12) {
+    const safeByteCount = Number.isInteger(byteCount) && byteCount > 0 ? byteCount : 12;
+    const nodeCrypto = getNodeCrypto();
+    if (nodeCrypto && typeof nodeCrypto.randomBytes === 'function') {
+      return nodeCrypto.randomBytes(safeByteCount).toString('hex');
+    }
+    if (root?.crypto?.getRandomValues) {
+      const bytes = new Uint8Array(safeByteCount);
+      root.crypto.getRandomValues(bytes);
+      return Array.from(bytes).map((item) => item.toString(16).padStart(2, '0')).join('');
+    }
+    return '';
+  }
+
   function createNonce(nowMs = Date.now()) {
-    return `n-${Number(nowMs || Date.now()).toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+    const randomPart = randomHex(12);
+    if (randomPart) {
+      return `n-${Number(nowMs || Date.now()).toString(36)}-${randomPart}`;
+    }
+    return `n-${Number(nowMs || Date.now()).toString(36)}-${Date.now().toString(16)}`;
   }
 
   function getNodeCrypto() {

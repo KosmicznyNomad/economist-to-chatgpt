@@ -3389,7 +3389,7 @@ async function enrichWatchlistDispatchPayloadConversationSnapshot(payload, copyT
   }
 
   const schema = typeof basePayload.schema === 'string' ? basePayload.schema.trim().toLowerCase() : '';
-  if (schema !== 'economist.response.v1') {
+  if (schema !== 'economist.response.v1' && schema !== 'economist.response.v2') {
     return {
       payload: basePayload,
       analysis: {
@@ -6407,6 +6407,75 @@ function extractAssistantTextFromProcess(process) {
   return '';
 }
 
+function getCompletedProcessFinalityState(process) {
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const completedResponseText = typeof process?.completedResponseText === 'string'
+    ? process.completedResponseText.trim()
+    : '';
+  const hasCompletedPayload = completedResponseText.length > 0;
+  const promptComplete = totalPrompts > 0 && currentPrompt >= totalPrompts;
+  return {
+    currentPrompt,
+    totalPrompts,
+    completedResponseText,
+    hasCompletedPayload,
+    promptComplete,
+    ready: hasCompletedPayload && promptComplete
+  };
+}
+
+async function resolveCompletedProcessFinalResponseText(process, options = {}) {
+  if (!process || typeof process !== 'object') {
+    return {
+      success: false,
+      reason: 'invalid_process',
+      finality: getCompletedProcessFinalityState(null)
+    };
+  }
+
+  const force = options?.force === true;
+  const finality = getCompletedProcessFinalityState(process);
+  if (!force) {
+    if (!finality.hasCompletedPayload) {
+      return { success: false, reason: 'completed_response_missing', finality };
+    }
+    if (!finality.promptComplete) {
+      return { success: false, reason: 'not_final_stage', finality };
+    }
+  }
+
+  let responseText = finality.completedResponseText;
+  if (!responseText && force) {
+    responseText = extractAssistantTextFromProcess(process);
+  }
+  if (!responseText && force && options?.allowDomFallback === true && Number.isInteger(options?.tabId)) {
+    responseText = await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
+  }
+  responseText = typeof responseText === 'string' ? responseText.trim() : '';
+  if (!responseText) {
+    return { success: false, reason: 'missing_response_text', finality };
+  }
+
+  const contract = buildResponseContractValidation(responseText);
+  if (!force && contract?.valid !== true) {
+    return {
+      success: false,
+      reason: 'invalid_final_response_contract',
+      finality,
+      contractKind: contract?.kind || 'invalid'
+    };
+  }
+
+  return {
+    success: true,
+    responseText,
+    finality,
+    contractKind: contract?.kind || 'invalid',
+    contract
+  };
+}
+
 async function extractLastAssistantResponseFromTab(tabId, maxWaitMs = 1800) {
   if (!Number.isInteger(tabId)) return '';
   try {
@@ -6481,17 +6550,14 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     return { attempted: false, success: false, reason: 'invalid_process' };
   }
 
-  const currentPrompt = Number.isInteger(process.currentPrompt) ? process.currentPrompt : 0;
-  const totalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : 0;
-  const statusText = typeof process.statusText === 'string' ? process.statusText.toLowerCase() : '';
-  const hasCompletedPayload = typeof process.completedResponseText === 'string' && process.completedResponseText.trim().length > 0;
-  const likelyFinalStage = hasCompletedPayload
-    || (Number.isInteger(process.completedResponseLength) && process.completedResponseLength > 0)
-    || (totalPrompts > 0 && currentPrompt >= totalPrompts)
-    || statusText.includes('trwa zapis do bazy')
-    || statusText.includes('zakonczony');
-  if (!likelyFinalStage && options?.force !== true) {
-    return { attempted: false, success: false, reason: 'not_final_stage' };
+  const resolvedResponse = await resolveCompletedProcessFinalResponseText(process, {
+    force: options?.force === true,
+    tabId: options?.tabId,
+    tabReadTimeoutMs: options?.tabReadTimeoutMs,
+    allowDomFallback: options?.allowDomFallback === true
+  });
+  if (resolvedResponse?.success !== true) {
+    return { attempted: false, success: false, reason: resolvedResponse?.reason || 'missing_response_text' };
   }
 
   const alreadySaved = process?.completedResponseSaved === true || process?.persistenceStatus?.saveOk === true;
@@ -6507,13 +6573,7 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     ? process.title.trim()
     : 'Restart replay';
 
-  let responseText = extractAssistantTextFromProcess(process);
-  if (!responseText && Number.isInteger(options?.tabId)) {
-    responseText = await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
-  }
-  if (!responseText) {
-    return { attempted: false, success: false, reason: 'missing_response_text' };
-  }
+  const responseText = resolvedResponse.responseText;
 
   const existingTrace = typeof process.completedResponseSaveTrace === 'string' && process.completedResponseSaveTrace.trim()
     ? process.completedResponseSaveTrace.trim()
@@ -6667,6 +6727,7 @@ async function ensureCompletedProcessResponsePersisted(process, options = {}) {
     ? options.tabId
     : (Number.isInteger(process?.tabId) ? process.tabId : null);
   const force = options?.force === true;
+  const allowDomFallback = options?.allowDomFallback === true || (force && options?.allowDomFallback !== false);
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
     : 'resume_final_stage_persist_check';
@@ -6676,7 +6737,8 @@ async function ensureCompletedProcessResponsePersisted(process, options = {}) {
     replayResult = await replayCompletedResponseForProcess(process, {
       force,
       tabId,
-      tabReadTimeoutMs: Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2200
+      tabReadTimeoutMs: Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2200,
+      allowDomFallback
     });
   } catch (error) {
     replayResult = {
@@ -8832,6 +8894,62 @@ async function getActiveInvestTabIdInCurrentWindow() {
   return null;
 }
 
+function findInvestCopyProcessForTab(targetTab, contextSnapshot) {
+  const tabId = Number.isInteger(targetTab?.id) ? targetTab.id : null;
+  if (!Number.isInteger(tabId)) return null;
+
+  const processByTabId = contextSnapshot?.processByTabId instanceof Map
+    ? contextSnapshot.processByTabId
+    : new Map();
+  const exactTabProcess = processByTabId.get(tabId);
+  if (exactTabProcess && typeof exactTabProcess === 'object') {
+    return exactTabProcess;
+  }
+
+  const conversationUrl = normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
+  if (!conversationUrl) {
+    return null;
+  }
+
+  const processCandidates = Array.isArray(contextSnapshot?.processCandidates)
+    ? contextSnapshot.processCandidates
+    : [];
+  return processCandidates.find((process) => {
+    const processConversationUrl = normalizeChatConversationUrl(process?.chatUrl || process?.sourceUrl || '');
+    return !!(processConversationUrl && processConversationUrl === conversationUrl);
+  }) || null;
+}
+
+function compareInvestCopyTargets(left, right) {
+  const leftProcess = left?.process && typeof left.process === 'object' ? left.process : null;
+  const rightProcess = right?.process && typeof right.process === 'object' ? right.process : null;
+  const leftFinality = getCompletedProcessFinalityState(leftProcess);
+  const rightFinality = getCompletedProcessFinalityState(rightProcess);
+  const leftContract = leftFinality.ready
+    ? buildResponseContractValidation(leftFinality.completedResponseText)
+    : null;
+  const rightContract = rightFinality.ready
+    ? buildResponseContractValidation(rightFinality.completedResponseText)
+    : null;
+  const leftScore = (leftContract?.valid === true ? 4 : 0)
+    + (leftFinality.ready ? 2 : 0)
+    + (leftProcess ? 1 : 0);
+  const rightScore = (rightContract?.valid === true ? 4 : 0)
+    + (rightFinality.ready ? 2 : 0)
+    + (rightProcess ? 1 : 0);
+  if (leftScore !== rightScore) {
+    return rightScore - leftScore;
+  }
+
+  const leftActive = left?.isActive === true;
+  const rightActive = right?.isActive === true;
+  if (leftActive !== rightActive) {
+    return leftActive ? -1 : 1;
+  }
+
+  return compareTabsByRecentAccess(left, right);
+}
+
 function buildInvestCopyTargetFromTab(targetTab, contextSnapshot) {
   const tabId = Number.isInteger(targetTab?.id) ? targetTab.id : null;
   const windowId = Number.isInteger(targetTab?.windowId) ? targetTab.windowId : null;
@@ -8839,15 +8957,7 @@ function buildInvestCopyTargetFromTab(targetTab, contextSnapshot) {
     return null;
   }
 
-  const processByTabId = contextSnapshot?.processByTabId instanceof Map
-    ? contextSnapshot.processByTabId
-    : new Map();
-  const processByWindowId = contextSnapshot?.processByWindowId instanceof Map
-    ? contextSnapshot.processByWindowId
-    : new Map();
-  const process = processByTabId.get(tabId)
-    || processByWindowId.get(windowId)
-    || null;
+  const process = findInvestCopyProcessForTab(targetTab, contextSnapshot);
   const conversationUrl = normalizeChatConversationUrl(getTabEffectiveUrl(targetTab))
     || normalizeChatConversationUrl(process?.chatUrl || process?.sourceUrl || '');
 
@@ -8902,24 +9012,35 @@ async function resolveInvestCopyTargets(options = {}) {
     return compareTabsByRecentAccess(left, right);
   });
 
-  const selectedTabs = [];
-  if (scope === 'all_open_windows') {
-    const handledWindowIds = new Set();
-    investTabs.forEach((tab) => {
-      const windowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
-      if (!Number.isInteger(windowId) || handledWindowIds.has(windowId)) {
-        return;
+  const candidateTargets = investTabs
+    .map((tab) => {
+      const target = buildInvestCopyTargetFromTab(tab, contextSnapshot);
+      if (target && Number.isInteger(activeInvestTabId) && target.tabId === activeInvestTabId) {
+        target.isActive = true;
       }
-      handledWindowIds.add(windowId);
-      selectedTabs.push(tab);
-    });
-  } else if (investTabs[0]) {
-    selectedTabs.push(investTabs[0]);
-  }
+      return target;
+    })
+    .filter(Boolean)
+    .sort(compareInvestCopyTargets);
 
-  const targets = selectedTabs
-    .map((tab) => buildInvestCopyTargetFromTab(tab, contextSnapshot))
-    .filter(Boolean);
+  const targets = [];
+  if (scope === 'all_open_windows') {
+    const groupedByWindow = new Map();
+    candidateTargets.forEach((target) => {
+      const windowId = Number.isInteger(target?.windowId) ? target.windowId : null;
+      if (!Number.isInteger(windowId)) return;
+      const existing = groupedByWindow.get(windowId);
+      if (!existing || compareInvestCopyTargets(target, existing) < 0) {
+        groupedByWindow.set(windowId, target);
+      }
+    });
+    groupedByWindow.forEach((target) => {
+      targets.push(target);
+    });
+    targets.sort(compareInvestCopyTargets);
+  } else if (candidateTargets[0]) {
+    targets.push(candidateTargets[0]);
+  }
 
   if (targets.length === 0) {
     return {
@@ -9023,22 +9144,8 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
     return failureResult;
   }
 
-  let responseText = '';
-  let readError = '';
-  try {
-    responseText = (
-      extractAssistantTextFromProcess(process)
-      || await extractLastAssistantResponseFromTab(
-        tabId,
-        Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2400
-      )
-    ).trim();
-  } catch (error) {
-    readError = error?.message || String(error);
-  }
-
-  if (!responseText) {
-    const failureReason = readError || 'missing_response_text';
+  if (!process || typeof process !== 'object') {
+    const failureReason = 'final_process_not_found';
     reportCopyLatestInvestFinalResponseEvent({
       operationId,
       origin,
@@ -9049,7 +9156,7 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
       status: 'failed',
       reason: failureReason,
       error: failureReason,
-      runId: typeof process?.id === 'string' ? process.id : '',
+      runId: '',
       tabId,
       windowId,
       targetTitle: title,
@@ -9073,10 +9180,56 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
       windowId,
       title,
       conversationUrl,
+      processId: ''
+    };
+  }
+
+  const resolvedResponse = await resolveCompletedProcessFinalResponseText(process, {
+    force: false
+  });
+  if (resolvedResponse?.success !== true) {
+    const failureReason = typeof resolvedResponse?.reason === 'string' && resolvedResponse.reason.trim()
+      ? resolvedResponse.reason.trim()
+      : 'missing_response_text';
+    reportCopyLatestInvestFinalResponseEvent({
+      operationId,
+      origin,
+      scope,
+      targetOrdinal,
+      targetTotal,
+      level: 'warn',
+      status: 'failed',
+      reason: failureReason,
+      error: failureReason,
+      runId: typeof process?.id === 'string' ? process.id : '',
+      tabId,
+      windowId,
+      targetTitle: title,
+      sourceUrl: typeof target?.url === 'string' ? target.url : '',
+      conversationUrl
+    });
+    console.warn('[copy-latest-invest] Target missing final response', {
+      operationId,
+      origin,
+      scope,
+      targetOrdinal,
+      targetTotal,
+      tabId,
+      windowId,
+      error: failureReason
+    });
+    return {
+      success: false,
+      error: failureReason,
+      tabId,
+      windowId,
+      title,
+      conversationUrl,
       processId: typeof process?.id === 'string' ? process.id : ''
     };
   }
 
+  const responseText = resolvedResponse.responseText;
   const persistence = {
     attempted: false,
     success: false,
@@ -9088,74 +9241,42 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
   };
 
   try {
-    if (process) {
-      const processPatch = {};
-      if (conversationUrl) processPatch.chatUrl = conversationUrl;
-      if (Number.isInteger(tabId)) processPatch.tabId = tabId;
-      if (Number.isInteger(windowId)) processPatch.windowId = windowId;
-      if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
-        await upsertProcess(process.id.trim(), processPatch);
-      }
-
-      const replayResult = await ensureCompletedProcessResponsePersisted(
-        {
-          ...process,
-          ...processPatch
-        },
-        {
-          force: true,
-          tabId,
-          origin
-        }
-      );
-
-      persistence.attempted = true;
-      persistence.success = replayResult?.success === true;
-      persistence.mode = 'process_replay';
-      persistence.reason = typeof replayResult?.reason === 'string' ? replayResult.reason : '';
-      persistence.copyTrace = typeof replayResult?.copyTrace === 'string' ? replayResult.copyTrace : '';
-      persistence.dispatchSummary = typeof replayResult?.dispatchSummary === 'string'
-        ? replayResult.dispatchSummary
-        : '';
-      persistence.conversationLogCount = Number.isInteger(replayResult?.conversationAnalysis?.conversationLogCount)
-        ? replayResult.conversationAnalysis.conversationLogCount
-        : null;
-    } else {
-      const saveResult = await saveResponse(
-        responseText,
-        title && title.trim()
-          ? title.trim()
-          : 'ChatGPT Invest fallback',
-        'company',
-        null,
-        buildRestartReplayResponseId('manual_copy_fallback', responseText, 0),
-        {
-          selected_response_reason: 'manual_copy_fallback'
-        },
-        conversationUrl || null,
-        {
-          sourceTitle: title || 'ChatGPT Invest',
-          sourceName: 'ChatGPT Invest',
-          sourceUrl: conversationUrl || ''
-        }
-      );
-
-      persistence.attempted = true;
-      persistence.success = saveResult?.success === true;
-      persistence.mode = 'direct_save';
-      persistence.reason = saveResult?.success === true ? 'saved' : 'save_failed';
-      persistence.copyTrace = typeof saveResult?.copyTrace === 'string' ? saveResult.copyTrace : '';
-      persistence.dispatchSummary = saveResult?.dispatch && typeof saveResult.dispatch === 'object'
-        ? formatDispatchUiSummary(saveResult.dispatch)
-        : '';
-      persistence.conversationLogCount = Number.isInteger(saveResult?.conversationAnalysis?.conversationLogCount)
-        ? saveResult.conversationAnalysis.conversationLogCount
-        : null;
+    const processPatch = {};
+    if (conversationUrl) processPatch.chatUrl = conversationUrl;
+    if (Number.isInteger(tabId)) processPatch.tabId = tabId;
+    if (Number.isInteger(windowId)) processPatch.windowId = windowId;
+    if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
+      await upsertProcess(process.id.trim(), processPatch);
     }
+
+    const replayResult = await ensureCompletedProcessResponsePersisted(
+      {
+        ...process,
+        ...processPatch
+      },
+      {
+        force: false,
+        allowDomFallback: false,
+        tabId,
+        origin
+      }
+    );
+
+    persistence.attempted = true;
+    persistence.success = replayResult?.success === true;
+    persistence.mode = 'process_replay';
+    persistence.reason = typeof replayResult?.reason === 'string' ? replayResult.reason : '';
+    persistence.copyTrace = typeof replayResult?.copyTrace === 'string' ? replayResult.copyTrace : '';
+    persistence.dispatchSummary = typeof replayResult?.dispatchSummary === 'string'
+      ? replayResult.dispatchSummary
+      : '';
+    persistence.conversationLogCount = Number.isInteger(replayResult?.conversationAnalysis?.conversationLogCount)
+      ? replayResult.conversationAnalysis.conversationLogCount
+      : null;
   } catch (error) {
     persistence.attempted = true;
     persistence.success = false;
-    persistence.mode = process ? 'process_replay' : 'direct_save';
+    persistence.mode = 'process_replay';
     persistence.reason = error?.message || String(error);
   }
 
@@ -14660,6 +14781,151 @@ function extractDecisionRecordFromText(rawText) {
     : null;
 }
 
+function normalizeStructuredWatchlistValue(value, fallback = '') {
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    return trimmed || fallback;
+  }
+  if (value === null || value === undefined) {
+    return fallback;
+  }
+  const normalized = String(value).trim();
+  return normalized || fallback;
+}
+
+function normalizeStructuredWatchlistObject(value) {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) return null;
+  const normalized = {};
+  Object.entries(value).forEach(([rawKey, rawValue]) => {
+    const key = normalizeStructuredWatchlistValue(rawKey);
+    if (!key) return;
+    normalized[key] = typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+  });
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
+function serializeStructuredWatchlistKpiScorecard(rawKpi) {
+  const kpi = normalizeStructuredWatchlistObject(rawKpi);
+  if (!kpi) return '';
+
+  const items = Array.isArray(kpi.items) ? kpi.items : [];
+  const orderedKeys = ['FQ', 'TE', 'CM', 'VS', 'TQ', 'PP', 'CP', 'CD', 'NO', 'MR'];
+  if (items.length !== orderedKeys.length) return '';
+
+  const valuesByKey = new Map();
+  items.forEach((item) => {
+    if (!item || typeof item !== 'object') return;
+    const key = normalizeStructuredWatchlistValue(item.key).toUpperCase();
+    const value = Number.parseInt(item.value, 10);
+    if (!key || !Number.isInteger(value)) return;
+    valuesByKey.set(key, value);
+  });
+  if (orderedKeys.some((key) => !valuesByKey.has(key))) {
+    return '';
+  }
+  return orderedKeys.map((key) => `${key}:${valuesByKey.get(key)}`).join(',');
+}
+
+function sanitizeStructuredWatchlistRecord(rawRecord) {
+  if (!rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)) return null;
+  const fields = normalizeStructuredWatchlistObject(rawRecord.fields);
+  if (!fields) return null;
+
+  const hasFieldContent = Object.values(fields).some((value) => normalizeStructuredWatchlistValue(value));
+  if (!hasFieldContent) return null;
+
+  const decisionRole = normalizeStructuredWatchlistValue(
+    rawRecord.decision_role || rawRecord.decisionRole || fields.decision_role
+  ).toUpperCase();
+  if (decisionRole && !fields.decision_role) {
+    fields.decision_role = decisionRole;
+  }
+
+  const taxonomy = normalizeStructuredWatchlistObject(rawRecord.taxonomy);
+  const kpi = normalizeStructuredWatchlistObject(rawRecord.kpi);
+  const extras = normalizeStructuredWatchlistObject(rawRecord.extras);
+  return {
+    decision_role: decisionRole || '',
+    fields,
+    ...(taxonomy ? { taxonomy } : {}),
+    ...(kpi ? { kpi } : {}),
+    ...(extras ? { extras } : {})
+  };
+}
+
+function extractStructuredWatchlistJsonCandidates(rawText) {
+  const text = normalizeStructuredWatchlistValue(rawText);
+  if (!text) return [];
+
+  const candidates = [];
+  const fencedMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+  if (fencedMatch?.[1]) {
+    candidates.push(fencedMatch[1].trim());
+  }
+  candidates.push(text);
+
+  const firstBrace = text.indexOf('{');
+  const lastBrace = text.lastIndexOf('}');
+  if (firstBrace !== -1 && lastBrace > firstBrace) {
+    candidates.push(text.slice(firstBrace, lastBrace + 1).trim());
+  }
+  return Array.from(new Set(candidates.filter(Boolean)));
+}
+
+function extractStructuredWatchlistResponseFromText(rawText) {
+  const candidates = extractStructuredWatchlistJsonCandidates(rawText);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        continue;
+      }
+      const schema = normalizeStructuredWatchlistValue(parsed.schema).toLowerCase();
+      if (schema !== 'economist.response.v2') {
+        continue;
+      }
+
+      const schemaVersion = normalizeStructuredWatchlistValue(parsed.schema_version || parsed.schemaVersion);
+      const recordCandidates = Array.isArray(parsed.records) ? parsed.records : [parsed];
+      const records = recordCandidates
+        .map((record) => sanitizeStructuredWatchlistRecord(record))
+        .filter((record) => !!record);
+      if (records.length === 0) {
+        continue;
+      }
+      return {
+        schema: 'economist.response.v2',
+        schemaVersion,
+        records
+      };
+    } catch (error) {
+      continue;
+    }
+  }
+  return null;
+}
+
+function buildResponseContractValidation(rawText) {
+  const structuredResponse = extractStructuredWatchlistResponseFromText(rawText);
+  if (structuredResponse) {
+    return {
+      valid: true,
+      kind: 'economist.response.v2',
+      structuredResponse
+    };
+  }
+
+  const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
+    ? DecisionContractUtils.validateDecisionContractText(rawText)
+    : null;
+  const status = typeof validation?.status === 'string' ? validation.status : '';
+  return {
+    valid: validation?.currentContractPassed === true || status === 'legacy',
+    kind: validation?.currentContractPassed === true || status === 'legacy' ? 'stage12' : 'invalid',
+    validation
+  };
+}
+
 function mapDispatchDecisionRecord(record) {
   if (typeof WatchlistDispatchShapeUtils.mapDecisionRecordForDispatch === 'function') {
     return WatchlistDispatchShapeUtils.mapDecisionRecordForDispatch(record);
@@ -14697,6 +14963,67 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
+  const structuredResponse = (() => {
+    const schema = normalizeStructuredWatchlistValue(response.schema).toLowerCase();
+    if (schema === 'economist.response.v2') {
+      const recordCandidates = Array.isArray(response.records)
+        ? response.records
+        : [response];
+      const records = recordCandidates
+        .map((record) => sanitizeStructuredWatchlistRecord(record))
+        .filter((record) => !!record);
+      if (records.length > 0) {
+        return {
+          schema: 'economist.response.v2',
+          schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
+          records
+        };
+      }
+    }
+    return extractStructuredWatchlistResponseFromText(text);
+  })();
+  const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
+  if (structuredResponse) {
+    const payload = {
+      schema: 'economist.response.v2',
+      responseId: responseId || generateResponseId(runId),
+      runId: runId || null,
+      text: text.trim(),
+      source: typeof response.source === 'string' ? response.source : '',
+      analysisType: typeof response.analysisType === 'string' ? response.analysisType : '',
+      timestamp: response.timestamp ?? Date.now(),
+      records: structuredResponse.records
+    };
+    if (structuredResponse.schemaVersion) {
+      payload.schema_version = structuredResponse.schemaVersion;
+    }
+    if (sourceMeta.sourceTitle) {
+      payload.sourceTitle = sourceMeta.sourceTitle;
+    }
+    if (sourceMeta.sourceName) {
+      payload.sourceName = sourceMeta.sourceName;
+    }
+    if (sourceMeta.sourceUrl) {
+      payload.sourceUrl = sourceMeta.sourceUrl;
+    }
+    payload.decisionRecordCount = structuredResponse.records.length;
+    const conversationUrl = normalizeChatConversationUrl(response.conversationUrl);
+    if (conversationUrl) {
+      payload.conversationUrl = conversationUrl;
+    }
+    const conversationLogs = normalizeConversationLogSnapshot(
+      response.conversationLogs,
+      RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+    );
+    if (conversationLogs.length > 0) {
+      payload.conversationLogs = conversationLogs;
+      payload.conversationLogCount = conversationLogs.length;
+    } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
+      payload.conversationLogCount = response.conversationLogCount;
+    }
+    return payload;
+  }
+
   const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
     ? DecisionContractUtils.validateDecisionContractText(text)
     : null;
@@ -14711,7 +15038,6 @@ function normalizeWatchlistDispatchPayload(response) {
     : (decisionRecords.length > 0
       ? decisionRecords.map((record) => record.canonicalLine).join('\n')
       : text);
-  const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
 
   const payload = {
     schema: "economist.response.v1",
@@ -14775,8 +15101,30 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const source = trimProblemLogText(rawPayload.source || '', 140);
   const analysisType = trimProblemLogText(rawPayload.analysisType || '', 80);
   const sourceMeta = normalizeResponseSourceMeta(rawPayload, source);
+  const structuredResponse = (() => {
+    if (schema !== 'economist.response.v2') {
+      return null;
+    }
+    const recordCandidates = Array.isArray(rawPayload.records)
+      ? rawPayload.records
+      : [rawPayload];
+    const records = recordCandidates
+      .map((record) => sanitizeStructuredWatchlistRecord(record))
+      .filter((record) => !!record);
+    if (records.length > 0) {
+      return {
+        schema: 'economist.response.v2',
+        schemaVersion: normalizeStructuredWatchlistValue(rawPayload.schema_version || rawPayload.schemaVersion),
+        records
+      };
+    }
+    return extractStructuredWatchlistResponseFromText(rawText);
+  })();
+  if (schema === 'economist.response.v2' && !structuredResponse) {
+    return null;
+  }
   const payload = {
-    schema,
+    schema: structuredResponse ? 'economist.response.v2' : schema,
     responseId,
     runId: runId || null,
     supportId: typeof rawPayload.supportId === 'string' && rawPayload.supportId.trim()
@@ -14796,6 +15144,9 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (sourceMeta.sourceUrl) {
     payload.sourceUrl = sourceMeta.sourceUrl;
   }
+  if (structuredResponse?.schemaVersion) {
+    payload.schema_version = structuredResponse.schemaVersion;
+  }
 
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
   if (conversationUrl) {
@@ -14813,6 +15164,11 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   }
   if (rawPayload.stage && typeof rawPayload.stage === 'object' && !Array.isArray(rawPayload.stage)) {
     payload.stage = rawPayload.stage;
+  }
+  if (structuredResponse) {
+    payload.records = structuredResponse.records;
+    payload.decisionRecordCount = structuredResponse.records.length;
+    return payload;
   }
   if (rawPayload.decisionRecord && typeof rawPayload.decisionRecord === 'object' && !Array.isArray(rawPayload.decisionRecord)) {
     payload.decisionRecord = mapDispatchDecisionRecord(rawPayload.decisionRecord);
@@ -23934,46 +24290,15 @@ async function injectToChat(
         responseCount = nextResponses.length;
       }
 
-      const validation = decisionUtils && typeof decisionUtils.validateDecisionContractText === 'function'
-        ? decisionUtils.validateDecisionContractText(savedResponse?.text || normalizedText)
-        : null;
-      const decisionRecords = Array.isArray(validation?.records) ? validation.records : [];
-      const decisionRecord = validation?.primaryRecord || validation?.selectedRecord || decisionRecords[0] || null;
-
-      const dispatchPayload = {
-        schema: 'economist.response.v1',
-        responseId: normalizedResponseId,
-        runId: normalizedRunId || null,
-        text: typeof validation?.canonicalText === 'string' && validation.canonicalText.trim()
-          ? validation.canonicalText
+      const dispatchPayload = normalizeWatchlistDispatchPayload({
+        ...(savedResponse && typeof savedResponse === 'object' ? savedResponse : responseRecord),
+        text: typeof savedResponse?.text === 'string' && savedResponse.text.trim()
+          ? savedResponse.text
           : normalizedText,
-        source,
-        analysisType: normalizedAnalysisType,
         timestamp
-      };
-      if (sourceTitleForSave) {
-        dispatchPayload.sourceTitle = sourceTitleForSave;
-      }
-      if (sourceNameForSave) {
-        dispatchPayload.sourceName = sourceNameForSave;
-      }
-      if (sourceUrlForSave) {
-        dispatchPayload.sourceUrl = sourceUrlForSave;
-      }
-      if (conversationUrl) {
-        dispatchPayload.conversationUrl = conversationUrl;
-      }
-      if (decisionRecord) {
-        dispatchPayload.decisionRecord = mapDispatchDecisionRecord(decisionRecord);
-        dispatchPayload.decisionRecordCount = decisionRecords.length;
-        dispatchPayload.decisionRecords = typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
-          ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(decisionRecords)
-          : decisionRecords
-            .map((record) => mapDispatchDecisionRecord(record))
-            .filter((record) => !!record);
-      }
-      if (savedResponse?.decisionContract && typeof savedResponse.decisionContract === 'object') {
-        dispatchPayload.decisionContract = savedResponse.decisionContract;
+      });
+      if (!dispatchPayload) {
+        return { success: false, reason: 'dispatch_payload_invalid' };
       }
 
       const snapshot = await chrome.storage.local.get(['watchlist_dispatch_outbox']);

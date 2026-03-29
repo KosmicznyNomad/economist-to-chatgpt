@@ -3971,49 +3971,72 @@ BLAD: `VOI: wzrost NRR; Fals: brak kontraktów; Primary risk: konkurencja`
 
 ---
 
-## STRUKTURA OUTPUT — 17 pol oddzielonych srednikami
+## STRUKTURA OUTPUT — economist.response.v2 (structured JSON)
 
-| Kolumna | Nazwa pola             | Przyklad                                           |
-|---------|------------------------|----------------------------------------------------|
-| 1       | Data decyzji           | 2025-10-14                                         |
-| 2       | Status decyzji         | WATCH / AVOID                                      |
-| 3       | Rola                   | PRIMARY / SECONDARY                                |
-| 4       | Spolka                 | Richemont (CFR:SW)                                 |
-| 5       | Material zrodlowy      | The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT. |
-| 6       | Teza inwestycyjna      | (pelny opis, 4-6 zdan)                             |
-| 7       | Bear scenario (TOTAL)  | Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%       |
-| 8       | Base scenario (TOTAL)  | Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%     |
-| 9       | Bull scenario (TOTAL)  | Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%     |
-| 10      | VOI/Falsifiers/Primary risk | VOI: X, Fals: Y, Primary risk: Z, Composite: A, EntryScore: B, Sizing: C |
-| 11      | Sektor (1 z 5 bazowych)| Software steruje praca, pieniedzmi i ryzykiem     |
-| 12      | Rodzina spolki         | Technologia i oprogramowanie                       |
-| 13      | Typ spolki             | Cyberbezpieczenstwo i tozsamosc                    |
-| 14      | Model przychodu        | Subskrypcja oprogramowania                         |
-| 15      | Region                 | USA                                                |
-| 16      | Waluta                 | USD                                                |
-| 17      | KPI Scorecard          | FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6  |
+Zwracaj **jeden obiekt JSON** zgodny z kontraktem `economist.response.v2`.
+
+Minimalny ksztalt odpowiedzi:
+
+```json
+{
+  "schema": "economist.response.v2",
+  "records": [
+    {
+      "decision_role": "PRIMARY",
+      "fields": {
+        "data_decyzji": "2025-10-14",
+        "status_decyzji": "WATCH",
+        "spolka": "Richemont (CFR:SW)",
+        "zrodlo_tezy": "The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.",
+        "material_zrodlowy_podcast": "The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.",
+        "teza_inwestycyjna": "Pelny opis analityczny, 4-6 zdan.",
+        "bear_scenario_total": "Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%",
+        "base_scenario_total": "Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%",
+        "bull_scenario_total": "Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%",
+        "voi_falsy_kluczowe_ryzyka": "VOI: X, Fals: Y, Primary risk: Z, Composite: A, EntryScore: B, Sizing: C"
+      },
+      "taxonomy": {
+        "sector": "Software steruje praca, pieniedzmi i ryzykiem",
+        "company_family": "Technologia i oprogramowanie",
+        "company_type": "Cyberbezpieczenstwo i tozsamosc",
+        "revenue_model": "Subskrypcja oprogramowania",
+        "region": "USA",
+        "currency": "USD"
+      },
+      "kpi": {
+        "schema_id": "core10",
+        "items": [
+          { "key": "FQ", "label": "Financial Quality", "value": 8 }
+        ]
+      },
+      "extras": {}
+    }
+  ]
+}
+```
 
 ---
 
 ## Kontrakt danych (obowiazkowy)
 
-- Ten format ma **dokladnie 17 pol** i sluzy do bezposredniego importu do Watchlist.
-- Generuj zawsze **2 linie**: pierwsza = PRIMARY, druga = SECONDARY.
-- Jesli Stage 11 wyprodukowal tylko 1 spolke (SHORTFALL): generuj 1 linie i dopisz na koncu: # SHORTFALL: only 1 company passed Stage 10 gates
-- Nie dodawaj ani nie usuwaj pol.
-- Nie przesuwaj tresci miedzy polami: kazda kolumna ma stale znaczenie.
-- Nie wolno pominac pola 5 (`Material zrodlowy`). Jesli THESIS_SOURCE jest nieostry, wpisz najlepszy krotki opis z Stage 1, ale nie przesuwaj firmy ani tezy o jedna kolumne w lewo.
-- Slowa `PRIMARY` i `SECONDARY` moga wystapic tylko w polu 3 kazdej linii. Pole 4 (`Spolka`) nigdy nie moze byc rowne `PRIMARY` ani `SECONDARY`.
-- Nie doklejaj poczatku drugiego rekordu do pola 6 albo 10 poprzedniej linii. Kazdy rekord zaczyna sie od nowej linii i wzorca `RRRR-MM-DD;STATUS;ROLA;SPOLKA;`.
-- Pole 5 (`Material zrodlowy`) ma zawierac `THESIS_SOURCE` ze Stage 1 HANDOFF, nie analize.
-- Pole 6 (`Teza inwestycyjna`) ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
-- Pola 7-9 sa zarezerwowane tylko dla scenariuszy TOTAL: `Bear_TOTAL`, `Base_TOTAL`, `Bull_TOTAL`.
-- Pole 10 ma zawsze format `VOI: ..., Fals: ..., Primary risk: ..., Composite: ..., EntryScore: ..., Sizing: ...`.
-- Pole 11 (`Sektor`) musi byc jednym z 5 bazowych sektorow Watchlist i nie jest aliasem pola 12.
-- Pola 12-14 musza byc zgodne z aktualna taxonomia spolek w Watchlist: `rodzina_spolki`, `typ_spolki`, `model_przychodu`.
-- Pola 11-14 sa obowiazkowe i nie moga zawierac placeholderow typu `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a`.
+- `schema` musi byc rowne `economist.response.v2`.
+- Zwracaj zawsze tablice `records`.
+- Standardowo generuj **2 rekordy**: pierwszy `PRIMARY`, drugi `SECONDARY`.
+- Jesli Stage 11 wyprodukowal tylko 1 spolke (SHORTFALL), zwroc 1 rekord i dodaj `extras.shortfall_reason`.
+- Nie zwracaj packed single-line outputu, CSV ani rekordu `17 pol oddzielonych srednikami`.
+- `fields` zawiera surowe pola tresciowe rekordu. Nie przesuwaj znaczen miedzy kluczami.
+- `taxonomy` jest osobnym obiektem i musi zawierac: `sector`, `company_family`, `company_type`, `revenue_model`, `region`, `currency`.
+- `decision_role` musi byc obecne rowniez na poziomie rekordu (`PRIMARY` albo `SECONDARY`).
+- `fields.material_zrodlowy_podcast` ma zawierac `THESIS_SOURCE` ze Stage 1 HANDOFF, nie analize.
+- `fields.teza_inwestycyjna` ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
+- `fields.bear_scenario_total`, `fields.base_scenario_total`, `fields.bull_scenario_total` sa zarezerwowane tylko dla scenariuszy TOTAL.
+- `fields.voi_falsy_kluczowe_ryzyka` ma zawsze format `VOI: ..., Fals: ..., Primary risk: ..., Composite: ..., EntryScore: ..., Sizing: ...`.
+- `taxonomy.sector` musi byc jednym z 5 bazowych sektorow Watchlist i nie jest aliasem `company_family`.
+- `taxonomy.company_family`, `taxonomy.company_type`, `taxonomy.revenue_model` musza byc zgodne z aktualna taxonomia spolek w Watchlist.
+- `taxonomy.sector`, `taxonomy.company_family`, `taxonomy.company_type`, `taxonomy.revenue_model` sa obowiazkowe i nie moga zawierac placeholderow typu `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a`.
 - Gdy nie ma idealnego matchu, wybierz najblizsze wiarygodne dopasowanie z taxonomii na podstawie tego, co firma sprzedaje, komu sprzedaje i jak fakturuje.
-- Pole 17 (`KPI Scorecard`) jest obowiazkowe i musi zawierac dokladnie 10 wartosci w formacie klucz:wartosc.
+- `kpi` jest obiektem schema-driven. Dla legacy `core10` utrzymuj zestaw 10 KPI, ale wynik zapisuj jako `schema_id` + `items[]`.
+- Dla KPI mozesz uzyc `value: null`, jesli wskaznik jest not-applicable albo brak wiarygodnego odczytu po DATA_GAP_PROTOCOL.
 - Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.
 
 ---
@@ -4247,19 +4270,41 @@ Przyklady: USD, CHF, EUR, PLN
 
 ---
 
-### 17. KPI Scorecard
+### 17. KPI
 
-Pole obowiazkowe. Zawiera 10 wskaznikow jakosciowych (KPI) na skali 1-10, obliczanych na podstawie danych z wczesniejszych etapow pipeline.
+Pole obowiazkowe, ale zwracane jako obiekt `kpi`, nie jako pojedynczy string.
 
-**Format pola:**
+**Format obiektu:**
 
-`FQ:X,TE:X,CM:X,VS:X,TQ:X,PP:X,CP:X,CD:X,NO:X,MR:X`
+```json
+{
+  "schema_id": "core10",
+  "items": [
+    { "key": "FQ", "label": "Financial Quality", "value": 8 },
+    { "key": "TE", "label": "Thesis Exposure", "value": 7 }
+  ]
+}
+```
 
-gdzie X = integer 1-10, bez spacji, rozdzielone przecinkami.
+**Legacy `core10` example:**
 
-**Przyklad:**
-
-`FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6`
+```json
+{
+  "schema_id": "core10",
+  "items": [
+    { "key": "FQ", "label": "Financial Quality", "value": 8 },
+    { "key": "TE", "label": "Thesis Exposure", "value": 7 },
+    { "key": "CM", "label": "Competitive Moat", "value": 9 },
+    { "key": "VS", "label": "Valuation Safety", "value": 6 },
+    { "key": "TQ", "label": "Traction Quality", "value": 7 },
+    { "key": "PP", "label": "Pricing Power", "value": 8 },
+    { "key": "CP", "label": "Catalyst Proximity", "value": 5 },
+    { "key": "CD", "label": "Capital Discipline", "value": 7 },
+    { "key": "NO", "label": "Non-Obviousness", "value": 8 },
+    { "key": "MR", "label": "Monetization Realism", "value": 6 }
+  ]
+}
+```
 
 **Legenda KPI:**
 
@@ -4357,59 +4402,83 @@ gdzie X = integer 1-10, bez spacji, rozdzielone przecinkami.
 
 ##  Przyklad kompletnego outputu
 
-### Bez numeracji (finalna forma):
-
-``` 
-2025-10-14; WATCH; PRIMARY; Richemont (CFR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu (dywergencja wzrostu +300bps vs implied).; Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%; Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%; Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%; VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, EntryScore: 8.2/10, Sizing: 3%; Zaufanie, zdrowie i rzadkosc utrzymuja premie; Dobra luksusowe i konsument premium; Bizuteria i zegarki premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF; FQ:8,TE:9,CM:9,VS:6,TQ:7,PP:9,CP:5,CD:7,NO:6,MR:7
-2025-10-14; WATCH; SECONDARY; Swatch Group (UHR:SW); The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.; Rynek zegarkow mid-luxury konsoliduje sie wokol marek z wlasnym ruchem i certyfikacja METAS. Swatch zarabia na marzy Omega i Longines w kanale retail z rosnacym udzialem DTC. MoonSwatch generuje traffic, ale value capture lezy w up-sell do Omega Seamaster po pelnej cenie. Niedobor ruchow wlasnych ogranicza substytucje. Dywergencja marzy +200bps vs implied.; Bear_TOTAL: 180 CHF/akcja, CAGR 2%, FCFmY3 7%; Base_TOTAL: 260 CHF/akcja, CAGR 5%, FCFmY3 10%; Bull_TOTAL: 380 CHF/akcja, CAGR 8%, FCFmY3 12%; VOI: marza Omega w H1 2026, Fals: book-to-bill Omega < 0.9x przez 2Q, Primary risk: spowolnienie Chin, Composite: 3.4/5.0, EntryScore: 6.9/10, Sizing: 2%; Zaufanie, zdrowie i rzadkosc utrzymuja premie; Dobra luksusowe i konsument premium; Zegarki i akcesoria premium; Sprzedaz produktowa DTC i retail; Szwajcaria; CHF; FQ:7,TE:7,CM:7,VS:5,TQ:5,PP:7,CP:4,CD:6,NO:5,MR:5
+```json
+{
+  "schema": "economist.response.v2",
+  "records": [
+    {
+      "decision_role": "PRIMARY",
+      "fields": {
+        "data_decyzji": "2025-10-14",
+        "status_decyzji": "WATCH",
+        "spolka": "Richemont (CFR:SW)",
+        "zrodlo_tezy": "The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.",
+        "material_zrodlowy_podcast": "The Economist, Money Talks, Alice Fulwood, LONGFORM_TRANSCRIPT.",
+        "teza_inwestycyjna": "Rynek jubilerski bifurkuje: segment laboratoryjny obniza cene masowa, a segment natural high jewelry pozostaje rynkiem ograniczonej podazy. Richemont zarabia glownie na marzy brutto ze sprzedazy high jewelry i hard luxury w kanale DTC. Przyklad monetyzacji: premiera kolekcji high jewelry jest rozliczana jako pelnocenowa sprzedaz butikowa z capture z projektu, kuracji kamieni i certyfikacji. Na rynku brakuje marek o porownywalnej skali zaufania i relacji VIC, co ogranicza substytucje i wspiera marze w horyzoncie 12-36 miesiecy. Rynek niedoszacowuje trwalosci tego mechanizmu.",
+        "bear_scenario_total": "Bear_TOTAL: 95 CHF/akcja, CAGR 3%, FCFmY3 9%",
+        "base_scenario_total": "Base_TOTAL: 140 CHF/akcja, CAGR 6%, FCFmY3 11%",
+        "bull_scenario_total": "Bull_TOTAL: 210 CHF/akcja, CAGR 9%, FCFmY3 13%",
+        "voi_falsy_kluczowe_ryzyka": "VOI: udzial high jewelry >10% przez 2Q, Fals: brak poprawy APAC do 2Q 2026 przy wzroscie rabatow, Primary risk: przesuniecie popytu do substytutow, Composite: 4.1/5.0, EntryScore: 8.2/10, Sizing: 3%"
+      },
+      "taxonomy": {
+        "sector": "Zaufanie, zdrowie i rzadkosc utrzymuja premie",
+        "company_family": "Dobra luksusowe i konsument premium",
+        "company_type": "Bizuteria i zegarki premium",
+        "revenue_model": "Sprzedaz produktowa DTC i retail",
+        "region": "Szwajcaria",
+        "currency": "CHF"
+      },
+      "kpi": {
+        "schema_id": "core10",
+        "items": [
+          { "key": "FQ", "label": "Financial Quality", "value": 8 },
+          { "key": "TE", "label": "Thesis Exposure", "value": 9 },
+          { "key": "CM", "label": "Competitive Moat", "value": 9 },
+          { "key": "VS", "label": "Valuation Safety", "value": 6 },
+          { "key": "TQ", "label": "Traction Quality", "value": 7 },
+          { "key": "PP", "label": "Pricing Power", "value": 9 },
+          { "key": "CP", "label": "Catalyst Proximity", "value": 5 },
+          { "key": "CD", "label": "Capital Discipline", "value": 7 },
+          { "key": "NO", "label": "Non-Obviousness", "value": 6 },
+          { "key": "MR", "label": "Monetization Realism", "value": 7 }
+        ]
+      },
+      "extras": {}
+    }
+  ]
+}
 ```
 
 ---
 
 ##  Zasady stylistyczne
 
-- Output = dokladnie dwie linie tekstu (chyba ze SHORTFALL)
-- Pola oddzielone tylko srednikami (;)
-- Zadnych srednikow wewnatrz pol
-- Bez nazw kolumn i komentarzy
-- Styl: jasny, briefingowy, precyzyjny, bez przymiotnikow-wypelniaczy
-- Jezyk: polski, ton strategiczny i analityczny
+- Output = jeden poprawny obiekt JSON
+- Bez komentarzy poza polami JSON
+- Styl wartosci tekstowych: jasny, briefingowy, precyzyjny, bez przymiotnikow-wypelniaczy
+- Jezyk wartosci opisowych: polski, ton strategiczny i analityczny
 
 ---
 
 ##  Walidacja przed zwrotem (obowiazkowa)
 
-- Sprawdz liczbe separatorow: rekord ma miec dokladnie **16** srednikow separatora (17 pol).
-- Generuj dokladnie 2 linie (chyba ze SHORTFALL).
-- PRIMARY jest zawsze pierwsza linia.
-- W kazdej linii slowa `PRIMARY` albo `SECONDARY` wystepuja dokladnie raz: tylko w polu 3.
-- Pole 4 nie moze byc `PRIMARY` ani `SECONDARY`.
-- Pole 5 nie moze byc puste.
-- W kazdej linii wzorzec `RRRR-MM-DD;STATUS;ROLA;SPOLKA;` wystepuje dokladnie raz.
-- Pole 5 ma byc zgodne z `THESIS_SOURCE` ze Stage 1 HANDOFF i miec max 15 slow.
-- Sprawdz prefiksy:
-  - Pole 3: PRIMARY lub SECONDARY
-  - Pole 7 zaczyna sie od `Bear_TOTAL:`
-  - Pole 8 zaczyna sie od `Base_TOTAL:`
-  - Pole 9 zaczyna sie od `Bull_TOTAL:`
-  - Pole 10 zaczyna sie od `VOI:`
-  - Pole 10 zawiera kolejno: VOI, Fals, Primary risk, Composite, EntryScore, Sizing.
-- Pole 11 nalezy do dozwolonej piatki bazowych sektorow Watchlist.
-- Pola 11-14 sa wypelnione realnymi etykietami taxonomii i nie zawieraja `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a` ani pustej wartosci.
-- Pole 11 jest jednym z 5 bazowych sektorow wymienionych wyzej.
-- Pole 17 (`KPI Scorecard`) — walidacja dodatkowa:
-  - Pole 17 musi zawierac dokladnie 10 par klucz:wartosc
-  - Kolejnosc kluczy: FQ,TE,CM,VS,TQ,PP,CP,CD,NO,MR (stala, niezmienna)
-  - Kazda wartosc musi byc integer 1-10
-  - Format: klucz:wartosc rozdzielone przecinkami, bez spacji
-  - Jesli jakikolwiek klucz brakuje lub wartosc jest poza zakresem 1-10: blad walidacji
-- Nie zwracaj dawnego rekordu z polami `watpliwosci`, `gate rating`, `why buy`, `why avoid`.
+- `schema` = `economist.response.v2`
+- `records` jest tablica i ma zwykle 2 rekordy (`PRIMARY`, potem `SECONDARY`)
+- Kazdy rekord ma `decision_role`, `fields`, `taxonomy`, `kpi`, `extras`
+- `fields.material_zrodlowy_podcast` nie moze byc puste
+- `fields.bear_scenario_total`, `fields.base_scenario_total`, `fields.bull_scenario_total` maja prefiksy `Bear_TOTAL:`, `Base_TOTAL:`, `Bull_TOTAL:`
+- `fields.voi_falsy_kluczowe_ryzyka` zaczyna sie od `VOI:` i zawiera kolejno: VOI, Fals, Primary risk, Composite, EntryScore, Sizing
+- `taxonomy.sector` nalezy do dozwolonej piatki bazowych sektorow Watchlist
+- `taxonomy.company_family`, `taxonomy.company_type`, `taxonomy.revenue_model` sa wypelnione realnymi etykietami taxonomii i nie zawieraja `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a` ani pustej wartosci
+- Dla `kpi.schema_id = "core10"` zwroc 10 pozycji w kolejnosci FQ, TE, CM, VS, TQ, PP, CP, CD, NO, MR
+- `kpi.items[].value` moze byc `null` tylko wtedy, gdy wskaznik jest not-applicable albo DATA_GAP nie zostal domkniety wiarygodnie
+- Nie zwracaj dawnego packed outputu ani pol `watpliwosci`, `gate rating`, `why buy`, `why avoid`
 
 ---
 
 ##  Finalna instrukcja
 
-Wygeneruj dokladnie dwie linie tekstu zgodne z powyzsza struktura — 17 pol oddzielonych srednikami — bez numeracji, bez naglowkow, bez komentarzy. PRIMARY jako pierwsza linia, SECONDARY jako druga.
+Wygeneruj jeden obiekt JSON zgodny z `economist.response.v2`, bez markdownu, bez komentarzy, bez naglowkow. PRIMARY jako pierwszy rekord, SECONDARY jako drugi.
 This will help for the next stage: Final output delivery.
 
 

@@ -153,7 +153,17 @@ const context = {
 };
 
 vm.createContext(context);
-['mapDispatchDecisionRecord', 'normalizeWatchlistDispatchPayload', 'normalizeOutboundWatchlistDispatchPayload']
+[
+  'normalizeStructuredWatchlistValue',
+  'normalizeStructuredWatchlistObject',
+  'serializeStructuredWatchlistKpiScorecard',
+  'sanitizeStructuredWatchlistRecord',
+  'extractStructuredWatchlistJsonCandidates',
+  'extractStructuredWatchlistResponseFromText',
+  'mapDispatchDecisionRecord',
+  'normalizeWatchlistDispatchPayload',
+  'normalizeOutboundWatchlistDispatchPayload'
+]
   .forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
   });
@@ -235,10 +245,132 @@ function testFallbackMapperPreservesKpiScorecard() {
   assert.strictEqual(mapped.kpiScorecard, 'FQ:8,TE:7,CM:9,VS:6,TQ:7,PP:8,CP:5,CD:7,NO:8,MR:6');
 }
 
+function testStructuredV2PayloadPreservesRecords() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          data_decyzji: '2026-03-20',
+          status_decyzji: 'WATCH',
+          spolka: 'Alpha Corp (ALP:NASDAQ)',
+          zrodlo_tezy: 'Alpha source',
+          material_zrodlowy_podcast: 'Alpha source',
+          teza_inwestycyjna: 'Alpha thesis',
+          bear_scenario_total: 'Bear_TOTAL: 10',
+          base_scenario_total: 'Base_TOTAL: 20',
+          bull_scenario_total: 'Bull_TOTAL: 30',
+          voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
+          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          rodzina_spolki: 'Technologia i oprogramowanie',
+          typ_spolki: 'Software',
+          model_przychodu: 'Subscription',
+          region: 'USA',
+          waluta: 'USD'
+        },
+        taxonomy: {
+          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          company_family: 'Technologia i oprogramowanie',
+          company_type: 'Software',
+          revenue_model: 'Subscription',
+          region: 'USA',
+          currency: 'USD'
+        },
+        kpi: {
+          schema_id: 'core10',
+          items: [
+            { key: 'FQ', value: 8 },
+            { key: 'TE', value: 7 },
+            { key: 'CM', value: 9 },
+            { key: 'VS', value: 6 },
+            { key: 'TQ', value: 7 },
+            { key: 'PP', value: 8 },
+            { key: 'CP', value: 5 },
+            { key: 'CD', value: 7 },
+            { key: 'NO', value: 8 },
+            { key: 'MR', value: 6 }
+          ]
+        },
+        extras: {}
+      },
+      {
+        decision_role: 'SECONDARY',
+        fields: {
+          data_decyzji: '2026-03-20',
+          status_decyzji: 'WATCH',
+          spolka: 'Beta Corp (BET:NASDAQ)',
+          zrodlo_tezy: 'Beta source',
+          material_zrodlowy_podcast: 'Beta source',
+          teza_inwestycyjna: 'Beta thesis',
+          bear_scenario_total: 'Bear_TOTAL: 11',
+          base_scenario_total: 'Base_TOTAL: 21',
+          bull_scenario_total: 'Bull_TOTAL: 31',
+          voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.0/5.0, EntryScore: 7.9/10, Sizing: 2%',
+          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          rodzina_spolki: 'Technologia i oprogramowanie',
+          typ_spolki: 'Software',
+          model_przychodu: 'Subscription',
+          region: 'USA',
+          waluta: 'USD'
+        },
+        taxonomy: {
+          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          company_family: 'Technologia i oprogramowanie',
+          company_type: 'Software',
+          revenue_model: 'Subscription',
+          region: 'USA',
+          currency: 'USD'
+        },
+        kpi: {
+          schema_id: 'core10',
+          items: [
+            { key: 'FQ', value: 7 },
+            { key: 'TE', value: 7 },
+            { key: 'CM', value: 8 },
+            { key: 'VS', value: 6 },
+            { key: 'TQ', value: 6 },
+            { key: 'PP', value: 7 },
+            { key: 'CP', value: 5 },
+            { key: 'CD', value: 7 },
+            { key: 'NO', value: 6 },
+            { key: 'MR', value: 6 }
+          ]
+        },
+        extras: { shortfall_reason: '' }
+      }
+    ]
+  });
+
+  const payload = context.normalizeWatchlistDispatchPayload({
+    text,
+    source: 'Prompt chain',
+    analysisType: 'company',
+    responseId: 'resp-v2',
+    runId: 'run-v2',
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'economist.response.v2');
+  assert.strictEqual(payload.decisionRecordCount, 2);
+  assert.strictEqual(payload.records.length, 2);
+  assert.strictEqual(payload.records[0].decision_role, 'PRIMARY');
+  assert.strictEqual(payload.records[0].fields.spolka, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(payload.records[0].kpi.items.length, 10);
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'economist.response.v2');
+  assert.strictEqual(outbound.decisionRecordCount, 2);
+  assert.strictEqual(outbound.records.length, 2);
+  assert.strictEqual(outbound.records[1].decision_role, 'SECONDARY');
+  assert.strictEqual(outbound.records[1].fields.spolka, 'Beta Corp (BET:NASDAQ)');
+}
+
 function main() {
   testCurrentPairPayload();
   testShortfallPayload();
   testFallbackMapperPreservesKpiScorecard();
+  testStructuredV2PayloadPreservesRecords();
   console.log('test-watchlist-dispatch-decision-contract.js: ok');
 }
 
