@@ -48,7 +48,7 @@ submitBtn.addEventListener('click', () => {
   const prompts = parsePrompts(promptInput.value);
 
   if (prompts.length > 0) {
-    chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: 'PROMPT_CHAIN_SUBMIT',
       prompts
     });
@@ -56,7 +56,7 @@ submitBtn.addEventListener('click', () => {
 });
 
 cancelBtn.addEventListener('click', () => {
-  chrome.runtime.sendMessage({
+  void sendRuntimeMessage({
     type: 'PROMPT_CHAIN_CANCEL'
   });
 });

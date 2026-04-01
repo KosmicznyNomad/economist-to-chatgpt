@@ -195,6 +195,100 @@ function testViewHelpersFallbacks() {
   assert.strictEqual(invalidSnapshot.hasRenderableCompany, false);
 }
 
+function testStructuredJsonV2Contract() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          data_decyzji: '2026-03-29',
+          status_decyzji: 'WATCH',
+          spolka: 'Leidos Holdings Inc. (LDOS:NYSE)',
+          material_zrodlowy_podcast: 'a16z podcast',
+          teza_inwestycyjna: 'Primary thesis',
+          bear_scenario_total: 'Bear_TOTAL: 90',
+          base_scenario_total: 'Base_TOTAL: 120',
+          bull_scenario_total: 'Bull_TOTAL: 160',
+          voi_falsy_kluczowe_ryzyka: 'VOI: backlog, Fals: budget cut, Primary risk: execution, Composite: 4.1/5.0, EntryScore: 7.8/10, Sizing: 3%'
+        },
+        taxonomy: {
+          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          company_family: 'Technologia i oprogramowanie',
+          company_type: 'Oprogramowanie obronne',
+          revenue_model: 'Integracja i wdrozenia',
+          region: 'USA',
+          currency: 'USD'
+        },
+        opportunity: {
+          value_chain_position: 'Platforma',
+          entry_condition_type: 'Already met'
+        },
+        character: {
+          proof_class: 'FUNDED',
+          primary_kill_risk: 'execution'
+        },
+        kpi: {
+          schema_id: 'core10',
+          items: [
+            { key: 'FQ', label: 'Financial Quality', value: 8 },
+            { key: 'TE', label: 'Thesis Exposure', value: 7 },
+            { key: 'CM', label: 'Competitive Moat', value: 8 },
+            { key: 'VS', label: 'Valuation Safety', value: 6 },
+            { key: 'TQ', label: 'Traction Quality', value: 7 },
+            { key: 'PP', label: 'Pricing Power', value: 7 },
+            { key: 'CP', label: 'Catalyst Proximity', value: 5 },
+            { key: 'CD', label: 'Capital Discipline', value: 7 },
+            { key: 'NO', label: 'Non-Obviousness', value: 8 },
+            { key: 'MR', label: 'Monetization Realism', value: 6 }
+          ]
+        },
+        extras: {}
+      },
+      {
+        decision_role: 'SECONDARY',
+        fields: {
+          data_decyzji: '2026-03-29',
+          status_decyzji: 'WATCH',
+          spolka: 'KBR (KBR:NYSE)',
+          material_zrodlowy_podcast: 'a16z podcast',
+          teza_inwestycyjna: 'Secondary thesis',
+          bear_scenario_total: 'Bear_TOTAL: 40',
+          base_scenario_total: 'Base_TOTAL: 55',
+          bull_scenario_total: 'Bull_TOTAL: 70',
+          voi_falsy_kluczowe_ryzyka: 'VOI: task orders, Fals: margin compression, Primary risk: procurement delay, Composite: 3.8/5.0, EntryScore: 6.9/10, Sizing: 2%'
+        },
+        taxonomy: {
+          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          company_family: 'Technologia i oprogramowanie',
+          company_type: 'Oprogramowanie obronne',
+          revenue_model: 'Integracja i wdrozenia',
+          region: 'USA',
+          currency: 'USD'
+        },
+        opportunity: {
+          value_chain_position: 'Integrator',
+          entry_condition_type: 'Proof only'
+        },
+        character: {
+          proof_class: 'AWARDED',
+          primary_kill_risk: 'procurement delay'
+        },
+        kpi: { schema_id: 'core10', items: [] },
+        extras: {}
+      }
+    ]
+  });
+
+  const validation = DecisionContractUtils.validateDecisionContractText(text);
+  assert.strictEqual(validation.status, 'current');
+  assert.strictEqual(validation.recordCount, 2);
+  assert.strictEqual(validation.primaryRecord.company, 'Leidos Holdings Inc. (LDOS:NYSE)');
+  assert.strictEqual(validation.records[1].decisionRole, 'SECONDARY');
+  assert.strictEqual(validation.primaryRecord.opportunity.value_chain_position, 'Platforma');
+  assert.strictEqual(validation.records[1].character.primary_kill_risk, 'procurement delay');
+}
+
 function main() {
   testCurrentContract();
   testShortfallContract();
@@ -203,6 +297,7 @@ function main() {
   testFormattingAndExtraction();
   testViewHelpers();
   testViewHelpersFallbacks();
+  testStructuredJsonV2Contract();
   console.log('test-decision-contract.js: ok');
 }
 

@@ -16,18 +16,6 @@ let refreshInProgress = false;
 let pendingRefresh = false;
 let pollIntervalId = null;
 
-function sendRuntimeMessage(payload) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(payload, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message || 'runtime_error'));
-        return;
-      }
-      resolve(response && typeof response === 'object' ? response : {});
-    });
-  });
-}
-
 function setStatus(text, isError = false) {
   if (!statusBox) return;
   statusBox.textContent = typeof text === 'string' ? text : '';

@@ -79,7 +79,6 @@ Required auth headers:
 
 ## Notes
 - `prompts-portfolio.txt` may still exist in the repo as a legacy artifact; it is not part of the current documented runtime flow.
-- `content-script.js` remains an independent Google Sheets bridge, not the canonical response persistence path.
 - Shared helper scripts are loaded by extension pages and the worker; the manifest no longer exposes them broadly via `web_accessible_resources`.
 
 ## Quick validation

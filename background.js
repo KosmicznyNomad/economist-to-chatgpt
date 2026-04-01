@@ -55,8 +55,9 @@ try {
   // Local inline Watchlist config is optional for unpacked extension installs.
 }
 if (typeof importScripts === 'function') {
-  importScripts('decision-contract.js', 'response-storage.js', 'watchlist-api.js', 'watchlist-dispatch-shape.js');
+  importScripts('process-contract.js', 'decision-contract.js', 'response-storage.js', 'watchlist-api.js', 'watchlist-dispatch-shape.js');
 }
+const ProcessContractUtils = globalThis.ProcessContractUtils || {};
 const DecisionContractUtils = globalThis.DecisionContractUtils || {};
 const ResponseStorageUtils = globalThis.ResponseStorageUtils || {};
 const WatchlistApiUtils = globalThis.WatchlistApiUtils || {};
@@ -163,6 +164,8 @@ const RESPONSE_CONVERSATION_LOG_MESSAGE_MAX_LENGTH = 420;
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const PROCESS_HISTORY_LIMIT = 30;
 const PROCESS_CONVERSATION_URL_HISTORY_LIMIT = 12;
+const PROCESS_UPDATE_DEBOUNCE_MS = 300;
+const PROCESS_DEBUG_EVENT_LIMIT = 200;
 const UNFINISHED_RESUME_BATCH_STORAGE_KEY = 'unfinished_resume_batch_state';
 const UNFINISHED_RESUME_BATCH_MAX_ROWS = 500;
 const UNFINISHED_RESUME_BATCH_STATUSES = new Set([
@@ -172,20 +175,17 @@ const UNFINISHED_RESUME_BATCH_STATUSES = new Set([
   'completed_with_errors',
   'interrupted'
 ]);
-const CLOSED_PROCESS_STATUSES = new Set([
-  'completed',
-  'failed',
-  'closed',
-  'error',
-  'cancelled',
-  'canceled',
-  'aborted',
-  'stopped',
-  'interrupted'
-]);
 const processRegistry = new Map();
 const manualPdfProviderPorts = new Map();
 let processRegistryReady = null;
+let processRegistryVersion = 0;
+let processSnapshotVersion = 0;
+let processRegistryFlushTimer = null;
+let processRegistryFlushPromise = Promise.resolve([]);
+let processRegistryDirty = false;
+let processRegistryFlushReason = '';
+let analysisQueueVersion = 0;
+const processRuntimeDebugEventsByRunId = new Map();
 let watchlistDispatchFlushInProgress = false;
 let watchlistDispatchFlushPending = false;
 let watchlistDispatchFlushPendingReason = '';
@@ -284,8 +284,127 @@ async function setStoredResumeComposerThinkingEffort(value) {
   return normalized;
 }
 
+function normalizeProcessLifecycleStatus(value, fallback = 'running') {
+  if (typeof ProcessContractUtils.normalizeLifecycleStatus === 'function') {
+    return ProcessContractUtils.normalizeLifecycleStatus(value, fallback);
+  }
+  if (typeof value !== 'string') return fallback || 'running';
+  const normalized = value.trim().toLowerCase();
+  return normalized || fallback || 'running';
+}
+
+function normalizeProcessPhase(value, fallback = '') {
+  if (typeof ProcessContractUtils.normalizePhase === 'function') {
+    return ProcessContractUtils.normalizePhase(value, fallback);
+  }
+  if (typeof value !== 'string') return fallback || '';
+  const normalized = value.trim().toLowerCase();
+  return normalized || fallback || '';
+}
+
+function normalizeProcessActionRequired(value, fallback = 'none') {
+  if (typeof ProcessContractUtils.normalizeActionRequired === 'function') {
+    return ProcessContractUtils.normalizeActionRequired(value, fallback);
+  }
+  if (typeof value !== 'string') return fallback || 'none';
+  const normalized = value.trim().toLowerCase();
+  return normalized || fallback || 'none';
+}
+
+function deriveProcessActionRequired(record = {}) {
+  if (typeof ProcessContractUtils.deriveActionRequiredFromLegacy === 'function') {
+    return ProcessContractUtils.deriveActionRequiredFromLegacy(record);
+  }
+  return record?.needsAction === true ? 'manual_resume' : 'none';
+}
+
+function deriveProcessStatusCode(record = {}) {
+  if (typeof ProcessContractUtils.deriveStatusCode === 'function') {
+    return ProcessContractUtils.deriveStatusCode(record);
+  }
+  return typeof record?.statusCode === 'string' ? record.statusCode.trim() : '';
+}
+
+function buildOperatorStatusText(record = {}) {
+  if (typeof ProcessContractUtils.buildOperatorStatusText === 'function') {
+    return ProcessContractUtils.buildOperatorStatusText(record);
+  }
+  return typeof record?.statusText === 'string' ? record.statusText.trim() : '';
+}
+
+function appendProcessRuntimeDebugEvent(rawEvent = {}) {
+  const event = rawEvent && typeof rawEvent === 'object' ? { ...rawEvent } : {};
+  const runId = typeof event.runId === 'string' && event.runId.trim() ? event.runId.trim() : '';
+  if (!runId) return null;
+  const current = processRuntimeDebugEventsByRunId.get(runId) || [];
+  const next = current.slice(-(PROCESS_DEBUG_EVENT_LIMIT - 1));
+  next.push({
+    ts: Number.isInteger(event.ts) ? event.ts : Date.now(),
+    level: typeof event.level === 'string' ? event.level : 'info',
+    area: typeof event.area === 'string' ? event.area : 'runtime',
+    event: typeof event.event === 'string' ? event.event : 'unknown',
+    phase: typeof event.phase === 'string' ? event.phase : '',
+    statusCode: typeof event.statusCode === 'string' ? event.statusCode : '',
+    durationMs: Number.isInteger(event.durationMs) ? event.durationMs : null,
+    meta: event.meta && typeof event.meta === 'object' ? event.meta : {}
+  });
+  processRuntimeDebugEventsByRunId.set(runId, next);
+  return next[next.length - 1];
+}
+
+const logger = {
+  event(rawEvent = {}) {
+    const event = rawEvent && typeof rawEvent === 'object' ? { ...rawEvent } : {};
+    const level = typeof event.level === 'string' ? event.level.trim().toLowerCase() : 'info';
+    const area = typeof event.area === 'string' && event.area.trim() ? event.area.trim() : 'runtime';
+    const eventName = typeof event.event === 'string' && event.event.trim() ? event.event.trim() : 'unknown';
+    const runId = typeof event.runId === 'string' && event.runId.trim() ? event.runId.trim() : '';
+    const statusCode = typeof event.statusCode === 'string' && event.statusCode.trim()
+      ? event.statusCode.trim()
+      : deriveProcessStatusCode(event);
+    const phase = normalizeProcessPhase(event.phase || '');
+    const durationMs = Number.isInteger(event.durationMs) ? event.durationMs : null;
+    const meta = event.meta && typeof event.meta === 'object' ? event.meta : {};
+
+    if (runId) {
+      appendProcessRuntimeDebugEvent({
+        ts: Date.now(),
+        runId,
+        level,
+        area,
+        event: eventName,
+        phase,
+        statusCode,
+        durationMs,
+        meta
+      });
+    }
+
+    const logFn = level === 'error'
+      ? console.error
+      : level === 'warn'
+        ? console.warn
+        : level === 'info'
+          ? console.info
+          : console.log;
+    logFn(`[runtime:${area}] ${eventName}`, {
+      runId: runId || null,
+      jobId: typeof event.jobId === 'string' ? event.jobId : null,
+      responseId: typeof event.responseId === 'string' ? event.responseId : null,
+      phase: phase || null,
+      statusCode: statusCode || null,
+      durationMs,
+      meta
+    });
+  }
+};
+
 function isClosedProcessStatus(status) {
-  return CLOSED_PROCESS_STATUSES.has(String(status || '').toLowerCase());
+  const normalized = normalizeProcessLifecycleStatus(status, 'running');
+  if (typeof ProcessContractUtils.isClosedLifecycleStatus === 'function') {
+    return ProcessContractUtils.isClosedLifecycleStatus(normalized);
+  }
+  return normalized === 'completed' || normalized === 'failed' || normalized === 'stopped';
 }
 
 function isQueuedProcessStatus(status) {
@@ -293,9 +412,7 @@ function isQueuedProcessStatus(status) {
 }
 
 function normalizeProcessStatus(status) {
-  if (typeof status !== 'string') return 'running';
-  const normalized = status.trim().toLowerCase();
-  return normalized || 'running';
+  return normalizeProcessLifecycleStatus(status, 'running');
 }
 
 function normalizePromptCounters(status, currentPrompt, totalPrompts, stageIndex) {
@@ -438,13 +555,57 @@ function normalizeProcessRecord(record) {
   const id = typeof record.id === 'string' ? record.id : String(record.id || '');
   if (!id) return null;
 
-  const status = normalizeProcessStatus(record.status);
+  const lifecycleStatus = normalizeProcessLifecycleStatus(
+    record.lifecycleStatus || record.status,
+    'running'
+  );
+  const phase = normalizeProcessPhase(
+    record.phase,
+    typeof ProcessContractUtils.defaultPhaseForLifecycle === 'function'
+      ? ProcessContractUtils.defaultPhaseForLifecycle(lifecycleStatus)
+      : ''
+  );
+  const actionRequired = normalizeProcessActionRequired(
+    record.actionRequired,
+    deriveProcessActionRequired(record)
+  );
+  const status = lifecycleStatus;
+  const effectiveActionRequired = isClosedProcessStatus(status) ? 'none' : actionRequired;
   const normalizedCounters = normalizePromptCounters(
     status,
     record.currentPrompt,
     record.totalPrompts,
     record.stageIndex
   );
+  const timestamp = Number.isInteger(record.timestamp) ? record.timestamp : Date.now();
+  const lastActivityAt = Number.isInteger(record.lastActivityAt) && record.lastActivityAt > 0
+    ? record.lastActivityAt
+    : timestamp;
+  const nextStatusCode = deriveProcessStatusCode({
+    ...record,
+    lifecycleStatus,
+    phase,
+    actionRequired: effectiveActionRequired,
+    status
+  });
+  const nextStatusText = buildOperatorStatusText({
+    ...record,
+    lifecycleStatus,
+    phase,
+    actionRequired: effectiveActionRequired,
+    statusCode: nextStatusCode,
+    status
+  });
+  const attempt = Number.isInteger(record.attempt) && record.attempt >= 0
+    ? record.attempt
+    : (
+      Number.isInteger(record?.autoRecovery?.attempt) && record.autoRecovery.attempt >= 0
+        ? record.autoRecovery.attempt
+        : 0
+    );
+  const retryCount = Number.isInteger(record.retryCount) && record.retryCount >= 0
+    ? record.retryCount
+    : attempt;
 
   const normalized = {
     ...record,
@@ -455,29 +616,43 @@ function normalizeProcessRecord(record) {
     analysisType: typeof record.analysisType === 'string' && record.analysisType.trim()
       ? record.analysisType
       : 'company',
+    lifecycleStatus,
+    phase,
+    actionRequired: effectiveActionRequired,
+    statusCode: nextStatusCode,
     status,
     currentPrompt: normalizedCounters.currentPrompt,
     totalPrompts: normalizedCounters.totalPrompts,
-    timestamp: Number.isInteger(record.timestamp) ? record.timestamp : Date.now(),
+    timestamp,
+    lastActivityAt,
     lastProgressAt: Number.isInteger(record.lastProgressAt) && record.lastProgressAt > 0
       ? record.lastProgressAt
       : (
-        Number.isInteger(record.timestamp) && record.timestamp > 0
-          ? record.timestamp
-          : Date.now()
+        timestamp > 0 ? timestamp : Date.now()
       ),
     startedAt: Number.isInteger(record.startedAt)
       ? record.startedAt
-      : (Number.isInteger(record.timestamp) ? record.timestamp : Date.now()),
-    needsAction: isClosedProcessStatus(status) ? false : !!record.needsAction,
+      : (timestamp > 0 ? timestamp : Date.now()),
+    phaseStartedAt: Number.isInteger(record.phaseStartedAt) && record.phaseStartedAt > 0
+      ? record.phaseStartedAt
+      : lastActivityAt,
+    needsAction: effectiveActionRequired !== 'none',
+    version: Number.isInteger(record.version) && record.version > 0 ? record.version : 1,
+    attempt,
+    retryCount,
+    statusText: nextStatusText,
     messages: Array.isArray(record.messages) ? record.messages : []
   };
 
   if (!Number.isInteger(normalized.windowId)) delete normalized.windowId;
   if (!Number.isInteger(normalized.tabId)) delete normalized.tabId;
+  if (!Number.isInteger(normalized.queuePosition) || normalized.queuePosition <= 0) delete normalized.queuePosition;
   if (!Number.isInteger(normalized.lastProgressAt)) delete normalized.lastProgressAt;
+  if (!Number.isInteger(normalized.lastActivityAt)) delete normalized.lastActivityAt;
+  if (!Number.isInteger(normalized.phaseStartedAt)) delete normalized.phaseStartedAt;
   if (typeof normalized.reason !== 'string') delete normalized.reason;
-  if (typeof normalized.statusText !== 'string') delete normalized.statusText;
+  if (typeof normalized.statusText !== 'string' || !normalized.statusText.trim()) delete normalized.statusText;
+  if (typeof normalized.statusCode !== 'string' || !normalized.statusCode.trim()) delete normalized.statusCode;
   if (typeof normalized.stageName !== 'string') delete normalized.stageName;
   if (!Number.isInteger(normalized.stageIndex)) delete normalized.stageIndex;
   const normalizedChatUrl = normalizeChatConversationUrl(
@@ -549,6 +724,13 @@ function normalizeProcessRecord(record) {
     } else {
       delete normalized.autoRecovery;
     }
+  }
+  if (normalized.actionRequired === 'none') {
+    normalized.needsAction = false;
+  }
+  if (isClosedProcessStatus(normalized.lifecycleStatus)) {
+    normalized.actionRequired = 'none';
+    normalized.needsAction = false;
   }
 
   return normalized;
@@ -658,6 +840,11 @@ async function ensureProcessRegistryReady() {
         records.forEach((record) => {
           processRegistry.set(record.id, record);
         });
+        processRegistryVersion = records.reduce((maxValue, record) => {
+          const version = Number.isInteger(record?.version) ? record.version : 0;
+          return Math.max(maxValue, version);
+        }, 0);
+        processSnapshotVersion = processRegistryVersion;
         rehydrateProcessProblemLogState(records);
         scheduleCompletedProcessPersistenceRetriesForSnapshot(records, 'process_registry_ready');
       } catch (error) {
@@ -686,9 +873,112 @@ async function persistProcessRegistry() {
   return records;
 }
 
+function shouldFlushProcessUpdateImmediately(existingProcess = null, nextProcess = null, patch = {}) {
+  const existing = existingProcess && typeof existingProcess === 'object' ? existingProcess : null;
+  const next = nextProcess && typeof nextProcess === 'object' ? nextProcess : null;
+  const candidatePatch = patch && typeof patch === 'object' ? patch : {};
+  if (!next) return true;
+  if (isClosedProcessStatus(next.lifecycleStatus || next.status)) return true;
+  if (normalizeProcessActionRequired(next.actionRequired || '', deriveProcessActionRequired(next)) !== 'none') return true;
+
+  const existingPrompt = Number.isInteger(existing?.currentPrompt) ? existing.currentPrompt : 0;
+  const nextPrompt = Number.isInteger(next?.currentPrompt) ? next.currentPrompt : 0;
+  if (nextPrompt > existingPrompt) return true;
+
+  const existingQueueState = typeof existing?.queueState === 'string' ? existing.queueState.trim() : '';
+  const nextQueueState = typeof next?.queueState === 'string' ? next.queueState.trim() : '';
+  if (existingQueueState !== nextQueueState) return true;
+
+  if ('slotReserved' in candidatePatch || 'slotReleasedAt' in candidatePatch || 'queuePosition' in candidatePatch) {
+    return true;
+  }
+
+  return false;
+}
+
+function clearScheduledProcessRegistryFlush() {
+  if (processRegistryFlushTimer !== null) {
+    clearTimeout(processRegistryFlushTimer);
+    processRegistryFlushTimer = null;
+  }
+}
+
+async function flushScheduledProcessRegistry(reason = 'scheduled') {
+  clearScheduledProcessRegistryFlush();
+  if (!processRegistryDirty) {
+    return pruneProcessRecords(Array.from(processRegistry.values()));
+  }
+  processRegistryDirty = false;
+  processRegistryFlushReason = '';
+  processSnapshotVersion = processRegistryVersion;
+  const records = await persistProcessRegistry();
+  await broadcastProcessUpdate({
+    processes: records,
+    reason,
+    version: processSnapshotVersion
+  });
+  return records;
+}
+
+function scheduleProcessRegistryFlush(reason = 'scheduled', options = {}) {
+  const normalizedReason = typeof reason === 'string' && reason.trim() ? reason.trim() : 'scheduled';
+  processRegistryDirty = true;
+  processRegistryFlushReason = normalizedReason;
+  const immediate = options?.immediate === true;
+
+  if (immediate) {
+    processRegistryFlushPromise = processRegistryFlushPromise.then(
+      () => flushScheduledProcessRegistry(normalizedReason),
+      () => flushScheduledProcessRegistry(normalizedReason)
+    );
+    return processRegistryFlushPromise;
+  }
+
+  if (processRegistryFlushTimer !== null) {
+    return processRegistryFlushPromise;
+  }
+
+  processRegistryFlushTimer = setTimeout(() => {
+    processRegistryFlushTimer = null;
+    processRegistryFlushPromise = processRegistryFlushPromise.then(
+      () => flushScheduledProcessRegistry(processRegistryFlushReason || normalizedReason),
+      () => flushScheduledProcessRegistry(processRegistryFlushReason || normalizedReason)
+    );
+  }, PROCESS_UPDATE_DEBOUNCE_MS);
+  return processRegistryFlushPromise;
+}
+
+function applyQueuePositionsToProcesses(records = [], queueState = null) {
+  const sourceRecords = Array.isArray(records) ? records : [];
+  const state = queueState && typeof queueState === 'object' ? queueState : analysisQueueState;
+  const waitingJobs = Array.isArray(state?.waitingJobs) ? state.waitingJobs : [];
+  const queuePositionByRunId = new Map();
+  waitingJobs.forEach((job, index) => {
+    const runId = typeof job?.runId === 'string' ? job.runId.trim() : '';
+    if (!runId || queuePositionByRunId.has(runId)) return;
+    queuePositionByRunId.set(runId, index + 1);
+  });
+  return sourceRecords.map((record) => {
+    const runId = typeof record?.id === 'string' ? record.id.trim() : '';
+    const queuePosition = queuePositionByRunId.get(runId) || null;
+    if (!queuePosition) {
+      if (!record || typeof record !== 'object') return record;
+      if (!('queuePosition' in record)) return record;
+      const { queuePosition: _queuePosition, ...rest } = record;
+      return rest;
+    }
+    return {
+      ...record,
+      queuePosition
+    };
+  });
+}
+
 async function getProcessSnapshot() {
   await ensureProcessRegistryReady();
-  return pruneProcessRecords(Array.from(processRegistry.values()));
+  await ensureAnalysisQueueReady().catch(() => null);
+  const records = pruneProcessRecords(Array.from(processRegistry.values()));
+  return applyQueuePositionsToProcesses(records);
 }
 
 function sanitizeManualPdfAttachmentContext(rawAttachment) {
@@ -802,6 +1092,33 @@ function sanitizeAnalysisQueueJob(rawJob) {
   return sanitized;
 }
 
+function getAnalysisQueueJobPriority(job) {
+  return job?.kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE ? 0 : 1;
+}
+
+function compareAnalysisQueueJobs(left, right) {
+  const priorityDiff = getAnalysisQueueJobPriority(left) - getAnalysisQueueJobPriority(right);
+  if (priorityDiff !== 0) return priorityDiff;
+
+  const leftSequence = Number.isInteger(left?.sequence) && left.sequence > 0 ? left.sequence : null;
+  const rightSequence = Number.isInteger(right?.sequence) && right.sequence > 0 ? right.sequence : null;
+  if (leftSequence !== null && rightSequence !== null && leftSequence !== rightSequence) {
+    return leftSequence - rightSequence;
+  }
+
+  const leftCreatedAt = Number.isInteger(left?.createdAt) ? left.createdAt : 0;
+  const rightCreatedAt = Number.isInteger(right?.createdAt) ? right.createdAt : 0;
+  if (leftCreatedAt !== rightCreatedAt) return leftCreatedAt - rightCreatedAt;
+
+  return String(left?.jobId || '').localeCompare(String(right?.jobId || ''));
+}
+
+function sortAnalysisQueueWaitingJobs(waitingJobs) {
+  if (!Array.isArray(waitingJobs) || waitingJobs.length < 2) return waitingJobs;
+  waitingJobs.sort(compareAnalysisQueueJobs);
+  return waitingJobs;
+}
+
 function createEmptyAnalysisQueueState() {
   return {
     waitingJobs: [],
@@ -830,12 +1147,19 @@ function sanitizeAnalysisQueueState(rawState) {
   const activeSource = Array.isArray(source.activeJobs) ? source.activeJobs : [];
   waitingSource.forEach((job) => appendJob(waitingJobs, job));
   activeSource.forEach((job) => appendJob(activeJobs, job));
+  sortAnalysisQueueWaitingJobs(waitingJobs);
+
+  const maxSeenSequence = waitingJobs.concat(activeJobs).reduce((maxValue, job) => {
+    const sequence = Number.isInteger(job?.sequence) && job.sequence > 0 ? job.sequence : 0;
+    return Math.max(maxValue, sequence);
+  }, 0);
+  const storedLastSequence = Number.isInteger(source.lastSequence) ? Math.max(0, source.lastSequence) : 0;
 
   return {
     waitingJobs,
     activeJobs,
     maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
-    lastSequence: Number.isInteger(source.lastSequence) ? Math.max(0, source.lastSequence) : 0
+    lastSequence: Math.max(storedLastSequence, maxSeenSequence)
   };
 }
 
@@ -887,6 +1211,7 @@ function scheduleAnalysisQueueDeadlineTimerFromState(state = null) {
 async function persistAnalysisQueueState(nextState = null) {
   const normalized = sanitizeAnalysisQueueState(nextState || analysisQueueState || createEmptyAnalysisQueueState());
   analysisQueueState = normalized;
+  analysisQueueVersion += 1;
   await chrome.storage.local.set({ [ANALYSIS_QUEUE_STORAGE_KEY]: normalized });
   scheduleAnalysisQueueDeadlineTimerFromState(normalized);
   return normalized;
@@ -912,6 +1237,7 @@ async function getAnalysisQueueSnapshot() {
 
 function getProcessLastActivityTimestamp(process) {
   if (!process || typeof process !== 'object') return 0;
+  if (Number.isInteger(process.lastActivityAt) && process.lastActivityAt > 0) return process.lastActivityAt;
   if (Number.isInteger(process.timestamp) && process.timestamp > 0) return process.timestamp;
   if (Number.isInteger(process.startedAt) && process.startedAt > 0) return process.startedAt;
   return 0;
@@ -960,18 +1286,11 @@ function getAnalysisQueueProcessContextKey(process) {
 
 function shouldProcessOccupyAnalysisQueueSlot(process) {
   if (!process || typeof process !== 'object') return false;
-  const status = normalizeProcessStatus(process.status);
-  if (process.queueManaged === true && process.slotReserved === false && status !== 'completed') {
+  const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (process.queueManaged === true && process.slotReserved === false && status !== 'queued') {
     return false;
   }
-  if (status === 'completed') {
-    if (!hasProcessReachedFinalStage(process)) return true;
-    const delivery = getProcessQueueDeliveryState(process);
-    if (delivery.confirmed === true) return false;
-    if (delivery.saveOk !== true) return false;
-    if (delivery.queueSkipped === true || delivery.flushSkipped === true) return false;
-    return true;
-  }
+  if (status === 'finalizing' || status === 'completed') return false;
   if (isClosedProcessStatus(status)) return false;
   if (status === 'queued') {
     return process.queueManaged === true && process.slotReserved === true;
@@ -1160,6 +1479,7 @@ async function getAnalysisQueueStatusSnapshot() {
   const startingSlots = Math.max(0, reservedSlots - liveSlots);
   return {
     success: true,
+    version: analysisQueueVersion,
     maxConcurrent: snapshot.maxConcurrent,
     activeSlots,
     reservedSlots,
@@ -1173,8 +1493,11 @@ async function getAnalysisQueueStatusSnapshot() {
   };
 }
 
-async function broadcastProcessUpdate() {
-  const processes = await getProcessSnapshot();
+async function broadcastProcessUpdate(options = {}) {
+  const providedProcesses = Array.isArray(options?.processes) ? options.processes : null;
+  const processes = applyQueuePositionsToProcesses(
+    providedProcesses || await getProcessSnapshot()
+  );
   let queue = null;
   try {
     queue = await getAnalysisQueueStatusSnapshot();
@@ -1185,7 +1508,10 @@ async function broadcastProcessUpdate() {
     await chrome.runtime.sendMessage({
       type: 'PROCESSES_UPDATE',
       processes,
-      queue
+      queue,
+      version: Number.isInteger(options?.version) ? options.version : processSnapshotVersion,
+      queueVersion: Number.isInteger(queue?.version) ? queue.version : analysisQueueVersion,
+      reason: typeof options?.reason === 'string' ? options.reason : ''
     });
   } catch (error) {
     // Ignore: no listeners currently connected.
@@ -3541,14 +3867,22 @@ function shouldDispatchProblemLogRemotely(entry) {
 
 function shouldRecordIssueForProcess(process) {
   if (!process || typeof process !== 'object') return false;
-  const status = normalizeProcessStatus(process.status);
+  const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (isFailedProcessStatus(status)) return true;
-  if (process.needsAction === true) return true;
+  if (normalizeProcessActionRequired(process.actionRequired || '', deriveProcessActionRequired(process)) !== 'none') {
+    return true;
+  }
   const reason = typeof process.reason === 'string' ? process.reason.toLowerCase() : '';
   const error = typeof process.error === 'string' ? process.error.toLowerCase() : '';
   const statusText = typeof process.statusText === 'string' ? process.statusText.toLowerCase() : '';
-  const markers = ['error', 'fail', 'timeout', 'invalid', 'not_ready', 'needs_action', 'critical'];
-  return markers.some((marker) => reason.includes(marker) || error.includes(marker) || statusText.includes(marker));
+  const statusCode = typeof process.statusCode === 'string' ? process.statusCode.toLowerCase() : '';
+  const markers = ['error', 'fail', 'timeout', 'invalid', 'not_ready', 'needs_action', 'critical', 'dispatch.failed'];
+  return markers.some((marker) => (
+    reason.includes(marker)
+    || error.includes(marker)
+    || statusText.includes(marker)
+    || statusCode.includes(marker)
+  ));
 }
 
 function shouldRecordSuccessForProcess(process, status, stage) {
@@ -3639,8 +3973,8 @@ function resolveProcessStageSnapshot(process) {
 
 function hasProcessReachedFinalStage(process) {
   if (!process || typeof process !== 'object') return false;
-  const status = normalizeProcessStatus(process.status);
-  if (status !== 'completed') return false;
+  const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (status !== 'completed' && status !== 'finalizing') return false;
   const stage = resolveProcessStageSnapshot(process);
   const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : 0;
   const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : 0;
@@ -4337,43 +4671,109 @@ async function upsertProcess(runId, patch = {}) {
     id: runId,
     title: 'Bez tytulu',
     analysisType: 'company',
+    lifecycleStatus: 'starting',
     status: 'starting',
+    phase: 'slot_reserved',
+    actionRequired: 'none',
     currentPrompt: 0,
     totalPrompts: 0,
     startedAt: Date.now(),
     timestamp: Date.now(),
     needsAction: false,
+    version: 0,
     messages: []
   };
 
-  const existingStatus = normalizeProcessStatus(existing.status);
+  const existingStatus = normalizeProcessLifecycleStatus(existing.lifecycleStatus || existing.status, 'starting');
   if (existingStatus === 'stopped' && !patchData.forceStatusOverride) {
-    const requestedStatus = typeof patchData.status === 'string'
-      ? normalizeProcessStatus(patchData.status)
-      : '';
+    const requestedStatus = normalizeProcessLifecycleStatus(
+      patchData.lifecycleStatus || patchData.status,
+      ''
+    );
     if (!requestedStatus || requestedStatus !== 'stopped') {
+      patchData.lifecycleStatus = 'stopped';
       patchData.status = 'stopped';
     }
+    patchData.actionRequired = 'none';
     patchData.needsAction = false;
     if (!patchData.reason && typeof existing.reason === 'string') {
       patchData.reason = existing.reason;
     }
-    if (!patchData.statusText && typeof existing.statusText === 'string') {
-      patchData.statusText = existing.statusText;
+    if (!patchData.statusCode && typeof existing.statusCode === 'string') {
+      patchData.statusCode = existing.statusCode;
     }
   }
   delete patchData.forceStatusOverride;
+
+  if (!Number.isInteger(patchData.attempt) && Number.isInteger(patchData?.autoRecovery?.attempt)) {
+    patchData.attempt = patchData.autoRecovery.attempt;
+  }
+  if (!Number.isInteger(patchData.retryCount) && Number.isInteger(patchData.attempt)) {
+    patchData.retryCount = patchData.attempt;
+  }
+
+  const nowTs = Number.isInteger(patchData.timestamp) ? patchData.timestamp : Date.now();
+  const nextLifecycleStatus = normalizeProcessLifecycleStatus(
+    patchData.lifecycleStatus || patchData.status || existing.lifecycleStatus || existing.status,
+    'running'
+  );
+  const previousPhase = normalizeProcessPhase(
+    existing.phase,
+    typeof ProcessContractUtils.defaultPhaseForLifecycle === 'function'
+      ? ProcessContractUtils.defaultPhaseForLifecycle(existingStatus)
+      : ''
+  );
+  const nextPhase = normalizeProcessPhase(
+    patchData.phase,
+    previousPhase || (
+      typeof ProcessContractUtils.defaultPhaseForLifecycle === 'function'
+        ? ProcessContractUtils.defaultPhaseForLifecycle(nextLifecycleStatus)
+        : ''
+    )
+  );
+  const nextActionRequired = normalizeProcessActionRequired(
+    patchData.actionRequired,
+    deriveProcessActionRequired({
+      ...existing,
+      ...patchData,
+      lifecycleStatus: nextLifecycleStatus,
+      phase: nextPhase
+    })
+  );
 
   const next = normalizeProcessRecord({
     ...existing,
     ...patchData,
     id: runId,
+    lifecycleStatus: nextLifecycleStatus,
+    status: nextLifecycleStatus,
+    phase: nextPhase,
+    actionRequired: nextActionRequired,
     startedAt: existing.startedAt || Date.now(),
-    timestamp: Number.isInteger(patchData.timestamp) ? patchData.timestamp : Date.now()
+    phaseStartedAt: nextPhase && nextPhase !== previousPhase
+      ? nowTs
+      : (
+        Number.isInteger(patchData.phaseStartedAt) && patchData.phaseStartedAt > 0
+          ? patchData.phaseStartedAt
+          : (
+            Number.isInteger(existing.phaseStartedAt) && existing.phaseStartedAt > 0
+              ? existing.phaseStartedAt
+              : nowTs
+          )
+      ),
+    lastActivityAt: Number.isInteger(patchData.lastActivityAt) && patchData.lastActivityAt > 0
+      ? patchData.lastActivityAt
+      : nowTs,
+    timestamp: nowTs,
+    version: Math.max(
+      Number.isInteger(existing.version) ? existing.version : 0,
+      Number.isInteger(patchData.version) ? patchData.version : 0
+    ) + 1
   });
 
   if (!next) return null;
   mergeProcessConversationUrls(existing, next);
+  processRegistryVersion = Math.max(processRegistryVersion, Number.isInteger(next.version) ? next.version : 0);
   const problemEntry = buildProcessProblemLogEntry(runId, next);
   const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
   const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
@@ -4396,6 +4796,23 @@ async function upsertProcess(runId, patch = {}) {
     processStaleWarnLastEmitTsByRunId.delete(runId);
   }
   processRegistry.set(runId, next);
+  logger.event({
+    level: isClosedProcessStatus(next.lifecycleStatus || next.status)
+      ? (normalizeProcessLifecycleStatus(next.lifecycleStatus || next.status) === 'failed' ? 'warn' : 'info')
+      : 'info',
+    area: 'process',
+    event: 'upsert',
+    runId,
+    phase: next.phase || '',
+    statusCode: next.statusCode || '',
+    meta: {
+      lifecycleStatus: next.lifecycleStatus || next.status,
+      actionRequired: next.actionRequired || 'none',
+      version: next.version,
+      currentPrompt: next.currentPrompt,
+      totalPrompts: next.totalPrompts
+    }
+  });
   scheduleCompletedProcessPersistenceRetry(next, {
     origin: 'process_upsert'
   });
@@ -4406,8 +4823,10 @@ async function upsertProcess(runId, patch = {}) {
     console.warn('[manual-pdf] batch progress update failed:', error?.message || String(error));
   });
   logProcessTransition(runId, next, patchData);
-  await persistProcessRegistry();
-  await broadcastProcessUpdate();
+  const flushImmediately = shouldFlushProcessUpdateImmediately(existing, next, patchData);
+  await scheduleProcessRegistryFlush('process_upsert', {
+    immediate: flushImmediately
+  });
   return next;
 }
 
@@ -4903,6 +5322,11 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
   const nextLog = [...previousLog.slice(-15), deliveryLogEntry];
 
   const patch = {
+    lifecycleStatus: 'completed',
+    status: 'completed',
+    phase: 'verify_remote',
+    actionRequired: 'none',
+    statusCode: 'dispatch.confirmed',
     completedResponseDispatch: nextDispatch,
     completedResponseDispatchSummary: dispatchSummary,
     completedResponseDispatchProcessLog: nextLog.slice(-16),
@@ -5029,8 +5453,8 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     return { action: 'release', closeWindow: false, reason: 'missing_process' };
   }
 
-  const status = normalizeProcessStatus(process.status);
-  if (status === 'completed') {
+  const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (status === 'finalizing' || status === 'completed') {
     if (!hasProcessReachedFinalStage(process)) {
       return {
         action: 'keep',
@@ -5059,19 +5483,10 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
         reason: 'dispatch_skipped'
       };
     }
-
-    const dispatchDeadlineAt = resolveAnalysisQueueDispatchDeadlineAt(job, process, nowTs);
-    if (dispatchDeadlineAt > nowTs) {
-      return {
-        action: 'keep',
-        queueState: 'awaiting_dispatch',
-        dispatchDeadlineAt
-      };
-    }
     return {
       action: 'release',
       closeWindow: true,
-      reason: 'pending_dispatch_timeout'
+      reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending'
     };
   }
 
@@ -5117,10 +5532,11 @@ async function markTrackedProcessStoppedForClosedTab(tabId, removeInfo = null) {
     const refreshedProcess = processRegistry.get(process.id) || process;
     const delivery = getProcessQueueDeliveryState(refreshedProcess);
     await upsertProcess(process.id, {
-      status: 'completed',
-      statusText: delivery.confirmed === true
-        ? 'Zakonczono - odzyskano zapis po zamknieciu karty'
-        : 'Zakonczono - zapis odzyskany, oczekuje dispatch',
+      lifecycleStatus: delivery.confirmed === true ? 'completed' : 'finalizing',
+      status: delivery.confirmed === true ? 'completed' : 'finalizing',
+      phase: delivery.confirmed === true ? 'verify_remote' : 'dispatch_remote',
+      actionRequired: 'none',
+      statusCode: delivery.confirmed === true ? 'dispatch.confirmed' : 'dispatch.verify_pending',
       reason: delivery.confirmed === true
         ? 'tab_closed_after_completion'
         : 'tab_closed_after_completion_pending_dispatch',
@@ -5367,7 +5783,8 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
 
   let process = processRegistry.get(normalizedRunId) || null;
   if (!process || typeof process !== 'object') return false;
-  if (normalizeProcessStatus(process.status) !== 'completed') return false;
+  const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing') return false;
   if (process.queueManaged !== true) return false;
   const slotAlreadyReleased = process.slotReserved === false
     || process.queueState === 'slot_released'
@@ -5376,6 +5793,17 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
 
   const delivery = getProcessQueueDeliveryState(process);
   if (delivery.confirmed !== true) return false;
+  if (lifecycleStatus !== 'completed') {
+    await upsertProcess(normalizedRunId, {
+      lifecycleStatus: 'completed',
+      status: 'completed',
+      phase: 'verify_remote',
+      actionRequired: 'none',
+      statusCode: 'dispatch.confirmed',
+      timestamp: Date.now()
+    });
+    process = processRegistry.get(normalizedRunId) || process;
+  }
 
   const trace = buildProcessCopyTrace(process, normalizedRunId);
   const now = Date.now();
@@ -5685,6 +6113,7 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
       success: true,
       jobs: [],
       queuedCount: 0,
+      maxConcurrent: emptySnapshot.maxConcurrent,
       queueSize: emptySnapshot.queueSize,
       activeSlots: emptySnapshot.activeSlots,
       reservedSlots: emptySnapshot.reservedSlots,
@@ -5719,13 +6148,7 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
       nextJobs.push(prepared);
     }
 
-    state.waitingJobs.sort((left, right) => {
-      const seqDiff = (left.sequence || 0) - (right.sequence || 0);
-      if (seqDiff !== 0) return seqDiff;
-      const createdDiff = (left.createdAt || 0) - (right.createdAt || 0);
-      if (createdDiff !== 0) return createdDiff;
-      return String(left.jobId || '').localeCompare(String(right.jobId || ''));
-    });
+    sortAnalysisQueueWaitingJobs(state.waitingJobs);
 
     queuedJobs = nextJobs;
     return persistAnalysisQueueState(state);
@@ -5773,6 +6196,7 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
     success: true,
     jobs: queuedJobs,
     queuedCount: queuedJobs.length,
+    maxConcurrent: queueSnapshot.maxConcurrent,
     queueSize: queueSnapshot.queueSize,
     activeSlots: queueSnapshot.activeSlots,
     reservedSlots: queueSnapshot.reservedSlots,
@@ -6216,6 +6640,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           excludedRunIds: releasedRunIds
         });
         let reservedSlots = occupiedSlots.length;
+        sortAnalysisQueueWaitingJobs(state.waitingJobs);
         while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
           const waitingJob = state.waitingJobs.shift();
           const activatedJob = sanitizeAnalysisQueueJob({
@@ -6253,14 +6678,12 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             slotReleaseReason: release.reason,
             timestamp: now
           };
-          if (release.reason === 'pending_dispatch_timeout') {
-            releasePatch.statusText = 'Analiza zakonczona ponad 5 min temu, dispatch nadal niepotwierdzony - zamykam okno';
-            releasePatch.reason = 'pending_dispatch_timeout';
+          if (release.reason === 'dispatch_pending') {
+            releasePatch.reason = 'dispatch_pending';
+            releasePatch.queueState = 'dispatch_pending';
           } else if (release.reason === 'local_save_failed') {
-            releasePatch.statusText = 'Final wygenerowany, zapis lokalny nieudany - zamykam okno';
             releasePatch.reason = 'local_save_failed';
           } else if (release.reason === 'dispatch_skipped') {
-            releasePatch.statusText = 'Final zapisany lokalnie, dispatch pominiety - zamykam okno';
             releasePatch.reason = 'dispatch_skipped';
           }
           await upsertProcess(release.job.runId, releasePatch);
@@ -7374,17 +7797,26 @@ async function handleProcessProgressMessage(message, sender) {
   if (!runId) return false;
 
   const nowTs = Date.now();
+  const explicitLifecycleStatus = normalizeProcessLifecycleStatus(
+    message?.lifecycleStatus || message?.status,
+    'running'
+  );
+  const explicitActionRequired = normalizeProcessActionRequired(
+    message?.actionRequired,
+    deriveProcessActionRequired(message || {})
+  );
   const patch = {
     timestamp: nowTs,
     lastProgressAt: nowTs,
-    needsAction: !!message?.needsAction
+    lastActivityAt: nowTs,
+    lifecycleStatus: explicitLifecycleStatus,
+    status: explicitLifecycleStatus,
+    actionRequired: explicitActionRequired,
+    needsAction: explicitActionRequired !== 'none'
   };
 
-  if (typeof message?.status === 'string' && message.status.trim()) {
-    patch.status = message.status;
-  } else {
-    patch.status = 'running';
-  }
+  if (typeof message?.phase === 'string' && message.phase.trim()) patch.phase = message.phase.trim();
+  if (typeof message?.statusCode === 'string' && message.statusCode.trim()) patch.statusCode = message.statusCode.trim();
   if (Number.isInteger(message?.currentPrompt)) patch.currentPrompt = message.currentPrompt;
   if (Number.isInteger(message?.totalPrompts)) patch.totalPrompts = message.totalPrompts;
   if (typeof message?.statusText === 'string') patch.statusText = message.statusText;
@@ -7410,16 +7842,28 @@ async function handleProcessNeedsActionMessage(message, sender) {
   const runId = await resolveProcessId(message, sender);
   if (!runId) return false;
   const nowTs = Date.now();
+  const explicitActionRequired = normalizeProcessActionRequired(
+    message?.actionRequired,
+    deriveProcessActionRequired({
+      ...message,
+      needsAction: true
+    })
+  );
   const patch = {
-    status: 'running',
+    lifecycleStatus: normalizeProcessLifecycleStatus(message?.lifecycleStatus || 'running', 'running'),
+    status: normalizeProcessLifecycleStatus(message?.lifecycleStatus || 'running', 'running'),
     needsAction: true,
+    actionRequired: explicitActionRequired === 'none' ? 'manual_resume' : explicitActionRequired,
     timestamp: nowTs,
+    lastActivityAt: nowTs,
     lastProgressAt: nowTs
   };
   if (Number.isInteger(message?.currentPrompt)) patch.currentPrompt = message.currentPrompt;
   if (Number.isInteger(message?.totalPrompts)) patch.totalPrompts = message.totalPrompts;
   if (Number.isInteger(message?.stageIndex)) patch.stageIndex = message.stageIndex;
   if (typeof message?.stageName === 'string') patch.stageName = message.stageName;
+  if (typeof message?.phase === 'string') patch.phase = message.phase;
+  if (typeof message?.statusCode === 'string') patch.statusCode = message.statusCode;
   if (typeof message?.statusText === 'string') patch.statusText = message.statusText;
   if (typeof message?.reason === 'string') patch.reason = message.reason;
   const conversationUrl = resolveProcessConversationUrlFromMessage(message, sender);
@@ -7445,11 +7889,15 @@ async function handleProcessActionResolvedMessage(message, sender) {
   const decision = message?.decision === 'skip' ? 'skip' : 'wait';
   const nowTs = Date.now();
   const patch = {
+    lifecycleStatus: 'running',
     status: 'running',
     needsAction: false,
+    actionRequired: 'none',
     reason: '',
+    statusCode: decision === 'skip' ? 'process.manual_resume_resolved' : 'process.wait_resolved',
     statusText: getDecisionResolvedStatusText(decision),
     timestamp: nowTs,
+    lastActivityAt: nowTs,
     lastProgressAt: nowTs
   };
   const conversationUrl = resolveProcessConversationUrlFromMessage(message, sender);
@@ -14327,6 +14775,9 @@ function buildPersistenceUiSummary(options = {}) {
     return {
       saveOk: false,
       hasResponse: false,
+      lifecycleStatus: 'failed',
+      phase: 'save_local',
+      statusCode: 'response.empty',
       statusText: 'Zakonczono (pusta odpowiedz)',
       reason: 'empty_response',
       tone: 'warn',
@@ -14355,6 +14806,9 @@ function buildPersistenceUiSummary(options = {}) {
     return {
       saveOk: false,
       hasResponse: true,
+      lifecycleStatus: 'failed',
+      phase: 'save_local',
+      statusCode: 'storage.save_failed',
       statusText: `Zakonczono | ${storageSummary}${bridgeStatusChunk} | ${dispatchSummary}`,
       reason: 'save_failed',
       tone: 'error',
@@ -14407,9 +14861,40 @@ function buildPersistenceUiSummary(options = {}) {
     || !!bridgeSummary
   ) ? 'warn' : 'success';
   const bridgeStatusChunk = bridgeSummary ? ` | ${bridgeSummary}` : '';
+  const dispatchState = typeof dispatch?.state === 'string' ? dispatch.state.trim() : '';
+  const failedDispatch = (Number.isInteger(dispatch?.failed) && dispatch.failed > 0)
+    || dispatchState === 'dispatch_failed'
+    || dispatch?.queueSkipped === true;
+  const pendingDispatch = dispatchState === 'dispatch_pending'
+    || dispatchState === 'dispatch_queued_no_flush_result'
+    || dispatch?.flushSkipped === true
+    || (Number.isInteger(dispatch?.deferred) && dispatch.deferred > 0)
+    || (Number.isInteger(dispatch?.remaining) && dispatch.remaining > 0)
+    || (Number.isInteger(dispatch?.accepted) && dispatch.accepted > 0 && (!Number.isInteger(dispatch?.sent) || dispatch.sent === 0));
+  const confirmedDispatch = dispatchState === 'dispatch_confirmed'
+    || (
+      Number.isInteger(dispatch?.sent) && dispatch.sent > 0
+      && (!Number.isInteger(dispatch?.failed) || dispatch.failed === 0)
+      && (!Number.isInteger(dispatch?.remaining) || dispatch.remaining === 0)
+      && (!Number.isInteger(dispatch?.deferred) || dispatch.deferred === 0)
+      && dispatch?.queueSkipped !== true
+      && dispatch?.flushSkipped !== true
+    );
+  const lifecycleStatus = failedDispatch
+    ? 'failed'
+    : (confirmedDispatch ? 'completed' : 'finalizing');
+  const phase = confirmedDispatch
+    ? 'verify_remote'
+    : (pendingDispatch ? 'dispatch_remote' : 'save_local');
+  const statusCode = failedDispatch
+    ? (dispatch?.queueSkipped === true ? 'dispatch.skipped' : 'dispatch.failed')
+    : (confirmedDispatch ? 'dispatch.confirmed' : (phase === 'dispatch_remote' ? 'dispatch.pending' : 'storage.saved_local'));
   return {
     saveOk: true,
     hasResponse: true,
+    lifecycleStatus,
+    phase,
+    statusCode,
     statusText: `Zakonczono | ${storageSummary}${bridgeStatusChunk} | ${dispatchSummary}`,
     reason: '',
     tone,
@@ -14804,6 +15289,31 @@ function normalizeStructuredWatchlistObject(value) {
   return Object.keys(normalized).length > 0 ? normalized : null;
 }
 
+const STRUCTURED_WATCHLIST_OPPORTUNITY_KEYS = [
+  'value_chain_position',
+  'price_dislocation_reason',
+  'rerating_catalyst_type',
+  'time_horizon_type',
+  'entry_condition_type'
+];
+const STRUCTURED_WATCHLIST_CHARACTER_KEYS = [
+  'quality_state',
+  'safety_state',
+  'thesis_stock_relationship',
+  'proof_class',
+  'confidence_in_thesis',
+  'primary_kill_risk'
+];
+
+function normalizeStructuredWatchlistNamedSection(rawSection, keys) {
+  const section = normalizeStructuredWatchlistObject(rawSection);
+  const normalized = {};
+  keys.forEach((key) => {
+    normalized[key] = normalizeStructuredWatchlistValue(section?.[key]);
+  });
+  return Object.keys(normalized).length > 0 ? normalized : null;
+}
+
 function serializeStructuredWatchlistKpiScorecard(rawKpi) {
   const kpi = normalizeStructuredWatchlistObject(rawKpi);
   if (!kpi) return '';
@@ -14842,12 +15352,16 @@ function sanitizeStructuredWatchlistRecord(rawRecord) {
   }
 
   const taxonomy = normalizeStructuredWatchlistObject(rawRecord.taxonomy);
+  const opportunity = normalizeStructuredWatchlistNamedSection(rawRecord.opportunity, STRUCTURED_WATCHLIST_OPPORTUNITY_KEYS);
+  const character = normalizeStructuredWatchlistNamedSection(rawRecord.character, STRUCTURED_WATCHLIST_CHARACTER_KEYS);
   const kpi = normalizeStructuredWatchlistObject(rawRecord.kpi);
   const extras = normalizeStructuredWatchlistObject(rawRecord.extras);
   return {
     decision_role: decisionRole || '',
     fields,
     ...(taxonomy ? { taxonomy } : {}),
+    ...(opportunity ? { opportunity } : {}),
+    ...(character ? { character } : {}),
     ...(kpi ? { kpi } : {}),
     ...(extras ? { extras } : {})
   };
@@ -14926,6 +15440,52 @@ function buildResponseContractValidation(rawText) {
   };
 }
 
+function buildCompletedStage12Snapshot(rawText, sourceTitle = '') {
+  const text = typeof rawText === 'string' ? rawText : '';
+  const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
+    ? DecisionContractUtils.validateDecisionContractText(text)
+    : null;
+  const decisionContract = validation?.decisionContract && typeof validation.decisionContract === 'object'
+    ? validation.decisionContract
+    : null;
+  if (!validation || !decisionContract) return null;
+  const records = Array.isArray(validation?.records)
+    ? validation.records
+      .filter((record) => record && typeof record === 'object')
+      .map((record) => ({
+        decisionRole: typeof record.decisionRole === 'string' ? record.decisionRole : '',
+        company: typeof record.company === 'string' ? record.company : '',
+        decisionStatus: typeof record.decisionStatus === 'string' ? record.decisionStatus : '',
+        decisionDate: typeof record.decisionDate === 'string' ? record.decisionDate : '',
+        bear: typeof record.bear === 'string' ? record.bear : '',
+        base: typeof record.base === 'string' ? record.base : '',
+        bull: typeof record.bull === 'string' ? record.bull : '',
+        sector: typeof record.sector === 'string' ? record.sector : '',
+        companyFamily: typeof record.companyFamily === 'string' ? record.companyFamily : '',
+        companyType: typeof record.companyType === 'string' ? record.companyType : '',
+        revenueModel: typeof record.revenueModel === 'string' ? record.revenueModel : '',
+        region: typeof record.region === 'string' ? record.region : '',
+        currency: typeof record.currency === 'string' ? record.currency : '',
+        composite: typeof record.composite === 'string' ? record.composite : '',
+        sizing: typeof record.sizing === 'string' ? record.sizing : '',
+        voi: typeof record.voi === 'string' ? record.voi : '',
+        fals: typeof record.fals === 'string' ? record.fals : '',
+        primaryRisk: typeof record.primaryRisk === 'string' ? record.primaryRisk : ''
+      }))
+    : [];
+  return {
+    company: typeof validation?.company === 'string' && validation.company.trim()
+      ? validation.company.trim()
+      : (typeof sourceTitle === 'string' ? sourceTitle.trim() : ''),
+    status: typeof decisionContract.status === 'string' ? decisionContract.status : 'invalid',
+    issueCodes: Array.isArray(decisionContract.issueCodes) ? decisionContract.issueCodes.slice() : [],
+    recordCount: Number.isInteger(decisionContract.recordCount) ? decisionContract.recordCount : records.length,
+    recordFormats: Array.isArray(decisionContract.recordFormats) ? decisionContract.recordFormats.slice() : [],
+    hasDecisionRecord: records.length > 0,
+    records
+  };
+}
+
 function mapDispatchDecisionRecord(record) {
   if (typeof WatchlistDispatchShapeUtils.mapDecisionRecordForDispatch === 'function') {
     return WatchlistDispatchShapeUtils.mapDecisionRecordForDispatch(record);
@@ -14963,84 +15523,57 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
-  const structuredResponse = (() => {
-    const schema = normalizeStructuredWatchlistValue(response.schema).toLowerCase();
-    if (schema === 'economist.response.v2') {
-      const recordCandidates = Array.isArray(response.records)
-        ? response.records
-        : [response];
-      const records = recordCandidates
-        .map((record) => sanitizeStructuredWatchlistRecord(record))
-        .filter((record) => !!record);
-      if (records.length > 0) {
-        return {
-          schema: 'economist.response.v2',
-          schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
-          records
-        };
-      }
-    }
-    return extractStructuredWatchlistResponseFromText(text);
-  })();
-  const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
-  if (structuredResponse) {
-    const payload = {
-      schema: 'economist.response.v2',
-      responseId: responseId || generateResponseId(runId),
-      runId: runId || null,
-      text: text.trim(),
-      source: typeof response.source === 'string' ? response.source : '',
-      analysisType: typeof response.analysisType === 'string' ? response.analysisType : '',
-      timestamp: response.timestamp ?? Date.now(),
-      records: structuredResponse.records
-    };
-    if (structuredResponse.schemaVersion) {
-      payload.schema_version = structuredResponse.schemaVersion;
-    }
-    if (sourceMeta.sourceTitle) {
-      payload.sourceTitle = sourceMeta.sourceTitle;
-    }
-    if (sourceMeta.sourceName) {
-      payload.sourceName = sourceMeta.sourceName;
-    }
-    if (sourceMeta.sourceUrl) {
-      payload.sourceUrl = sourceMeta.sourceUrl;
-    }
-    payload.decisionRecordCount = structuredResponse.records.length;
-    const conversationUrl = normalizeChatConversationUrl(response.conversationUrl);
-    if (conversationUrl) {
-      payload.conversationUrl = conversationUrl;
-    }
-    const conversationLogs = normalizeConversationLogSnapshot(
-      response.conversationLogs,
-      RESPONSE_CONVERSATION_LOG_MAX_ITEMS
-    );
-    if (conversationLogs.length > 0) {
-      payload.conversationLogs = conversationLogs;
-      payload.conversationLogCount = conversationLogs.length;
-    } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
-      payload.conversationLogCount = response.conversationLogCount;
-    }
-    return payload;
-  }
-
   const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
     ? DecisionContractUtils.validateDecisionContractText(text)
     : null;
+  const directStructuredRecords = Array.isArray(response.records)
+    ? (
+      typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
+        ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(response.records)
+        : response.records
+          .map((record) => sanitizeStructuredWatchlistRecord(record))
+          .filter((record) => !!record)
+    )
+    : [];
+  const extractedStructuredPayload = typeof DecisionContractUtils.extractStructuredDecisionPayload === 'function'
+    ? DecisionContractUtils.extractStructuredDecisionPayload(text)
+    : null;
+  const structuredPayload = directStructuredRecords.length > 0
+    ? {
+      schema: 'economist.response.v2',
+      schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
+      records: directStructuredRecords
+    }
+    : (
+      extractedStructuredPayload?.records?.length
+        ? {
+          schema: 'economist.response.v2',
+          schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
+          records: typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
+            ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(extractedStructuredPayload.records)
+            : extractedStructuredPayload.records
+        }
+        : extractStructuredWatchlistResponseFromText(text)
+    );
   const decisionRecords = Array.isArray(validation?.records) ? validation.records : extractDecisionRecordsFromText(text);
   const decisionRecord = validation?.primaryRecord
     || validation?.selectedRecord
     || decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
     || decisionRecords[decisionRecords.length - 1]
     || null;
-  const dispatchText = typeof validation?.canonicalText === 'string' && validation.canonicalText.trim()
-    ? validation.canonicalText
-    : (decisionRecords.length > 0
-      ? decisionRecords.map((record) => record.canonicalLine).join('\n')
-      : text);
+  const dispatchText = structuredPayload
+    ? text.trim()
+    : (
+      typeof validation?.canonicalText === 'string' && validation.canonicalText.trim()
+        ? validation.canonicalText
+        : (decisionRecords.length > 0
+          ? decisionRecords.map((record) => record.canonicalLine).join('\n')
+          : text)
+    );
+  const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
 
   const payload = {
-    schema: "economist.response.v1",
+    schema: structuredPayload ? 'economist.response.v2' : 'economist.response.v1',
     responseId: responseId || generateResponseId(runId),
     runId: runId || null,
     text: dispatchText,
@@ -15057,6 +15590,14 @@ function normalizeWatchlistDispatchPayload(response) {
   if (sourceMeta.sourceUrl) {
     payload.sourceUrl = sourceMeta.sourceUrl;
   }
+  if (structuredPayload?.schemaVersion) {
+    payload.schema_version = structuredPayload.schemaVersion;
+  }
+  if (structuredPayload?.records?.length) {
+    payload.records = typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
+      ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(structuredPayload.records)
+      : structuredPayload.records;
+  }
   if (decisionRecord) {
     payload.decisionRecord = mapDispatchDecisionRecord(decisionRecord);
     payload.decisionRecordCount = decisionRecords.length;
@@ -15065,6 +15606,8 @@ function normalizeWatchlistDispatchPayload(response) {
       : decisionRecords
         .map((record) => mapDispatchDecisionRecord(record))
         .filter((record) => !!record);
+  } else if (structuredPayload?.records?.length) {
+    payload.decisionRecordCount = structuredPayload.records.length;
   }
   if (response.decisionContract && typeof response.decisionContract === 'object') {
     payload.decisionContract = response.decisionContract;
@@ -15093,7 +15636,11 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const rawText = typeof rawPayload.text === 'string' ? rawPayload.text : '';
   if (!rawText.trim()) return null;
 
-  const schema = trimProblemLogText(rawPayload.schema || 'economist.response.v1', 80) || 'economist.response.v1';
+  const hasStructuredRecords = Array.isArray(rawPayload.records) && rawPayload.records.length > 0;
+  const schema = trimProblemLogText(
+    rawPayload.schema || (hasStructuredRecords ? 'economist.response.v2' : 'economist.response.v1'),
+    80
+  ) || (hasStructuredRecords ? 'economist.response.v2' : 'economist.response.v1');
   const runId = typeof rawPayload.runId === 'string' ? rawPayload.runId.trim() : '';
   const responseId = typeof rawPayload.responseId === 'string' && rawPayload.responseId.trim()
     ? rawPayload.responseId.trim()
@@ -15102,15 +15649,18 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const analysisType = trimProblemLogText(rawPayload.analysisType || '', 80);
   const sourceMeta = normalizeResponseSourceMeta(rawPayload, source);
   const structuredResponse = (() => {
-    if (schema !== 'economist.response.v2') {
+    if (schema !== 'economist.response.v2' && !hasStructuredRecords) {
       return null;
     }
-    const recordCandidates = Array.isArray(rawPayload.records)
-      ? rawPayload.records
-      : [rawPayload];
-    const records = recordCandidates
-      .map((record) => sanitizeStructuredWatchlistRecord(record))
-      .filter((record) => !!record);
+    const records = Array.isArray(rawPayload.records)
+      ? (
+        typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
+          ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(rawPayload.records)
+          : rawPayload.records
+            .map((record) => sanitizeStructuredWatchlistRecord(record))
+            .filter((record) => !!record)
+      )
+      : [];
     if (records.length > 0) {
       return {
         schema: 'economist.response.v2',
@@ -15146,6 +15696,11 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   }
   if (structuredResponse?.schemaVersion) {
     payload.schema_version = structuredResponse.schemaVersion;
+  }
+  if (Array.isArray(rawPayload.records)) {
+    payload.records = typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
+      ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(rawPayload.records)
+      : rawPayload.records;
   }
 
   const conversationUrl = normalizeChatConversationUrl(rawPayload.conversationUrl);
@@ -15549,6 +16104,7 @@ function isWatchlistVerificationTerminalState(state) {
   return normalized === 'missing_fields'
     || normalized === 'mismatch'
     || normalized === 'ingest_failed'
+    || normalized === 'ingest_quarantined'
     || normalized === 'materialization_unavailable';
 }
 
@@ -19280,6 +19836,16 @@ async function saveResponse(
     const copyFingerprint = textFingerprint(responseText);
     const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
     const normalizedSourceMeta = normalizeResponseSourceMeta(sourceMeta, source);
+    if (normalizedRunId) {
+      await upsertProcess(normalizedRunId, {
+        lifecycleStatus: 'finalizing',
+        status: 'finalizing',
+        phase: 'save_local',
+        actionRequired: 'none',
+        statusCode: 'storage.saving_local',
+        timestamp: Date.now()
+      });
+    }
     const conversationLogs = await buildConversationLogSnapshotForResponse({
       runId: normalizedRunId,
       conversationUrl: normalizedConversationUrl,
@@ -19593,6 +20159,16 @@ async function saveResponse(
     const pipelineLogLevel = pipelineDispatchState === 'dispatch_failed'
       ? 'error'
       : (pipelineDispatchState === 'dispatch_confirmed' ? 'info' : 'warn');
+    const completedStage12Snapshot = buildCompletedStage12Snapshot(responseText, normalizedSourceMeta.sourceTitle || source);
+    const persistenceLifecycleStatus = pipelineDispatchState === 'dispatch_confirmed'
+      ? 'completed'
+      : (pipelineDispatchState === 'dispatch_failed' || dispatchOutcome.queueSkipped === true ? 'failed' : 'finalizing');
+    const persistencePhase = pipelineDispatchState === 'dispatch_confirmed'
+      ? 'verify_remote'
+      : 'dispatch_remote';
+    const persistenceStatusCode = pipelineDispatchState === 'dispatch_confirmed'
+      ? 'dispatch.confirmed'
+      : (dispatchOutcome.queueSkipped === true ? 'dispatch.skipped' : (pipelineDispatchState === 'dispatch_failed' ? 'dispatch.failed' : 'dispatch.verify_pending'));
     emitWatchlistDispatchProcessLog(
       pipelineLogLevel,
       'pipeline_result',
@@ -19659,6 +20235,17 @@ async function saveResponse(
     console.log(`Nowy stan: ${verifiedResponses.length} odpowiedzi w storage (zweryfikowano lokalnie: ${verifiedResponses.length})`);
     console.log(`Fingerprint: ${copyFingerprint}`);
     console.log(`${'*'.repeat(80)}\n`);
+    if (normalizedRunId) {
+      await upsertProcess(normalizedRunId, {
+        lifecycleStatus: persistenceLifecycleStatus,
+        status: persistenceLifecycleStatus,
+        phase: persistencePhase,
+        actionRequired: 'none',
+        statusCode: persistenceStatusCode,
+        completedStage12Snapshot,
+        timestamp: Date.now()
+      });
+    }
     return {
       success: true,
       response: lastSaved || newResponse,
@@ -19666,7 +20253,11 @@ async function saveResponse(
       verifiedCount: verifiedResponses.length,
       dispatch: dispatchOutcome,
       dispatchProcessLog: dispatchProcessLog.slice(-16),
-      conversationAnalysis
+      conversationAnalysis,
+      completedStage12Snapshot,
+      lifecycleStatus: persistenceLifecycleStatus,
+      phase: persistencePhase,
+      statusCode: persistenceStatusCode
     };
   } catch (error) {
     console.error(`\n${'!'.repeat(80)}`);
@@ -19988,10 +20579,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         getProcessSnapshot(),
         getAnalysisQueueStatusSnapshot()
       ]);
-      sendResponse({ processes, queue });
+      sendResponse({
+        processes,
+        queue,
+        version: processSnapshotVersion,
+        queueVersion: analysisQueueVersion
+      });
     })().catch((error) => {
       console.warn('[monitor] GET_PROCESSES failed:', error);
-      sendResponse({ processes: [], queue: null });
+      sendResponse({
+        processes: [],
+        queue: null,
+        version: processSnapshotVersion,
+        queueVersion: analysisQueueVersion
+      });
     });
     return true;
   } else if (message.type === 'GET_ANALYSIS_QUEUE_STATUS') {
@@ -21538,6 +22139,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ? result.metrics
       : null;
     let finalStatus = 'completed';
+    let finalPhase = 'verify_remote';
+    let finalStatusCode = 'process.completed';
     let finalStatusText = 'Zakonczono';
     let finalReason = '';
     let finalError = '';
@@ -21613,6 +22216,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             ? persistedSaveErrorFromInject
             : 'save_response_failed')
       });
+      finalStatus = persistenceSummary.lifecycleStatus || 'completed';
+      finalPhase = persistenceSummary.phase || 'verify_remote';
+      finalStatusCode = persistenceSummary.statusCode || 'process.completed';
       finalStatusText = persistenceSummary.statusText;
       finalReason = persistenceSummary.reason;
       persistencePatch = {
@@ -21644,6 +22250,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       });
     } else if (result && result.success && !hasResultLastResponse) {
       const persistenceSummary = buildPersistenceUiSummary({ hasResponse: false });
+      finalStatus = persistenceSummary.lifecycleStatus || 'failed';
+      finalPhase = persistenceSummary.phase || 'save_local';
+      finalStatusCode = persistenceSummary.statusCode || 'response.empty';
       finalStatusText = persistenceSummary.statusText;
       finalReason = persistenceSummary.reason;
       persistencePatch = {
@@ -21668,11 +22277,14 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       });
     } else if (result && !result.success) {
       finalStatus = 'failed';
+      finalPhase = 'response_wait';
       finalError = result?.error || '';
       if (finalError === 'pdf_attach_failed') {
+        finalStatusCode = 'chat.pdf_attach_failed';
         finalStatusText = 'pdf_attach_failed';
         finalReason = 'pdf_attach_failed';
       } else {
+        finalStatusCode = 'process.inject_failed';
         finalStatusText = 'Blad procesu';
         finalReason = 'inject_failed';
       }
@@ -21684,6 +22296,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       });
     } else {
       finalStatus = 'failed';
+      finalPhase = 'response_wait';
+      finalStatusCode = 'process.invalid_result';
       finalStatusText = 'Nieoczekiwany wynik';
       finalReason = 'invalid_result';
       await renderFinalCounterStatusOnTab(chatTabId, {
@@ -21697,7 +22311,11 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     await upsertProcess(processId, {
       title: processTitle,
       analysisType,
+      lifecycleStatus: finalStatus,
       status: finalStatus,
+      phase: finalPhase,
+      actionRequired: 'none',
+      statusCode: finalStatusCode,
       needsAction: false,
       statusText: finalStatusText,
       reason: finalReason,
@@ -21707,7 +22325,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(persistencePatch ? persistencePatch : {}),
       ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
       ...(Object.keys(completedResponsePatch).length > 0 ? completedResponsePatch : {}),
-      ...(finalStatus === 'completed'
+      ...((finalStatus === 'completed' || finalStatus === 'finalizing')
         ? {
           currentPrompt: processTotalPrompts,
           totalPrompts: processTotalPrompts,
@@ -21735,7 +22353,11 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     await upsertProcess(processId, {
       title: processTitle,
       analysisType,
+      lifecycleStatus: 'failed',
       status: 'failed',
+      phase: 'response_wait',
+      actionRequired: 'none',
+      statusCode: 'process.exception',
       needsAction: false,
       statusText: 'Blad procesu',
       reason: 'exception',
@@ -21754,7 +22376,6 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
 }
 
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
-  {
     const sourceTabs = Array.isArray(tabs) ? tabs.filter((tab) => !!tab) : [];
     if (sourceTabs.length === 0) {
       console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
@@ -21792,8 +22413,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         ? options.reason.trim()
         : 'process_articles_enqueue'
     });
-  }
+}
 
+// Legacy direct executor retained only as a reference during queue-first cleanup.
+async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, analysisType, options = {}) {
   if (!tabs || tabs.length === 0) {
     console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
     return [];
@@ -22206,6 +22829,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.log(`[${analysisType}] [${index + 1}/${tabs.length}] injectToChat metrics:`, injectMetrics);
       }
       let finalStatus = 'completed';
+      let finalPhase = 'verify_remote';
+      let finalStatusCode = 'process.completed';
       let finalStatusText = 'Zakonczono';
       let finalReason = '';
       let finalError = '';
@@ -22298,6 +22923,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
               ? persistedSaveErrorFromInject
               : 'save_response_failed')
         });
+        finalStatus = persistenceSummary.lifecycleStatus || 'completed';
+        finalPhase = persistenceSummary.phase || 'verify_remote';
+        finalStatusCode = persistenceSummary.statusCode || 'process.completed';
         finalStatusText = persistenceSummary.statusText;
         finalReason = persistenceSummary.reason;
         persistencePatch = {
@@ -22362,6 +22990,9 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse jest pusta lub null ⚠️ ⚠️ ⚠️`);
         console.warn(`lastResponse: "${result.lastResponse}" (długość: ${result.lastResponse?.length || 0})`);
         const persistenceSummary = buildPersistenceUiSummary({ hasResponse: false });
+        finalStatus = persistenceSummary.lifecycleStatus || 'failed';
+        finalPhase = persistenceSummary.phase || 'save_local';
+        finalStatusCode = persistenceSummary.statusCode || 'response.empty';
         finalStatusText = persistenceSummary.statusText;
         finalReason = persistenceSummary.reason;
         persistencePatch = {
@@ -22392,11 +23023,14 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
         finalStatus = 'failed';
+        finalPhase = 'response_wait';
         finalError = result?.error || '';
         if (finalError === 'pdf_attach_failed') {
+          finalStatusCode = 'chat.pdf_attach_failed';
           finalStatusText = 'pdf_attach_failed';
           finalReason = 'pdf_attach_failed';
         } else {
+          finalStatusCode = 'process.inject_failed';
           finalStatusText = 'Blad procesu';
           finalReason = 'inject_failed';
         }
@@ -22413,6 +23047,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         console.error(`success: ${result?.success}`);
         console.error(`lastResponse: ${result?.lastResponse}`);
         finalStatus = 'failed';
+        finalPhase = 'response_wait';
+        finalStatusCode = 'process.invalid_result';
         finalStatusText = 'Nieoczekiwany wynik';
         finalReason = 'invalid_result';
         await renderFinalCounterStatusOnTab(chatTabId, {
@@ -22427,7 +23063,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       await upsertProcess(processId, {
         title: processTitle,
         analysisType,
+        lifecycleStatus: finalStatus,
         status: finalStatus,
+        phase: finalPhase,
+        actionRequired: 'none',
+        statusCode: finalStatusCode,
         needsAction: false,
         statusText: finalStatusText,
         reason: finalReason,
@@ -22439,7 +23079,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
           : {}),
-        ...(finalStatus === 'completed'
+        ...((finalStatus === 'completed' || finalStatus === 'finalizing')
           ? {
             currentPrompt: processTotalPrompts,
             totalPrompts: processTotalPrompts,
@@ -22471,7 +23111,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       await upsertProcess(processId, {
         title: processTitle,
         analysisType,
+        lifecycleStatus: 'failed',
         status: 'failed',
+        phase: 'response_wait',
+        actionRequired: 'none',
+        statusCode: 'process.exception',
         needsAction: false,
         statusText: 'Blad procesu',
         reason: 'exception',
@@ -22809,397 +23453,101 @@ async function runManualSourceAnalysis(text, title, instances) {
     sourceKind: 'manual_text',
     reason: 'manual_source_enqueue'
   });
-
-  try {
-    const safeText = typeof text === 'string' ? text : '';
-    const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
-    const safeInstances = normalizeManualInstances(instances);
-
-    console.log('\n=== ROZPOCZYNAM ANALIZE Z RECZNEGO ZRODLA ===');
-    console.log(`Tytul: ${safeTitle}`);
-    console.log(`Tekst: ${safeText.length} znakow`);
-    console.log(`Instancje: ${safeInstances}`);
-
-    const promptsReady = await ensureCompanyPromptsReady();
-    if (!promptsReady || PROMPTS_COMPANY.length === 0) {
-      console.error('[manual-source] Brak promptow dla analizy spolki');
-      return;
-    }
-
-    const timestamp = Date.now();
-    const pseudoTabs = [];
-    for (let i = 0; i < safeInstances; i += 1) {
-      pseudoTabs.push({
-        id: `manual-${timestamp}-${i}`,
-        title: safeTitle,
-        url: 'manual://source',
-        manualText: safeText
-      });
-    }
-
-    await processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company');
-    console.log('\n[manual-source] Zakonczono uruchamianie analizy recznego zrodla.');
-  } catch (error) {
-    console.error('[manual-source] Blad runManualSourceAnalysis:', error);
-  }
 }
 
 async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFiles }) {
-  {
-    const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
-    const safeInstances = normalizeManualInstances(instances);
-    const normalizedFiles = normalizeManualPdfFiles(pdfFiles);
-
-    if (!safeProviderId) {
-      console.warn('[manual-pdf] Missing providerId, queue skipped.');
-      return { success: false, error: 'missing_provider_id' };
-    }
-
-    if (normalizedFiles.length === 0) {
-      console.warn('[manual-pdf] Empty PDF list, queue skipped.');
-      await notifyManualPdfProviderStatus(safeProviderId, 'failed', 'Brak poprawnych PDF do przetworzenia.');
-      await releaseManualPdfProvider(safeProviderId, 'Kolejka PDF przerwana: brak poprawnych plikow.', { success: false });
-      return { success: false, error: 'no_valid_pdf_files' };
-    }
-
-    const providerPortReady = await waitForManualPdfProviderPort(safeProviderId, 7000);
-    if (!providerPortReady) {
-      await notifyManualPdfProviderStatus(
-        safeProviderId,
-        'running',
-        'Uwaga: brak polaczenia keepalive z providerem PDF. Nie zamykaj tego okna i odswiez rozszerzenie, jesli kolejka zatrzyma sie po 1 pliku.'
-      );
-    }
-
-    const batchId = `manual-pdf-batch-${safeProviderId}-${Date.now()}`;
-    const queueJobs = [];
-    let jobIndex = 0;
-    for (const file of normalizedFiles) {
-      for (let instanceIndex = 1; instanceIndex <= safeInstances; instanceIndex += 1) {
-        const isMultiInstance = safeInstances > 1;
-        const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : file.name;
-        const runTitle = isMultiInstance
-          ? `${baseTitle} [${file.name}] [instancja ${instanceIndex}/${safeInstances}]`
-          : `${baseTitle} [${file.name}]`;
-        queueJobs.push({
-          kind: ANALYSIS_QUEUE_KIND_ARTICLE,
-          analysisType: 'company',
-          title: runTitle,
-          sourceKind: 'manual_pdf',
-          manualPdfBatchId: batchId,
-          manualPdfProviderId: safeProviderId,
-          queueBatchId: batchId,
-          tabSnapshot: {
-            id: `manual-pdf-${Date.now()}-${jobIndex}`,
-            title: runTitle,
-            url: 'manual://pdf',
-            manualText: buildManualPdfPayload(file.name),
-            manualPdfAttachment: {
-              enabled: true,
-              providerId: safeProviderId,
-              token: file.token,
-              name: file.name,
-              mimeType: 'application/pdf',
-              size: file.size,
-              instanceIndex,
-              instanceTotal: safeInstances
-            }
-          }
-        });
-        jobIndex += 1;
-      }
-    }
-
-    await notifyManualPdfProviderStatus(
-      safeProviderId,
-      'running',
-      `Zakolejkowano ${queueJobs.length} zadan PDF (${normalizedFiles.length} plikow x ${safeInstances} instancji).`,
-      {
-        totalJobs: queueJobs.length,
-        completedJobs: 0,
-        failedJobs: 0
-      }
-    );
-
-    const enqueueResult = await enqueueAnalysisJobs(queueJobs, {
-      reason: 'manual_pdf_enqueue'
-    });
-    registerManualPdfQueueBatch(batchId, safeProviderId, enqueueResult?.jobs || []);
-    return {
-      success: true,
-      mode: 'pdf',
-      queued: enqueueResult?.queuedCount || 0,
-      queuedCount: enqueueResult?.queuedCount || 0,
-      queueSize: Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : 0,
-      activeSlots: Number.isInteger(enqueueResult?.activeSlots) ? enqueueResult.activeSlots : 0,
-      reservedSlots: Number.isInteger(enqueueResult?.reservedSlots) ? enqueueResult.reservedSlots : 0,
-      liveSlots: Number.isInteger(enqueueResult?.liveSlots) ? enqueueResult.liveSlots : 0,
-      startingSlots: Number.isInteger(enqueueResult?.startingSlots) ? enqueueResult.startingSlots : 0,
-      batchId
-    };
-  }
-
   const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
   const safeInstances = normalizeManualInstances(instances);
   const normalizedFiles = normalizeManualPdfFiles(pdfFiles);
 
   if (!safeProviderId) {
     console.warn('[manual-pdf] Missing providerId, queue skipped.');
-    return;
-  }
-
-  const providerPortReady = await waitForManualPdfProviderPort(safeProviderId, 7000);
-  if (!providerPortReady) {
-    console.warn('[manual-pdf] Provider keepalive port not connected. Queue may be interrupted by worker lifecycle.', {
-      providerId: safeProviderId
-    });
-    await notifyManualPdfProviderStatus(
-      safeProviderId,
-      'running',
-      'Uwaga: brak polaczenia keepalive z providerem PDF. Nie zamykaj okna i odswiez rozszerzenie, jesli kolejka zatrzyma sie po 1 pliku.'
-    );
-  }
-
-  const promptsReady = await ensureCompanyPromptsReady();
-  if (!promptsReady || PROMPTS_COMPANY.length === 0) {
-    console.error('[manual-pdf] Brak promptow dla analizy spolki');
-    await notifyManualPdfProviderStatus(safeProviderId, 'failed', 'Brak promptow company. Kolejka przerwana.');
-    await releaseManualPdfProvider(safeProviderId, 'Kolejka PDF przerwana: brak promptow.', { success: false });
-    return;
+    return { success: false, error: 'missing_provider_id' };
   }
 
   if (normalizedFiles.length === 0) {
     console.warn('[manual-pdf] Empty PDF list, queue skipped.');
     await notifyManualPdfProviderStatus(safeProviderId, 'failed', 'Brak poprawnych PDF do przetworzenia.');
     await releaseManualPdfProvider(safeProviderId, 'Kolejka PDF przerwana: brak poprawnych plikow.', { success: false });
-    return;
+    return { success: false, error: 'no_valid_pdf_files' };
   }
 
+  const providerPortReady = await waitForManualPdfProviderPort(safeProviderId, 7000);
+  if (!providerPortReady) {
+    await notifyManualPdfProviderStatus(
+      safeProviderId,
+      'running',
+      'Uwaga: brak polaczenia keepalive z providerem PDF. Nie zamykaj tego okna i odswiez rozszerzenie, jesli kolejka zatrzyma sie po 1 pliku.'
+    );
+  }
+
+  const batchId = `manual-pdf-batch-${safeProviderId}-${Date.now()}`;
   const queueJobs = [];
+  let jobIndex = 0;
   for (const file of normalizedFiles) {
     for (let instanceIndex = 1; instanceIndex <= safeInstances; instanceIndex += 1) {
+      const isMultiInstance = safeInstances > 1;
+      const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : file.name;
+      const runTitle = isMultiInstance
+        ? `${baseTitle} [${file.name}] [instancja ${instanceIndex}/${safeInstances}]`
+        : `${baseTitle} [${file.name}]`;
       queueJobs.push({
-        file,
-        instanceIndex,
-        instanceTotal: safeInstances
+        kind: ANALYSIS_QUEUE_KIND_ARTICLE,
+        analysisType: 'company',
+        title: runTitle,
+        sourceKind: 'manual_pdf',
+        manualPdfBatchId: batchId,
+        manualPdfProviderId: safeProviderId,
+        queueBatchId: batchId,
+        tabSnapshot: {
+          id: `manual-pdf-${Date.now()}-${jobIndex}`,
+          title: runTitle,
+          url: 'manual://pdf',
+          manualText: buildManualPdfPayload(file.name),
+          manualPdfAttachment: {
+            enabled: true,
+            providerId: safeProviderId,
+            token: file.token,
+            name: file.name,
+            mimeType: 'application/pdf',
+            size: file.size,
+            instanceIndex,
+            instanceTotal: safeInstances
+          }
+        }
       });
+      jobIndex += 1;
     }
   }
-
-  const timestamp = Date.now();
-  let completedJobs = 0;
-  let failedJobs = 0;
-
-  console.log('[manual-pdf] Queue start:', {
-    providerId: safeProviderId,
-    files: normalizedFiles.length,
-    instances: safeInstances,
-    jobs: queueJobs.length
-  });
 
   await notifyManualPdfProviderStatus(
     safeProviderId,
     'running',
-    `Start kolejki PDF: ${queueJobs.length} zadan (${normalizedFiles.length} plikow x ${safeInstances} instancji).`,
-    { totalJobs: queueJobs.length, completedJobs: 0, failedJobs: 0 }
-  );
-
-  const queueConcurrency = Math.max(
-    1,
-    Math.min(
-      queueJobs.length,
-      Number.isInteger(MANUAL_PDF_QUEUE_MAX_CONCURRENCY) ? MANUAL_PDF_QUEUE_MAX_CONCURRENCY : 1
-    )
-  );
-
-  console.log('[manual-pdf] Queue concurrency:', {
-    providerId: safeProviderId,
-    jobs: queueJobs.length,
-    concurrency: queueConcurrency
-  });
-
-  try {
-    const queueState = {
-      nextJobIndex: 0,
+    `Zakolejkowano ${queueJobs.length} zadan PDF (${normalizedFiles.length} plikow x ${safeInstances} instancji).`,
+    {
+      totalJobs: queueJobs.length,
       completedJobs: 0,
       failedJobs: 0
-    };
-
-    const runSingleJob = async (job, jobIndex, workerId) => {
-      const isMultiInstance = job.instanceTotal > 1;
-      const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : job.file.name;
-      const runTitle = isMultiInstance
-        ? `${baseTitle} [${job.file.name}] [instancja ${job.instanceIndex}/${job.instanceTotal}]`
-        : `${baseTitle} [${job.file.name}]`;
-
-      console.log('[manual-pdf] job:start', {
-        index: jobIndex + 1,
-        total: queueJobs.length,
-        file: job.file.name,
-        instance: `${job.instanceIndex}/${job.instanceTotal}`,
-        workerId
-      });
-
-      await notifyManualPdfProviderStatus(
-        safeProviderId,
-        'running',
-        `Start ${jobIndex + 1}/${queueJobs.length}: ${job.file.name} (instancja ${job.instanceIndex}/${job.instanceTotal}).`,
-        {
-          currentJob: jobIndex + 1,
-          totalJobs: queueJobs.length,
-          completedJobs: queueState.completedJobs,
-          failedJobs: queueState.failedJobs,
-          workerId
-        }
-      );
-
-      const pseudoTab = {
-        id: `manual-pdf-${timestamp}-${jobIndex}`,
-        title: runTitle,
-        url: 'manual://pdf',
-        manualText: buildManualPdfPayload(job.file.name),
-        manualPdfAttachment: {
-          enabled: true,
-          providerId: safeProviderId,
-          token: job.file.token,
-          name: job.file.name,
-          mimeType: 'application/pdf',
-          size: job.file.size,
-          instanceIndex: job.instanceIndex,
-          instanceTotal: job.instanceTotal
-        }
-      };
-
-      try {
-        const settled = await processArticles([pseudoTab], PROMPTS_COMPANY, CHAT_URL, 'company');
-        const firstResult = Array.isArray(settled) && settled.length > 0 ? settled[0] : null;
-
-        if (firstResult?.status === 'fulfilled') {
-          return {
-            jobSuccess: !!firstResult.value?.success,
-            jobReason: firstResult.value?.reason || firstResult.value?.error || ''
-          };
-        }
-
-        if (firstResult?.status === 'rejected') {
-          return {
-            jobSuccess: false,
-            jobReason: firstResult.reason?.message || String(firstResult.reason || 'promise_rejected')
-          };
-        }
-
-        return {
-          jobSuccess: false,
-          jobReason: 'missing_result'
-        };
-      } catch (jobError) {
-        return {
-          jobSuccess: false,
-          jobReason: jobError?.message || String(jobError || 'process_articles_failed')
-        };
-      }
-    };
-
-    const runWorker = async (workerId) => {
-      while (true) {
-        const jobIndex = queueState.nextJobIndex;
-        if (jobIndex >= queueJobs.length) return;
-        queueState.nextJobIndex += 1;
-
-        const job = queueJobs[jobIndex];
-        const jobResult = await runSingleJob(job, jobIndex, workerId);
-        const jobSuccess = !!jobResult.jobSuccess;
-        const jobReason = jobResult.jobReason || '';
-
-        if (jobSuccess) {
-          queueState.completedJobs += 1;
-          console.log('[manual-pdf] job:ok', {
-            index: jobIndex + 1,
-            total: queueJobs.length,
-            file: job.file.name,
-            workerId
-          });
-        } else {
-          queueState.failedJobs += 1;
-          console.warn('[manual-pdf] job:failed', {
-            index: jobIndex + 1,
-            total: queueJobs.length,
-            file: job.file.name,
-            reason: truncateDispatchLogText(jobReason || 'unknown', 220),
-            workerId
-          });
-        }
-
-        await notifyManualPdfProviderStatus(
-          safeProviderId,
-          jobSuccess ? 'running' : 'failed',
-          jobSuccess
-            ? `Gotowe ${jobIndex + 1}/${queueJobs.length}: ${job.file.name}.`
-            : `Blad ${jobIndex + 1}/${queueJobs.length}: ${job.file.name} (${jobReason || 'unknown'}).`,
-          {
-            currentJob: jobIndex + 1,
-            totalJobs: queueJobs.length,
-            completedJobs: queueState.completedJobs,
-            failedJobs: queueState.failedJobs,
-            success: jobSuccess,
-            reason: jobReason || '',
-            workerId
-          }
-        );
-      }
-    };
-
-    const workers = [];
-    for (let workerId = 1; workerId <= queueConcurrency; workerId += 1) {
-      workers.push(runWorker(workerId));
     }
-    await Promise.all(workers);
+  );
 
-    completedJobs = queueState.completedJobs;
-    failedJobs = queueState.failedJobs;
-
-    const finalMessage = `Kolejka PDF zakonczona. Sukces: ${completedJobs}, bledy: ${failedJobs}, razem: ${queueJobs.length}.`;
-    await notifyManualPdfProviderStatus(
-      safeProviderId,
-      'completed',
-      finalMessage,
-      {
-        totalJobs: queueJobs.length,
-        completedJobs,
-        failedJobs,
-        success: failedJobs === 0
-      }
-    );
-    await releaseManualPdfProvider(safeProviderId, finalMessage, {
-      totalJobs: queueJobs.length,
-      completedJobs,
-      failedJobs,
-      success: failedJobs === 0
-    });
-  } catch (error) {
-    const finalError = error?.message || String(error);
-    console.warn('[manual-pdf] Queue runtime error:', finalError);
-    const finalMessage = `Kolejka PDF przerwana: ${finalError}`;
-    await notifyManualPdfProviderStatus(
-      safeProviderId,
-      'failed',
-      finalMessage,
-      {
-        totalJobs: queueJobs.length,
-        completedJobs,
-        failedJobs,
-        success: false,
-        reason: finalError
-      }
-    );
-    await releaseManualPdfProvider(safeProviderId, finalMessage, {
-      totalJobs: queueJobs.length,
-      completedJobs,
-      failedJobs,
-      success: false,
-      reason: finalError
-    });
-  }
+  const enqueueResult = await enqueueAnalysisJobs(queueJobs, {
+    reason: 'manual_pdf_enqueue'
+  });
+  registerManualPdfQueueBatch(batchId, safeProviderId, enqueueResult?.jobs || []);
+  return {
+    success: true,
+    mode: 'pdf',
+    queued: enqueueResult?.queuedCount || 0,
+    queuedCount: enqueueResult?.queuedCount || 0,
+    maxConcurrent: Number.isInteger(enqueueResult?.maxConcurrent) ? enqueueResult.maxConcurrent : null,
+    queueSize: Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : 0,
+    activeSlots: Number.isInteger(enqueueResult?.activeSlots) ? enqueueResult.activeSlots : 0,
+    reservedSlots: Number.isInteger(enqueueResult?.reservedSlots) ? enqueueResult.reservedSlots : 0,
+    liveSlots: Number.isInteger(enqueueResult?.liveSlots) ? enqueueResult.liveSlots : 0,
+    startingSlots: Number.isInteger(enqueueResult?.startingSlots) ? enqueueResult.startingSlots : 0,
+    batchId
+  };
 }
 
 // Uwaga: chrome.action.onClicked NIE działa gdy jest default_popup w manifest
@@ -27849,10 +28197,14 @@ async function injectToChat(
       console.log(`⏸️ Pokazuję przyciski Kontynuuj dla prompta ${currentPrompt}/${totalPrompts}`);
       notifyProcess('PROCESS_NEEDS_ACTION', {
         status: 'running',
+        lifecycleStatus: 'running',
+        phase: 'response_wait',
         needsAction: true,
+        actionRequired: 'continue_button',
         currentPrompt,
         totalPrompts,
         reason,
+        statusCode: 'chat.continue_button',
         statusText: 'Wymaga decyzji'
       });
 
@@ -27985,11 +28337,15 @@ async function injectToChat(
         skipBtn.style.opacity = '0.7';
         notifyProcess('PROCESS_ACTION_RESOLVED', {
           status: 'running',
+          lifecycleStatus: 'running',
+          phase: 'response_wait',
           needsAction: false,
+          actionRequired: 'none',
           currentPrompt,
           totalPrompts,
           decision: action,
           origin,
+          statusCode: action === 'skip' ? 'process.manual_resume_resolved' : 'process.wait_resolved',
           statusText: action === 'skip' ? 'Pominieto czekanie' : 'Wznowiono czekanie'
         });
         resolve(action);
@@ -28740,10 +29096,13 @@ async function injectToChat(
           updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Wysyłam prompt...');
           notifyProcess('PROCESS_PROGRESS', {
             status: 'running',
+            lifecycleStatus: 'running',
             currentPrompt: absoluteCurrentPrompt,
             totalPrompts: totalPromptsForRun,
             stageIndex: absoluteStageIndex,
             stageName: `Prompt ${absoluteCurrentPrompt}`,
+            phase: 'prompt_send',
+            statusCode: 'chat.prompt_sending',
             statusText: 'Wysylam prompt',
             needsAction: false
           });
@@ -28994,10 +29353,14 @@ async function injectToChat(
               );
               notifyProcess('PROCESS_PROGRESS', {
                 status: 'failed',
+                lifecycleStatus: 'failed',
                 currentPrompt: absoluteCurrentPrompt,
                 totalPrompts: totalPromptsForRun,
                 stageIndex: absoluteStageIndex,
                 stageName: `Prompt ${absoluteCurrentPrompt}`,
+                phase: 'capture_validate',
+                actionRequired: 'none',
+                statusCode: 'process.data_gap_unresolved',
                 statusText: `DATA_GAP nierozwiazany (${dataGapStageId})`,
                 reason: 'data_gap_unresolved',
                 error: dataGapError,
@@ -29055,10 +29418,13 @@ async function injectToChat(
             );
             notifyProcess('PROCESS_PROGRESS', {
               status: 'running',
+              lifecycleStatus: 'running',
               currentPrompt: rewindTargetPrompt,
               totalPrompts: totalPromptsForRun,
               stageIndex: rewindStageIndex,
               stageName: `Prompt ${rewindTargetPrompt}`,
+              phase: 'prompt_send',
+              statusCode: 'process.data_gap_rewind',
               statusText: `DATA_GAP rewind -> Prompt ${rewindTargetPrompt}`,
               reason: 'data_gap_rewind_applied',
               allowLowerProgress: true,
@@ -29097,10 +29463,13 @@ async function injectToChat(
         console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
         notifyProcess('PROCESS_PROGRESS', {
           status: 'running',
+          lifecycleStatus: 'running',
           currentPrompt: absoluteCurrentPrompt,
           totalPrompts: totalPromptsForRun,
           stageIndex: absoluteStageIndex,
           stageName: `Prompt ${absoluteCurrentPrompt}`,
+          phase: 'capture_validate',
+          statusCode: 'response.capture_validate',
           statusText: 'Prompt zakonczony',
           needsAction: false
         });
@@ -29206,11 +29575,15 @@ async function injectToChat(
           }
         }
         notifyProcess('PROCESS_PROGRESS', {
-          status: 'completed',
+          status: 'finalizing',
+          lifecycleStatus: 'finalizing',
           currentPrompt: completedPrompt,
           totalPrompts: totalPromptsForRun,
           stageIndex: completedPrompt > 0 ? (completedPrompt - 1) : null,
           stageName: completedPrompt > 0 ? `Prompt ${completedPrompt}` : 'Start',
+          phase: 'save_local',
+          actionRequired: 'none',
+          statusCode: 'storage.saving_local',
           statusText: 'Prompt chain zakonczony - trwa zapis do bazy',
           needsAction: false
         });
@@ -29236,10 +29609,14 @@ async function injectToChat(
         removeCounter(counter, true);
         notifyProcess('PROCESS_PROGRESS', {
           status: 'completed',
+          lifecycleStatus: 'completed',
           currentPrompt: promptOffset,
           totalPrompts: totalPromptsForRun,
           stageIndex: promptOffset > 0 ? (promptOffset - 1) : null,
           stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Start',
+          phase: 'verify_remote',
+          actionRequired: 'none',
+          statusCode: 'process.completed',
           statusText: 'Brak prompt chain',
           needsAction: false
         });
@@ -29260,8 +29637,12 @@ async function injectToChat(
   console.error("Nie znaleziono textarea w ChatGPT po " + textareaWaitMs + "ms");
   notifyProcess('PROCESS_PROGRESS', {
     status: 'failed',
+    lifecycleStatus: 'failed',
     currentPrompt: promptOffset,
     totalPrompts: totalPromptsForRun,
+    phase: 'editor_ready',
+    actionRequired: 'none',
+    statusCode: 'chat.editor_not_found',
     statusText: 'Nie znaleziono textarea',
     reason: 'textarea_not_found',
     needsAction: false

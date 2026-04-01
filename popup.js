@@ -10,23 +10,6 @@ function withActiveWindowContext(callback) {
   });
 }
 
-function sendRuntimeMessage(payload) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(payload, (response) => {
-      if (chrome.runtime.lastError) {
-        const message = chrome.runtime.lastError.message || 'runtime_error';
-        if (message.includes('before a response was received')) {
-          resolve({});
-          return;
-        }
-        reject(new Error(message));
-        return;
-      }
-      resolve(response && typeof response === 'object' ? response : {});
-    });
-  });
-}
-
 function summarizeClientErrorValue(rawValue) {
   if (typeof ProblemLogUiUtils.summarizeClientErrorValue === 'function') {
     return ProblemLogUiUtils.summarizeClientErrorValue(rawValue);
@@ -63,7 +46,7 @@ function reportProblemLogFromUi(rawEntry = {}) {
     ? rawEntry.signature.trim()
     : ['popup-ui', source, rawEntry?.title || '', reason, error, message].join('|');
   try {
-    chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: 'REPORT_PROBLEM_LOG',
       entry: {
         level: rawEntry?.level === 'info'
@@ -79,7 +62,7 @@ function reportProblemLogFromUi(rawEntry = {}) {
         tabId: Number.isInteger(rawEntry?.tabId) ? rawEntry.tabId : null,
         windowId: Number.isInteger(rawEntry?.windowId) ? rawEntry.windowId : null
       }
-    }, () => {});
+    });
   } catch {
     // Ignore runtime bridge errors in popup.
   }
@@ -453,6 +436,7 @@ const DISPATCH_REASON_LABELS = {
   missing_fields: 'braki danych po stronie intake',
   mismatch: 'niezgodnosc danych verify',
   ingest_failed: 'ingest zakonczony bledem',
+  ingest_quarantined: 'ingest zakonczony kwarantanna',
   materialization_unavailable: 'materializacja DB niedostepna',
   timeout: 'timeout HTTP',
   dispatch_error: 'blad transportu dispatch',
@@ -1494,7 +1478,7 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
     );
 
     if (shouldFallbackToDialog) {
-      chrome.runtime.sendMessage({
+      void sendRuntimeMessage({
         type: 'RESUME_STAGE_OPEN',
         tabId: Number.isInteger(options?.tabId) ? options.tabId : null,
         windowId: Number.isInteger(options?.windowId) ? options.windowId : null,
@@ -1509,7 +1493,7 @@ async function executeSmartResumeStageFromPopup(button, options = {}) {
     setRunStatus(statusText, true);
     void refreshAnalysisQueueStatus();
   } catch (error) {
-    chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: 'RESUME_STAGE_OPEN',
       tabId: Number.isInteger(options?.tabId) ? options.tabId : null,
       windowId: Number.isInteger(options?.windowId) ? options.windowId : null,
@@ -1793,17 +1777,13 @@ if (countCompanyMessagesBtn) {
 const stopBtn = document.getElementById('stopBtn');
 if (stopBtn) {
   stopBtn.addEventListener('click', () => {
-    withActiveWindowContext(({ windowId }) => {
-      chrome.runtime.sendMessage(
-        {
-          type: 'STOP_PROCESS',
-          windowId,
-          origin: 'popup-stop',
-        },
-        () => {
-          window.close();
-        }
-      );
+    withActiveWindowContext(async ({ windowId }) => {
+      await sendRuntimeMessage({
+        type: 'STOP_PROCESS',
+        windowId,
+        origin: 'popup-stop',
+      });
+      window.close();
     });
   });
 }

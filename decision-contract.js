@@ -19,6 +19,21 @@
   const LEGACY_FIELD_10_KEYS = ['voi', 'fals', 'primaryRisk', 'composite', 'sizing'];
   const FIELD_10_LABEL_REGEX = /\b(VOI|Fals(?:ifiers)?|Primary risk|Composite|EntryScore|Sizing)\s*:/gi;
   const KPI_SCORECARD_KEYS = ['FQ', 'TE', 'CM', 'VS', 'TQ', 'PP', 'CP', 'CD', 'NO', 'MR'];
+  const OPPORTUNITY_KEYS = [
+    'value_chain_position',
+    'price_dislocation_reason',
+    'rerating_catalyst_type',
+    'time_horizon_type',
+    'entry_condition_type'
+  ];
+  const CHARACTER_KEYS = [
+    'quality_state',
+    'safety_state',
+    'thesis_stock_relationship',
+    'proof_class',
+    'confidence_in_thesis',
+    'primary_kill_risk'
+  ];
 
   function normalizeText(value, fallback = '') {
     const text = typeof value === 'string' ? value.trim() : '';
@@ -27,6 +42,15 @@
 
   function uniqueStrings(values) {
     return Array.from(new Set((Array.isArray(values) ? values : []).filter((value) => typeof value === 'string' && value.trim())));
+  }
+
+  function normalizeStructuredNamedSection(section, keys) {
+    const source = section && typeof section === 'object' ? section : {};
+    const normalized = {};
+    keys.forEach((key) => {
+      normalized[key] = normalizeText(source[key]);
+    });
+    return normalized;
   }
 
   function parseDecisionRecordParts(rawLine) {
@@ -184,6 +208,141 @@
     meta.issueCodes.push('field10_missing_segments');
     meta.issueCodes.push('field10_invalid_order');
     return meta;
+  }
+
+  function safeParseJsonObject(rawText) {
+    const text = normalizeText(rawText);
+    if (!text) return null;
+
+    const candidates = [text];
+    const fencedMatch = text.match(/^```(?:json)?\s*([\s\S]*?)\s*```$/i);
+    if (fencedMatch?.[1]) {
+      candidates.unshift(fencedMatch[1].trim());
+    }
+    const firstBrace = text.indexOf('{');
+    const lastBrace = text.lastIndexOf('}');
+    if (firstBrace !== -1 && lastBrace > firstBrace) {
+      candidates.push(text.slice(firstBrace, lastBrace + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!normalizeText(candidate).startsWith('{')) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+          return parsed;
+        }
+      } catch (error) {
+        continue;
+      }
+    }
+    return null;
+  }
+
+  function serializeStructuredKpiScorecard(kpi) {
+    if (!kpi || typeof kpi !== 'object') return '';
+    const schemaId = normalizeText(kpi.schema_id || kpi.schemaId).toLowerCase();
+    const items = Array.isArray(kpi.items) ? kpi.items : [];
+    if (schemaId !== 'core10' || items.length === 0) return '';
+
+    const ordered = {};
+    items.forEach((item) => {
+      const key = normalizeText(item?.key).toUpperCase();
+      const value = Number.isFinite(item?.value) ? item.value : Number.parseInt(item?.value, 10);
+      if (key && Number.isInteger(value)) {
+        ordered[key] = value;
+      }
+    });
+
+    if (!KPI_SCORECARD_KEYS.every((key) => Number.isInteger(ordered[key]) && ordered[key] >= 1 && ordered[key] <= 10)) {
+      return '';
+    }
+    return KPI_SCORECARD_KEYS.map((key) => `${key}:${ordered[key]}`).join(',');
+  }
+
+  function normalizeStructuredPayloadRecord(record) {
+    if (!record || typeof record !== 'object') return null;
+    const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+    const taxonomy = record.taxonomy && typeof record.taxonomy === 'object' ? record.taxonomy : {};
+    const opportunity = record.opportunity && typeof record.opportunity === 'object' ? record.opportunity : {};
+    const character = record.character && typeof record.character === 'object' ? record.character : {};
+    const kpi = record.kpi && typeof record.kpi === 'object' ? record.kpi : {};
+    const extras = record.extras && typeof record.extras === 'object' ? record.extras : {};
+    const decisionRole = normalizeText(record.decision_role || fields.decision_role).toUpperCase();
+    if (decisionRole !== 'PRIMARY' && decisionRole !== 'SECONDARY') return null;
+
+    return {
+      decision_role: decisionRole,
+      fields: {
+        ...fields,
+        decision_role: decisionRole
+      },
+      taxonomy,
+      opportunity: normalizeStructuredNamedSection(opportunity, OPPORTUNITY_KEYS),
+      character: normalizeStructuredNamedSection(character, CHARACTER_KEYS),
+      kpi,
+      extras
+    };
+  }
+
+  function extractStructuredDecisionPayload(rawText) {
+    const parsed = safeParseJsonObject(rawText);
+    if (!parsed) return null;
+    if (normalizeText(parsed.schema).toLowerCase() !== 'economist.response.v2') return null;
+
+    const records = (Array.isArray(parsed.records) ? parsed.records : [])
+      .map((record) => normalizeStructuredPayloadRecord(record))
+      .filter(Boolean);
+    if (records.length === 0) return null;
+
+    return {
+      schema: 'economist.response.v2',
+      records
+    };
+  }
+
+  function mapStructuredRecordToDecisionRecord(record) {
+    if (!record || typeof record !== 'object') return null;
+    const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+    const taxonomy = record.taxonomy && typeof record.taxonomy === 'object' ? record.taxonomy : {};
+    const opportunity = record.opportunity && typeof record.opportunity === 'object' ? record.opportunity : {};
+    const character = record.character && typeof record.character === 'object' ? record.character : {};
+    const kpi = record.kpi && typeof record.kpi === 'object' ? record.kpi : {};
+    const kpiScorecard = serializeStructuredKpiScorecard(kpi);
+
+    return {
+      canonicalLine: '',
+      recordFormat: 'structured_v2_json',
+      rawFieldCount: 0,
+      decisionDate: normalizeText(fields.data_decyzji),
+      decisionStatus: normalizeText(fields.status_decyzji),
+      decisionRole: normalizeText(record.decision_role || fields.decision_role).toUpperCase(),
+      company: normalizeText(fields.spolka),
+      sourceMaterial: normalizeText(fields.material_zrodlowy_podcast || fields.zrodlo_tezy),
+      thesis: normalizeText(fields.teza_inwestycyjna),
+      asymmetry: '',
+      bear: normalizeText(fields.bear_scenario_total),
+      base: normalizeText(fields.base_scenario_total),
+      bull: normalizeText(fields.bull_scenario_total),
+      voi: normalizeText(fields.voi_falsy_kluczowe_ryzyka),
+      sector: normalizeText(taxonomy.sector || fields.sektor),
+      companyFamily: normalizeText(taxonomy.company_family || fields.rodzina_spolki || taxonomy.sector || fields.sektor),
+      companyType: normalizeText(taxonomy.company_type || fields.typ_spolki),
+      revenueModel: normalizeText(taxonomy.revenue_model || fields.model_przychodu),
+      region: normalizeText(taxonomy.region || fields.region),
+      currency: normalizeText(taxonomy.currency || fields.waluta),
+      kpiScorecard,
+      field10Meta: parseField10Meta(fields.voi_falsy_kluczowe_ryzyka),
+      kpiMeta: kpiScorecard
+        ? parseKpiScorecard(kpiScorecard)
+        : { isComplete: true, issueCodes: [], values: {}, orderedKeys: [] },
+      fields,
+      taxonomy,
+      opportunity: normalizeStructuredNamedSection(opportunity, OPPORTUNITY_KEYS),
+      character: normalizeStructuredNamedSection(character, CHARACTER_KEYS),
+      kpi,
+      extras: record.extras && typeof record.extras === 'object' ? record.extras : {}
+    };
   }
 
   function parseDecisionRecordLine(rawLine) {
@@ -383,6 +542,13 @@
   }
 
   function extractDecisionRecordsFromText(rawText) {
+    const structuredPayload = extractStructuredDecisionPayload(rawText);
+    if (structuredPayload) {
+      return structuredPayload.records
+        .map((record) => mapStructuredRecordToDecisionRecord(record))
+        .filter(Boolean);
+    }
+
     const text = normalizeText(rawText);
     if (!text) return [];
 
@@ -560,6 +726,73 @@
 
   function validateDecisionContractText(rawText) {
     const text = normalizeText(rawText);
+    const structuredPayload = extractStructuredDecisionPayload(text);
+    if (structuredPayload) {
+      const records = structuredPayload.records
+        .map((record) => mapStructuredRecordToDecisionRecord(record))
+        .filter(Boolean);
+
+      const issueCodes = [];
+      let status = 'invalid';
+
+      if (records.length === 2) {
+        if (records[0].decisionRole !== 'PRIMARY' || records[1].decisionRole !== 'SECONDARY') {
+          issueCodes.push('invalid_role_order');
+        }
+        if (records.some((record) => !record.field10Meta || record.field10Meta.isComplete !== true)) {
+          issueCodes.push('field10_invalid');
+        }
+        if (issueCodes.length === 0) {
+          status = 'current';
+        }
+      } else if (records.length === 1) {
+        if (records[0].decisionRole !== 'PRIMARY') {
+          issueCodes.push('shortfall_requires_primary_role');
+        }
+        if (records.some((record) => !record.field10Meta || record.field10Meta.isComplete !== true)) {
+          issueCodes.push('field10_invalid');
+        }
+        if (issueCodes.length === 0) {
+          status = 'shortfall';
+        }
+      } else {
+        issueCodes.push('no_decision_records');
+      }
+
+      const recordFormats = uniqueStrings(records.map((record) => record.recordFormat));
+      const selectedRecord = records.find((record) => record.decisionRole === 'PRIMARY')
+        || records[records.length - 1]
+        || null;
+      const decisionContract = {
+        version: CONTRACT_VERSION,
+        status,
+        recordCount: records.length,
+        recordFormats,
+        issueCodes: uniqueStrings(issueCodes),
+        records: records.map((record) => buildRecordSignalSummary(record)).filter(Boolean)
+      };
+
+      return {
+        text,
+        lines: [text],
+        nonShortfallLines: [text],
+        shortfallLines: [],
+        records,
+        structuredPayload,
+        selectedRecord,
+        primaryRecord: records.find((record) => record.decisionRole === 'PRIMARY') || null,
+        recordCount: records.length,
+        recordFormats,
+        issueCodes: uniqueStrings(issueCodes),
+        status,
+        canonicalText: text,
+        shortfallDetected: status === 'shortfall',
+        usedFlattenedText: false,
+        currentContractPassed: status === 'current' || status === 'shortfall',
+        decisionContract
+      };
+    }
+
     const lines = splitDecisionLines(text);
     const shortfallLines = lines.filter((line) => isShortfallMarkerLine(line));
     const nonShortfallLines = lines.filter((line) => !isShortfallMarkerLine(line));
@@ -821,6 +1054,7 @@
     buildDecisionContractSnapshot,
     extractDecisionRecordFromText,
     extractDecisionRecordsFromText,
+    extractStructuredDecisionPayload,
     formatDecisionRecordTable,
     getDecisionContractPrimaryRecord,
     getDecisionContractSecondaryRecord,

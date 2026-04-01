@@ -116,18 +116,6 @@ function initializeAutoClose() {
   }, 1000);
 }
 
-function sendRuntimeMessage(payload) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(payload, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message || 'runtime_error'));
-        return;
-      }
-      resolve(response && typeof response === 'object' ? response : {});
-    });
-  });
-}
-
 function formatDateTime(ts) {
   if (!Number.isInteger(ts) || ts <= 0) return '-';
   try {

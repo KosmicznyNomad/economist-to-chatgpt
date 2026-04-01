@@ -203,7 +203,7 @@ function truncateDispatchLogText(value, maxLength = 200) {
   return `${safe.slice(0, Math.max(0, maxLength - 3))}...`;
 }
 
-async function main() {
+function createBaseContext(fetchImpl) {
   const context = {
     console,
     Date,
@@ -257,34 +257,35 @@ async function main() {
       error.name = 'TimeoutError';
       return error;
     },
-    normalizeWatchlistVerifyState: (state) => (typeof state === 'string' ? state.trim().toLowerCase() : ''),
-    isWatchlistVerificationPendingState: (state) => {
-      const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
-      return normalized === 'not_found'
-        || normalized === 'materialization_pending'
-        || normalized === 'materialization_partial';
-    },
-    isWatchlistVerificationTerminalState: (state) => {
-      const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
-      return normalized === 'missing_fields'
-        || normalized === 'mismatch'
-        || normalized === 'ingest_failed'
-        || normalized === 'materialization_unavailable';
-    },
-    fetch: async () => ({
-      ok: false,
-      status: 404,
-      headers: {
-        get: () => ''
-      },
-      text: async () => '{"detail":"Not Found"}'
-    })
+    fetch: fetchImpl
   };
+  return context;
+}
 
+function loadVerifyHelpers(context) {
   vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'verifyWatchlistDispatchDelivery'), context, {
-    filename: 'background.js'
+  [
+    'normalizeWatchlistVerifyState',
+    'isWatchlistVerificationPendingState',
+    'isWatchlistVerificationTerminalState',
+    'verifyWatchlistDispatchDelivery'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
   });
+}
+
+async function testMissingVerifyEndpointFallsBackToAcceptedDelivery() {
+  const context = createBaseContext(async () => ({
+    ok: false,
+    status: 404,
+    headers: {
+      get: () => ''
+    },
+    text: async () => '{"detail":"Not Found"}'
+  }));
+  loadVerifyHelpers(context);
 
   const result = await context.verifyWatchlistDispatchDelivery({
     deliveryAcceptedAt: Date.now(),
@@ -311,6 +312,51 @@ async function main() {
     true,
     'Fallback should emit a dedicated diagnostic log.'
   );
+}
+
+async function testQuarantinedVerifyStateIsTerminal() {
+  const context = createBaseContext(async () => ({
+    ok: true,
+    status: 200,
+    headers: {
+      get: () => ''
+    },
+    json: async () => ({
+      success: false,
+      pending: false,
+      state: 'ingest_quarantined',
+      reason: 'structural_contract_validation_failed',
+      event_id: 26993,
+      materialized_row_count: 0,
+      expected_materialized_row_count: 1
+    })
+  }));
+  loadVerifyHelpers(context);
+
+  const result = await context.verifyWatchlistDispatchDelivery({
+    deliveryAcceptedAt: Date.now(),
+    deliveryEventId: '26993',
+    deliveryIntakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    payload: {
+      responseId: 'resp-2',
+      runId: 'run-2'
+    }
+  }, 'run-2/resp-2');
+
+  assert.strictEqual(result.success, false, 'Quarantined delivery should remain a failure.');
+  assert.strictEqual(result.pending, false, 'Quarantined delivery should be terminal, not retried.');
+  assert.strictEqual(result.state, 'ingest_quarantined');
+  assert.strictEqual(result.stage, 'verify_state', 'Terminal verify states should be classified as verify_state.');
+  assert.strictEqual(
+    context.logs.some((entry) => entry.code === 'verify_attempt_failed' && entry.details?.state === 'ingest_quarantined'),
+    true,
+    'Quarantined verify responses should produce terminal verify diagnostics.'
+  );
+}
+
+async function main() {
+  await testMissingVerifyEndpointFallsBackToAcceptedDelivery();
+  await testQuarantinedVerifyStateIsTerminal();
 
   console.log('watchlist verify fallback test: ok');
 }

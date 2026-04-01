@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const ProcessContractUtils = require('./process-contract.js');
 
 const backgroundPath = path.join(__dirname, 'background.js');
 const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
@@ -355,8 +356,8 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   );
   assert.strictEqual(
     activity.active,
-    true,
-    'Completed process waiting for dispatch confirmation should keep occupying its slot.'
+    false,
+    'Completed process with local save should stop occupying its analysis slot.'
   );
 
   context.startedJobs = [];
@@ -364,11 +365,13 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   await context.reconcileAnalysisQueueState('completed_dispatch_pending');
   assert.strictEqual(
     context.startedJobs.length,
-    0,
-    'Queue must not start the next job while completed run still waits for dispatch confirmation.'
+    1,
+    'Queue should immediately reuse the slot once local save succeeds.'
   );
-  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-1']);
-  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+  assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-2']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), []);
+  assert.deepStrictEqual(context.closedRuns, ['run-1']);
 }
 
 async function testLocalSaveFailureClosesCompletedProcessWindow() {
@@ -478,6 +481,8 @@ function buildScenarioContext() {
     Promise,
     Map,
     Set,
+    ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
+    ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
@@ -500,6 +505,7 @@ function buildScenarioContext() {
       maxConcurrent: 7,
       lastSequence: 0
     },
+    analysisQueueVersion: 0,
     processRegistry: new Map(),
     liveTabs: new Set(),
     windowTabs: new Map(),
@@ -542,6 +548,10 @@ function buildScenarioContext() {
   };
 
   const functionNames = [
+    'getAnalysisQueueJobPriority',
+    'compareAnalysisQueueJobs',
+    'sortAnalysisQueueWaitingJobs',
+    'normalizeProcessLifecycleStatus',
     'normalizeProcessStatus',
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
@@ -568,6 +578,7 @@ function buildScenarioContext() {
 }
 
 function loadScenarioFunctions(scenarioContext, functionNames) {
+  scenarioContext.ProcessContractUtils = ProcessContractUtils;
   vm.createContext(scenarioContext);
   for (const functionName of functionNames) {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), scenarioContext, {

@@ -322,7 +322,7 @@ increaseBtn.addEventListener('click', () => {
   }
 });
 
-submitBtn.addEventListener('click', () => {
+submitBtn.addEventListener('click', async () => {
   if (queueActive) return;
 
   const hasPdf = selectedPdfFiles.length > 0;
@@ -355,54 +355,58 @@ submitBtn.addEventListener('click', () => {
     startProviderKeepalive();
   }
 
-  chrome.runtime.sendMessage(payload, (response) => {
-    if (chrome.runtime.lastError) {
-      submitBtn.textContent = 'Blad';
-      submitBtn.disabled = false;
-      setProviderStatus(`Blad wysylki: ${chrome.runtime.lastError.message || 'runtime_error'}`, 'error');
-      if (hasPdf) {
-        stopProviderKeepalive();
-      }
-      return;
-    }
-
-    if (!response?.success) {
-      const launchError = response?.error || response?.reason || 'unknown';
-      const launchMessage = launchError === 'prompts_not_loaded'
-        ? 'Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.'
-        : launchError;
-      submitBtn.textContent = 'Blad';
-      submitBtn.disabled = false;
-      setProviderStatus(`Blad uruchomienia: ${launchMessage}`, 'error');
-      if (hasPdf) {
-        stopProviderKeepalive();
-      }
-      return;
-    }
-
+  const response = await sendRuntimeMessage(payload);
+  if (response?.ok === false) {
+    submitBtn.textContent = 'Blad';
+    submitBtn.disabled = false;
+    setProviderStatus(`Blad wysylki: ${response.errorMessage || response.errorCode || 'runtime_error'}`, 'error');
     if (hasPdf) {
-      queueActive = true;
-      startProviderKeepalive();
-      setQueueUiLocked(true);
-      submitBtn.disabled = true;
-      submitBtn.textContent = 'Kolejka uruchomiona';
-      setProviderStatus(
-        `Provider aktywny. Zakolejkowano ${response?.queuedCount || response?.queued || 0} zadan, sloty ${response?.activeSlots || 0}/7, kolejka ${response?.queueSize || 0}.`,
-        'info'
-      );
-      return;
+      stopProviderKeepalive();
     }
+    return;
+  }
 
-    submitBtn.textContent = 'Uruchomiono';
+  if (!response?.success) {
+    const launchError = response?.error || response?.reason || 'unknown';
+    const launchMessage = launchError === 'prompts_not_loaded'
+      ? 'Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.'
+      : launchError;
+    submitBtn.textContent = 'Blad';
+    submitBtn.disabled = false;
+    setProviderStatus(`Blad uruchomienia: ${launchMessage}`, 'error');
+    if (hasPdf) {
+      stopProviderKeepalive();
+    }
+    return;
+  }
+
+  const maxConcurrent = Number.isInteger(response?.maxConcurrent) ? response.maxConcurrent : 7;
+  const usedSlots = Number.isInteger(response?.reservedSlots)
+    ? response.reservedSlots
+    : (Number.isInteger(response?.activeSlots) ? response.activeSlots : 0);
+
+  if (hasPdf) {
+    queueActive = true;
+    startProviderKeepalive();
+    setQueueUiLocked(true);
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Kolejka uruchomiona';
     setProviderStatus(
-      `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz. Sloty ${response?.activeSlots || 0}/7, kolejka ${response?.queueSize || 0}.`,
-      'success'
+      `Provider aktywny. Zakolejkowano ${response?.queuedCount || response?.queued || 0} zadan, sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+      'info'
     );
-    setTimeout(() => {
-      submitBtn.textContent = 'Uruchom';
-      updateSubmitButton();
-    }, 900);
-  });
+    return;
+  }
+
+  submitBtn.textContent = 'Uruchomiono';
+  setProviderStatus(
+    `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz. Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+    'success'
+  );
+  setTimeout(() => {
+    submitBtn.textContent = 'Uruchom';
+    updateSubmitButton();
+  }, 900);
 });
 
 cancelBtn.addEventListener('click', () => {

@@ -2,3 +2,5 @@ watchlist.inline-config.js
 backend/.venv/
 **/__pycache__/
 **/*.pyc
+Iskra-extension-*.zip
+test-*.zip

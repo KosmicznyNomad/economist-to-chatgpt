@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const ProcessContractUtils = require('./process-contract.js');
 
 const backgroundPath = path.join(__dirname, 'background.js');
 const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
@@ -215,6 +216,9 @@ async function main() {
     Promise,
     Map,
     Set,
+    ProcessContractUtils,
+    ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
+    ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
       'completed',
@@ -314,6 +318,10 @@ async function main() {
 
   vm.createContext(context);
   const functionNames = [
+    'getAnalysisQueueJobPriority',
+    'compareAnalysisQueueJobs',
+    'sortAnalysisQueueWaitingJobs',
+    'normalizeProcessLifecycleStatus',
     'normalizeProcessStatus',
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
@@ -410,9 +418,9 @@ async function main() {
     },
     1000
   );
-  assert.strictEqual(pendingDispatchDecision.action, 'keep');
-  assert.strictEqual(pendingDispatchDecision.queueState, 'awaiting_dispatch');
-  assert.strictEqual(pendingDispatchDecision.dispatchDeadlineAt, 301000);
+  assert.strictEqual(pendingDispatchDecision.action, 'release');
+  assert.strictEqual(pendingDispatchDecision.closeWindow, true);
+  assert.strictEqual(pendingDispatchDecision.reason, 'dispatch_pending');
 
   const cappedDispatchDeadlineDecision = context.resolveAnalysisQueueReleaseDecision(
     { jobId: 'aq-1', runId: 'run-1', dispatchDeadlineAt: 601000 },
@@ -436,12 +444,9 @@ async function main() {
     },
     1000
   );
-  assert.strictEqual(cappedDispatchDeadlineDecision.action, 'keep');
-  assert.strictEqual(
-    cappedDispatchDeadlineDecision.dispatchDeadlineAt,
-    301000,
-    'Stored queue deadlines should be capped to 5 minutes after analysis completion.'
-  );
+  assert.strictEqual(cappedDispatchDeadlineDecision.action, 'release');
+  assert.strictEqual(cappedDispatchDeadlineDecision.closeWindow, true);
+  assert.strictEqual(cappedDispatchDeadlineDecision.reason, 'dispatch_pending');
 
   const timedOutDispatchDecision = context.resolveAnalysisQueueReleaseDecision(
     { jobId: 'aq-1', runId: 'run-1', dispatchDeadlineAt: 999 },
@@ -466,7 +471,7 @@ async function main() {
   );
   assert.strictEqual(timedOutDispatchDecision.action, 'release');
   assert.strictEqual(timedOutDispatchDecision.closeWindow, true);
-  assert.strictEqual(timedOutDispatchDecision.reason, 'pending_dispatch_timeout');
+  assert.strictEqual(timedOutDispatchDecision.reason, 'dispatch_pending');
 
   context.analysisQueueState = {
     waitingJobs: [
@@ -501,12 +506,12 @@ async function main() {
   context.startedJobs = [];
   context.upserts = [];
   await context.reconcileAnalysisQueueState('test_await_dispatch');
-  assert.strictEqual(context.startedJobs.length, 0, 'Queue must not start the next job before dispatch gets space to finish.');
-  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-1']);
-  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+  assert.deepStrictEqual(context.startedJobs.map((entry) => entry.runId), ['run-2']);
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-2']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), []);
   assert(
-    context.analysisQueueState.activeJobs.every((job) => Number.isInteger(job.dispatchDeadlineAt) && job.dispatchDeadlineAt > Date.now()),
-    'Completed process should keep a dispatch deadline while waiting for send confirmation.'
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'dispatch_pending'),
+    'Completed process with pending dispatch should release the analysis slot immediately after local save.'
   );
 
   context.analysisQueueState = {
@@ -546,7 +551,7 @@ async function main() {
   assert.deepStrictEqual(context.startedJobs.map((entry) => entry.runId), ['run-2']);
   assert.deepStrictEqual(context.closedRuns, ['run-1']);
   assert(
-    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'slot_released'),
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'dispatch_pending'),
     'Timed-out dispatch should release the slot without pretending dispatch was confirmed.'
   );
 

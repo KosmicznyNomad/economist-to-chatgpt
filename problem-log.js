@@ -15,18 +15,6 @@ let refreshInFlight = false;
 let currentSupportId = '';
 let currentViewMode = 'local';
 
-function sendRuntimeMessage(payload) {
-  return new Promise((resolve, reject) => {
-    chrome.runtime.sendMessage(payload, (response) => {
-      if (chrome.runtime.lastError) {
-        reject(new Error(chrome.runtime.lastError.message || 'runtime_error'));
-        return;
-      }
-      resolve(response && typeof response === 'object' ? response : {});
-    });
-  });
-}
-
 function summarizeClientErrorValue(rawValue) {
   if (typeof ProblemLogUiUtils.summarizeClientErrorValue === 'function') {
     return ProblemLogUiUtils.summarizeClientErrorValue(rawValue);
@@ -62,7 +50,7 @@ function reportProblemLogFromUi(rawEntry = {}) {
     ? rawEntry.signature.trim()
     : ['problem-log-ui', source, rawEntry?.title || '', reason, error, message].join('|');
   try {
-    chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: 'REPORT_PROBLEM_LOG',
       entry: {
         level: rawEntry?.level === 'warn' ? 'warn' : 'error',
@@ -73,7 +61,7 @@ function reportProblemLogFromUi(rawEntry = {}) {
         message,
         signature
       }
-    }, () => {});
+    });
   } catch {
     // Ignore runtime bridge errors in UI page.
   }

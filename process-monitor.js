@@ -17,11 +17,14 @@ let currentProcesses = [];
 let activeProcessesCache = [];
 let allProcessesCache = [];
 let analysisQueueSnapshot = null;
+let processSnapshotVersion = 0;
+let queueSnapshotVersion = 0;
 let lastSignature = '';
 let lastHistorySignature = '';
 let historyOpen = false;
 let viewFilterMode = 'all';
 let viewQueryValue = '';
+let lastPushUpdateAt = 0;
 const processCardMap = new Map();
 const processSeenAt = new Map();
 let stageNamesCompany = [];
@@ -36,21 +39,13 @@ const PROCESS_COMPANY_SNAPSHOT_TTL_MS = 60_000;
 console.log('[panel] Monitor procesow uruchomiony');
 
 async function loadStageNames() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'GET_STAGE_NAMES' }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('[panel] GET_STAGE_NAMES failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-        resolve([]);
-        return;
-      }
-      const names = Array.isArray(response?.stageNames)
-        ? response.stageNames.filter((name) => typeof name === 'string')
-        : [];
-      stageNamesCompany = names;
-      stageNamesLoaded = true;
-      resolve(names);
-    });
-  });
+  const response = await sendRuntimeMessage({ type: 'GET_STAGE_NAMES' });
+  const names = Array.isArray(response?.stageNames)
+    ? response.stageNames.filter((name) => typeof name === 'string')
+    : [];
+  stageNamesCompany = names;
+  stageNamesLoaded = true;
+  return names;
 }
 
 async function initializeMonitor() {
@@ -64,12 +59,23 @@ void initializeMonitor();
 // Nasluchuj na aktualizacje
 chrome.runtime.onMessage.addListener((message) => {
   if (message.type === 'PROCESSES_UPDATE') {
+    lastPushUpdateAt = Date.now();
+    if (Number.isInteger(message?.version)) processSnapshotVersion = message.version;
+    if (Number.isInteger(message?.queueVersion)) queueSnapshotVersion = message.queueVersion;
     applyProcessesUpdate(message.processes, { queue: message.queue || null });
   }
 });
 
-// Odswiezaj co 6s jako backup
-setInterval(refreshProcesses, 3000);
+function shouldRunFallbackRefresh() {
+  if (!lastPushUpdateAt) return true;
+  return (Date.now() - lastPushUpdateAt) > 10_000;
+}
+
+// Push-first monitor; backup poll only when channel looks stale.
+setInterval(() => {
+  if (!shouldRunFallbackRefresh()) return;
+  void refreshProcesses();
+}, 20_000);
 installProcessMonitorRuntimeProblemLogging();
 
 if (historyToggle && historyList) {
@@ -156,23 +162,9 @@ const persistenceErrorLabels = {
 const DecisionContractUtils = globalThis.DecisionContractUtils || {};
 const ResponseStorageUtils = globalThis.ResponseStorageUtils || {};
 const DecisionViewModelUtils = globalThis.DecisionViewModelUtils || {};
+const ProcessContractUtils = globalThis.ProcessContractUtils || {};
 const ProblemLogUiUtils = globalThis.ProblemLogUiUtils || {};
 const RESPONSE_STORAGE_KEY = ResponseStorageUtils.RESPONSE_STORAGE_KEY || 'responses';
-
-function sendRuntimeMessage(payload) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage(payload, (response) => {
-      if (chrome.runtime.lastError) {
-        resolve({
-          success: false,
-          error: chrome.runtime.lastError.message || 'runtime_error'
-        });
-        return;
-      }
-      resolve(response && typeof response === 'object' ? response : {});
-    });
-  });
-}
 
 function summarizeClientErrorValue(rawValue) {
   if (typeof ProblemLogUiUtils.summarizeClientErrorValue === 'function') {
@@ -209,7 +201,7 @@ function reportProblemLogFromUi(rawEntry = {}) {
     ? rawEntry.signature.trim()
     : ['process-monitor-ui', source, rawEntry?.title || '', reason, error, message].join('|');
   try {
-    chrome.runtime.sendMessage({
+    void sendRuntimeMessage({
       type: 'REPORT_PROBLEM_LOG',
       entry: {
         level: rawEntry?.level === 'warn' ? 'warn' : 'error',
@@ -220,7 +212,7 @@ function reportProblemLogFromUi(rawEntry = {}) {
         message,
         signature
       }
-    }, () => {});
+    });
   } catch {
     // Ignore runtime bridge errors in UI page.
   }
@@ -266,6 +258,51 @@ function humanizeToken(value) {
   const normalized = normalizeCodeToken(value);
   if (!normalized) return '';
   return normalized.replace(/[_-]+/g, ' ');
+}
+
+function getProcessContract(process) {
+  if (ProcessContractUtils && typeof ProcessContractUtils.getProcessContract === 'function') {
+    return ProcessContractUtils.getProcessContract(process || {});
+  }
+
+  const lifecycleStatus = typeof process?.lifecycleStatus === 'string'
+    ? process.lifecycleStatus
+    : (typeof process?.status === 'string' ? process.status : 'running');
+  const actionRequired = process?.needsAction ? 'manual_resume' : 'none';
+  return {
+    lifecycleStatus,
+    phase: typeof process?.phase === 'string' ? process.phase : '',
+    actionRequired,
+    statusCode: typeof process?.statusCode === 'string' ? process.statusCode : '',
+    statusText: typeof process?.statusText === 'string' ? process.statusText : ''
+  };
+}
+
+function getProcessLifecycleStatus(process) {
+  return getProcessContract(process).lifecycleStatus;
+}
+
+function getProcessPhase(process) {
+  return getProcessContract(process).phase;
+}
+
+function getProcessActionRequired(process) {
+  return getProcessContract(process).actionRequired;
+}
+
+function getProcessStatusCode(process) {
+  return getProcessContract(process).statusCode;
+}
+
+function getProcessStatusText(process) {
+  const contract = getProcessContract(process);
+  return typeof contract?.statusText === 'string' && contract.statusText.trim()
+    ? contract.statusText.trim()
+    : (typeof process?.statusText === 'string' ? process.statusText.trim() : '');
+}
+
+function processNeedsAction(process) {
+  return getProcessActionRequired(process) !== 'none';
 }
 
 function getReasonLabel(reasonCode) {
@@ -505,8 +542,7 @@ function getDatabaseBadgeModel(process) {
 }
 
 function getNormalizedStatus(process) {
-  if (!process || typeof process.status !== 'string') return '';
-  return process.status.trim().toLowerCase();
+  return getProcessLifecycleStatus(process);
 }
 
 function normalizePromptNumberList(values) {
@@ -636,7 +672,7 @@ function isDataGapProcess(process) {
   if (!process || typeof process !== 'object') return false;
   const marker = [
     typeof process?.reason === 'string' ? process.reason : '',
-    typeof process?.statusText === 'string' ? process.statusText : '',
+    getProcessStatusText(process),
     typeof process?.error === 'string' ? process.error : ''
   ].join(' ');
   return /\bdata[_\s-]?gaps?(?:\b|[_-])/i.test(marker);
@@ -648,7 +684,7 @@ function isMissingReplyProcess(process) {
   if (!process || typeof process !== 'object') return false;
   const marker = [
     typeof process?.reason === 'string' ? process.reason : '',
-    typeof process?.statusText === 'string' ? process.statusText : '',
+    getProcessStatusText(process),
     typeof process?.error === 'string' ? process.error : ''
   ].join(' ');
   return (
@@ -658,10 +694,16 @@ function isMissingReplyProcess(process) {
 }
 
 function isFailedStatus(status) {
-  return status === 'failed' || status === 'error';
+  if (ProcessContractUtils && typeof ProcessContractUtils.isFailedLifecycleStatus === 'function') {
+    return ProcessContractUtils.isFailedLifecycleStatus(status);
+  }
+  return status === 'failed';
 }
 
 function isCompletedStatus(status) {
+  if (ProcessContractUtils && typeof ProcessContractUtils.isCompletedLifecycleStatus === 'function') {
+    return ProcessContractUtils.isCompletedLifecycleStatus(status);
+  }
   return status === 'completed';
 }
 
@@ -717,7 +759,7 @@ function getProcessPriorityModel(process) {
   let score = 0;
   const drivers = [];
 
-  if (process.needsAction) {
+  if (processNeedsAction(process)) {
     score += 40;
     drivers.push('needs_action');
   }
@@ -752,7 +794,9 @@ function getProcessPriorityModel(process) {
     drivers.push('bridge_fallback');
   }
 
-  const updatedAt = Number.isInteger(process.timestamp) ? process.timestamp : process.startedAt;
+  const updatedAt = Number.isInteger(process?.lastActivityAt)
+    ? process.lastActivityAt
+    : (Number.isInteger(process.timestamp) ? process.timestamp : process.startedAt);
   if (Number.isInteger(updatedAt) && updatedAt > 0) {
     const ageMinutes = Math.max(0, (Date.now() - updatedAt) / 60_000);
     if (ageMinutes >= 10) {
@@ -763,7 +807,7 @@ function getProcessPriorityModel(process) {
   }
 
   const progress = getProgressPercent(process?.currentPrompt, process?.totalPrompts);
-  if (process.needsAction && progress >= 80) {
+  if (processNeedsAction(process) && progress >= 80) {
     score += 8;
     drivers.push('late_stage_block');
   }
@@ -834,7 +878,7 @@ function matchesViewFilter(process) {
 
   switch (viewFilterMode) {
     case 'needs_action':
-      return !!process.needsAction;
+      return processNeedsAction(process);
     case 'p1p2': {
       const code = getProcessPriorityModel(process).code;
       return code === 'P1' || code === 'P2';
@@ -855,7 +899,7 @@ function matchesViewQuery(process) {
     process?.title || '',
     process?.id || '',
     process?.reason || '',
-    process?.statusText || '',
+    getProcessStatusText(process),
     process?.error || ''
   ].join(' ').toLowerCase();
   return haystack.includes(viewQueryValue);
@@ -953,11 +997,11 @@ function ensureCountConsistency(allItems, activeItems, historyItems) {
     issues.push('closed_in_active');
   }
 
-  const activeNeedsAction = activeItems.filter((process) => !!process?.needsAction).length;
+  const activeNeedsAction = activeItems.filter((process) => processNeedsAction(process)).length;
   // Count needsAction only on the same active partition (by id),
   // otherwise stale/non-visible items in history can cause false mismatches.
   const partitionNeedsAction = allItems.filter((process) => {
-    if (!process?.needsAction) return false;
+    if (!processNeedsAction(process)) return false;
     const processId = process?.id ? String(process.id) : '';
     return !!processId && activeIds.has(processId);
   }).length;
@@ -974,7 +1018,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const historyItems = Array.isArray(historyProcesses) ? historyProcesses : [];
 
   const activeCount = activeItems.length;
-  const needsActionCount = activeItems.filter((process) => !!process?.needsAction).length;
+  const needsActionCount = activeItems.filter((process) => processNeedsAction(process)).length;
   const completedCount = allItems.filter((process) => isCompletedStatus(getNormalizedStatus(process))).length;
   const failedCount = allItems.filter((process) => isFailedStatus(getNormalizedStatus(process))).length;
   const dataGapCount = allItems.filter((process) => isDataGapProcess(process)).length;
@@ -1215,6 +1259,12 @@ async function fetchProcessCompanySnapshot(process, options = {}) {
   if (existingRequest) return existingRequest;
 
   const request = (async () => {
+    const fromProcessSnapshot = buildProcessCompanySnapshotFromProcess(process);
+    if (fromProcessSnapshot) {
+      setProcessCompanySnapshotCache(process, fromProcessSnapshot);
+      return fromProcessSnapshot;
+    }
+
     const responses = await readResponsesFromStorage();
     const completed = findCompletedResponseForProcess(process, responses);
     const rawText = extractResponseText(completed) || extractCompletedTextFromProcess(process);
@@ -1232,41 +1282,12 @@ async function fetchProcessCompanySnapshot(process, options = {}) {
         DecisionContractUtils
       )
       : null;
-    const stage12Records = Array.isArray(stage12State?.records)
-      ? stage12State.records.map((record) => ({
-        decisionRole: record.role || '',
-        company: record.company || '',
-        decisionStatus: record.decisionStatus || '',
-        decisionDate: record.decisionDate || '',
-        bear: record.bear || '',
-        base: record.base || '',
-        bull: record.bull || '',
-        sector: record.sector || '',
-        companyFamily: record.companyFamily || '',
-        companyType: record.companyType || '',
-        revenueModel: record.revenueModel || '',
-        region: record.region || '',
-        currency: record.currency || '',
-        composite: record.composite || '',
-        sizing: record.sizing || '',
-        voi: record.voi || '',
-        fals: record.fals || '',
-        primaryRisk: record.primaryRisk || ''
-      }))
-      : [];
-
-    const snapshot = {
+    const snapshot = buildProcessCompanySnapshotFromStage12State(process, {
       processId,
       hasCompletedResponse: !!completed || !!rawText,
       responseTimestamp: Number.isInteger(completed?.timestamp) ? completed.timestamp : null,
-      company: stage12State?.company || (process.title || ''),
-      hasDecisionRecord: stage12Records.length > 0,
-      decisionContractStatus: typeof stage12State?.status === 'string' ? stage12State.status : 'invalid',
-      decisionContractIssues: Array.isArray(stage12State?.issueCodes) ? stage12State.issueCodes : [],
-      decisionRecordCount: Number.isInteger(stage12State?.recordCount) ? stage12State.recordCount : stage12Records.length,
-      decisionRecordFormats: Array.isArray(stage12State?.recordFormats) ? stage12State.recordFormats : [],
-      stage12Records
-    };
+      stage12State
+    });
 
     setProcessCompanySnapshotCache(process, snapshot);
     return snapshot;
@@ -1356,6 +1377,75 @@ function extractCompletedTextFromProcess(process) {
   }
 
   return '';
+}
+
+function mapStage12Record(record = {}) {
+  return {
+    decisionRole: record.role || record.decisionRole || '',
+    company: record.company || '',
+    decisionStatus: record.decisionStatus || '',
+    decisionDate: record.decisionDate || '',
+    bear: record.bear || '',
+    base: record.base || '',
+    bull: record.bull || '',
+    sector: record.sector || '',
+    companyFamily: record.companyFamily || '',
+    companyType: record.companyType || '',
+    revenueModel: record.revenueModel || '',
+    region: record.region || '',
+    currency: record.currency || '',
+    composite: record.composite || '',
+    sizing: record.sizing || '',
+    voi: record.voi || '',
+    fals: record.fals || '',
+    primaryRisk: record.primaryRisk || ''
+  };
+}
+
+function buildProcessCompanySnapshotFromStage12State(process, options = {}) {
+  const stage12State = options?.stage12State && typeof options.stage12State === 'object'
+    ? options.stage12State
+    : {};
+  const stage12Records = Array.isArray(stage12State?.records)
+    ? stage12State.records.map((record) => mapStage12Record(record))
+    : [];
+  return {
+    processId: typeof options?.processId === 'string' ? options.processId : String(process?.id || ''),
+    hasCompletedResponse: options?.hasCompletedResponse === true,
+    responseTimestamp: Number.isInteger(options?.responseTimestamp) ? options.responseTimestamp : null,
+    company: stage12State?.company || (process?.title || ''),
+    hasDecisionRecord: stage12Records.length > 0,
+    decisionContractStatus: typeof stage12State?.status === 'string' ? stage12State.status : 'invalid',
+    decisionContractIssues: Array.isArray(stage12State?.issueCodes) ? stage12State.issueCodes : [],
+    decisionRecordCount: Number.isInteger(stage12State?.recordCount) ? stage12State.recordCount : stage12Records.length,
+    decisionRecordFormats: Array.isArray(stage12State?.recordFormats) ? stage12State.recordFormats : [],
+    stage12Records
+  };
+}
+
+function buildProcessCompanySnapshotFromProcess(process) {
+  const rawSnapshot = process?.completedStage12Snapshot;
+  if (!rawSnapshot || typeof rawSnapshot !== 'object') return null;
+
+  const records = Array.isArray(rawSnapshot?.records)
+    ? rawSnapshot.records.map((record) => mapStage12Record(record))
+    : [];
+  return {
+    processId: String(process?.id || ''),
+    hasCompletedResponse: true,
+    responseTimestamp: Number.isInteger(process?.finishedAt)
+      ? process.finishedAt
+      : (Number.isInteger(process?.lastActivityAt) ? process.lastActivityAt : null),
+    company: typeof rawSnapshot?.company === 'string' && rawSnapshot.company.trim()
+      ? rawSnapshot.company.trim()
+      : (process?.title || ''),
+    hasDecisionRecord: rawSnapshot?.hasDecisionRecord === true || records.length > 0,
+    decisionContractStatus: typeof rawSnapshot?.status === 'string' ? rawSnapshot.status : 'invalid',
+    decisionContractIssues: Array.isArray(rawSnapshot?.issueCodes) ? rawSnapshot.issueCodes : [],
+    decisionRecordCount: Number.isInteger(rawSnapshot?.recordCount) ? rawSnapshot.recordCount : records.length,
+    decisionRecordFormats: Array.isArray(rawSnapshot?.recordFormats) ? rawSnapshot.recordFormats : [],
+    stage12Records: records
+  };
 }
 
 // Clipboard copy counters (in-memory per panel tab open).
@@ -1643,13 +1733,17 @@ function buildProcessCard() {
 function updateProcessCard(entry, process, isSelected) {
   if (!entry || !process) return;
   const { card, refs } = entry;
+  const contract = getProcessContract(process);
+  const lifecycleStatus = contract.lifecycleStatus;
+  const actionRequired = contract.actionRequired;
+  const operatorStatusText = getProcessStatusText(process);
   card.__process = process;
   card.id = `process-${process.id}`;
 
   if (!card.classList.contains('process-card')) {
     card.classList.add('process-card');
   }
-  card.classList.toggle('needs-action', !!process.needsAction);
+  card.classList.toggle('needs-action', actionRequired !== 'none');
   card.classList.toggle('selected', !!isSelected);
 
   refs.title.textContent = process.title || 'Bez tytulu';
@@ -1663,28 +1757,35 @@ function updateProcessCard(entry, process, isSelected) {
   const totalPrompts = Number.isInteger(process.totalPrompts) ? process.totalPrompts : 0;
   const progress = getProgressPercent(currentPrompt, totalPrompts);
   const startedAt = Number.isInteger(process.startedAt) ? process.startedAt : null;
-  const updatedAt = Number.isInteger(process.timestamp) ? process.timestamp : startedAt;
+  const updatedAt = Number.isInteger(process?.lastActivityAt)
+    ? process.lastActivityAt
+    : (Number.isInteger(process.timestamp) ? process.timestamp : startedAt);
   const tabLabel = Number.isInteger(process.tabId) ? String(process.tabId) : '-';
   const windowLabel = Number.isInteger(process.windowId) ? String(process.windowId) : '-';
 
-  refs.statusLine.textContent = getNormalizedStatus(process) === 'queued'
-    ? 'W kolejce'
-    : `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`;
+  refs.statusLine.textContent = lifecycleStatus === 'queued'
+    ? operatorStatusText
+    : (ProcessContractUtils?.buildStageProgressLabel?.(process) || `Prompt ${currentPrompt}/${totalPrompts} (${progress}%)`);
 
-  const status = getNormalizedStatus(process);
   let statusBadgeText = 'W trakcie';
   let statusBadgeClass = 'status-running';
-  if (process.needsAction) {
+  if (actionRequired !== 'none') {
     statusBadgeText = 'WYMAGA AKCJI';
     statusBadgeClass = 'status-needs-action';
-  } else if (status === 'queued') {
+  } else if (lifecycleStatus === 'queued') {
     statusBadgeText = 'W kolejce';
     statusBadgeClass = 'status-queued';
-  } else if (isCompletedStatus(status)) {
+  } else if (lifecycleStatus === 'finalizing') {
+    statusBadgeText = 'Finalizacja';
+    statusBadgeClass = 'status-running';
+  } else if (isCompletedStatus(lifecycleStatus)) {
     statusBadgeText = 'Zakonczono';
     statusBadgeClass = 'status-completed';
-  } else if (isFailedStatus(status)) {
+  } else if (isFailedStatus(lifecycleStatus)) {
     statusBadgeText = 'Blad';
+    statusBadgeClass = 'status-failed';
+  } else if (lifecycleStatus === 'stopped') {
+    statusBadgeText = 'Zatrzymano';
     statusBadgeClass = 'status-failed';
   }
 
@@ -1707,7 +1808,7 @@ function updateProcessCard(entry, process, isSelected) {
   const stageLabel = resolveStageLabel(process);
   refs.stageMeta.textContent = `Etap: ${stageLabel}`;
 
-  const statusLine = process.statusText ? shortenText(String(process.statusText), 96) : '';
+  const statusLine = operatorStatusText ? shortenText(String(operatorStatusText), 96) : '';
   if (statusLine || updatedAt) {
     const statusChunk = statusLine || 'brak statusu';
     refs.statusMeta.textContent = `${statusChunk} | ${formatRelativeTime(updatedAt)}`;
@@ -1718,7 +1819,7 @@ function updateProcessCard(entry, process, isSelected) {
   }
 
   refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni: ${formatClock(updatedAt)}`;
-  refs.locationMeta.textContent = status === 'queued' && tabLabel === '-' && windowLabel === '-'
+  refs.locationMeta.textContent = lifecycleStatus === 'queued' && tabLabel === '-' && windowLabel === '-'
     ? 'Oczekuje na wolny slot'
     : `Tab ${tabLabel} | Okno ${windowLabel}`;
 
@@ -1732,7 +1833,7 @@ function updateProcessCard(entry, process, isSelected) {
     refs.reason.style.display = 'none';
   }
 
-  const needsAction = !!process.needsAction;
+  const needsAction = actionRequired !== 'none';
   refs.actions.style.display = needsAction ? 'flex' : 'none';
   if (!needsAction) {
     refs.waitBtn.disabled = false;
@@ -1740,7 +1841,9 @@ function updateProcessCard(entry, process, isSelected) {
   }
 
   if (needsAction) {
-    refs.hint.textContent = 'Wybierz akcje lub otworz okno ChatGPT.';
+    refs.hint.textContent = actionRequired === 'continue_button'
+      ? 'Kliknij Continue w ChatGPT albo wybierz akcje.'
+      : 'Wybierz akcje lub otworz okno ChatGPT.';
     refs.hint.style.display = 'block';
   } else {
     refs.hint.textContent = '';
@@ -1755,17 +1858,6 @@ function openChatTab(process) {
   return true;
 }
 
-const CLOSED_STATUSES = new Set([
-  'completed',
-  'failed',
-  'closed',
-  'error',
-  'cancelled',
-  'canceled',
-  'aborted',
-  'stopped',
-  'interrupted'
-]);
 const MAX_ORPHAN_ACTIVE_AGE_MS = 45000;
 const STATUS_CACHE_TTL_MS = 2500;
 const tabStatusCache = new Map();
@@ -1774,8 +1866,11 @@ let updateSequence = 0;
 
 function isProcessClosed(process) {
   if (!process) return true;
+  if (ProcessContractUtils && typeof ProcessContractUtils.isClosedLifecycleStatus === 'function') {
+    return ProcessContractUtils.isClosedLifecycleStatus(getNormalizedStatus(process));
+  }
   const status = getNormalizedStatus(process);
-  return CLOSED_STATUSES.has(status);
+  return status === 'completed' || status === 'failed' || status === 'stopped';
 }
 
 function readStatusCache(cache, id) {
@@ -2057,106 +2152,91 @@ async function openProcessWindow(process) {
   return false;
 }
 
-function refreshProcesses() {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({ type: 'GET_PROCESSES' }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('[panel] GET_PROCESSES failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-        resolve([]);
-        return;
-      }
-      const processes = Array.isArray(response?.processes) ? response.processes : [];
-      applyProcessesUpdate(processes, { queue: response?.queue || null });
-      resolve(processes);
-    });
-  });
+async function refreshProcesses() {
+  const response = await sendRuntimeMessage({ type: 'GET_PROCESSES' });
+  if (response?.ok === false) {
+    console.warn('[panel] GET_PROCESSES failed:', response.errorMessage || response.errorCode || response.error);
+    return [];
+  }
+
+  if (Number.isInteger(response?.version)) processSnapshotVersion = response.version;
+  if (Number.isInteger(response?.queueVersion)) queueSnapshotVersion = response.queueVersion;
+  const processes = Array.isArray(response?.processes) ? response.processes : [];
+  await applyProcessesUpdate(processes, { queue: response?.queue || null });
+  return processes;
 }
 
-function sendDecision(process, decision) {
-  return new Promise((resolve) => {
-    if (!process || !process.id) {
-      resolve(false);
-      return;
-    }
-    chrome.runtime.sendMessage({
-      type: 'PROCESS_DECISION',
-      runId: process.id,
-      decision,
-      origin: 'panel',
-      tabId: Number.isInteger(process.tabId) ? process.tabId : null,
-      windowId: Number.isInteger(process.windowId) ? process.windowId : null
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('[panel] PROCESS_DECISION failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-        resolve(false);
-        return;
-      }
-      resolve(!!response?.success);
-    });
+async function sendDecision(process, decision) {
+  if (!process || !process.id) {
+    return false;
+  }
+  const response = await sendRuntimeMessage({
+    type: 'PROCESS_DECISION',
+    runId: process.id,
+    decision,
+    origin: 'panel',
+    tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+    windowId: Number.isInteger(process.windowId) ? process.windowId : null
   });
+  if (response?.ok === false) {
+    console.warn('[panel] PROCESS_DECISION failed:', response.errorMessage || response.errorCode || response.error);
+    return false;
+  }
+  return !!response?.success;
 }
 
-function sendDecisionAll(decision) {
-  return new Promise((resolve) => {
-    chrome.runtime.sendMessage({
-      type: 'PROCESS_DECISION_ALL',
-      decision,
-      origin: 'panel'
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('[panel] PROCESS_DECISION_ALL failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-        resolve({ success: false, matched: 0, delivered: 0 });
-        return;
-      }
-
-      resolve({
-        success: !!response?.success,
-        matched: Number.isInteger(response?.matched) ? response.matched : 0,
-        delivered: Number.isInteger(response?.delivered) ? response.delivered : 0
-      });
-    });
+async function sendDecisionAll(decision) {
+  const response = await sendRuntimeMessage({
+    type: 'PROCESS_DECISION_ALL',
+    decision,
+    origin: 'panel'
   });
+  if (response?.ok === false) {
+    console.warn('[panel] PROCESS_DECISION_ALL failed:', response.errorMessage || response.errorCode || response.error);
+    return { success: false, matched: 0, delivered: 0 };
+  }
+
+  return {
+    success: !!response?.success,
+    matched: Number.isInteger(response?.matched) ? response.matched : 0,
+    delivered: Number.isInteger(response?.delivered) ? response.delivered : 0
+  };
 }
 
-function sendProcessResumeNextStage(process, options = {}) {
-  return new Promise((resolve) => {
-    if (!process || !process.id) {
-      resolve({ success: false, error: 'missing_process_id' });
-      return;
-    }
+async function sendProcessResumeNextStage(process, options = {}) {
+  if (!process || !process.id) {
+    return { success: false, error: 'missing_process_id' };
+  }
 
-    chrome.runtime.sendMessage({
-      type: 'PROCESS_RESUME_NEXT_STAGE',
-      runId: process.id,
-      tabId: Number.isInteger(process.tabId) ? process.tabId : null,
-      windowId: Number.isInteger(process.windowId) ? process.windowId : null,
-      chatUrl: resolveChatUrl(process),
-      title: process?.title || '',
-      openDialogOnly: !!options.openDialogOnly
-    }, (response) => {
-      if (chrome.runtime.lastError) {
-        console.warn('[panel] PROCESS_RESUME_NEXT_STAGE failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-        resolve({
-          success: false,
-          error: chrome.runtime.lastError.message || 'runtime_error'
-        });
-        return;
-      }
-
-      resolve({
-        success: !!response?.success,
-        error: typeof response?.error === 'string' ? response.error : '',
-        mode: typeof response?.mode === 'string' ? response.mode : '',
-        startIndex: Number.isInteger(response?.startIndex) ? response.startIndex : null,
-        startPromptNumber: Number.isInteger(response?.startPromptNumber) ? response.startPromptNumber : null,
-        detectedPromptNumber: Number.isInteger(response?.detectedPromptNumber) ? response.detectedPromptNumber : null,
-        detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : '',
-        finalStagePersistence: response?.finalStagePersistence && typeof response.finalStagePersistence === 'object'
-          ? response.finalStagePersistence
-          : null
-      });
-    });
+  const response = await sendRuntimeMessage({
+    type: 'PROCESS_RESUME_NEXT_STAGE',
+    runId: process.id,
+    tabId: Number.isInteger(process.tabId) ? process.tabId : null,
+    windowId: Number.isInteger(process.windowId) ? process.windowId : null,
+    chatUrl: resolveChatUrl(process),
+    title: process?.title || '',
+    openDialogOnly: !!options.openDialogOnly
   });
+  if (response?.ok === false) {
+    console.warn('[panel] PROCESS_RESUME_NEXT_STAGE failed:', response.errorMessage || response.errorCode || response.error);
+    return {
+      success: false,
+      error: response.errorCode || response.error || 'runtime_error'
+    };
+  }
+
+  return {
+    success: !!response?.success,
+    error: typeof response?.error === 'string' ? response.error : '',
+    mode: typeof response?.mode === 'string' ? response.mode : '',
+    startIndex: Number.isInteger(response?.startIndex) ? response.startIndex : null,
+    startPromptNumber: Number.isInteger(response?.startPromptNumber) ? response.startPromptNumber : null,
+    detectedPromptNumber: Number.isInteger(response?.detectedPromptNumber) ? response.detectedPromptNumber : null,
+    detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : '',
+    finalStagePersistence: response?.finalStagePersistence && typeof response.finalStagePersistence === 'object'
+      ? response.finalStagePersistence
+      : null
+  };
 }
 
 function formatFinalStagePersistenceShort(finalStagePersistence) {
@@ -2303,7 +2383,7 @@ function restoreDecisionButtons(waitBtn, skipBtn) {
 function scheduleDecisionButtonRecovery(processId, waitBtn, skipBtn, delayMs = 1800) {
   setTimeout(() => {
     const latest = currentProcesses.find((process) => process.id === processId);
-    if (latest?.needsAction) {
+    if (processNeedsAction(latest)) {
       restoreDecisionButtons(waitBtn, skipBtn);
     }
   }, delayMs);
@@ -2361,8 +2441,8 @@ function updateUI(processes, options = {}) {
   itemsWithKey.sort((a, b) => {
     const byPriority = (b.priority?.score || 0) - (a.priority?.score || 0);
     if (byPriority !== 0) return byPriority;
-    const aNeeds = !!a.process.needsAction;
-    const bNeeds = !!b.process.needsAction;
+    const aNeeds = processNeedsAction(a.process);
+    const bNeeds = processNeedsAction(b.process);
     if (aNeeds && !bNeeds) return -1;
     if (!aNeeds && bNeeds) return 1;
     const diff = (b.sortKey || 0) - (a.sortKey || 0);
@@ -2382,7 +2462,7 @@ function updateUI(processes, options = {}) {
     .map((process) => {
       const stageKey = Number.isInteger(process.stageIndex) ? process.stageIndex : '';
       const stageName = process.stageName || '';
-      const statusText = process.statusText || '';
+      const statusText = getProcessStatusText(process);
       const reason = process.reason || '';
       const title = process.title || '';
       const tabId = Number.isInteger(process.tabId) ? process.tabId : '';
@@ -2409,7 +2489,7 @@ function updateUI(processes, options = {}) {
       const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}`;
       const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
-      return `${process.id}|${sortKey}|${process.status}|${process.needsAction}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}`;
+      return `${process.id}|${sortKey}|${getNormalizedStatus(process)}|${getProcessActionRequired(process)}|${getProcessPhase(process)}|${getProcessStatusCode(process)}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}`;
     })
     .join(';') + `|sel:${selectedProcessId || ''}`;
 
@@ -2574,7 +2654,7 @@ function getResumeStartIndex(process) {
 
 function getNeedsActionProcesses() {
   const source = allProcessesCache.length > 0 ? allProcessesCache : currentProcesses;
-  return source.filter((process) => !!process?.needsAction && !isProcessClosed(process));
+  return source.filter((process) => processNeedsAction(process) && !isProcessClosed(process));
 }
 
 function updateResumeAllButtonState() {
@@ -2626,7 +2706,7 @@ function openResumeStage(process) {
   let startIndex = getResumeStartIndex(process);
   if (!Number.isInteger(startIndex)) return false;
   if (startIndex < 1) startIndex = 1;
-  chrome.runtime.sendMessage({
+  void sendRuntimeMessage({
     type: 'RESUME_STAGE_OPEN',
     startIndex,
     title: process?.title || ''
@@ -2651,11 +2731,7 @@ async function openHistoryProcess(process) {
   const opened = await openProcessWindow(process);
   if (opened) return;
 
-  chrome.runtime.sendMessage({ type: 'ACTIVATE_TAB', reason: 'history-open' }, () => {
-    if (chrome.runtime.lastError) {
-      // Ignore if no ChatGPT tab available
-    }
-  });
+  await sendRuntimeMessage({ type: 'ACTIVATE_TAB', reason: 'history-open' });
 }
 
 function buildDetailsAuditCard(titleText) {
@@ -2864,10 +2940,10 @@ function renderDetails() {
     ? 'Zakonczono'
     : isFailedStatus(selectedStatus)
       ? 'Blad'
-      : selected.needsAction
+      : processNeedsAction(selected)
         ? 'Wymaga akcji'
         : 'W trakcie';
-    subtitle.textContent = `Status: ${statusLabel}`;
+  subtitle.textContent = `Status: ${statusLabel}`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
 
@@ -2883,7 +2959,9 @@ function renderDetails() {
   metaWrap.className = 'details-subtitle';
   const detailsProgress = getProgressPercent(selected.currentPrompt, selected.totalPrompts);
   const detailsStage = resolveStageLabel(selected);
-  const detailsUpdatedAt = Number.isInteger(selected.timestamp) ? selected.timestamp : selected.startedAt;
+  const detailsUpdatedAt = Number.isInteger(selected?.lastActivityAt)
+    ? selected.lastActivityAt
+    : (Number.isInteger(selected.timestamp) ? selected.timestamp : selected.startedAt);
   metaWrap.textContent = `Etap ${detailsStage} | Prompt ${selected.currentPrompt || 0}/${selected.totalPrompts || 0} (${detailsProgress}%) | ${formatRelativeTime(detailsUpdatedAt)}`;
   const priorityMeta = document.createElement('div');
   priorityMeta.className = 'details-subtitle';
@@ -2938,7 +3016,7 @@ function renderDetails() {
     actions.appendChild(focusBtn);
   }
 
-  const canResumeNextFromDetails = selected.needsAction || isProcessClosed(selected);
+  const canResumeNextFromDetails = processNeedsAction(selected) || isProcessClosed(selected);
   if (canResumeNextFromDetails) {
     const resumeNextBtn = document.createElement('button');
     resumeNextBtn.className = 'details-open details-resume-next';

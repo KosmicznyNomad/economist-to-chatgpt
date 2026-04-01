@@ -512,8 +512,6 @@ Before producing your final structured output, work through your analysis system
 Your final output should consist only of the structured sections (0 through 4) as specified in the Required Output Structure, and should not duplicate or rehash your intermediate working.
 
 Begin your analysis now.
-
-This will help for the next stage: Stage 1 - Sub-segment Validation (thesis-derived only).
 ◄PROMPT_SEPARATOR►
 ROLE
 You are a PhD-level investment analyst and systems thinker; you assume the thesis is TRUE, deduce where capital must flow, then select the best public stocks to capture that flow with the best risk/reward. Assuming the thesis is TRUE authorizes conditional deduction only; it does not imply incremental equity value for any listed company.
@@ -690,55 +688,8 @@ HANDOFF INHERITANCE RULE (critical — prevents drift in later stages):
 - Fallback to earlier stages (e.g. Stage 4 instead of Stage 8/9) is PROHIBITED if the immediate prior handoff exists.
 - If prior handoff NOT found after explicit search: output DATA_GAP_STAGE=[N-1] and STOP.
 
-
-In the next stages you will conduct following steps:
-
-STAGE STRUCTURE (use this order; one sentence each on what we care about)
-
-Stage 0 — Thesis Object Inheritance
-We care about importing the existing Thesis Object and earlier outputs from this conversation and not rebuilding Stage 0.
-
-Stage 1 — Sub-segment Validation (thesis-derived only)
-We care about converting the thesis into 5–8 precise sub-segments defined by what buyers purchase, stress-testing structure and timing, then selecting the top 2–3 to carry forward.
-
-Stage 2 — Stock Universe (15 names)
-We care about producing 15 public companies mapped to the top sub-segments with a clear thesis exposure mechanism, value-chain role, and the single biggest risk.
-
-Stage 3 — Thesis-Linked Traction Pack (TS/TQ/CP)
-We care about scoring thesis-stream traction with contract-semantics discipline (ceiling vs obligated vs funded vs delivered), plus capture potential, so Stage 4 valuation uses auditable traction objects instead of narrative proxies.
-
-Stage 4 — Reverse DCF Lite + Driver-of-Value Screen (fast filter)
-We care about checking whether the market is already pricing the base case and identifying whether value is driven mainly by growth, margins, or WACC, then classifying names as ADVANCE/WATCH/DROP (screening only, not final Stage 10 decision).
-
-Stage 5 — Competitive Position (4 finalists)
-We care about selecting 4 finalists with the strongest value-capture position (replaceability, scarce assets/capacity, qualification, relationships) and explicit fit to gating constraints.
-
-Stage 6 — Returns on Capital & Capital Allocation Quality
-We care about testing whether the thesis improves durable returns on capital, cash conversion, and per-share value creation, while using DuPont ROE only as a supplementary diagnostic where helpful.
-
-Stage 7 — Revaluation Parameter Selection
-We care about selecting ONE measurable Revaluation Parameter per finalist, ranking all finalists by revaluation potential, and carrying all forward.
-
-Stage 8 — Thesis Monetization (incremental only, SoP-compatible)
-We care about quantifying only incremental thesis cash flows (Bear/Base/Bull) and converting them into an incremental NPV/share delta with assumptions labeled SOURCE/ASSUMPTION.
-
-Stage 9 — Reverse DCF (whole company, consistent valuation object)
-We care about solving market-implied growth/margins via root-finding on a whole-company valuation (or consistent SoP) and measuring divergence versus your Base case.
-
-Stage 10 — Four-Gate Decision (final WATCH/AVOID)
-We care about producing per-company WATCH/AVOID decisions using Quality, Value, Proof, and Execution gates plus executable contingency plans.
-Stage 10 does NOT select finalists - that happens in Stage 11.
-
-Stage 11 — Composite Rank & Final Selection
-We care about ranking WATCH candidates cross-company using a weighted composite score and selecting PRIMARY + SECONDARY.
-
-Stage 12 — Decision Output Format (record export)
-We care about generating standardized downstream records (PRIMARY first, SECONDARY second) with strict field validation.
-
 START RULE
 Don't execute them. just remember this fact, think about it, and starting from the next stage follow.
-
-This will help for the next stage: Stage 1 - Sub-segment Validation (thesis-derived only).
 ◄PROMPT_SEPARATOR►
 
 You are an investment research engineer working within a multi-stage investment analysis pipeline. Your task is to transform an inherited investment thesis into an operational "market map in invoice form," then generate and evaluate candidate sub-segments to identify the top 2–3 for downstream company selection.
@@ -755,6 +706,9 @@ If NOT found: output DATA_GAP_STAGE=0 and STOP.
 
 
 ## Your Task: Four Required Mechanics
+
+OPTIMIZATION TARGET:
+Identify the few sub-segments where spend is most forced, margins are most defensible, and public companies can capture a material share of value.
 
 ### MECHANIC 1: Sub-Segment Derivation
 
@@ -986,7 +940,6 @@ ACCOUNTING_CONVERSION_PROFILE:
   Maintenance-capex burden:
 === END HANDOFF ===
 
-This will help for the next stage: Stage 2 - Stock Universe (15 names).
 ◄PROMPT_SEPARATOR►
 
 You are an expert investment analyst. Your task is to identify 15 high-conviction stock picks based on a specific investment thesis that has already been translated in Stage 1 into invoice-first sub-segments (payer/contract/invoice items/gates/timing funnel + invoice pool and delivered pool ranges).
@@ -1024,6 +977,9 @@ Your current task is to translate this thesis and sub-segment analysis into a co
 
 
 ## Seven-Phase Analysis Framework
+
+OPTIMIZATION TARGET:
+Identify public stocks with the most material and underappreciated exposure to the thesis relative to their current valuation.
 
 Work through these seven phases systematically. Conduct all reasoning, research queries, calculations, and filtering decisions before presenting your final recommendations.
 
@@ -1367,8 +1323,8 @@ After completing all 7 phases, select your final 15 stocks according to these re
   - Explain which missing data or sub-segment definitions prevented Core classification
 
 **Additional Constraints:**
-- Maximum 2 stocks with overheating score ?7
-- Minimum 8 stocks with overheating score ?4
+- Maximum 2 stocks with overheating score >= 7
+- Minimum 8 stocks with overheating score <= 4
 - Maximum 3 stocks with average daily volume <$5M
 
 ## Required Output Format
@@ -1421,117 +1377,10 @@ QUICK_VALUATION_VERDICT:
 QUALITY_FLAGS:
 === END HANDOFF ===
 ◄PROMPT_SEPARATOR►
-
-STAGE 3 — THESIS-LINKED TRACTION PACK (TS/TQ/CP)
-Contract Semantics Audit + Customer Traction Now + Capture Potential
-(Web Research Mandatory; No Valuation; Built to feed Stage 4)
-
-ROLE
-INHERITANCE LOCK:
-Search context for '=== STAGE 1 HANDOFF ===' and Stage 2 universe output.
-Extract: SELECTED_SUB-SEGMENTS with invoice-first definitions, 15 companies with sub-segment mapping.
-If found: USE THEM. Do not reconstruct.
-If NOT found: output DATA_GAP_STAGE=1 or DATA_GAP_STAGE=2 and STOP.
-
-You are an investment research engineer working inside a thesis-driven pipeline.
-Assume the thesis is TRUE for conditional traction analysis. Do not debate it. Do not infer from that assumption alone that the thesis creates incremental equity value for this company.
-Your job is to measure “traction under the thesis” for the Stage 2 universe (15 public companies) in a way that is:
-- invoice-linked (tied to the thesis sub-segment invoice stream, not generic company momentum),
-- contract-semantic correct (ceiling vs obligated/funded vs delivered),
-- useful for valuation calibration in Stage 4 (tempo of monetization + uncertainty tax),
-- and usable for monitoring later (Primary KPI + VOI window).
-
-WHAT “TRACTION” MEANS IN THIS SYSTEM (non-negotiable)
-We do not mean “hype” or “demand vibes”.
-Traction is money moving through the real economy funnel implied by the thesis:
-Budget/Intent › Tender › Award/Obligation › Backlog › Delivery/Revenue Recognition › Cash.
-We measure two distinct things and keep them separate:
-1) Traction Now: how far money has progressed in the funnel (TS) and the quality/realism of that traction (TQ).
-2) Capture Potential: whether this company has the right/ability to capture the thesis stream even before full awards (CP).
-
-WHY THIS STAGE EXISTS (value relevance)
-Stage 4 (Reverse DCF Lite) is sensitive to contract semantics and timing:
-- A “$X contract” can be a ceiling (“up to”), not real obligations.
-- Award ? funded backlog ? delivered revenue ? cash.
-If we misread this, DCF-lite will filter the wrong names and we can lose true undervaluation cases.
-This stage creates a consistent Traction Object per company so Stage 4 does not guess.
-
-INPUTS (must inherit from prior stages; do not rebuild)
-From Stage 1 (Sub-segment Validation):
-- Selected sub-segments (2–3) with payer, contract mechanism, invoice items, gates/bottlenecks, timing funnel,
-  Invoice Pool + Delivered Pool (Y1–Y3) ranges and pool confidence.
-From Stage 2 (Stock Universe):
-- 15 public companies with mapping to sub-segment(s) and invoice items (thesis exposure mechanism).
-- Any noted company-specific risks already documented.
-
-HARD SCOPE RULE
-Score traction ONLY for the thesis-linked stream defined by the mapped sub-segment(s).
-Do not score the company’s overall business traction unless you explicitly explain why it is an acceptable proxy
-(and then flag “dilution risk”).
-
-WEB RESEARCH POLICY (mandatory; audit trail required)
-For each company:
-- You MUST use web research.
-- Preferred source hierarchy:
-  1) Company filings / IR: annual report (10-K/20-F), 10-Q/interim, earnings deck, transcript.
-  2) Official contract/award/procurement sources when relevant (country/sector appropriate).
-  3) Regulators / system operators for regulated/RAB cases.
-  4) Reputable aggregators only as fallback (use at least two if you must).
-- Record EVERY search query used (literal text).
-- Label every key statement as SOURCE / ASSUMPTION / INFERENCE.
-- Never treat “ceiling / up to / framework agreement” as funded revenue.
-
-CORE DEFINITIONS (keep consistent)
-TS (0–5): position in money funnel. TQ (0–5): contract semantics + cash realism. CP (0–5): structural capture ability.
-PrimaryTractionKPI: ONE public KPI for customer footprint. Prefer the narrowest thesis-stream KPI available over broader company-wide proxies. VOI Window: next concrete traction update event.
-Scalars: TractionNow = (TS+TQ)/10, Capture = CP/5.
-Full scoring rubrics in the detailed process section below.
-
-PROCESS: Execute Steps 1-10 for all 15 companies (detailed rubrics in the expanded process section that follows).
-
-IMPORTANT: OPTION_ONLY is not “bad”; it’s a pre-inflection option that requires higher asymmetry and clear VOI later.
-LOW_QUALITY is the contract-marketing trap bucket.
-
-OUTPUT REQUIREMENTS (three artifacts; must be copy-pastable)
-Artifact 1 — Traction Pack Table (all 15)
-One row per company with columns:
-Company | Ticker | Primary SubSegment_ID | Thesis invoice items matched (short) | BusinessType
-TS | TQ | CP | TractionNow | Capture | TractionClass
-PrimaryTractionKPI (value, period) | VOI Window
-Semantics verdict (ceiling vs obligated vs funded vs delivered)
-Cash conversion flag (clean / mild drag / red flag)
-Evidence bullets (2–5) labeled SOURCE/ASSUMPTION/INFERENCE + citations
-Search query log (list of the exact queries used for this company)
-
-Artifact 2 — Traction Diagnostics Summary
-- Counts by TractionClass (HARD / SOFT / OPTION_ONLY / LOW_QUALITY).
-- The 3 most common semantic pitfalls encountered (e.g., ceiling confusion, unfunded backlog, cash conversion drag).
-- A short “watchlist of options”: names with OPTION_ONLY (high CP, low TS/TQ) with their VOI window (one line each).
-- A short “trap list”: LOW_QUALITY names with the single reason (one line each).
-
-Artifact 3 — Stage 4 Handoff Objects (compact; one per company)
-For each company output:
-Company, Ticker, Primary SubSegment_ID,
-TS/TQ/CP, TractionNow, Capture, TractionClass,
-Thesis_Margin_Proxy, Accounting_Conversion_Profile, Working_Capital_Drag,
-PrimaryTractionKPI (name + latest value + period),
-VOI Window,
-One sentence: “What must happen next in the funnel” (e.g., tender›award, award›funded backlog, backlog›delivery),
-One sentence: “Weakest link” (quality/semantics/cash/qualification/capacity),
-One sentence: “Valuation implication hint” (timing friction: 0–12m / 12–24m / 24m+ to meaningful cash).
-
-STOP RULE
-Do not run any DCF, do not compute priced-in, do not output ADVANCE/WATCH/DROP.
-That belongs to Stage 4.
-Your job is to produce the traction objects that Stage 4 must inherit.
-
-INTEGRATION NOTE (for the next prompt, Stage 4)
-Stage 4 must inherit TS/TQ/CP, TractionClass, PrimaryTractionKPI, Thesis_Margin_Proxy, Accounting_Conversion_Profile, Working_Capital_Drag, and VOI Window
-to apply uncertainty tax and to avoid semantic errors (ceiling ? funded ? delivered).
-
-This will help for the next stage: Stage 4 - Reverse DCF Lite + Driver-of-Value Screen.
-◄PROMPT_SEPARATOR►
 You are an investment research engineer working within a thesis-driven equity selection pipeline. Your role is Stage 3: score traction for 15 public companies against a validated investment thesis.
+
+OPTIMIZATION TARGET:
+Identify companies where thesis-linked money is closest to funded, deliverable, and cash-convertible reality.
 
 ## Pipeline Context and Inputs
 
@@ -1614,10 +1463,10 @@ After scoring TS and TQ, verify logical consistency:
 
 | Condition | Rule | Action |
 |-----------|------|--------|
-| TS ? 4, TQ < 3 | Backlog converting to revenue should have modelable contract quality | Flag COHERENCE_REVIEW, provide explicit justification or adjust |
+| TS >= 4, TQ < 3 | Backlog converting to revenue should have modelable contract quality | Flag COHERENCE_REVIEW, provide explicit justification or adjust |
 | TS = 5, TQ < 4 | Delivered + cash proven with below-conversion-proven quality is contradictory | Flag COHERENCE_WARNING, investigate and resolve |
-| TS ? 1, TQ ? 4 | High contract quality with no funnel progress is unusual | Flag COHERENCE_NOTE, verify correct stream is being scored |
-| \|TS - TQ\| ? 3 | Large gaps signal potential scoring errors or unusual situations | Flag DIVERGENCE_FLAG, explain the divergence |
+| TS <= 1, TQ >= 4 | High contract quality with no funnel progress is unusual | Flag COHERENCE_NOTE, verify correct stream is being scored |
+| \|TS - TQ\| >= 3 | Large gaps signal potential scoring errors or unusual situations | Flag DIVERGENCE_FLAG, explain the divergence |
 
 ## Business Type Classification
 
@@ -1646,7 +1495,7 @@ Choose exactly one per company for thesis stream. This determines appropriate ev
 1. **Highest**: Company filings/IR (10-K, 20-F, 10-Q, 6-K, interim reports, earnings decks, transcripts, investor presentations)
 2. Official contract/award/procurement sources (government procurement databases, regulatory filings)
 3. Regulators/system operators (for regulated cases: regulatory decisions, rate cases, approved capex plans)
-4. Reputable industry aggregators (use ?2 independent sources, cross-reference claims)
+4. Reputable industry aggregators (use at least 2 independent sources, cross-reference claims)
 5. **Lowest**: Analyst reports/news (context only, never primary evidence for scoring)
 
 ### Audit Trail Requirements
@@ -1745,7 +1594,7 @@ Floor_Traction = min(TS, TQ) / 5
 TQ_TS_Gap = |TS - TQ|
 ```
 
-If TQ_TS_Gap ? 3, flag DIVERGENCE_FLAG and explain.
+If TQ_TS_Gap >= 3, flag DIVERGENCE_FLAG and explain.
 
 ### Step 10: Assign Traction Class
 
@@ -1753,12 +1602,12 @@ Routing label for Stage 4 threshold logic:
 
 | Class | Conditions | Meaning |
 |-------|-----------|---------|
-| HARD_TRACTION | TS ? 3 AND TQ ? 3 | Real money moving with credible contract quality, Stage 4 models with moderate uncertainty tax |
-| SOFT_TRACTION | Not HARD, but at least one of TS/TQ ? 2, evidence mixed/partially visible | Some signal exists but incomplete, Stage 4 applies higher uncertainty tax |
-| OPTION_ONLY | (TS ? 1 OR TQ ? 1) AND CP ? 4 AND VOI Window within 12 months | Pre-inflection option: structurally positioned but money hasn't moved yet, requires higher asymmetry threshold in Stage 4 |
-| LOW_QUALITY | TS ? 1 AND TQ ? 1 AND CP ? 2 | Contract marketing trap: narrative without substance, Stage 4 treats with maximum skepticism or skips |
+| HARD_TRACTION | TS >= 3 AND TQ >= 3 | Real money moving with credible contract quality, Stage 4 models with moderate uncertainty tax |
+| SOFT_TRACTION | Not HARD, but at least one of TS/TQ >= 2, evidence mixed/partially visible | Some signal exists but incomplete, Stage 4 applies higher uncertainty tax |
+| OPTION_ONLY | (TS <= 1 OR TQ <= 1) AND CP >= 4 AND VOI Window within 12 months | Pre-inflection option: structurally positioned but money hasn't moved yet, requires higher asymmetry threshold in Stage 4 |
+| LOW_QUALITY | TS <= 1 AND TQ <= 1 AND CP <= 2 | Contract marketing trap: narrative without substance, Stage 4 treats with maximum skepticism or skips |
 
-**Edge cases**: If qualifies for both SOFT_TRACTION and OPTION_ONLY, classify as OPTION_ONLY. If TS or TQ is 0 and the other is ? 3, classify as SOFT_TRACTION and flag ASYMMETRIC_SCORES.
+**Edge cases**: If qualifies for both SOFT_TRACTION and OPTION_ONLY, classify as OPTION_ONLY. If TS or TQ is 0 and the other is >= 3, classify as SOFT_TRACTION and flag ASYMMETRIC_SCORES.
 Company-wide backlog or broad segment disclosure alone is not sufficient for HARD_TRACTION when the thesis stream is narrow and dilution risk is high.
 
 ## Your Analysis Process
@@ -1779,7 +1628,7 @@ For each company, work through your analysis inside `<company_analysis>` tags in
 
 3. **Scoring with coherence check**: 
    - Score TS with 1-2 sentence justification citing specific evidence
-   - Score TQ with 1-2 sentence justification, explicitly noting whether cash conversion red flags triggered the mandatory TQ ? 3 cap
+   - Score TQ with 1-2 sentence justification, explicitly noting whether cash conversion red flags triggered the mandatory TQ cap at 3
    - **Explicitly check each coherence rule**: Go through the coherence rules table row by row and state whether each condition applies
    - Flag any coherence violations
    - Score CP with 1-2 sentence justification that references specific gates from Stage 1 taxonomy
@@ -1789,7 +1638,7 @@ For each company, work through your analysis inside `<company_analysis>` tags in
    - Scored only thesis-linked stream, not overall business?
    - Contract semantics audit applied honestly — headlines backed by funded obligations?
    - TS-TQ coherence rules checked?
-   - TQ ? 3 cap enforced if persistent cash red flags exist?
+   - TQ cap at 3 enforced if persistent cash red flags exist?
    - CP justified using specific gate language from pipeline?
    - Primary KPI specific enough for monitoring?
    - VOI Window set with concrete downgrade trigger?
@@ -1883,7 +1732,7 @@ Before finalizing, verify for every company:
 - [ ] Labeled every key statement SOURCE / ASSUMPTION / INFERENCE?
 - [ ] Applied contract semantics audit honestly — headlines backed by funded obligations?
 - [ ] Checked TS-TQ coherence rules and flagged violations?
-- [ ] Enforced TQ ? 3 cap if persistent cash red flags exist?
+- [ ] Enforced TQ cap at 3 if persistent cash red flags exist?
 - [ ] Justified CP using specific gate language from pipeline?
 - [ ] Primary KPI publicly measurable and specific enough for monitoring?
 - [ ] Set concrete VOI Window with specific downgrade trigger?
@@ -1947,6 +1796,10 @@ Begin your analysis now. Your final output should consist only of the three arti
 STAGE 4 — REVERSE DCF LITE + DRIVER-OF-VALUE SCREEN (Two-Layer Asymmetry)
 
 PURPOSE
+
+OPTIMIZATION TARGET:
+Identify companies where credible thesis-driven per-share upside is least reflected in the current price and driven by real economics.
+
 This stage is a fast, high-signal filter before Stage 5.
 
 Your objective is to identify which companies have real mispricing fuel and which only look attractive narratively. You must separate:
@@ -2112,8 +1965,8 @@ Interpretation matters:
 Mandatory “wedge realism” computation (how to check wedge is not fantasy):
 
 * Required_Annual_FCF calculation depends on Stage 8 persistence class:
-  - Durable/Step-change: Required_Annual_FCF ? (EquityWedge × DilutedShares) × WACC_total
-  - Wave (finite life N years): Required_Annual_FCF ? (EquityWedge × DilutedShares) / Annuity_Factor(WACC, N)
+  - Durable/Step-change: Required_Annual_FCF ≈ (EquityWedge × DilutedShares) × WACC_total
+  - Wave (finite life N years): Required_Annual_FCF ≈ (EquityWedge × DilutedShares) / Annuity_Factor(WACC, N)
     where Annuity_Factor = (1 - (1+WACC)^(-N)) / WACC
     Use N from Stage 8 fade schedule (default N=6 if not specified).
 * If persistence class is not yet known (Stage 8 not run), use Durable formula 
@@ -2179,7 +2032,7 @@ Using TOTAL values:
 Compute:
 • Upside to Bull
 • Downside to Bear
-• Total Asymmetry = (Bull  Price) / (Price  Bear)
+• Total Asymmetry = (Bull - Price) / (Price - Bear)
 
 Separately report:
 • Core asymmetry
@@ -2327,9 +2180,11 @@ STYLE CONSTRAINTS
 • Prefer numbers and structure over narrative.
 • The key output is economic clarity, not conviction language.
 
-This will help for the next stage: Stage 5 - Competitive Position.
 ◄PROMPT_SEPARATOR►
-You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis. You follow the Tiger Global and Baillie Gifford investment philosophy: invest in market leadership at inflection points through structural deduction, prioritizing asymmetric risk/reward ratios over position strength alone.
+You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis.
+
+OPTIMIZATION TARGET:
+Identify companies that control bottlenecks and can capture disproportionate economic value as the thesis scales.
 
 INHERITANCE LOCK:
 1. Search context for Stage 3 Artifact 3 (Handoff Objects) → extract CP scores and gate justifications per company
@@ -2631,7 +2486,6 @@ Remember: Prioritize asymmetric risk/reward ratios and favorable S-curve positio
 
 Your final output should consist only of the Competitive Position Analysis Results and should not duplicate or rehash your detailed intermediate analytical work.
 
-This will help for the next stage: Stage 6 - Returns on Capital & Capital Allocation Quality.
 ◄PROMPT_SEPARATOR►
 # STAGE 6 — RETURNS ON CAPITAL & CAPITAL ALLOCATION QUALITY
 
@@ -2640,6 +2494,9 @@ This will help for the next stage: Stage 6 - Returns on Capital & Capital Alloca
 Inheritance: 4 finalists and their financials come from Stage 5 outputs and earlier stages. Scan the full conversation for company name, ticker, revenue, EBIT, net income, FCF, total assets, invested capital, equity, diluted shares, and net debt. Run for ALL 4 finalists.
 
 ## Analytical Purpose
+
+OPTIMIZATION TARGET:
+Identify businesses that can convert thesis-driven demand into durable ROIC, FCF, and per-share value creation.
 
 This stage evaluates whether the company creates value through durable returns on capital and disciplined capital allocation, and whether the thesis improves those returns. DuPont ROE remains a supplementary diagnostic, not the primary framework for non-financials.
 
@@ -2698,7 +2555,6 @@ Carry all 4 forward to Stage 7. Do not select a winner in Stage 6.
 
 Advance to Revaluation Parameter Selection.
 
-This will help for the next stage: Stage 7 - Revaluation Parameter Selection.
 ◄PROMPT_SEPARATOR►
 # STAGE 7 — REVALUATION PARAMETER SELECTION
 
@@ -2715,6 +2571,9 @@ INHERITANCE LOCK:
 All three required. If missing: output DATA_GAP_STAGE=[missing] and STOP.
 
 # Context and Inputs
+
+OPTIMIZATION TARGET:
+Identify the single measurable parameter most likely to force a revaluation of total per-share value within 6–18 months.
 
 You will have received inputs from previous analysis stages:
 
@@ -2969,13 +2828,16 @@ RANKED_ORDER: [Company1, Company2, Company3, Company4]
 
 Begin your analysis now.
 
-This will help for the next stage: Stage 8 - Thesis Monetization Quantification.
 ◄PROMPT_SEPARATOR►
 
 STAGE 8 — THESIS MONETIZATION QUANTIFICATION
 Incremental Wedge + SoP-Compatible + Path-Routed + Search-When-Needed
 
 PURPOSE IN THE WORKFLOW
+
+OPTIMIZATION TARGET:
+Identify the most realistic incremental cash flows from the thesis that can actually reach shareholders.
+
 INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY calculation, execute these searches in order:
 1. Search for '=== STAGE 7 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER, FLAGS
@@ -3021,7 +2883,7 @@ E) Treat wedge NPV as EV-additive. Do not subtract net debt from the wedge. Net 
 F) Anti-double-count: incremental means “thesis path minus the same baseline path embedded in CORE assumptions.” If baseline differs, reconcile before proceeding.
 Do not let procurement, industrial-base support, sustainment, and service tails stand in for one another inside the same wedge unless the incremental link is explicit.
 G) Wedge persistence: do not assume the wedge is perpetual by default. Classify persistence (wave/cycle vs durable steady-state change) and only then decide whether a long-term component exists.
-H) Wedge sanity checks: wedge should be monotonic (Bear ? Base ? Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
+H) Wedge sanity checks: wedge should be monotonic (Bear <= Base <= Bull). If not, flag and fix scenario logic or explain a real mechanism that causes it.
 
 DATA GAP FALLBACK (EMERGENCY ONLY)
 If critical inputs are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
@@ -3141,13 +3003,15 @@ After completing all 4 companies, produce consolidated handoff:
   FLAGS: [any flags or "None"]
 === END HANDOFF ===
 
-This will help for the next stage: Stage 9 - Reverse DCF (whole company / TOTAL).
 ◄PROMPT_SEPARATOR►
 # STAGE 9 — REVERSE DCF (TOTAL / WHOLE COMPANY)
 
 
 
 You are conducting a Reverse DCF analysis for ALL 4 finalists to extract what expectations are already priced into each stock and determine whether there is actionable mispricing versus the thesis. This is NOT a fair-value exercise. Your output must be decision-grade, auditable, and internally consistent.
+
+OPTIMIZATION TARGET:
+Identify the largest credible gap between market-implied expectations and realistic total per-share value.
 
 INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY calculation, execute these searches:
@@ -3168,7 +3032,7 @@ COMPUTATION + DATA REQUIREMENTS
 * Use Enterprise Value (EV) as the primary reverse-DCF anchor, then convert to Equity Value per share using net debt and current diluted shares outstanding.
 * IMPORTANT: “Diluted shares outstanding” means current shares outstanding plus in-the-money dilution (RSUs, options, convertibles). Do NOT use diluted weighted-average shares from the income statement.
 
-PREREQUISITES CHECK ? LAST-RESORT STOP ONLY IF STILL MISSING
+PREREQUISITES CHECK — LAST-RESORT STOP ONLY IF STILL MISSING
 If prerequisites are still missing after applying DataGap Rule steps 1-2 and required search/proxy attempts, STOP and output exactly one line (last resort):
 DATA_GAP_STAGE=<previous_stage_number>
 
@@ -3231,12 +3095,12 @@ Preconditions (must hold):
 • Wedge cash flows are strictly incremental vs the CORE baseline (no double-count).
 Build SoP at the EV level:
 • EV_total_s = EV_core_s + EV_wedge_s
-• NetDebt_total_s = NetDebt_core_s + ?NetDebt_s (only if wedge requires financing; else 0)
-• DilutedShares_total_s = DilutedShares_core + ?Shares_s (only if wedge causes dilution; else 0)
-• EquityValuePerShare_total_s = (EV_total_s  NetDebt_total_s) / DilutedShares_total_s
-Only if ?NetDebt_s = 0 and ?Shares_s = 0 may you safely add per-share values (EV-level is still preferred).
+• NetDebt_total_s = NetDebt_core_s + IncrementalNetDebt_s (only if wedge requires financing; else 0)
+• DilutedShares_total_s = DilutedShares_core + IncrementalShares_s (only if wedge causes dilution; else 0)
+• EquityValuePerShare_total_s = (EV_total_s - NetDebt_total_s) / DilutedShares_total_s
+Only if IncrementalNetDebt_s = 0 and IncrementalShares_s = 0 may you safely add per-share values (EV-level is still preferred).
 Persistence (inherit from Stage 8):
-• Wave wedge: model explicit ?FCF through a fade schedule (e.g., out to year 6–8) and set wedge terminal contribution = 0.
+• Wave wedge: model explicit incremental FCF through a fade schedule (e.g., out to year 6–8) and set wedge terminal contribution = 0.
 • Durable wedge: terminal allowed only with explicit maintenance reinvestment logic.
 Discounting:
 • Use consistent WACC/g across parts unless you explicitly justify different risk rates.
@@ -3256,11 +3120,11 @@ Inputs:
 Mechanics:
 * Revenue_t = Revenue_0 × (1 + growth) ^ t  (or your explicit path)
 * FCF_t = Revenue_t × FCFMargin_t
-* PV_FCF = ?_{t=1..3} FCF_t / (1+WACC)^t
-* TV = FCF_3 × (1+g) / (WACC  g)
+* PV_FCF = sum_{t=1..3} FCF_t / (1+WACC)^t
+* TV = FCF_3 × (1+g) / (WACC - g)
 * PV_TV = TV / (1+WACC)^3
 * EV = PV_FCF + PV_TV
-* EquityValue = EV  NetDebt
+* EquityValue = EV - NetDebt
 * EquityValuePerShare = EquityValue / DilutedShares
 
 NEW — Step 2.1 CASH FLOW CONSISTENCY CHECK (MANDATORY)
@@ -3275,16 +3139,16 @@ If Horizon N (from Step 0.2) is > 3, extend the DCF mechanics WITHOUT changing t
 * For years 4..N, apply a fade of growth from g_1_3 toward g_terminal by year N (linear fade is acceptable).
 * For margin, default to holding margin_3 constant for years 4..N unless the thesis persistence in Stage 8 requires a fade (Wave case) or explicit reinvestment logic (Durable case).
 * Compute PV_FCF for t=1..N and terminal value at year N:
-  - PV_FCF = ?_{t=1..N} FCF_t / (1+WACC)^t
-  - TV = FCF_N × (1+g_terminal) / (WACC  g_terminal)
+  - PV_FCF = sum_{t=1..N} FCF_t / (1+WACC)^t
+  - TV = FCF_N × (1+g_terminal) / (WACC - g_terminal)
   - PV_TV = TV / (1+WACC)^N
 * Mandatory diagnostic: report terminal share = PV_TV / (PV_FCF + PV_TV). High terminal share implies WACC sensitivity.
 
 STEP 3 — MARKET POSITION VS YOUR SCENARIOS (WHOLE-COMPANY)
 Compute using whole-company Bear/Base/Bull Equity Value per share:
-* %PricedIn = (Price  Bear) / (Bull  Bear) × 100
-* Gap_to_Base = (Base  Price) / Price
-* Gap_to_Bull = (Bull  Price) / Price
+* %PricedIn = (Price - Bear) / (Bull - Bear) × 100
+* Gap_to_Base = (Base - Price) / Price
+* Gap_to_Bull = (Bull - Price) / Price
 If %PricedIn < 0 or > 100, treat it as “outside range” diagnostic, not a basis for interpolation.
 
 STEP 3.5 — PRIMARY MULTIPLE SANITY CHECK (mandatory)
@@ -3315,7 +3179,7 @@ You must solve directly, not interpolate.
 * Report 3–5 representative points to show trade-offs (e.g., high growth/low margin vs lower growth/higher margin).
 
 4.4 If SoP is used (thesis-incremental inputs)
-* Compute implied thesis value per share = CurrentPrice  BaseBusinessValuePerShare_current.
+* Compute implied thesis value per share = CurrentPrice - BaseBusinessValuePerShare_current.
 * Within the thesis incremental DCF, solve for one implied thesis driver (preferably capture rate or thesis CAGR) such that ThesisNPVPerShare == implied thesis value per share.
 * Do not compare thesis-only NPV to full price.
 
@@ -3355,20 +3219,20 @@ analysis.
 
 STEP 5 — RISK-REWARD METRICS (TOTAL EQUITY VALUE PER SHARE, PYTHON)
 Precondition: Price, Bear, Base, Bull are all TOTAL Equity Value per share (EV›Equity bridge already applied).
-If Price ? Bear or Bull ? Price, treat as “outside range” and do not compute AsymmetryRatio; proceed to root-finding diagnostics.
+If Price < Bear or Price > Bull, treat as “outside range” and do not compute AsymmetryRatio; proceed to root-finding diagnostics.
 
 Compute (Python):
 • ExpectedValue = pBear * Bear + pBase * Base + pBull * Bull
   (where pBear=0.25, pBase=0.50, pBull=0.25 unless overridden by Stage 8 TractionClass weights)
-• ExpectedValueUpside% = ExpectedValue / Price  1
+• ExpectedValueUpside% = ExpectedValue / Price - 1
 
 Risk/Reward (percent-based):
-• Upside% = Bull / Price  1
-• Downside% = 1  Bear / Price
+• Upside% = Bull / Price - 1
+• Downside% = 1 - Bear / Price
 • AsymmetryRatio = Upside% / Downside%
 
 Cross-check (must match numerically):
-• AsymmetryRatio_check = (Bull  Price) / (Price  Bear)
+• AsymmetryRatio_check = (Bull - Price) / (Price - Bear)
 
 Optional reporting (do NOT use to compute asymmetry):
 • BullMultiple = Bull / Price
@@ -3467,9 +3331,11 @@ This table enables Stage 11 Composite Rank by providing directly comparable metr
 Style: concise, decision-oriented, auditable. No generic filler. No linear interpolation. No object mismatch.
 Focus on actionable conclusions. Show all key calculations and assumptions explicitly, and ensure the object of valuation is consistent throughout.
 
-This will help for the next stage: Stage 10 - Four-Gate Decision (WATCH/AVOID).
 ◄PROMPT_SEPARATOR►
 ROLE
+OPTIMIZATION TARGET:
+Identify which companies deserve active watchlist attention and a concrete upgrade path based on quality, value, proof, and execution.
+
 You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ALL 4 FINALISTS, you must produce a decision (WATCH / AVOID) per company, then rank WATCH companies using a Composite Score and select the top 2 as PRIMARY and SECONDARY.
 
 
@@ -3496,7 +3362,7 @@ Your job is to:
 3) translate the result into a practical position plan (enter, add, reduce, exit),
 4) refuse false certainty when key stages are missing.
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 CORE CONCEPT: CORE/WEDGE/TOTAL rules — see DEFINITIONS in the preamble.
 All Gate 2 metrics computed on TOTAL only. WEDGE is diagnostic ratio only (Wedge_to_Price).
 
@@ -3513,7 +3379,7 @@ Binary rule:
 - Structural failure maps to AVOID + STRUCTURAL.
 - “Too expensive” or “not enough proof yet” maps to WATCH.
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 INPUT SOURCE MAP (reference, not re-extraction):
 - Gate 1 (Quality): Stage 5 moat + Stage 6 returns quality/capital allocation + Stage 4 CORE floor
 - Gate 2 (Value): Stage 9 TOTAL Bear/Base/Bull (NOT Stage 4), Stage 8 Wedge_to_Price (diagnostic), Stage 4 Traction_Rank
@@ -3522,10 +3388,10 @@ INPUT SOURCE MAP (reference, not re-extraction):
 - Thesis context: Stage 0 premise/disconfirmers, Stage 1 sub-segments, Stage 2 company role
 All inputs inherited via INHERITANCE LOCK above.
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 THE DECISION PROCESS (follow strictly)
 
-GATE 0 ? INTEGRITY (mandatory gate; STOP only as last resort)
+GATE 0 — INTEGRITY (mandatory gate; STOP only as last resort)
 Purpose: prevent methodological failure before debating the stock.
 
 You must confirm:
@@ -3540,7 +3406,7 @@ If any of A/B/C is not satisfied after applying DataGap Rule steps 1-2:
 - DATA_GAP_STAGE=<previous_stage_number>
 Then STOP.
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 GATE 1 — QUALITY (permanent impairment risk)
 Purpose: eliminate situations where you can lose capital permanently.
 
@@ -3561,25 +3427,25 @@ If any item is FAIL:
 - State the main reason in 1–2 sentences
 Then STOP.
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 GATE 2 — VALUE (is the price favorable?)
 Purpose: separate “great company” from “good price.”
 This gate is computed ONLY on TOTAL.
 
 Required formulas (TOTAL):
 1) Total asymmetry:
-   Asymmetry_TOTAL = (Bull_TOTAL  Price) / (Price  Bear_TOTAL)
+   Asymmetry_TOTAL = (Bull_TOTAL - Price) / (Price - Bear_TOTAL)
 
 2) Expected value (TOTAL):
    EV_TOTAL = 0.25*Bear_TOTAL + 0.50*Base_TOTAL + 0.25*Bull_TOTAL
-   EV_Upside = (EV_TOTAL / Price)  1
+   EV_Upside = (EV_TOTAL / Price) - 1
 
 3) Priced-in diagnostic (not a valuation, just a check):
-   PricedIn% = (Price  Bear_TOTAL) / (Bull_TOTAL  Bear_TOTAL)
+   PricedIn% = (Price - Bear_TOTAL) / (Bull_TOTAL - Bear_TOTAL)
 
 4) Divergence vs market (from Stage 9 reverse DCF):
-   Divergence_growth = Base_CAGR  MarketImplied_CAGR
-   Divergence_margin = Base_FCFmY3  MarketImplied_FCFmY3
+   Divergence_growth = Base_CAGR - MarketImplied_CAGR
+   Divergence_margin = Base_FCFmY3 - MarketImplied_FCFmY3
 Report both if available. If only one exists, report it and state the limitation.
 
 WEDGE diagnostic (allowed, but not a target):
@@ -3591,8 +3457,8 @@ Interpretation must respect Stage 4 dominant driver:
 - WACC-dominated (Path C): you must require regime-related VOI or a clearly evidenced cash-flow mechanism; otherwise default to WATCH.
 
 Thresholds:
-- PASS: Asymmetry_TOTAL ? 3.0 and divergence is meaningful
-- RISK: Asymmetry_TOTAL 2.0–3.0 or divergence is small/uncertain
+- PASS: Asymmetry_TOTAL >= 3.0 and divergence is meaningful
+- RISK: Asymmetry_TOTAL >= 2.0 and Asymmetry_TOTAL < 3.0, or divergence is small/uncertain
 - FAIL: Asymmetry_TOTAL < 2.0 or market is already pricing Base or better
 
 CRITICAL OVERRIDE — TRACTION-PROTECTED:
@@ -3600,7 +3466,7 @@ If Gate 2 FAIL but: Gate 1 PASS + Gate 3 ≥MEDIUM + Traction_Rank top 3 →
   WATCH / PRICE_CONTINGENT (trigger = Base_TOTAL × 0.95).
   Stage 11 Value Asymmetry scores 1 (not 0). Execution plan uses price_trigger as Tranche 1.
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 GATE 3 - PROOF & VOI (is the thesis showing up in reality?)
 Purpose: anchor conviction to measurable signals that update probability soon.
 Uses Stage 3 Traction Pack as primary proof evidence.
@@ -3675,7 +3541,7 @@ Provide:
    - a price trigger and/or
    - a VOI/KPI trigger that would justify stronger conviction
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 FINAL DECISION LOGIC
 1) If Gate 1 has any FAIL: AVOID / STRUCTURAL
 2a) If Gate 1 PASS and Gate 2 FAIL and Traction_Rank top 3:
@@ -3685,7 +3551,7 @@ FINAL DECISION LOGIC
 3) If Gate 1 PASS, Gate 2 PASS, and Gate 3 is not LOW: WATCH / OK
 4) Otherwise: WATCH / INSUFFICIENT_PROOF or TIMING (choose the real blocker)
 
-¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦¦
+---
 OUTPUT FORMAT (per company — repeat for all 4 finalists)
 [Company] (Ticker:Exchange)
 DECISION: WATCH / AVOID
@@ -3731,6 +3597,9 @@ STAGE 11 — COMPOSITE RANK & FINAL SELECTION (execute after all 4 companies)
 ═══════════════════════════════════════════════════════════════════
 
 After completing Four-Gate analysis for all 4 finalists:
+
+OPTIMIZATION TARGET:
+Select the best PRIMARY and SECONDARY candidates among surviving names based on credible mispricing, proof quality, and near-term rerating potential.
 
 STEP 1 — ELIMINATE AVOID COMPANIES
 Remove any company with AVOID decision. If fewer than 2 remain, flag SHORTFALL and proceed with what you have.
@@ -3917,9 +3786,6 @@ SECONDARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | Ent
 CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
 === END HANDOFF ===
 
-This will help for the next stage: Stage 12 - Four-Gate Framework — Decision Output Format
-
-
 ◄PROMPT_SEPARATOR►
 
 # STAGE 12 — Four-Gate Framework — Decision Output Format
@@ -3928,48 +3794,25 @@ This will help for the next stage: Stage 12 - Four-Gate Framework — Decision O
 
 ## Cel
 
+OPTIMIZATION TARGET:
+Preserve the final investment decision in a clear format that maintains thesis, risks, and execution logic.
+
 INHERITANCE LOCK:
 1. Search for '=== STAGE 11 HANDOFF ===' → extract PRIMARY, SECONDARY, Composite scores, EntryScore, EntryBlocker, Sizing
-2. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: BEAR_TOTAL, BASE_TOTAL, BULL_TOTAL (for fields 7-9)
-3. Search for '=== STAGE 1 HANDOFF ===' → extract THESIS_SOURCE (for field 5)
-4. Search for Stage 10 output → extract per-company: VOI, Falsifier, Primary risk (for field 10)
-5. Search for Stage 3 output → extract per-company: TractionClass, Floor_Traction, TS, TQ, CP, Semantics_Verdict (for field 17 KPI)
-6. Search for Stage 5 output → extract per-company: Moat_Score, Gate_Quality, pricing power mechanism (for field 17 KPI)
-7. Search for Stage 6 output → extract per-company: ROIC/ROTCE, Cash_Conversion_3Y, Earnings_Quality, NetDebt/EBITDA, Diluted_Share_CAGR_3Y (for field 17 KPI)
-8. Search for Stage 7 output → extract per-company: REI_SCORE, Revaluation_Parameter (for field 17 KPI)
-9. Search for Stage 0 output → extract per-company: Layer_Depth, Evidence_Tier, Mispricing_Mechanism (for field 17 KPI)
-10. Search for Stage 4 output → extract per-company: WedgeRealism (for field 17 KPI)
-11. Search for Stage 8 output → extract per-company: Monetization_Path (for field 17 KPI)
-12. Search for Stage 1 output → extract per-company: Gate_Quality (A/B/C), Supply_Response (Slow/Medium/Fast), invoice-item overlap (for field 17 KPI)
+2. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: BEAR_TOTAL, BASE_TOTAL, BULL_TOTAL, implied vs base divergence, price state, bear floor (for fields 7-9, `opportunity.price_dislocation_reason`, `opportunity.entry_condition_type`, `character.safety_state`)
+3. Search for '=== STAGE 1 HANDOFF ===' → extract THESIS_SOURCE, invoice issuer, gate taxonomy, invoice-item overlap, Supply_Response (for field 5, `opportunity.value_chain_position`, field 28 KPI)
+4. Search for Stage 10 output → extract per-company: VOI, Falsifier, Primary risk, entry blocker, blocker category (for field 10, `opportunity.entry_condition_type`, `character.primary_kill_risk`, field 28 KPI)
+5. Search for Stage 3 output → extract per-company: TractionClass, Floor_Traction, TS, TQ, CP, Semantics_Verdict (for `character.proof_class`, `character.confidence_in_thesis`, field 28 KPI)
+6. Search for Stage 5 output → extract per-company: Moat_Score, Gate_Quality, pricing power mechanism, moat analysis (for `opportunity.value_chain_position`, `character.quality_state`, field 28 KPI)
+7. Search for Stage 6 output → extract per-company: ROIC/ROTCE, Cash_Conversion_3Y, Earnings_Quality, NetDebt/EBITDA, Diluted_Share_CAGR_3Y (for `character.quality_state`, `character.safety_state`, field 28 KPI)
+8. Search for Stage 7 output → extract per-company: REI_SCORE, Revaluation_Parameter, rerating window class, VOI event (for `opportunity.rerating_catalyst_type`, `opportunity.time_horizon_type`, field 28 KPI)
+9. Search for Stage 0 output → extract per-company: Layer_Depth, Evidence_Tier, Mispricing_Mechanism (for `character.confidence_in_thesis`, field 28 KPI)
+10. Search for Stage 4 output → extract per-company: dominant driver, WedgeRealism, competitive position context (for `opportunity.price_dislocation_reason`, field 28 KPI)
+11. Search for Stage 8 output → extract per-company: Monetization_Path, wedge_to_price, falsifier (for `character.thesis_stock_relationship`, `character.primary_kill_risk`, field 28 KPI)
+12. Search for Stage 1 output → extract per-company: Gate_Quality (A/B/C), Supply_Response (Slow/Medium/Fast), invoice-item overlap (for field 28 KPI)
 
 PROHIBITION: For fields 7-9 (scenarios), use Stage 9 values. Do NOT fall back to Stage 4.
 If Stage 9 handoff NOT found: output DATA_GAP_STAGE=9 and STOP.
-
-Wygeneruj dokładnie dwie linie tekstu — dwa standardowe rekordy decyzyjne według metodologii Four-Gate Framework. Pierwszy rekord = PRIMARY, drugi = SECONDARY z Stage 11.
-
-
-
-
----
-
-## KRYTYCZNA ZASADA — separator średnik (;)
-
-Średnik **TYLKO** pomiędzy polami (kolumnami)
-**NIGDY** wewnątrz pola — nawet w długich opisach
-
-Wewnątrz pola używaj:
-
-- Przecinków (,)
-- Myślników (–)
-- Dwukropków (:)
-- Kropek (.)
-
-**Przykłady:**
-
-OK: `VOI: wzrost NRR, Fals: brak kontraktów, Primary risk: konkurencja`
-BLAD: `VOI: wzrost NRR; Fals: brak kontraktów; Primary risk: konkurencja`
-
----
 
 ## STRUKTURA OUTPUT — economist.response.v2 (structured JSON)
 
@@ -4003,6 +3846,21 @@ Minimalny ksztalt odpowiedzi:
         "region": "USA",
         "currency": "USD"
       },
+      "opportunity": {
+        "value_chain_position": "Platforma",
+        "price_dislocation_reason": "Misklasyfikacja",
+        "rerating_catalyst_type": "Wyniki potwierdzaja",
+        "time_horizon_type": "Katalizator 1-2 kwartaly",
+        "entry_condition_type": "Already met"
+      },
+      "character": {
+        "quality_state": "STRONG",
+        "safety_state": "RESILIENT",
+        "thesis_stock_relationship": "THESIS_MATTERS_TO_STOCK",
+        "proof_class": "FUNDED",
+        "confidence_in_thesis": "Srednia",
+        "primary_kill_risk": "Teza moze byc prawdziwa, ale zbyt mala dla wyniku akcji."
+      },
       "kpi": {
         "schema_id": "core10",
         "items": [
@@ -4026,6 +3884,8 @@ Minimalny ksztalt odpowiedzi:
 - Nie zwracaj packed single-line outputu, CSV ani rekordu `17 pol oddzielonych srednikami`.
 - `fields` zawiera surowe pola tresciowe rekordu. Nie przesuwaj znaczen miedzy kluczami.
 - `taxonomy` jest osobnym obiektem i musi zawierac: `sector`, `company_family`, `company_type`, `revenue_model`, `region`, `currency`.
+- `opportunity` jest osobnym obiektem i musi zawierac: `value_chain_position`, `price_dislocation_reason`, `rerating_catalyst_type`, `time_horizon_type`, `entry_condition_type`.
+- `character` jest osobnym obiektem i musi zawierac: `quality_state`, `safety_state`, `thesis_stock_relationship`, `proof_class`, `confidence_in_thesis`, `primary_kill_risk`.
 - `decision_role` musi byc obecne rowniez na poziomie rekordu (`PRIMARY` albo `SECONDARY`).
 - `fields.material_zrodlowy_podcast` ma zawierac `THESIS_SOURCE` ze Stage 1 HANDOFF, nie analize.
 - `fields.teza_inwestycyjna` ma zawierac **caly opis analityczny**, w tym osadzenie asymetrii/dywergencji.
@@ -4270,7 +4130,168 @@ Przyklady: USD, CHF, EUR, PLN
 
 ---
 
-### 17. KPI
+### 17. opportunity.value_chain_position
+
+Zrodlo: Stage 5 (moat analysis) + Stage 1 (invoice issuer).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `Waskie gardlo` - firma kontroluje zasob lub krok, ktorego nie da sie ominac
+- `Platforma` - infrastruktura, na ktorej inni buduja biznes
+- `Integrator` - laczy komponenty w rozwiazanie dla klienta koncowego
+- `Dostawca komponentu` - sprzedaje jeden element do wiekszego systemu
+- `Operator sieci` - utrzymuje i monetyzuje wlasna siec
+- `Uslugodawca projektowy` - sprzedaje czas i wiedze na projekty
+
+---
+
+### 18. opportunity.price_dislocation_reason
+
+Zrodlo: Stage 9 (implied vs base divergence) + Stage 4 (dominant driver) + Stage 5 (competitive position).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `Sentyment sektorowy` - caly sektor wyprzedany bez powodu
+- `Misklasyfikacja` - rynek wycenia jak X, firma zarabia jak Y
+- `Niewidoczny segment` - najlepsza czesc biznesu ukryta w raportach
+- `Jednorazowy miss` - rynek ukaral za przejsciowy problem
+- `Duration aversion` - rynek karze za dlugi horyzont mimo niskiego ryzyka
+- `Size neglect` - zbyt mala, zeby analitycy pokrywali
+- `Brak dyslokacji` - cena fair lub pelna, okazja to jakosc, nie przecena
+
+---
+
+### 19. opportunity.rerating_catalyst_type
+
+Zrodlo: Stage 7 (RP, VOI event) + Stage 10 (entry blocker).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `Wyniki potwierdzaja` - kolejny kwartal z dowodem w liczbach
+- `Pierwszy named win` - jeden konkretny kontrakt lub klient publicznie
+- `Cena spada do progu` - nic w firmie nie musi sie zmienic
+- `Zewnetrzny event` - budzet, regulacja lub geopolityka odblokowuje
+- `Coverage inicjacja` - analityk zaczyna pokrywac, informacja dociera
+- `Spin-off lub restrukturyzacja` - struktura sie upraszcza i wartosc staje sie widoczna
+
+---
+
+### 20. opportunity.time_horizon_type
+
+Zrodlo: Stage 7 (rerating window class) + Stage 3 (timing friction).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `Katalizator 1-2 kwartaly` - rerating mozliwy szybko
+- `Adoption curve 2-4 lata` - trzeba poczekac na dojrzewanie
+- `Strukturalny compounder 5+` - trzymaj bez sprawdzania co kwartal
+- `Event-driven` - zalezy od jednego zewnetrznego zdarzenia
+
+---
+
+### 21. opportunity.entry_condition_type
+
+Zrodlo: Stage 10 (entry blocker, category) + Stage 9 (price state).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `Price only` - wystarczy, ze cena spadnie
+- `Proof only` - wystarczy jeden konkretny dowod
+- `Price AND proof` - oba warunki jednoczesnie
+- `Time only` - czekasz na konkretny event
+- `Macro unlock` - wymaga zmiany zewnetrznego warunku
+- `Already met` - warunki juz spelnione, mozna wejsc teraz
+
+---
+
+### 22. character.quality_state
+
+Zrodlo: Stage 5 (moat score) + Stage 6 (ROE, ROIC, FCF conversion).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `ELITE` - ROIC wysoki, moat silny, konwersja gotowki swietna
+- `STRONG` - solidne zwroty, dobra pozycja, zdrowy bilans
+- `MIXED` - dobre elementy, ale widoczne problemy
+- `FRAGILE` - strukturalne slabosci, ryzyko trwalego pogorszenia
+
+---
+
+### 23. character.safety_state
+
+Zrodlo: Stage 6 (net debt/EBITDA, cash conversion) + Stage 9 (bear floor).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `FORTRESS` - duzo gotowki, minimalny dlug
+- `RESILIENT` - zdrowy bilans, normalny dlug
+- `LEVERED` - istotny dlug, obslugiwany z biezacych CF
+- `FRAGILE` - dlug wysoki wzgledem zarobkow
+- `ACCOUNTING_DISTORTED` - bilans trudny do czytania przez jednorazowe zdarzenia
+
+---
+
+### 24. character.thesis_stock_relationship
+
+Zrodlo: Stage 8 (wedge_to_price) + Stage 3 (thesis exposure).
+
+To najwazniejsze pole w tej sekcji. Oddziela `teza jest prawdziwa` od `akcja na tym zarobi`.
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `THESIS_IS_THE_STOCK` - firma to czysta ekspozycja, teza = wyniki
+- `THESIS_MATTERS_TO_STOCK` - teza stanowi istotna czesc wartosci
+- `THESIS_IS_OVERLAY` - firma dobra bez tezy, teza to opcja na gorze
+- `THESIS_IMMATERIAL` - teza prawdziwa, ale zbyt mala, zeby ruszyc akcja
+
+Regula pomocnicza: jesli `wedge_to_price < 2%` -> `THESIS_IS_OVERLAY` lub `THESIS_IMMATERIAL`. Jesli `wedge_to_price > 10%` -> `THESIS_IS_THE_STOCK` lub `THESIS_MATTERS_TO_STOCK`.
+
+---
+
+### 25. character.proof_class
+
+Zrodlo: Stage 3 (semantics_verdict, traction_class).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `DELIVERED_CASH` - firma dostarcza i dostaje gotowke juz teraz
+- `FUNDED` - kontrakt podpisany, pieniadze zarezerwowane
+- `AWARDED` - kontrakt przyznany, nie wszystko sfinansowane
+- `VALIDATED` - firma zatwierdzona jako dostawca, bez zlecen
+- `NARRATIVE` - logika tezy, brak kontraktow lub zatwierdzen
+
+Mapowanie z Stage 3: Delivered-Cash -> `DELIVERED_CASH`, Obligated-Funded -> `FUNDED`, Mixed/Partially Funded -> `AWARDED`, OPTION_ONLY z CP>=4 -> `VALIDATED`, LOW_QUALITY lub NARRATIVE -> `NARRATIVE`.
+
+---
+
+### 26. character.confidence_in_thesis
+
+Zrodlo: Stage 3 (traction class) + Stage 0 (evidence tier).
+
+Dozwolone wartosci - wybierz dokladnie jedna:
+
+- `Wysoka` - teza potwierdzona w przychodach, dowody w liczbach
+- `Srednia` - teza logiczna, dowody czesciowe
+- `Niska` - teza strukturalna, brak jeszcze proof
+
+---
+
+### 27. character.primary_kill_risk
+
+Zrodlo: Stage 10 (primary risk) + Stage 8 (falsifier).
+
+Jedno zdanie, konkretne. Nie lista i nie ogolnik.
+
+Przyklady dobrych wpisow:
+
+- `Teza prawdziwa, ale za mala dla akcji`
+- `Duration bet ukryty jako fundamentalny`
+- `Koncentracja klienta - jeden kontrakt to 60% przychodow`
+- `Award cadence weakens - thesis stream stays too small inside MTS`
+
+---
+
+### 28. KPI
 
 Pole obowiazkowe, ale zwracane jako obiekt `kpi`, nie jako pojedynczy string.
 
@@ -4428,6 +4449,21 @@ Pole obowiazkowe, ale zwracane jako obiekt `kpi`, nie jako pojedynczy string.
         "region": "Szwajcaria",
         "currency": "CHF"
       },
+      "opportunity": {
+        "value_chain_position": "Waskie gardlo",
+        "price_dislocation_reason": "Misklasyfikacja",
+        "rerating_catalyst_type": "Wyniki potwierdzaja",
+        "time_horizon_type": "Katalizator 1-2 kwartaly",
+        "entry_condition_type": "Already met"
+      },
+      "character": {
+        "quality_state": "ELITE",
+        "safety_state": "RESILIENT",
+        "thesis_stock_relationship": "THESIS_IS_OVERLAY",
+        "proof_class": "DELIVERED_CASH",
+        "confidence_in_thesis": "Wysoka",
+        "primary_kill_risk": "Rynek moze dlugo ignorowac misklasyfikacje, jesli brak coverage."
+      },
       "kpi": {
         "schema_id": "core10",
         "items": [
@@ -4464,12 +4500,17 @@ Pole obowiazkowe, ale zwracane jako obiekt `kpi`, nie jako pojedynczy string.
 
 - `schema` = `economist.response.v2`
 - `records` jest tablica i ma zwykle 2 rekordy (`PRIMARY`, potem `SECONDARY`)
-- Kazdy rekord ma `decision_role`, `fields`, `taxonomy`, `kpi`, `extras`
+- Kazdy rekord ma `decision_role`, `fields`, `taxonomy`, `opportunity`, `character`, `kpi`, `extras`
 - `fields.material_zrodlowy_podcast` nie moze byc puste
 - `fields.bear_scenario_total`, `fields.base_scenario_total`, `fields.bull_scenario_total` maja prefiksy `Bear_TOTAL:`, `Base_TOTAL:`, `Bull_TOTAL:`
 - `fields.voi_falsy_kluczowe_ryzyka` zaczyna sie od `VOI:` i zawiera kolejno: VOI, Fals, Primary risk, Composite, EntryScore, Sizing
 - `taxonomy.sector` nalezy do dozwolonej piatki bazowych sektorow Watchlist
 - `taxonomy.company_family`, `taxonomy.company_type`, `taxonomy.revenue_model` sa wypelnione realnymi etykietami taxonomii i nie zawieraja `NIEZNANY`, `Do weryfikacji`, `brak danych`, `n/a` ani pustej wartosci
+- `opportunity` zawiera wszystkie 5 pol wypelnionych dozwolonymi wartosciami
+- `character` zawiera wszystkie 6 pol wypelnionych dozwolonymi wartosciami
+- `character.thesis_stock_relationship` pochodzi z `wedge_to_price` ze Stage 8, nie jest wymyslane
+- `opportunity.entry_condition_type` jest spojne z `decision.entry_blocker` ze Stage 10; jesli `entry_blocker = NONE`, to `entry_condition_type` powinno byc `Already met` albo `Price only`
+- `character.proof_class` jest spojne ze Stage 3 `semantics_verdict`
 - Dla `kpi.schema_id = "core10"` zwroc 10 pozycji w kolejnosci FQ, TE, CM, VS, TQ, PP, CP, CD, NO, MR
 - `kpi.items[].value` moze byc `null` tylko wtedy, gdy wskaznik jest not-applicable albo DATA_GAP nie zostal domkniety wiarygodnie
 - Nie zwracaj dawnego packed outputu ani pol `watpliwosci`, `gate rating`, `why buy`, `why avoid`
@@ -4479,7 +4520,6 @@ Pole obowiazkowe, ale zwracane jako obiekt `kpi`, nie jako pojedynczy string.
 ##  Finalna instrukcja
 
 Wygeneruj jeden obiekt JSON zgodny z `economist.response.v2`, bez markdownu, bez komentarzy, bez naglowkow. PRIMARY jako pierwszy rekord, SECONDARY jako drugi.
-This will help for the next stage: Final output delivery.
 
 
 

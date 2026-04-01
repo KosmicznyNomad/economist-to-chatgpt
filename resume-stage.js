@@ -72,13 +72,13 @@ function getStageMetaForPromptIndex(promptIndex) {
 
 async function loadPrompts() {
   try {
-    const response = await chrome.runtime.sendMessage({ type: 'GET_COMPANY_PROMPTS' });
+    const response = await sendRuntimeMessage({ type: 'GET_COMPANY_PROMPTS' });
     if (!(response && Array.isArray(response.prompts) && response.prompts.length > 0)) {
       throw new Error('Brak promptow');
     }
     prompts = response.prompts;
 
-    const namesResponse = await chrome.runtime.sendMessage({ type: 'GET_STAGE_NAMES' });
+    const namesResponse = await sendRuntimeMessage({ type: 'GET_STAGE_NAMES' });
     if (Array.isArray(namesResponse?.stageNames)) {
       promptNames = namesResponse.stageNames;
     }
@@ -177,12 +177,12 @@ function updateInfo() {
 
 promptSelect.addEventListener('change', updateInfo);
 
-startBtn.addEventListener('click', () => {
+startBtn.addEventListener('click', async () => {
   const selectedIndex = Number.parseInt(promptSelect.value, 10);
   if (!Number.isInteger(selectedIndex)) return;
 
   startBtn.disabled = true;
-  chrome.runtime.sendMessage({
+  await sendRuntimeMessage({
     type: 'RESUME_STAGE_START',
     startIndex: selectedIndex,
     targetTabId: presetTargetTabId,
@@ -190,12 +190,8 @@ startBtn.addEventListener('click', () => {
     title: resumeTitle,
     reloadBeforeResume: true,
     detach: true
-  }, () => {
-    if (chrome.runtime.lastError) {
-      console.warn('RESUME_STAGE_START send failed:', chrome.runtime.lastError.message || chrome.runtime.lastError);
-    }
-    window.close();
   });
+  window.close();
 });
 
 cancelBtn.addEventListener('click', () => {
