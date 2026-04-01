@@ -146,6 +146,21 @@ const context = {
   console,
   JSON,
   DecisionContractUtils,
+  STRUCTURED_WATCHLIST_OPPORTUNITY_KEYS: [
+    'value_chain_position',
+    'price_dislocation_reason',
+    'rerating_catalyst_type',
+    'time_horizon_type',
+    'entry_condition_type'
+  ],
+  STRUCTURED_WATCHLIST_CHARACTER_KEYS: [
+    'quality_state',
+    'safety_state',
+    'thesis_stock_relationship',
+    'proof_class',
+    'confidence_in_thesis',
+    'primary_kill_risk'
+  ],
   extractAssistantTextFromProcess(process) {
     if (!process || typeof process !== 'object') return '';
     if (typeof process.completedResponseText === 'string' && process.completedResponseText.trim()) {
@@ -162,6 +177,7 @@ vm.createContext(context);
 [
   'normalizeStructuredWatchlistValue',
   'normalizeStructuredWatchlistObject',
+  'normalizeStructuredWatchlistNamedSection',
   'sanitizeStructuredWatchlistRecord',
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
