@@ -1,4 +1,5 @@
 const ProblemLogUiUtils = globalThis.ProblemLogUiUtils || {};
+const RemoteUiSharedUtils = globalThis.RemoteUiSharedUtils || {};
 
 function withActiveWindowContext(callback) {
   chrome.tabs.query({ active: true, currentWindow: true }, (tabs) => {
@@ -129,6 +130,14 @@ const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindo
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 const unfinishedProcessesBtn = document.getElementById('unfinishedProcessesBtn');
+const remoteThisDeviceIdInput = document.getElementById('remoteThisDeviceIdInput');
+const remoteRunnerEnabledInput = document.getElementById('remoteRunnerEnabledInput');
+const remoteRunnerNameInput = document.getElementById('remoteRunnerNameInput');
+const remoteDefaultRunnerIdInput = document.getElementById('remoteDefaultRunnerIdInput');
+const saveRemoteRunnerConfigBtn = document.getElementById('saveRemoteRunnerConfigBtn');
+const openRemoteQueueBtn = document.getElementById('openRemoteQueueBtn');
+const remoteRunnerConfigStatus = document.getElementById('remoteRunnerConfigStatus');
+const remoteRunnerStatus = document.getElementById('remoteRunnerStatus');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
 const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
@@ -201,6 +210,24 @@ function setAutoRestoreStatus(text, isError = false) {
   setStatusElement(autoRestoreStatus, text, isError);
 }
 
+function setRemoteRunnerConfigStatus(text, isError = false) {
+  setStatusElement(remoteRunnerConfigStatus, text, isError);
+}
+
+function setRemoteRunnerStatus(text, isError = false) {
+  setStatusElement(remoteRunnerStatus, text, isError);
+}
+
+function formatRemoteRunnerSummary(runner) {
+  if (typeof RemoteUiSharedUtils.formatRunnerStatus === 'function') {
+    return RemoteUiSharedUtils.formatRunnerStatus(runner || {});
+  }
+  return {
+    tone: runner?.queueable ? 'success' : 'warn',
+    text: runner?.runnerName || runner?.runnerId || 'Runner'
+  };
+}
+
 function getAnalysisQueueUiMetrics(status) {
   const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 7;
   const reservedSlots = Number.isInteger(status?.reservedSlots)
@@ -260,6 +287,51 @@ async function refreshAnalysisQueueStatus() {
     setAnalysisQueueStatus(formatAnalysisQueueStatus(response), false);
   } catch (error) {
     setAnalysisQueueStatus(`Kolejka analiz: blad (${error?.message || String(error)}).`, true);
+  }
+}
+
+async function refreshRemoteRunnerConfig() {
+  try {
+    const response = await sendRuntimeMessage({ type: 'GET_REMOTE_RUNNER_CONFIG' });
+    if (response?.success === false) {
+      setRemoteRunnerConfigStatus(`Remote config: ${response.error || 'unknown'}`, true);
+      return null;
+    }
+    if (remoteThisDeviceIdInput) {
+      remoteThisDeviceIdInput.value = typeof response?.thisDeviceId === 'string' ? response.thisDeviceId : '';
+    }
+    if (remoteRunnerEnabledInput) {
+      remoteRunnerEnabledInput.checked = response?.remoteRunnerEnabled === true;
+    }
+    if (remoteRunnerNameInput) {
+      remoteRunnerNameInput.value = typeof response?.remoteRunnerName === 'string' ? response.remoteRunnerName : '';
+    }
+    if (remoteDefaultRunnerIdInput) {
+      remoteDefaultRunnerIdInput.value = typeof response?.remoteDefaultRunnerId === 'string' ? response.remoteDefaultRunnerId : '';
+    }
+    setRemoteRunnerConfigStatus('', false);
+    return response;
+  } catch (error) {
+    setRemoteRunnerConfigStatus(`Remote config: ${error?.message || String(error)}`, true);
+    return null;
+  }
+}
+
+async function refreshRemoteRunnerStatus(showErrors = false) {
+  try {
+    const response = await sendRuntimeMessage({ type: 'GET_REMOTE_DEFAULT_RUNNER_STATUS' });
+    if (response?.success === false) {
+      if (showErrors || response?.error !== 'default_runner_missing') {
+        setRemoteRunnerStatus(`Remote runner: ${response.error || 'unknown'}`, true);
+      } else {
+        setRemoteRunnerStatus('Remote runner: ustaw default runner id.', false);
+      }
+      return;
+    }
+    const summary = formatRemoteRunnerSummary(response?.runner || {});
+    setRemoteRunnerStatus(summary.text, summary.tone === 'error');
+  } catch (error) {
+    setRemoteRunnerStatus(`Remote runner: ${error?.message || String(error)}`, true);
   }
 }
 
@@ -1816,6 +1888,76 @@ if (manualSourceBtn) {
   });
 }
 
+function buildRemoteQueueWindowUrl(params = null) {
+  const query = params instanceof URLSearchParams && params.toString()
+    ? `?${params.toString()}`
+    : '';
+  return chrome.runtime.getURL(`remote-queue.html${query}`);
+}
+
+function openRemoteQueueWindow(params = null) {
+  chrome.windows.create({
+    url: buildRemoteQueueWindowUrl(params),
+    type: 'popup',
+    width: 840,
+    height: 760,
+  });
+  window.close();
+}
+
+function formatRemoteQueueErrorMessage(error = '') {
+  const normalizedError = typeof error === 'string' ? error.trim() : '';
+  if (normalizedError === 'remote_pdf_not_supported_yet') {
+    return 'Remote queue: PDF-y trzeba najpierw zamienic na tekst na tym komputerze.';
+  }
+  if (normalizedError === 'article_text_unavailable') {
+    return 'Remote queue: nie udalo sie wyciagnac tekstu z aktywnej karty.';
+  }
+  return `Remote queue: ${normalizedError || 'remote_prefill_failed'}`;
+}
+
+async function openPreparedRemoteQueueFromTab(activeTab) {
+  try {
+    const sourceTab = activeTab && typeof activeTab === 'object'
+      ? {
+        id: Number.isInteger(activeTab?.id) ? activeTab.id : null,
+        title: typeof activeTab?.title === 'string' ? activeTab.title : '',
+        url: typeof activeTab?.url === 'string' ? activeTab.url : '',
+        windowId: Number.isInteger(activeTab?.windowId) ? activeTab.windowId : null
+      }
+      : null;
+    setRemoteRunnerStatus('Remote queue: przygotowuje tekst artykulu...', false);
+    const response = await sendRuntimeMessage({
+      type: 'PREPARE_REMOTE_QUEUE_PREFILL',
+      sourceTab
+    });
+    if (response?.success !== true || !response?.prefillId) {
+      setRemoteRunnerStatus(formatRemoteQueueErrorMessage(response?.error), true);
+      return;
+    }
+    const params = new URLSearchParams();
+    params.set('prefillId', response.prefillId);
+    openRemoteQueueWindow(params);
+  } catch (error) {
+    setRemoteRunnerStatus(formatRemoteQueueErrorMessage(error?.message || String(error)), true);
+  }
+}
+
+const remoteQueueBtn = document.getElementById('remoteQueueBtn');
+if (remoteQueueBtn) {
+  remoteQueueBtn.addEventListener('click', () => {
+    withActiveWindowContext(({ activeTab }) => {
+      void openPreparedRemoteQueueFromTab(activeTab);
+    });
+  });
+}
+
+if (openRemoteQueueBtn) {
+  openRemoteQueueBtn.addEventListener('click', () => {
+    openRemoteQueueWindow();
+  });
+}
+
 const resumeStageBtn = document.getElementById('resumeStageBtn');
 if (resumeStageBtn) {
   resumeStageBtn.addEventListener('click', () => {
@@ -2050,6 +2192,36 @@ if (saveWatchlistTokenBtn) {
   });
 }
 
+if (saveRemoteRunnerConfigBtn) {
+  saveRemoteRunnerConfigBtn.addEventListener('click', async () => {
+    const originalText = saveRemoteRunnerConfigBtn.textContent;
+    saveRemoteRunnerConfigBtn.textContent = 'Zapis...';
+    saveRemoteRunnerConfigBtn.disabled = true;
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'SET_REMOTE_RUNNER_CONFIG',
+        remoteRunnerEnabled: remoteRunnerEnabledInput?.checked === true,
+        remoteRunnerName: remoteRunnerNameInput?.value || '',
+        remoteDefaultRunnerId: remoteDefaultRunnerIdInput?.value || ''
+      });
+      if (response?.success === false) {
+        setRemoteRunnerConfigStatus(`Remote config: ${response.error || 'unknown'}`, true);
+        return;
+      }
+      if (remoteThisDeviceIdInput) {
+        remoteThisDeviceIdInput.value = typeof response?.thisDeviceId === 'string' ? response.thisDeviceId : '';
+      }
+      setRemoteRunnerConfigStatus('Remote config zapisany.', false);
+      void refreshRemoteRunnerStatus(true);
+    } catch (error) {
+      setRemoteRunnerConfigStatus(`Remote config: ${error?.message || String(error)}`, true);
+    } finally {
+      saveRemoteRunnerConfigBtn.textContent = originalText;
+      saveRemoteRunnerConfigBtn.disabled = false;
+    }
+  });
+}
+
 if (clearWatchlistTokenBtn) {
   clearWatchlistTokenBtn.addEventListener('click', async () => {
     if (isDispatchInlineManaged(watchlistDispatchStatusSnapshot)) {
@@ -2131,9 +2303,12 @@ void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
   refreshAnalysisQueueStatus(),
+  refreshRemoteRunnerConfig(),
+  refreshRemoteRunnerStatus(false),
 ]);
 
 setInterval(() => {
   void refreshAutoRestoreStatus(false);
   void refreshAnalysisQueueStatus();
+  void refreshRemoteRunnerStatus(false);
 }, 15000);

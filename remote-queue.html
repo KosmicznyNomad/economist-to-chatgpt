@@ -1,0 +1,201 @@
+<!DOCTYPE html>
+<html lang="pl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Remote queue</title>
+  <style>
+    * { box-sizing: border-box; }
+    body {
+      margin: 0;
+      padding: 20px;
+      font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, sans-serif;
+      background: #f4f6f8;
+      color: #1f2937;
+    }
+    .container {
+      max-width: 860px;
+      margin: 0 auto;
+      background: #fff;
+      border-radius: 10px;
+      padding: 24px;
+      box-shadow: 0 10px 30px rgba(15, 23, 42, 0.08);
+    }
+    h1 {
+      margin: 0 0 8px;
+      font-size: 22px;
+    }
+    .subtitle {
+      margin: 0 0 20px;
+      color: #64748b;
+      font-size: 14px;
+      line-height: 1.45;
+    }
+    label {
+      display: block;
+      margin: 14px 0 8px;
+      font-size: 14px;
+      font-weight: 600;
+    }
+    input[type="text"], textarea {
+      width: 100%;
+      padding: 10px 12px;
+      border: 1px solid #d1d5db;
+      border-radius: 6px;
+      font: inherit;
+    }
+    textarea {
+      min-height: 280px;
+      resize: vertical;
+    }
+    input:focus, textarea:focus {
+      outline: none;
+      border-color: #2563eb;
+    }
+    .meta-card {
+      margin-bottom: 16px;
+      padding: 12px 14px;
+      border: 1px solid #e5e7eb;
+      border-radius: 8px;
+      background: #f8fafc;
+    }
+    .status {
+      margin-top: 10px;
+      padding: 10px 12px;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      background: #f3f4f6;
+      font-size: 13px;
+      color: #374151;
+    }
+    .status.success {
+      color: #166534;
+      border-color: #bbf7d0;
+      background: #f0fdf4;
+    }
+    .status.warn {
+      color: #92400e;
+      border-color: #fde68a;
+      background: #fffbeb;
+    }
+    .status.error {
+      color: #991b1b;
+      border-color: #fecaca;
+      background: #fef2f2;
+    }
+    .instances {
+      display: flex;
+      align-items: center;
+      gap: 12px;
+      margin: 18px 0;
+      padding: 12px 14px;
+      border-radius: 8px;
+      background: #f8fafc;
+      border: 1px solid #e5e7eb;
+    }
+    .instances button {
+      width: 34px;
+      height: 34px;
+      border-radius: 6px;
+      border: 1px solid #d1d5db;
+      background: #fff;
+      cursor: pointer;
+      font-size: 16px;
+    }
+    .instances button:disabled {
+      opacity: 0.4;
+      cursor: not-allowed;
+    }
+    .instances-value {
+      min-width: 28px;
+      text-align: center;
+      font-size: 18px;
+      font-weight: 700;
+    }
+    .buttons {
+      display: flex;
+      gap: 12px;
+      justify-content: flex-end;
+      margin-top: 18px;
+    }
+    .btn {
+      border: none;
+      border-radius: 6px;
+      padding: 10px 18px;
+      font: inherit;
+      cursor: pointer;
+    }
+    .btn.secondary {
+      background: #e5e7eb;
+      color: #111827;
+    }
+    .btn.primary {
+      background: #2563eb;
+      color: #fff;
+    }
+    .btn:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
+    .batch-jobs {
+      margin-top: 12px;
+      display: grid;
+      gap: 8px;
+    }
+    .batch-job {
+      padding: 10px 12px;
+      border: 1px solid #e5e7eb;
+      border-radius: 6px;
+      background: #fff;
+      font-size: 13px;
+      line-height: 1.45;
+    }
+    .batch-job a {
+      color: #2563eb;
+      text-decoration: none;
+    }
+  </style>
+</head>
+<body>
+  <div class="container">
+    <h1>Remote queue</h1>
+    <p class="subtitle">Wklej tekst na tym komputerze, a analiza zostanie wrzucona do kolejki domyślnego runnera na drugim komputerze.</p>
+
+    <div class="meta-card">
+      <strong>Domyslny runner</strong>
+      <p id="runnerStatus" class="status" aria-live="polite">Sprawdzam status runnera...</p>
+      <p id="configHint" class="status" aria-live="polite" hidden></p>
+    </div>
+
+    <label for="titleInput">Tytul</label>
+    <input type="text" id="titleInput" placeholder="Np. Acme / tytul artykulu">
+
+    <label for="textInput">Tekst</label>
+    <textarea id="textInput" placeholder="Wklej tekst do wyslania na zdalny runner..." autofocus></textarea>
+
+    <div class="instances">
+      <span>Instancje:</span>
+      <button id="decreaseBtn" type="button">-</button>
+      <span class="instances-value" id="instancesValue">1</span>
+      <button id="increaseBtn" type="button">+</button>
+      <span style="color:#64748b;font-size:13px;">1-10 osobnych jobów w batchu</span>
+    </div>
+
+    <div class="buttons">
+      <button id="refreshBtn" class="btn secondary" type="button">Odswiez status</button>
+      <button id="submitBtn" class="btn primary" type="button" disabled>Dodaj do kolejki</button>
+    </div>
+    <p id="submitStatus" class="status" aria-live="polite" hidden></p>
+
+    <div class="meta-card" style="margin-top:20px;">
+      <strong>Ostatni batch</strong>
+      <p id="batchStatus" class="status" aria-live="polite">Brak batcha.</p>
+      <div id="batchJobs" class="batch-jobs"></div>
+    </div>
+  </div>
+
+  <script src="runtime-bridge-ui.js"></script>
+  <script src="remote-ui-shared.js"></script>
+  <script src="remote-queue.js"></script>
+</body>
+</html>
