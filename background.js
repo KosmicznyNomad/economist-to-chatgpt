@@ -55,29 +55,13 @@ try {
   // Local inline Watchlist config is optional for unpacked extension installs.
 }
 if (typeof importScripts === 'function') {
-  importScripts(
-    'process-contract.js',
-    'decision-contract.js',
-    'response-storage.js',
-    'watchlist-api.js',
-    'watchlist-dispatch-shape.js',
-    'remote-contract.js',
-    'remote-api.js',
-    'remote-batch-storage.js',
-    'remote-ui-shared.js',
-    'remote-runner.js'
-  );
+  importScripts('process-contract.js', 'decision-contract.js', 'response-storage.js', 'watchlist-api.js', 'watchlist-dispatch-shape.js');
 }
 const ProcessContractUtils = globalThis.ProcessContractUtils || {};
 const DecisionContractUtils = globalThis.DecisionContractUtils || {};
 const ResponseStorageUtils = globalThis.ResponseStorageUtils || {};
 const WatchlistApiUtils = globalThis.WatchlistApiUtils || {};
 const WatchlistDispatchShapeUtils = globalThis.WatchlistDispatchShapeUtils || {};
-const RemoteContractUtils = globalThis.RemoteContractUtils || {};
-const RemoteApiUtils = globalThis.RemoteApiUtils || {};
-const RemoteBatchStorageUtils = globalThis.RemoteBatchStorageUtils || {};
-const RemoteUiSharedUtils = globalThis.RemoteUiSharedUtils || {};
-const RemoteRunnerUtils = globalThis.RemoteRunnerUtils || {};
 
 const WATCHLIST_INLINE_CONFIG = (() => {
   const raw = globalThis?.WATCHLIST_INLINE_OVERRIDE;
@@ -131,27 +115,6 @@ const WATCHLIST_DISPATCH = {
   alarmPeriodMinutes: 2
 };
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
-const REMOTE_RUNNER_ENABLED_STORAGE_KEY = 'remote_runner_enabled';
-const REMOTE_RUNNER_NAME_STORAGE_KEY = 'remote_runner_name';
-const REMOTE_DEFAULT_RUNNER_ID_STORAGE_KEY = 'remote_default_runner_id';
-const REMOTE_RUNNER_CONFIG_KEYS = [
-  REMOTE_RUNNER_ENABLED_STORAGE_KEY,
-  REMOTE_RUNNER_NAME_STORAGE_KEY,
-  REMOTE_DEFAULT_RUNNER_ID_STORAGE_KEY
-];
-const REMOTE_BATCH_STORAGE_KEY = RemoteBatchStorageUtils.STORAGE_KEY || 'remote_manual_batches';
-const REMOTE_BATCH_MAX_ITEMS = RemoteBatchStorageUtils.MAX_BATCHES || 20;
-const REMOTE_QUEUE_PREFILL_STORAGE_KEY = 'remote_queue_prefills';
-const REMOTE_QUEUE_PREFILL_MAX_ITEMS = 12;
-const REMOTE_QUEUE_PREFILL_TTL_MS = 15 * 60 * 1000;
-const REMOTE_RUNNER_TICK_ALARM = RemoteRunnerUtils.REMOTE_RUNNER_TICK_ALARM || 'remote-runner-tick';
-const REMOTE_RUNNER_TICK_PERIOD_MINUTES = RemoteRunnerUtils.REMOTE_RUNNER_TICK_PERIOD_MINUTES || 1;
-const REMOTE_JOB_HEARTBEAT_INTERVAL_MS = RemoteRunnerUtils.REMOTE_JOB_HEARTBEAT_INTERVAL_MS || 60000;
-const REMOTE_ERROR_PDF_NOT_SUPPORTED = RemoteContractUtils.REMOTE_ERROR_PDF_NOT_SUPPORTED || 'remote_pdf_not_supported_yet';
-const REMOTE_RUNNER_CAPABILITIES = {
-  remoteManualTextV1: true,
-  promptSnapshotV1: true
-};
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -251,10 +214,6 @@ let problemLogEntries = [];
 let problemLogReady = null;
 let extensionInstallationId = '';
 let extensionInstallationIdReady = null;
-let remoteRunnerTickInFlight = null;
-let remoteRunnerActiveExecution = null;
-let remoteRunnerLastPreflightAt = 0;
-let remoteRunnerLastPreflightResult = '';
 const problemLogLastSignatureByRunId = new Map();
 const processLogLastEmitTsByRunId = new Map();
 const processStaleWarnLastEmitTsByRunId = new Map();
@@ -1085,8 +1044,6 @@ function sanitizeAnalysisQueueJob(rawJob) {
     queueBatchId: typeof rawJob.queueBatchId === 'string' ? rawJob.queueBatchId.trim() : '',
     manualPdfBatchId: typeof rawJob.manualPdfBatchId === 'string' ? rawJob.manualPdfBatchId.trim() : '',
     manualPdfProviderId: typeof rawJob.manualPdfProviderId === 'string' ? rawJob.manualPdfProviderId.trim() : '',
-    promptHash: typeof rawJob.promptHash === 'string' ? rawJob.promptHash.trim() : '',
-    inputDedupeKey: typeof rawJob.inputDedupeKey === 'string' ? rawJob.inputDedupeKey.trim() : '',
     sourceUrl: typeof rawJob.sourceUrl === 'string' ? rawJob.sourceUrl.trim() : '',
     chatUrl: typeof rawJob.chatUrl === 'string' ? rawJob.chatUrl.trim() : '',
     startedAt: Number.isInteger(rawJob.startedAt) ? rawJob.startedAt : null,
@@ -1096,8 +1053,6 @@ function sanitizeAnalysisQueueJob(rawJob) {
 
   if (Number.isInteger(rawJob.invocationWindowId)) sanitized.invocationWindowId = rawJob.invocationWindowId;
   if (Number.isInteger(rawJob.sourceWindowId)) sanitized.sourceWindowId = rawJob.sourceWindowId;
-  if (Number.isInteger(rawJob.instanceIndex)) sanitized.instanceIndex = rawJob.instanceIndex;
-  if (Number.isInteger(rawJob.instanceTotal)) sanitized.instanceTotal = rawJob.instanceTotal;
 
   if (kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
     const tabSnapshot = sanitizeAnalysisQueueTabSnapshot(rawJob.tabSnapshot || rawJob.tab);
@@ -3418,467 +3373,6 @@ async function ensureExtensionInstallationId() {
   }
   const resolved = await extensionInstallationIdReady;
   return typeof resolved === 'string' ? resolved : '';
-}
-
-function generateRemoteEntityId(prefix = 'remote') {
-  const safePrefix = typeof prefix === 'string' && prefix.trim()
-    ? prefix.trim().replace(/[^a-zA-Z0-9._-]/g, '-')
-    : 'remote';
-  if (typeof globalThis?.crypto?.randomUUID === 'function') {
-    return `${safePrefix}-${globalThis.crypto.randomUUID()}`;
-  }
-  return `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
-}
-
-function normalizeRemoteRunnerConfigRecord(raw = {}) {
-  const normalized = RemoteRunnerUtils.normalizeRunnerConfig
-    ? RemoteRunnerUtils.normalizeRunnerConfig(raw)
-    : {
-      remoteRunnerEnabled: raw?.remoteRunnerEnabled === true || raw?.remote_runner_enabled === true,
-      remoteRunnerName: typeof raw?.remoteRunnerName === 'string'
-        ? raw.remoteRunnerName.trim()
-        : (typeof raw?.remote_runner_name === 'string' ? raw.remote_runner_name.trim() : ''),
-      remoteDefaultRunnerId: typeof raw?.remoteDefaultRunnerId === 'string'
-        ? raw.remoteDefaultRunnerId.trim()
-        : (typeof raw?.remote_default_runner_id === 'string' ? raw.remote_default_runner_id.trim() : '')
-    };
-  return {
-    remoteRunnerEnabled: normalized.remoteRunnerEnabled === true,
-    remoteRunnerName: typeof normalized.remoteRunnerName === 'string' ? normalized.remoteRunnerName.trim() : '',
-    remoteDefaultRunnerId: typeof normalized.remoteDefaultRunnerId === 'string' ? normalized.remoteDefaultRunnerId.trim() : ''
-  };
-}
-
-async function getRemoteRunnerConfig() {
-  const [storageResult, thisDeviceId] = await Promise.all([
-    chrome.storage.local.get(REMOTE_RUNNER_CONFIG_KEYS),
-    ensureExtensionInstallationId()
-  ]);
-  const normalized = normalizeRemoteRunnerConfigRecord({
-    remoteRunnerEnabled: storageResult?.[REMOTE_RUNNER_ENABLED_STORAGE_KEY] === true,
-    remoteRunnerName: storageResult?.[REMOTE_RUNNER_NAME_STORAGE_KEY],
-    remoteDefaultRunnerId: storageResult?.[REMOTE_DEFAULT_RUNNER_ID_STORAGE_KEY]
-  });
-  return {
-    ...normalized,
-    thisDeviceId: typeof thisDeviceId === 'string' ? thisDeviceId : '',
-    effectiveRunnerName: normalized.remoteRunnerName || (typeof thisDeviceId === 'string' ? thisDeviceId : '')
-  };
-}
-
-async function setRemoteRunnerConfig(input = {}) {
-  const current = await getRemoteRunnerConfig();
-  const next = normalizeRemoteRunnerConfigRecord({
-    remoteRunnerEnabled: input?.remoteRunnerEnabled ?? input?.remote_runner_enabled ?? current.remoteRunnerEnabled,
-    remoteRunnerName: input?.remoteRunnerName ?? input?.remote_runner_name ?? current.remoteRunnerName,
-    remoteDefaultRunnerId: input?.remoteDefaultRunnerId ?? input?.remote_default_runner_id ?? current.remoteDefaultRunnerId
-  });
-  await chrome.storage.local.set({
-    [REMOTE_RUNNER_ENABLED_STORAGE_KEY]: next.remoteRunnerEnabled,
-    [REMOTE_RUNNER_NAME_STORAGE_KEY]: next.remoteRunnerName,
-    [REMOTE_DEFAULT_RUNNER_ID_STORAGE_KEY]: next.remoteDefaultRunnerId
-  });
-  return getRemoteRunnerConfig();
-}
-
-async function readRemoteBatchRecords() {
-  const result = await chrome.storage.local.get([REMOTE_BATCH_STORAGE_KEY]);
-  const raw = Array.isArray(result?.[REMOTE_BATCH_STORAGE_KEY])
-    ? result[REMOTE_BATCH_STORAGE_KEY]
-    : [];
-  return typeof RemoteBatchStorageUtils.pruneBatchRecords === 'function'
-    ? RemoteBatchStorageUtils.pruneBatchRecords(raw)
-    : raw.slice(0, REMOTE_BATCH_MAX_ITEMS);
-}
-
-async function writeRemoteBatchRecords(records) {
-  const list = typeof RemoteBatchStorageUtils.pruneBatchRecords === 'function'
-    ? RemoteBatchStorageUtils.pruneBatchRecords(records)
-    : (Array.isArray(records) ? records.slice(0, REMOTE_BATCH_MAX_ITEMS) : []);
-  await chrome.storage.local.set({ [REMOTE_BATCH_STORAGE_KEY]: list });
-  return list;
-}
-
-async function storeRemoteBatchRecord(record) {
-  const records = await readRemoteBatchRecords();
-  const nextRecords = typeof RemoteBatchStorageUtils.upsertBatchRecord === 'function'
-    ? RemoteBatchStorageUtils.upsertBatchRecord(records, record)
-    : [record, ...records].slice(0, REMOTE_BATCH_MAX_ITEMS);
-  await writeRemoteBatchRecords(nextRecords);
-  const batchId = typeof record?.batchId === 'string'
-    ? record.batchId
-    : (typeof record?.batch_id === 'string' ? record.batch_id : '');
-  return (typeof RemoteBatchStorageUtils.findBatchRecord === 'function'
-    ? RemoteBatchStorageUtils.findBatchRecord(nextRecords, batchId)
-    : nextRecords.find((item) => item?.batchId === batchId)) || null;
-}
-
-async function getStoredRemoteBatchRecord(batchId = '') {
-  const records = await readRemoteBatchRecords();
-  const normalizedBatchId = typeof batchId === 'string' ? batchId.trim() : '';
-  if (!normalizedBatchId) {
-    return records[0] || null;
-  }
-  return (typeof RemoteBatchStorageUtils.findBatchRecord === 'function'
-    ? RemoteBatchStorageUtils.findBatchRecord(records, normalizedBatchId)
-    : records.find((item) => item?.batchId === normalizedBatchId)) || null;
-}
-
-function getRemoteQueuePrefillStorageArea() {
-  return chrome?.storage?.session || chrome?.storage?.local || null;
-}
-
-function normalizeRemoteQueuePrefillRecord(raw = {}) {
-  return {
-    prefillId: typeof raw?.prefillId === 'string' ? raw.prefillId.trim() : '',
-    sourceKind: typeof raw?.sourceKind === 'string' && raw.sourceKind.trim()
-      ? raw.sourceKind.trim()
-      : 'manual_text',
-    title: typeof raw?.title === 'string' && raw.title.trim()
-      ? raw.title.trim()
-      : 'Recznie wklejony artykul',
-    text: typeof raw?.text === 'string' ? raw.text : '',
-    sourceUrl: typeof raw?.sourceUrl === 'string' ? raw.sourceUrl.trim() : '',
-    createdAt: Number.isInteger(raw?.createdAt) ? raw.createdAt : Date.now(),
-    updatedAt: Number.isInteger(raw?.updatedAt) ? raw.updatedAt : Date.now()
-  };
-}
-
-function pruneRemoteQueuePrefillRecords(records) {
-  const now = Date.now();
-  const list = Array.isArray(records)
-    ? records.map((item) => normalizeRemoteQueuePrefillRecord(item)).filter((item) => item.prefillId && item.text.trim())
-    : [];
-  return list
-    .filter((item) => Math.max(0, now - item.updatedAt) <= REMOTE_QUEUE_PREFILL_TTL_MS)
-    .sort((left, right) => right.updatedAt - left.updatedAt)
-    .slice(0, REMOTE_QUEUE_PREFILL_MAX_ITEMS);
-}
-
-async function readRemoteQueuePrefillRecords() {
-  const storageArea = getRemoteQueuePrefillStorageArea();
-  if (!storageArea?.get) {
-    return [];
-  }
-  const result = await storageArea.get([REMOTE_QUEUE_PREFILL_STORAGE_KEY]);
-  return pruneRemoteQueuePrefillRecords(result?.[REMOTE_QUEUE_PREFILL_STORAGE_KEY]);
-}
-
-async function writeRemoteQueuePrefillRecords(records) {
-  const storageArea = getRemoteQueuePrefillStorageArea();
-  if (!storageArea?.set) {
-    throw new Error('remote_queue_prefill_storage_unavailable');
-  }
-  const list = pruneRemoteQueuePrefillRecords(records);
-  await storageArea.set({ [REMOTE_QUEUE_PREFILL_STORAGE_KEY]: list });
-  return list;
-}
-
-async function storeRemoteQueuePrefillRecord(record) {
-  const incoming = normalizeRemoteQueuePrefillRecord(record);
-  if (!incoming.prefillId || !incoming.text.trim()) {
-    throw new Error('remote_queue_prefill_invalid');
-  }
-  const records = await readRemoteQueuePrefillRecords();
-  const nextRecords = records.filter((item) => item.prefillId !== incoming.prefillId);
-  nextRecords.unshift({
-    ...incoming,
-    updatedAt: Date.now()
-  });
-  await writeRemoteQueuePrefillRecords(nextRecords);
-  return incoming;
-}
-
-async function getStoredRemoteQueuePrefillRecord(prefillId = '') {
-  const normalizedPrefillId = typeof prefillId === 'string' ? prefillId.trim() : '';
-  if (!normalizedPrefillId) return null;
-  const records = await readRemoteQueuePrefillRecords();
-  return records.find((item) => item.prefillId === normalizedPrefillId) || null;
-}
-
-function isLikelyPdfSourceUrl(rawUrl = '') {
-  const normalizedUrl = typeof rawUrl === 'string' ? rawUrl.trim().toLowerCase() : '';
-  if (!normalizedUrl) return false;
-  return normalizedUrl === 'manual://pdf'
-    || normalizedUrl.endsWith('.pdf')
-    || normalizedUrl.includes('.pdf?')
-    || normalizedUrl.includes('.pdf#')
-    || normalizedUrl.includes('.pdf%')
-    || normalizedUrl.includes('%2fpdf')
-    || normalizedUrl.includes('application/pdf');
-}
-
-async function prepareRemoteQueuePrefillFromTab(rawTab = null) {
-  const sourceTab = rawTab && typeof rawTab === 'object' ? rawTab : null;
-  const tabId = Number.isInteger(sourceTab?.id) ? sourceTab.id : null;
-  const sourceUrl = getTabEffectiveUrl(sourceTab);
-  if (isLikelyPdfSourceUrl(sourceUrl)) {
-    return {
-      success: false,
-      error: REMOTE_ERROR_PDF_NOT_SUPPORTED
-    };
-  }
-  if (!Number.isInteger(tabId)) {
-    return {
-      success: false,
-      error: 'invalid_source_tab'
-    };
-  }
-  try {
-    const extractionResults = await chrome.scripting.executeScript({
-      target: { tabId },
-      function: extractText
-    });
-    const text = typeof extractionResults?.[0]?.result === 'string'
-      ? extractionResults[0].result.trim()
-      : '';
-    if (!text) {
-      return {
-        success: false,
-        error: 'article_text_unavailable'
-      };
-    }
-    const prefillId = generateRemoteEntityId('rprefill');
-    const record = normalizeRemoteQueuePrefillRecord({
-      prefillId,
-      sourceKind: 'article',
-      title: typeof sourceTab?.title === 'string' && sourceTab.title.trim()
-        ? sourceTab.title.trim()
-        : 'Recznie wklejony artykul',
-      text,
-      sourceUrl,
-      createdAt: Date.now(),
-      updatedAt: Date.now()
-    });
-    await storeRemoteQueuePrefillRecord(record);
-    return {
-      success: true,
-      prefillId,
-      prefill: record
-    };
-  } catch (error) {
-    return {
-      success: false,
-      error: error?.message || 'remote_prefill_failed'
-    };
-  }
-}
-
-async function getCurrentLocalExecutionLoad() {
-  const queue = await getAnalysisQueueStatusSnapshot().catch(() => null);
-  let runningProcesses = 0;
-  for (const process of processRegistry.values()) {
-    if (!process || typeof process !== 'object') continue;
-    const status = normalizeProcessStatus(process.status || '');
-    if (status && !isClosedProcessStatus(status) && status !== 'queued') {
-      runningProcesses += 1;
-    }
-  }
-  const activeSlots = Number.isInteger(queue?.activeSlots) ? queue.activeSlots : 0;
-  const reservedSlots = Number.isInteger(queue?.reservedSlots) ? queue.reservedSlots : 0;
-  const liveSlots = Number.isInteger(queue?.liveSlots) ? queue.liveSlots : 0;
-  const startingSlots = Number.isInteger(queue?.startingSlots) ? queue.startingSlots : 0;
-  const localQueueSize = Number.isInteger(queue?.queueSize) ? queue.queueSize : 0;
-  const localBusy = activeSlots > 0 || reservedSlots > 0 || liveSlots > 0 || startingSlots > 0 || runningProcesses > 0;
-  return {
-    localBusy,
-    localQueueSize,
-    queue
-  };
-}
-
-async function buildRemotePromptSnapshotMeta() {
-  const promptChainSnapshot = Array.isArray(PROMPTS_COMPANY)
-    ? PROMPTS_COMPANY.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)
-    : [];
-  const promptHash = typeof RemoteContractUtils.buildPromptSnapshotHash === 'function'
-    ? await RemoteContractUtils.buildPromptSnapshotHash(promptChainSnapshot)
-    : '';
-  return {
-    promptsLoaded: promptChainSnapshot.length > 0,
-    promptChainSnapshot,
-    promptHash
-  };
-}
-
-async function buildAnalysisQueuePromptHash(promptChain) {
-  const promptSnapshot = Array.isArray(promptChain)
-    ? promptChain.map((item) => (typeof item === 'string' ? item.trim() : '')).filter(Boolean)
-    : [];
-  if (promptSnapshot.length === 0) return '';
-  if (typeof RemoteContractUtils.buildPromptSnapshotHash === 'function') {
-    return RemoteContractUtils.buildPromptSnapshotHash(promptSnapshot);
-  }
-  const digest = await sha256HexForDispatch(promptSnapshot.join('\n\nPROMPT_SEPARATOR\n\n'));
-  return digest ? `sha256:${digest}` : '';
-}
-
-function areAnalysisQueueJobsInSameIntentionalBatch(leftJob, rightJob) {
-  const leftBatchId = typeof leftJob?.queueBatchId === 'string' ? leftJob.queueBatchId.trim() : '';
-  const rightBatchId = typeof rightJob?.queueBatchId === 'string' ? rightJob.queueBatchId.trim() : '';
-  return Boolean(leftBatchId && rightBatchId && leftBatchId === rightBatchId);
-}
-
-function areAnalysisQueueJobsInputDuplicates(leftJob, rightJob) {
-  const leftKey = typeof leftJob?.inputDedupeKey === 'string' ? leftJob.inputDedupeKey.trim() : '';
-  const rightKey = typeof rightJob?.inputDedupeKey === 'string' ? rightJob.inputDedupeKey.trim() : '';
-  if (!leftKey || !rightKey || leftKey !== rightKey) {
-    return false;
-  }
-  return !areAnalysisQueueJobsInSameIntentionalBatch(leftJob, rightJob);
-}
-
-async function buildAnalysisQueueInputDedupeKey({ sourceKind = '', tabSnapshot = null, promptHash = '' } = {}) {
-  const normalizedSourceKind = typeof sourceKind === 'string' ? sourceKind.trim() : '';
-  const normalizedPromptHash = typeof promptHash === 'string' ? promptHash.trim() : '';
-  const snapshot = tabSnapshot && typeof tabSnapshot === 'object' ? tabSnapshot : null;
-  if (!snapshot) return '';
-
-  let sourceDescriptor = '';
-  if (normalizedSourceKind === 'manual_text') {
-    sourceDescriptor = typeof snapshot?.manualText === 'string' ? snapshot.manualText.trim() : '';
-  } else if (normalizedSourceKind === 'manual_pdf') {
-    const attachment = snapshot?.manualPdfAttachment && typeof snapshot.manualPdfAttachment === 'object'
-      ? snapshot.manualPdfAttachment
-      : null;
-    if (attachment) {
-      sourceDescriptor = [
-        typeof attachment.providerId === 'string' ? attachment.providerId.trim() : '',
-        typeof attachment.token === 'string' ? attachment.token.trim() : '',
-        typeof attachment.name === 'string' ? attachment.name.trim() : '',
-        Number.isFinite(attachment.size) ? String(Math.max(0, Math.floor(attachment.size))) : ''
-      ].join('::');
-    }
-    if (!sourceDescriptor) {
-      sourceDescriptor = typeof snapshot?.manualText === 'string' ? snapshot.manualText.trim() : '';
-    }
-  } else {
-    sourceDescriptor = typeof snapshot?.url === 'string' ? snapshot.url.trim() : '';
-  }
-
-  if (!sourceDescriptor) return '';
-  const sourceDigest = await sha256HexForDispatch(sourceDescriptor);
-  const promptSegment = normalizedPromptHash || 'prompt:none';
-  return `${normalizedSourceKind || 'article'}:${promptSegment}:${sourceDigest}`;
-}
-
-async function fetchRemoteJsonRequest(url, method = 'GET', body = null, options = {}) {
-  const dispatchConfig = await resolveWatchlistDispatchConfiguration(Boolean(options?.forceReload));
-  if (!dispatchConfig?.ok) {
-    return {
-      success: false,
-      status: null,
-      error: dispatchConfig?.reason || 'missing_dispatch_credentials'
-    };
-  }
-  const signed = await RemoteApiUtils.buildSignedJsonRequest({
-    url,
-    method,
-    body,
-    keyId: dispatchConfig.keyId,
-    secret: dispatchConfig.secret
-  });
-  const timeoutMs = Number.isInteger(options?.timeoutMs) && options.timeoutMs > 0
-    ? options.timeoutMs
-    : Math.max(1000, Number(WATCHLIST_DISPATCH.timeoutMs || 0) || 20000);
-  const controller = new AbortController();
-  let timeoutId = null;
-  try {
-    const response = await Promise.race([
-      fetch(signed.url, {
-        method: signed.method,
-        headers: signed.headers,
-        body: signed.method === 'GET' ? undefined : signed.body,
-        signal: controller.signal
-      }),
-      new Promise((_, reject) => {
-        timeoutId = setTimeout(() => {
-          try {
-            controller.abort();
-          } catch (_) {
-            // Ignore abort errors.
-          }
-          reject(new Error(`timeout_${timeoutMs}`));
-        }, timeoutMs);
-      })
-    ]);
-    const payload = await response.json().catch(() => ({}));
-    if (!response.ok) {
-      return {
-        success: false,
-        status: response.status,
-        error: typeof payload?.detail === 'string' ? payload.detail : `http_${response.status}`,
-        body: payload
-      };
-    }
-    return {
-      success: true,
-      status: response.status,
-      body: payload
-    };
-  } catch (error) {
-    return {
-      success: false,
-      status: null,
-      error: error?.message || String(error)
-    };
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-}
-
-async function sendRemoteRunnerHeartbeat(payload) {
-  const config = await resolveWatchlistDispatchConfiguration(false);
-  if (!config?.ok) {
-    return { success: false, error: config?.reason || 'missing_dispatch_credentials' };
-  }
-  const url = RemoteApiUtils.buildIskraUrl(config.intakeUrl, RemoteApiUtils.API_RUNNERS_HEARTBEAT_PATH);
-  return fetchRemoteJsonRequest(url, 'POST', payload);
-}
-
-async function fetchRemoteRunnerStatusRemote(runnerId) {
-  const config = await resolveWatchlistDispatchConfiguration(false);
-  if (!config?.ok) {
-    return { success: false, error: config?.reason || 'missing_dispatch_credentials' };
-  }
-  const url = RemoteApiUtils.buildRunnerStatusUrl(config.intakeUrl, runnerId);
-  return fetchRemoteJsonRequest(url, 'GET', null);
-}
-
-async function createRemoteJobRemote(payload) {
-  const config = await resolveWatchlistDispatchConfiguration(false);
-  if (!config?.ok) {
-    return { success: false, error: config?.reason || 'missing_dispatch_credentials' };
-  }
-  const url = RemoteApiUtils.buildIskraUrl(config.intakeUrl, RemoteApiUtils.API_JOBS_PATH);
-  return fetchRemoteJsonRequest(url, 'POST', payload);
-}
-
-async function claimRemoteJobRemote(runnerId) {
-  const config = await resolveWatchlistDispatchConfiguration(false);
-  if (!config?.ok) {
-    return { success: false, error: config?.reason || 'missing_dispatch_credentials' };
-  }
-  const url = RemoteApiUtils.buildIskraUrl(config.intakeUrl, RemoteApiUtils.API_JOBS_CLAIM_PATH);
-  return fetchRemoteJsonRequest(url, 'POST', { runnerId });
-}
-
-async function sendRemoteJobEventRemote(jobId, payload) {
-  const config = await resolveWatchlistDispatchConfiguration(false);
-  if (!config?.ok) {
-    return { success: false, error: config?.reason || 'missing_dispatch_credentials' };
-  }
-  const url = RemoteApiUtils.buildJobEventUrl(config.intakeUrl, jobId);
-  return fetchRemoteJsonRequest(url, 'POST', payload);
-}
-
-async function fetchRemoteJobRecordRemote(jobId) {
-  const config = await resolveWatchlistDispatchConfiguration(false);
-  if (!config?.ok) {
-    return { success: false, error: config?.reason || 'missing_dispatch_credentials' };
-  }
-  const url = RemoteApiUtils.buildJobGetUrl(config.intakeUrl, jobId);
-  return fetchRemoteJsonRequest(url, 'GET', null);
 }
 
 function buildProblemLogMessage(entry) {
@@ -6585,10 +6079,6 @@ function buildQueuedProcessPatchForJob(job) {
     queueBatchId: safeJob.queueBatchId || '',
     manualPdfBatchId: safeJob.manualPdfBatchId || '',
     manualPdfProviderId: safeJob.manualPdfProviderId || '',
-    promptHash: safeJob.promptHash || '',
-    inputDedupeKey: safeJob.inputDedupeKey || '',
-    instanceIndex: Number.isInteger(safeJob.instanceIndex) ? safeJob.instanceIndex : null,
-    instanceTotal: Number.isInteger(safeJob.instanceTotal) ? safeJob.instanceTotal : null,
     invocationWindowId: Number.isInteger(safeJob.invocationWindowId) ? safeJob.invocationWindowId : null,
     sourceWindowId: Number.isInteger(safeJob.sourceWindowId) ? safeJob.sourceWindowId : null,
     messages: []
@@ -6623,7 +6113,6 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
       success: true,
       jobs: [],
       queuedCount: 0,
-      skippedDuplicateCount: 0,
       maxConcurrent: emptySnapshot.maxConcurrent,
       queueSize: emptySnapshot.queueSize,
       activeSlots: emptySnapshot.activeSlots,
@@ -6635,12 +6124,10 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
 
   await ensureAnalysisQueueReady();
   let queuedJobs = [];
-  let skippedDuplicateJobs = [];
   let persistedSnapshot = null;
   persistedSnapshot = await withAnalysisQueueMutationLock(async () => {
     let state = cloneAnalysisQueueState();
     const nextJobs = [];
-    const skippedJobs = [];
 
     for (const rawJob of sourceJobs) {
       const sequence = (state.lastSequence || 0) + 1;
@@ -6657,16 +6144,6 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
         createdAt: Number.isInteger(rawJob?.createdAt) ? rawJob.createdAt : Date.now()
       });
       if (!prepared) continue;
-      const duplicateJob = state.waitingJobs.find((job) => areAnalysisQueueJobsInputDuplicates(job, prepared))
-        || state.activeJobs.find((job) => areAnalysisQueueJobsInputDuplicates(job, prepared))
-        || nextJobs.find((job) => areAnalysisQueueJobsInputDuplicates(job, prepared));
-      if (duplicateJob) {
-        skippedJobs.push({
-          job: prepared,
-          duplicateOfJobId: duplicateJob.jobId
-        });
-        continue;
-      }
       state.waitingJobs.push(prepared);
       nextJobs.push(prepared);
     }
@@ -6674,7 +6151,6 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
     sortAnalysisQueueWaitingJobs(state.waitingJobs);
 
     queuedJobs = nextJobs;
-    skippedDuplicateJobs = skippedJobs;
     return persistAnalysisQueueState(state);
   });
 
@@ -6720,7 +6196,6 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
     success: true,
     jobs: queuedJobs,
     queuedCount: queuedJobs.length,
-    skippedDuplicateCount: skippedDuplicateJobs.length,
     maxConcurrent: queueSnapshot.maxConcurrent,
     queueSize: queueSnapshot.queueSize,
     activeSlots: queueSnapshot.activeSlots,
@@ -20070,14 +19545,12 @@ markRunningUnfinishedResumeBatchInterruptedOnBoot().catch((error) => {
 });
 ensureWatchlistDispatchAlarm();
 ensureProcessMonitorHeartbeatAlarm();
-ensureRemoteRunnerTickAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
 });
 logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
 logWatchlistRemoteConnectionState('service_worker_boot', false).catch(() => {});
 runProcessMonitorHeartbeatSweep('service_worker_boot').catch(() => {});
-runRemoteRunnerTick('service_worker_boot').catch(() => {});
 requestAnalysisQueueReconcile('service_worker_boot');
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
@@ -20177,13 +19650,9 @@ chrome.runtime.onInstalled.addListener(() => {
   });
   ensureWatchlistDispatchAlarm();
   ensureProcessMonitorHeartbeatAlarm();
-  ensureRemoteRunnerTickAlarm();
   requestAnalysisQueueReconcile('on_installed');
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onInstalled failed:', error);
-  });
-  runRemoteRunnerTick('on_installed').catch((error) => {
-    console.warn('[remote-runner] onInstalled tick failed:', error);
   });
   logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_installed', false).catch(() => {});
@@ -20195,13 +19664,9 @@ chrome.runtime.onInstalled.addListener(() => {
 chrome.runtime.onStartup.addListener(() => {
   ensureWatchlistDispatchAlarm();
   ensureProcessMonitorHeartbeatAlarm();
-  ensureRemoteRunnerTickAlarm();
   requestAnalysisQueueReconcile('on_startup');
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onStartup failed:', error);
-  });
-  runRemoteRunnerTick('on_startup').catch((error) => {
-    console.warn('[remote-runner] onStartup tick failed:', error);
   });
   logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_startup', false).catch(() => {});
@@ -20315,13 +19780,6 @@ if (chrome?.alarms?.onAlarm) {
         console.warn('[auto-restore] cycle failed:', error);
       });
       requestAnalysisQueueReconcile('auto_restore_alarm');
-      return;
-    }
-
-    if (alarm.name === REMOTE_RUNNER_TICK_ALARM) {
-      runRemoteRunnerTick('alarm').catch((error) => {
-        console.warn('[remote-runner] tick alarm failed:', error);
-      });
     }
   });
 }
@@ -21088,142 +20546,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     })().catch((error) => {
       sendResponse({ success: false, error: error?.message || 'manual_source_start_failed' });
-    });
-    return true;
-  } else if (message.type === 'GET_REMOTE_RUNNER_CONFIG') {
-    (async () => {
-      const config = await getRemoteRunnerConfig();
-      sendResponse({
-        success: true,
-        ...config
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_runner_config_failed'
-      });
-    });
-    return true;
-  } else if (message.type === 'SET_REMOTE_RUNNER_CONFIG') {
-    (async () => {
-      const config = await setRemoteRunnerConfig({
-        remoteRunnerEnabled: message?.remoteRunnerEnabled,
-        remoteRunnerName: message?.remoteRunnerName,
-        remoteDefaultRunnerId: message?.remoteDefaultRunnerId
-      });
-      ensureRemoteRunnerTickAlarm();
-      queueRemoteRunnerTick('config_updated');
-      sendResponse({
-        success: true,
-        ...config
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_runner_config_save_failed'
-      });
-    });
-    return true;
-  } else if (message.type === 'GET_REMOTE_DEFAULT_RUNNER_STATUS') {
-    (async () => {
-      const config = await getRemoteRunnerConfig();
-      if (!config.remoteDefaultRunnerId) {
-        sendResponse({
-          success: false,
-          error: 'default_runner_missing',
-          runner: null,
-          thisDeviceId: config.thisDeviceId || ''
-        });
-        return;
-      }
-      const statusResponse = await fetchRemoteRunnerStatusRemote(config.remoteDefaultRunnerId);
-      if (statusResponse?.success !== true) {
-        sendResponse({
-          success: false,
-          error: statusResponse?.error || 'remote_runner_status_failed',
-          runner: null,
-          thisDeviceId: config.thisDeviceId || ''
-        });
-        return;
-      }
-      sendResponse({
-        success: true,
-        runner: statusResponse?.body?.runner || null,
-        thisDeviceId: config.thisDeviceId || ''
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_runner_status_failed'
-      });
-    });
-    return true;
-  } else if (message.type === 'PREPARE_REMOTE_QUEUE_PREFILL') {
-    (async () => {
-      const result = await prepareRemoteQueuePrefillFromTab(message?.sourceTab || null);
-      sendResponse(result);
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_prefill_failed'
-      });
-    });
-    return true;
-  } else if (message.type === 'GET_REMOTE_QUEUE_PREFILL') {
-    (async () => {
-      const prefillId = typeof message?.prefillId === 'string' ? message.prefillId.trim() : '';
-      const prefill = await getStoredRemoteQueuePrefillRecord(prefillId);
-      if (!prefill) {
-        sendResponse({
-          success: false,
-          error: 'prefill_not_found',
-          prefill: null
-        });
-        return;
-      }
-      sendResponse({
-        success: true,
-        prefill
-      });
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_prefill_load_failed',
-        prefill: null
-      });
-    });
-    return true;
-  } else if (message.type === 'SUBMIT_REMOTE_MANUAL_BATCH') {
-    (async () => {
-      const instances = Math.max(1, Math.min(10, Number.isInteger(message?.instances) ? message.instances : 1));
-      const result = await submitRemoteManualBatch(
-        typeof message?.text === 'string' ? message.text : '',
-        typeof message?.title === 'string' ? message.title : '',
-        instances,
-        {
-          submissionId: typeof message?.submissionId === 'string' ? message.submissionId : '',
-          sourceKind: typeof message?.sourceKind === 'string' ? message.sourceKind : ''
-        }
-      );
-      sendResponse(result);
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_batch_submit_failed'
-      });
-    });
-    return true;
-  } else if (message.type === 'GET_REMOTE_BATCH_STATUS') {
-    (async () => {
-      const batchId = typeof message?.batchId === 'string' ? message.batchId.trim() : '';
-      const result = await refreshRemoteBatchStatus(batchId);
-      sendResponse(result);
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'remote_batch_status_failed',
-        batch: null
-      });
     });
     return true;
   } else if (message.type === 'MANUAL_PDF_GET_CHUNK') {
@@ -23053,683 +22375,6 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
   }
 }
 
-async function executePreparedAnalysisJob(options = {}) {
-  const runId = typeof options?.runId === 'string' && options.runId.trim()
-    ? options.runId.trim()
-    : generateRemoteEntityId('run');
-  const title = typeof options?.title === 'string' && options.title.trim()
-    ? options.title.trim()
-    : 'Recznie wklejony artykul';
-  const analysisType = typeof options?.analysisType === 'string' && options.analysisType.trim()
-    ? options.analysisType.trim()
-    : 'company';
-  const promptChain = Array.isArray(options?.promptChain)
-    ? options.promptChain.filter((item) => typeof item === 'string' && item.trim())
-    : [];
-  const tabSnapshot = options?.tabSnapshot && typeof options.tabSnapshot === 'object'
-    ? options.tabSnapshot
-    : null;
-  const remoteMeta = options?.remoteMeta && typeof options.remoteMeta === 'object'
-    ? options.remoteMeta
-    : null;
-  const remotePatch = remoteMeta
-    ? {
-      triggerSource: 'remote_runner',
-      remoteJobId: typeof remoteMeta.remoteJobId === 'string' ? remoteMeta.remoteJobId : '',
-      remoteBatchId: typeof remoteMeta.remoteBatchId === 'string' ? remoteMeta.remoteBatchId : '',
-      remoteControllerId: typeof remoteMeta.controllerId === 'string' ? remoteMeta.controllerId : '',
-      remoteRunnerId: typeof remoteMeta.runnerId === 'string' ? remoteMeta.runnerId : '',
-      remoteInstanceIndex: Number.isInteger(remoteMeta.instanceIndex) ? remoteMeta.instanceIndex : null,
-      remoteInstanceTotal: Number.isInteger(remoteMeta.instanceTotal) ? remoteMeta.instanceTotal : null,
-      timestamp: Date.now()
-    }
-    : {
-      triggerSource: 'remote_runner',
-      timestamp: Date.now()
-    };
-
-  await upsertProcess(runId, {
-    title,
-    analysisType,
-    ...remotePatch
-  });
-  const executorResult = await executeAnalysisProcessJob(
-    tabSnapshot,
-    promptChain,
-    typeof options?.chatUrl === 'string' && options.chatUrl.trim() ? options.chatUrl.trim() : CHAT_URL,
-    analysisType,
-    {
-      runId,
-      invocationWindowId: Number.isInteger(options?.invocationWindowId) ? options.invocationWindowId : null,
-      sourceKind: typeof options?.sourceKind === 'string' ? options.sourceKind : 'manual_text'
-    }
-  );
-  const process = processRegistry.get(runId) || null;
-  await upsertProcess(runId, remotePatch);
-  const finality = getCompletedProcessFinalityState(process);
-  const responseText = typeof process?.completedResponseText === 'string'
-    ? process.completedResponseText.trim()
-    : '';
-  const copyTrace = typeof process?.completedResponseSaveTrace === 'string' && process.completedResponseSaveTrace.trim()
-    ? process.completedResponseSaveTrace.trim()
-    : (typeof process?.persistenceStatus?.copyTrace === 'string' ? process.persistenceStatus.copyTrace.trim() : '');
-  const promptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
-    ? process.currentPrompt
-    : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
-  const responseId = extractResponseIdFromCopyTrace(copyTrace, runId)
-    || (responseText ? buildRestartReplayResponseId(runId, responseText, promptNumber) : '');
-  const conversationUrl = normalizeChatConversationUrl(
-    typeof process?.chatUrl === 'string' ? process.chatUrl : ''
-  );
-  const persistenceDispatch = process?.persistenceStatus?.dispatch && typeof process.persistenceStatus.dispatch === 'object'
-    ? process.persistenceStatus.dispatch
-    : null;
-  const persistenceOutcome = {
-    lifecycleStatus: normalizeProcessStatus(process?.lifecycleStatus || process?.status || ''),
-    statusCode: typeof process?.statusCode === 'string' ? process.statusCode : '',
-    dispatchState: typeof persistenceDispatch?.state === 'string' ? persistenceDispatch.state : '',
-    copyTrace,
-    dispatch: persistenceDispatch
-  };
-  const analysisOutcome = {
-    analysisCompleted: responseText.length > 0,
-    responseCaptured: responseText.length > 0,
-    conversationUrl,
-    runId,
-    responseId
-  };
-  return {
-    success: analysisOutcome.analysisCompleted === true,
-    title,
-    runId,
-    analysisOutcome,
-    persistenceOutcome,
-    executorResult,
-    processSnapshot: process
-  };
-}
-
-async function findRemoteRunnerChatGptTab() {
-  const tabs = await chrome.tabs.query({});
-  const candidates = Array.isArray(tabs)
-    ? tabs.filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)))
-    : [];
-  if (candidates.length === 0) return null;
-  const preferredUrl = typeof CHAT_URL === 'string' ? CHAT_URL.trim() : '';
-  if (preferredUrl) {
-    const exactMatch = candidates.find((tab) => getTabEffectiveUrl(tab) === preferredUrl);
-    if (exactMatch) return exactMatch;
-  }
-  return candidates.slice().sort(compareTabsByRecentAccess)[0] || candidates[0] || null;
-}
-
-async function inspectRemoteRunnerChatGptTab(tabId) {
-  if (!Number.isInteger(tabId)) {
-    return {
-      healthy: false,
-      reason: 'chatgpt_tab_missing'
-    };
-  }
-  try {
-    const results = await chrome.scripting.executeScript({
-      target: { tabId },
-      func: () => {
-        const editor = document.querySelector('[role="textbox"]')
-          || document.querySelector('[contenteditable="true"]')
-          || document.querySelector('[contenteditable]');
-        if (!editor) {
-          return {
-            healthy: false,
-            reason: 'chatgpt_editor_missing'
-          };
-        }
-        const errorSelectors = [
-          '[role="alert"]',
-          '[class*="error"]',
-          '[class*="alert"]',
-          '.text-red-500',
-          '.text-red-600'
-        ];
-        for (const selector of errorSelectors) {
-          const elements = Array.from(document.querySelectorAll(selector));
-          for (const element of elements) {
-            const text = String(element?.textContent || '').replace(/\s+/g, ' ').trim().toLowerCase();
-            if (!text) continue;
-            if (
-              text.includes('something went wrong')
-              || text.includes('connection error')
-              || text.includes('network error')
-              || text.includes('server error')
-              || text.includes('unable to load')
-              || text.includes('failed to')
-            ) {
-              return {
-                healthy: false,
-                reason: 'chatgpt_error_banner',
-                details: text.slice(0, 160)
-              };
-            }
-          }
-        }
-        return {
-          healthy: true,
-          reason: 'ok'
-        };
-      }
-    });
-    const result = results?.[0]?.result && typeof results[0].result === 'object'
-      ? results[0].result
-      : null;
-    return {
-      healthy: result?.healthy === true,
-      reason: typeof result?.reason === 'string' && result.reason.trim()
-        ? result.reason.trim()
-        : 'chatgpt_check_failed',
-      details: typeof result?.details === 'string' ? result.details.trim() : ''
-    };
-  } catch (error) {
-    return {
-      healthy: false,
-      reason: 'chatgpt_check_failed',
-      details: error?.message || String(error)
-    };
-  }
-}
-
-async function evaluateRemoteRunnerPreflight(options = {}) {
-  const now = Date.now();
-  const promptMeta = options?.promptMeta && typeof options.promptMeta === 'object'
-    ? options.promptMeta
-    : await buildRemotePromptSnapshotMeta();
-  const load = options?.load && typeof options.load === 'object'
-    ? options.load
-    : await getCurrentLocalExecutionLoad().catch(() => ({ localBusy: false, localQueueSize: 0, queue: null }));
-  const promptsReady = options?.promptsReady === true || await ensureCompanyPromptsReady().catch(() => false);
-  const promptsLoaded = promptsReady
-    && promptMeta?.promptsLoaded === true
-    && Array.isArray(promptMeta?.promptChainSnapshot)
-    && promptMeta.promptChainSnapshot.length > 0;
-  let result = 'ok';
-  let chatgptReady = false;
-  let checkedTabId = null;
-
-  if (typeof CHAT_URL !== 'string' || !CHAT_URL.trim()) {
-    result = 'chatgpt_url_missing';
-  } else if (!promptsLoaded) {
-    result = 'prompts_not_loaded';
-  } else {
-    const chatTab = await findRemoteRunnerChatGptTab();
-    checkedTabId = Number.isInteger(chatTab?.id) ? chatTab.id : null;
-    if (!checkedTabId) {
-      result = 'chatgpt_tab_missing';
-    } else {
-      const health = await inspectRemoteRunnerChatGptTab(checkedTabId);
-      chatgptReady = health.healthy === true;
-      result = chatgptReady
-        ? (load?.localBusy === true ? 'local_busy' : 'ok')
-        : (health.reason || 'chatgpt_not_ready');
-    }
-  }
-
-  remoteRunnerLastPreflightAt = now;
-  remoteRunnerLastPreflightResult = result;
-  return {
-    chatgptReady,
-    promptsLoaded,
-    localBusy: load?.localBusy === true,
-    checkedTabId,
-    lastPreflightAt: now,
-    lastPreflightResult: result
-  };
-}
-
-async function buildRemoteRunnerHeartbeatPayload() {
-  const [config, runnerId, load, promptsReady] = await Promise.all([
-    getRemoteRunnerConfig(),
-    ensureExtensionInstallationId(),
-    getCurrentLocalExecutionLoad(),
-    ensureCompanyPromptsReady().catch(() => false)
-  ]);
-  const promptMeta = await buildRemotePromptSnapshotMeta();
-  const preflight = await evaluateRemoteRunnerPreflight({
-    load,
-    promptMeta,
-    promptsReady
-  });
-  return {
-    config,
-    payload: RemoteRunnerUtils.buildHeartbeatPayload({
-      runnerId,
-      runnerName: config.effectiveRunnerName,
-      enabled: config.remoteRunnerEnabled,
-      promptsLoaded: promptMeta.promptsLoaded,
-      promptHash: promptMeta.promptHash,
-      chatgptReady: preflight.chatgptReady,
-      localBusy: load.localBusy,
-      localQueueSize: load.localQueueSize,
-      lastPreflightAt: preflight.lastPreflightAt,
-      lastPreflightResult: preflight.lastPreflightResult,
-      capabilities: REMOTE_RUNNER_CAPABILITIES,
-      extensionVersion: chrome?.runtime?.getManifest?.()?.version || '2.0',
-      activeJobId: typeof remoteRunnerActiveExecution?.jobId === 'string' ? remoteRunnerActiveExecution.jobId : ''
-    }),
-    load,
-    promptMeta,
-    runnerId
-  };
-}
-
-function ensureRemoteRunnerTickAlarm() {
-  try {
-    chrome.alarms.create(REMOTE_RUNNER_TICK_ALARM, {
-      periodInMinutes: REMOTE_RUNNER_TICK_PERIOD_MINUTES
-    });
-  } catch (error) {
-    console.warn('[remote-runner] ensure alarm failed:', error?.message || String(error));
-  }
-}
-
-function queueRemoteRunnerTick(origin = 'manual') {
-  setTimeout(() => {
-    runRemoteRunnerTick(origin).catch((error) => {
-      console.warn('[remote-runner] queued tick failed:', {
-        origin,
-        error: error?.message || String(error)
-      });
-    });
-  }, 0);
-}
-
-function startRemoteJobHeartbeatLoop(job, attemptId, runnerId) {
-  const normalizedJobId = typeof job?.jobId === 'string' ? job.jobId.trim() : '';
-  const normalizedAttemptId = typeof attemptId === 'string' ? attemptId.trim() : '';
-  const normalizedRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
-  if (!normalizedJobId || !normalizedAttemptId || !normalizedRunnerId) return null;
-  return setInterval(() => {
-    void sendRemoteJobEventRemote(normalizedJobId, {
-      eventType: 'heartbeat',
-      attemptId: normalizedAttemptId,
-      runnerId: normalizedRunnerId
-    });
-    void buildRemoteRunnerHeartbeatPayload()
-      .then((context) => sendRemoteRunnerHeartbeat(context.payload))
-      .catch(() => {});
-  }, REMOTE_JOB_HEARTBEAT_INTERVAL_MS);
-}
-
-async function executeClaimedRemoteRunnerJob(jobEnvelope) {
-  const job = jobEnvelope && typeof jobEnvelope === 'object' ? jobEnvelope : null;
-  const requestPayload = job?.requestPayload && typeof job.requestPayload === 'object'
-    ? job.requestPayload
-    : {};
-  const jobId = typeof job?.jobId === 'string' ? job.jobId.trim() : '';
-  const attemptId = typeof job?.attemptId === 'string' ? job.attemptId.trim() : '';
-  const runnerId = typeof job?.runnerId === 'string' ? job.runnerId.trim() : await ensureExtensionInstallationId();
-  if (!jobId || !attemptId) {
-    return { success: false, error: 'invalid_claimed_job' };
-  }
-
-  remoteRunnerActiveExecution = {
-    jobId,
-    runId: typeof job?.runId === 'string' ? job.runId.trim() : '',
-    attemptId,
-    startedAt: Date.now()
-  };
-
-  const preflight = await evaluateRemoteRunnerPreflight();
-  if (!preflight.chatgptReady) {
-    await sendRemoteJobEventRemote(jobId, {
-      eventType: 'failed',
-      attemptId,
-      runnerId,
-      error: preflight.lastPreflightResult || 'chatgpt_not_ready',
-      result: {
-        failure: {
-          statusCode: preflight.lastPreflightResult || 'chatgpt_not_ready',
-          reason: preflight.lastPreflightResult || 'chatgpt_not_ready',
-          error: preflight.lastPreflightResult || 'chatgpt_not_ready'
-        }
-      }
-    });
-    remoteRunnerActiveExecution = null;
-    queueRemoteRunnerTick('job_finished');
-    return { success: false, error: preflight.lastPreflightResult || 'chatgpt_not_ready' };
-  }
-
-  await sendRemoteJobEventRemote(jobId, {
-    eventType: 'received',
-    attemptId,
-    runnerId
-  });
-  await sendRemoteJobEventRemote(jobId, {
-    eventType: 'started',
-    attemptId,
-    runnerId
-  });
-
-  const heartbeatTimer = startRemoteJobHeartbeatLoop(job, attemptId, runnerId);
-  try {
-    const preparedTab = typeof RemoteContractUtils.buildPreparedRemoteTab === 'function'
-      ? RemoteContractUtils.buildPreparedRemoteTab(requestPayload)
-      : {
-        id: `remote-${jobId}`,
-        title: typeof requestPayload?.submittedTitle === 'string' ? requestPayload.submittedTitle : 'Remote manual text',
-        url: 'manual://remote-text',
-        manualText: typeof requestPayload?.text === 'string' ? requestPayload.text : ''
-      };
-    const displayTitle = typeof RemoteContractUtils.buildDisplayTitle === 'function'
-      ? RemoteContractUtils.buildDisplayTitle(
-        requestPayload?.submittedTitle || 'Remote manual text',
-        requestPayload?.instanceIndex,
-        requestPayload?.instanceTotal
-      )
-      : preparedTab.title;
-    const execution = await executePreparedAnalysisJob({
-      runId: typeof requestPayload?.runId === 'string' ? requestPayload.runId : (typeof job?.runId === 'string' ? job.runId : ''),
-      title: displayTitle,
-      analysisType: 'company',
-      sourceKind: 'manual_text',
-      tabSnapshot: preparedTab,
-      promptChain: Array.isArray(requestPayload?.promptChainSnapshot) ? requestPayload.promptChainSnapshot : [],
-      chatUrl: CHAT_URL,
-      remoteMeta: {
-        remoteJobId: jobId,
-        remoteBatchId: typeof requestPayload?.batchId === 'string' ? requestPayload.batchId : '',
-        controllerId: typeof requestPayload?.controllerId === 'string' ? requestPayload.controllerId : '',
-        runnerId,
-        instanceIndex: Number.isInteger(requestPayload?.instanceIndex) ? requestPayload.instanceIndex : 1,
-        instanceTotal: Number.isInteger(requestPayload?.instanceTotal) ? requestPayload.instanceTotal : 1
-      }
-    });
-    if (execution?.analysisOutcome?.analysisCompleted && execution?.analysisOutcome?.responseCaptured) {
-      await sendRemoteJobEventRemote(jobId, {
-        eventType: 'completed',
-        attemptId,
-        runnerId,
-        result: {
-          result: {
-            conversationUrl: execution.analysisOutcome.conversationUrl || '',
-            runId: execution.analysisOutcome.runId || '',
-            responseId: execution.analysisOutcome.responseId || '',
-            title: displayTitle,
-            instanceIndex: Number.isInteger(requestPayload?.instanceIndex) ? requestPayload.instanceIndex : 1,
-            instanceTotal: Number.isInteger(requestPayload?.instanceTotal) ? requestPayload.instanceTotal : 1,
-            runnerPersistence: execution.persistenceOutcome || {}
-          }
-        }
-      });
-      return { success: true, execution };
-    }
-
-    await sendRemoteJobEventRemote(jobId, {
-      eventType: 'failed',
-      attemptId,
-      runnerId,
-      error: execution?.executorResult?.error || execution?.executorResult?.reason || 'remote_execution_failed',
-      result: {
-        result: {
-          runId: execution?.analysisOutcome?.runId || '',
-          title: displayTitle
-        },
-        failure: {
-          statusCode: execution?.executorResult?.reason || execution?.persistenceOutcome?.statusCode || 'remote_execution_failed',
-          reason: execution?.executorResult?.reason || 'remote_execution_failed',
-          error: execution?.executorResult?.error || execution?.executorResult?.reason || 'remote_execution_failed'
-        }
-      }
-    });
-    return {
-      success: false,
-      error: execution?.executorResult?.error || execution?.executorResult?.reason || 'remote_execution_failed',
-      execution
-    };
-  } catch (error) {
-    await sendRemoteJobEventRemote(jobId, {
-      eventType: 'failed',
-      attemptId,
-      runnerId,
-      error: error?.message || String(error),
-      result: {
-        failure: {
-          statusCode: 'remote_execution_exception',
-          reason: 'remote_execution_exception',
-          error: error?.message || String(error)
-        }
-      }
-    }).catch(() => {});
-    return { success: false, error: error?.message || String(error) };
-  } finally {
-    if (heartbeatTimer) clearInterval(heartbeatTimer);
-    remoteRunnerActiveExecution = null;
-    queueRemoteRunnerTick('job_finished');
-  }
-}
-
-async function runRemoteRunnerTick(origin = 'manual') {
-  if (remoteRunnerTickInFlight) {
-    return remoteRunnerTickInFlight;
-  }
-  remoteRunnerTickInFlight = (async () => {
-    const heartbeatContext = await buildRemoteRunnerHeartbeatPayload();
-    await sendRemoteRunnerHeartbeat(heartbeatContext.payload).catch(() => ({ success: false }));
-    if (!RemoteRunnerUtils.shouldAttemptClaim({
-      config: heartbeatContext.config,
-      activeExecution: remoteRunnerActiveExecution,
-      localBusy: heartbeatContext.load.localBusy,
-      promptsLoaded: heartbeatContext.promptMeta.promptsLoaded,
-      chatgptReady: heartbeatContext.payload.chatgptReady,
-      lastPreflightResult: heartbeatContext.payload.lastPreflightResult
-    })) {
-      return {
-        success: true,
-        origin,
-        claimed: false,
-        reason: heartbeatContext.payload.lastPreflightResult || 'runner_blocked'
-      };
-    }
-    const claimResponse = await claimRemoteJobRemote(heartbeatContext.runnerId);
-    if (claimResponse?.success !== true) {
-      return {
-        success: false,
-        origin,
-        error: claimResponse?.error || 'remote_claim_failed'
-      };
-    }
-    if (claimResponse?.body?.claimed !== true || !claimResponse?.body?.job) {
-      return {
-        success: true,
-        origin,
-        claimed: false,
-        reason: claimResponse?.body?.reason || 'queue_empty'
-      };
-    }
-    const execution = await executeClaimedRemoteRunnerJob(claimResponse.body.job);
-    return {
-      success: execution?.success === true,
-      origin,
-      claimed: true,
-      error: execution?.error || ''
-    };
-  })();
-  try {
-    return await remoteRunnerTickInFlight;
-  } finally {
-    remoteRunnerTickInFlight = null;
-  }
-}
-
-async function refreshRemoteBatchStatus(batchId = '') {
-  const storedBatch = await getStoredRemoteBatchRecord(batchId);
-  if (!storedBatch) {
-    return {
-      success: false,
-      error: 'batch_not_found',
-      batch: null
-    };
-  }
-  const jobs = Array.isArray(storedBatch.jobs) ? storedBatch.jobs : [];
-  let nextBatch = storedBatch;
-  for (const job of jobs) {
-    const jobId = typeof job?.jobId === 'string' ? job.jobId.trim() : '';
-    if (!jobId) continue;
-    const remoteJob = await fetchRemoteJobRecordRemote(jobId);
-    if (remoteJob?.success !== true || !remoteJob?.body?.job) continue;
-    nextBatch = typeof RemoteBatchStorageUtils.mergeJobIntoBatch === 'function'
-      ? RemoteBatchStorageUtils.mergeJobIntoBatch(nextBatch, remoteJob.body.job)
-      : nextBatch;
-  }
-  nextBatch = {
-    ...nextBatch,
-    batchState: typeof RemoteBatchStorageUtils.deriveBatchState === 'function'
-      ? RemoteBatchStorageUtils.deriveBatchState(nextBatch)
-      : nextBatch.batchState,
-    updatedAt: Date.now()
-  };
-  const persisted = await storeRemoteBatchRecord(nextBatch);
-  return {
-    success: true,
-    batch: persisted || nextBatch
-  };
-}
-
-async function submitRemoteManualBatch(text, title, requestedInstances, options = {}) {
-  const normalizedText = typeof text === 'string' ? text.trim() : '';
-  const normalizedTitle = typeof title === 'string' && title.trim()
-    ? title.trim()
-    : 'Recznie wklejony artykul';
-  const safeInstances = Math.max(1, Math.min(10, Number.isInteger(requestedInstances) ? requestedInstances : 1));
-  const normalizedSourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
-    ? options.sourceKind.trim()
-    : 'manual_text';
-  if (!normalizedText) {
-    return { success: false, error: 'text_required' };
-  }
-  if (normalizedSourceKind === 'manual_pdf') {
-    return { success: false, error: REMOTE_ERROR_PDF_NOT_SUPPORTED };
-  }
-
-  const [runnerConfig, promptsReady, controllerId, promptMeta] = await Promise.all([
-    getRemoteRunnerConfig(),
-    ensureCompanyPromptsReady(),
-    ensureExtensionInstallationId(),
-    buildRemotePromptSnapshotMeta()
-  ]);
-  if (!promptsReady || !promptMeta.promptsLoaded || !Array.isArray(promptMeta.promptChainSnapshot) || promptMeta.promptChainSnapshot.length === 0) {
-    return { success: false, error: 'prompts_not_loaded' };
-  }
-  if (!runnerConfig.remoteDefaultRunnerId) {
-    return { success: false, error: 'default_runner_missing' };
-  }
-
-  const runnerStatusResponse = await fetchRemoteRunnerStatusRemote(runnerConfig.remoteDefaultRunnerId);
-  const runner = runnerStatusResponse?.body?.runner && typeof runnerStatusResponse.body.runner === 'object'
-    ? runnerStatusResponse.body.runner
-    : null;
-  const queueable = runner?.queueable === true || (RemoteContractUtils.isRunnerQueueable && RemoteContractUtils.isRunnerQueueable(runner?.state, runner?.queueable));
-  if (!runnerStatusResponse?.success || !runner || !queueable) {
-    return {
-      success: false,
-      error: runnerStatusResponse?.error || runner?.reason || 'runner_not_queueable',
-      runner
-    };
-  }
-
-  const submissionId = typeof options?.submissionId === 'string' && options.submissionId.trim()
-    ? options.submissionId.trim()
-    : generateRemoteEntityId('rsubmit');
-  const batchId = typeof RemoteContractUtils.buildSubmissionScopedEntityId === 'function'
-    ? RemoteContractUtils.buildSubmissionScopedEntityId('rbatch', submissionId)
-    : `rbatch-${submissionId}`;
-  const createdJobs = [];
-  const errors = [];
-  for (let index = 1; index <= safeInstances; index += 1) {
-    const jobId = typeof RemoteContractUtils.buildSubmissionScopedEntityId === 'function'
-      ? RemoteContractUtils.buildSubmissionScopedEntityId('rjob', submissionId, index)
-      : `rjob-${submissionId}-${index}`;
-    const runId = typeof RemoteContractUtils.buildSubmissionScopedEntityId === 'function'
-      ? RemoteContractUtils.buildSubmissionScopedEntityId('run', submissionId, index)
-      : `run-${submissionId}-${index}`;
-    const requestDedupeKey = typeof RemoteContractUtils.buildRequestDedupeKey === 'function'
-      ? RemoteContractUtils.buildRequestDedupeKey(submissionId, index)
-      : `${submissionId}:${index}`;
-    const payload = {
-      schema: RemoteContractUtils.REMOTE_JOB_SCHEMA || 'iskra.remote_job.v1',
-      jobId,
-      runId,
-      batchId,
-      submissionId,
-      requestDedupeKey,
-      controllerId,
-      runnerId: runnerConfig.remoteDefaultRunnerId,
-      analysisType: RemoteContractUtils.REMOTE_ANALYSIS_TYPE_COMPANY || 'company',
-      sourceMode: RemoteContractUtils.REMOTE_SOURCE_MODE_MANUAL_TEXT || 'manual_text',
-      submittedTitle: normalizedTitle,
-      text: normalizedText,
-      instanceIndex: index,
-      instanceTotal: safeInstances,
-      promptChainSnapshot: promptMeta.promptChainSnapshot,
-      promptHash: promptMeta.promptHash,
-      usesRunnerPrompts: false,
-      createdAt: Date.now()
-    };
-    const createResponse = await createRemoteJobRemote(payload);
-    if (createResponse?.success === true && createResponse?.body?.job) {
-      createdJobs.push(createResponse.body.job);
-    } else {
-      errors.push({
-        instanceIndex: index,
-        reason: createResponse?.error || 'remote_job_create_failed'
-      });
-    }
-  }
-
-  const batchRecord = typeof RemoteBatchStorageUtils.buildBatchRecord === 'function'
-    ? RemoteBatchStorageUtils.buildBatchRecord({
-      batchId,
-      runnerId: runnerConfig.remoteDefaultRunnerId,
-      title: normalizedTitle,
-      requestedInstances: safeInstances,
-      createdCount: createdJobs.length,
-      failedCount: errors.length,
-      batchState: createdJobs.length > 0 && errors.length > 0
-        ? 'partial'
-        : (createdJobs.length > 0 ? 'created' : 'failed'),
-      submittedAt: Date.now(),
-      updatedAt: Date.now(),
-      jobs: createdJobs,
-      errors
-    })
-    : {
-      batchId,
-      runnerId: runnerConfig.remoteDefaultRunnerId,
-      title: normalizedTitle,
-      requestedInstances: safeInstances,
-      createdCount: createdJobs.length,
-      failedCount: errors.length,
-      batchState: createdJobs.length > 0 && errors.length > 0 ? 'partial' : (createdJobs.length > 0 ? 'created' : 'failed'),
-      submittedAt: Date.now(),
-      updatedAt: Date.now(),
-      jobs: createdJobs,
-      errors
-    };
-  const persistedBatch = await storeRemoteBatchRecord(batchRecord);
-  return {
-    success: createdJobs.length > 0,
-    batchId,
-    requestedInstances: safeInstances,
-    createdCount: createdJobs.length,
-    failedCount: errors.length,
-    createdJobs: createdJobs.map((job) => ({
-      jobId: job.jobId,
-      runId: job.runId,
-      instanceIndex: job.instanceIndex
-    })),
-    errors,
-    batchState: persistedBatch?.batchState || batchRecord.batchState,
-    batch: persistedBatch || batchRecord
-  };
-}
-
 async function processArticles(tabs, promptChain, chatUrl, analysisType, options = {}) {
     const sourceTabs = Array.isArray(tabs) ? tabs.filter((tab) => !!tab) : [];
     if (sourceTabs.length === 0) {
@@ -23740,20 +22385,13 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     const invocationWindowId = Number.isInteger(options?.invocationWindowId)
       ? options.invocationWindowId
       : null;
-    const queueBatchId = typeof options?.queueBatchId === 'string' ? options.queueBatchId : '';
-    const promptHash = await buildAnalysisQueuePromptHash(promptChain);
-    const jobs = await Promise.all(sourceTabs.map(async (tab) => {
+    const jobs = sourceTabs.map((tab) => {
       const sourceUrl = typeof tab?.url === 'string' ? tab.url : '';
       const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
         ? options.sourceKind.trim()
         : (sourceUrl === 'manual://pdf'
           ? 'manual_pdf'
           : (sourceUrl.startsWith('manual://') ? 'manual_text' : 'article'));
-      const inputDedupeKey = await buildAnalysisQueueInputDedupeKey({
-        sourceKind,
-        tabSnapshot: tab,
-        promptHash
-      });
       return {
         kind: ANALYSIS_QUEUE_KIND_ARTICLE,
         analysisType,
@@ -23764,15 +22402,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         sourceWindowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
         sourceUrl,
         chatUrl: typeof chatUrl === 'string' ? chatUrl : '',
-        promptHash,
-        inputDedupeKey,
-        queueBatchId,
-        instanceIndex: Number.isInteger(tab?.instanceIndex) ? tab.instanceIndex : null,
-        instanceTotal: Number.isInteger(tab?.instanceTotal) ? tab.instanceTotal : null,
+        queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
         manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
         manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : ''
       };
-    }));
+    });
 
     return enqueueAnalysisJobs(jobs, {
       reason: typeof options?.reason === 'string' && options.reason.trim()
@@ -24804,7 +23438,6 @@ async function runManualSourceAnalysis(text, title, instances) {
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
   const safeInstances = normalizeManualInstances(instances);
   const timestamp = Date.now();
-  const queueBatchId = `manual-text-batch-${timestamp}`;
   const pseudoTabs = [];
 
   for (let i = 0; i < safeInstances; i += 1) {
@@ -24812,15 +23445,12 @@ async function runManualSourceAnalysis(text, title, instances) {
       id: `manual-${timestamp}-${i}`,
       title: safeTitle,
       url: 'manual://source',
-      manualText: safeText,
-      instanceIndex: i + 1,
-      instanceTotal: safeInstances
+      manualText: safeText
     });
   }
 
   return processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
     sourceKind: 'manual_text',
-    queueBatchId,
     reason: 'manual_source_enqueue'
   });
 }
@@ -24829,7 +23459,6 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
   const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
   const safeInstances = normalizeManualInstances(instances);
   const normalizedFiles = normalizeManualPdfFiles(pdfFiles);
-  const promptHash = await buildAnalysisQueuePromptHash(PROMPTS_COMPANY);
 
   if (!safeProviderId) {
     console.warn('[manual-pdf] Missing providerId, queue skipped.');
@@ -24867,26 +23496,9 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
         analysisType: 'company',
         title: runTitle,
         sourceKind: 'manual_pdf',
-        promptHash,
-        inputDedupeKey: await buildAnalysisQueueInputDedupeKey({
-          sourceKind: 'manual_pdf',
-          tabSnapshot: {
-            url: 'manual://pdf',
-            manualText: buildManualPdfPayload(file.name),
-            manualPdfAttachment: {
-              providerId: safeProviderId,
-              token: file.token,
-              name: file.name,
-              size: file.size
-            }
-          },
-          promptHash
-        }),
         manualPdfBatchId: batchId,
         manualPdfProviderId: safeProviderId,
         queueBatchId: batchId,
-        instanceIndex,
-        instanceTotal: safeInstances,
         tabSnapshot: {
           id: `manual-pdf-${Date.now()}-${jobIndex}`,
           title: runTitle,

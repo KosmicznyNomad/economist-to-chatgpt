@@ -234,51 +234,11 @@
       <button class="btn" id="manualSourceBtn">Wklej zrodlo <span class="shortcut">1</span></button>
       <button class="btn btn-primary" id="runBtn">Uruchom analizy <span class="shortcut">2</span></button>
     </div>
-    <div class="row">
-      <button class="btn" id="remoteQueueBtn">Remote queue</button>
-    </div>
     <div class="row row-2">
       <button class="btn" id="resumeStageBtn">Wznow (auto) <span class="shortcut">3</span></button>
       <button class="btn" id="resumeAllBtn">Wznow wszystkie <span class="shortcut">4</span></button>
     </div>
   </div>
-
-  <details class="details">
-    <summary>Remote runner</summary>
-    <div class="details-content">
-      <input
-        class="dispatch-input"
-        id="remoteThisDeviceIdInput"
-        type="text"
-        placeholder="This device id"
-        readonly
-      />
-      <label style="display:flex;align-items:center;gap:8px;font-size:13px;color:#374151;">
-        <input id="remoteRunnerEnabledInput" type="checkbox">
-        Runner mode wlaczony na tym komputerze
-      </label>
-      <input
-        class="dispatch-input"
-        id="remoteRunnerNameInput"
-        type="text"
-        placeholder="Runner name (np. PC B)"
-        autocomplete="off"
-      />
-      <input
-        class="dispatch-input"
-        id="remoteDefaultRunnerIdInput"
-        type="text"
-        placeholder="Default runner id"
-        autocomplete="off"
-      />
-      <div class="dispatch-actions">
-        <button class="btn btn-center" id="saveRemoteRunnerConfigBtn">Zapisz remote config</button>
-        <button class="btn btn-center" id="openRemoteQueueBtn">Otworz remote queue</button>
-      </div>
-      <p class="status" id="remoteRunnerConfigStatus" aria-live="polite" hidden></p>
-      <p class="status" id="remoteRunnerStatus" aria-live="polite" hidden></p>
-    </div>
-  </details>
 
   <div class="card">
     <p class="card-title">Wyniki i kontrola</p>
@@ -365,7 +325,6 @@
 
   <script src="runtime-bridge-ui.js"></script>
   <script src="problem-log-ui-shared.js"></script>
-  <script src="remote-ui-shared.js"></script>
   <script src="popup.js"></script>
 </body>
 </html>

@@ -200,12 +200,6 @@ function buildContext() {
   const context = {
     console,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
-    RemoteContractUtils: {
-      buildPromptSnapshotHash: async (promptChain) => `prompt-hash:${promptChain.join('|')}`
-    },
-    sha256HexForDispatch: async (value) => `hash:${value}`,
-    buildAnalysisQueuePromptHash: null,
-    buildAnalysisQueueInputDedupeKey: null,
     captured: null,
     getAnalysisQueueStatusSnapshot: async () => ({
       success: true,
@@ -234,12 +228,6 @@ function buildContext() {
   };
 
   vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'buildAnalysisQueuePromptHash'), context, {
-    filename: 'background.js'
-  });
-  vm.runInContext(extractFunctionSource(backgroundSource, 'buildAnalysisQueueInputDedupeKey'), context, {
-    filename: 'background.js'
-  });
   vm.runInContext(extractFunctionSource(backgroundSource, 'processArticles'), context, {
     filename: 'background.js'
   });
@@ -261,20 +249,8 @@ async function testReturnsQueueSnapshotForEmptyInput() {
 async function testBuildsQueueJobsInsteadOfDirectExecution() {
   const context = buildContext();
   const tabs = [
-    { id: 1, title: 'Manual text', url: 'manual://source', manualText: 'prepared text' },
-    {
-      id: 2,
-      title: 'Manual pdf',
-      url: 'manual://pdf',
-      windowId: 9,
-      manualText: 'Nazwa pliku: source.pdf',
-      manualPdfAttachment: {
-        providerId: 'provider-1',
-        token: 'token-1',
-        name: 'source.pdf',
-        size: 321
-      }
-    }
+    { id: 1, title: 'Manual text', url: 'manual://source' },
+    { id: 2, title: 'Manual pdf', url: 'manual://pdf', windowId: 9 }
   ];
 
   const result = await context.processArticles(tabs, ['p1'], 'https://chat.example', 'company', {
@@ -299,11 +275,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     sourceWindowId: null,
     sourceUrl: 'manual://source',
     chatUrl: 'https://chat.example',
-    promptHash: 'prompt-hash:p1',
-    inputDedupeKey: 'manual_text:prompt-hash:p1:hash:prepared text',
     queueBatchId: 'batch-1',
-    instanceIndex: null,
-    instanceTotal: null,
     manualPdfBatchId: 'pdf-batch-1',
     manualPdfProviderId: 'provider-1'
   });
@@ -317,11 +289,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     sourceWindowId: 9,
     sourceUrl: 'manual://pdf',
     chatUrl: 'https://chat.example',
-    promptHash: 'prompt-hash:p1',
-    inputDedupeKey: 'manual_pdf:prompt-hash:p1:hash:provider-1::token-1::source.pdf::321',
     queueBatchId: 'batch-1',
-    instanceIndex: null,
-    instanceTotal: null,
     manualPdfBatchId: 'pdf-batch-1',
     manualPdfProviderId: 'provider-1'
   });
