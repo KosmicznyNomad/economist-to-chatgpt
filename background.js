@@ -1,5 +1,5 @@
-﻿const CHAT_URL = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706/project";
-const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje";
+﻿const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
+const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const CHAT_GPT_HOSTS = new Set([
   'chatgpt.com',
@@ -11,7 +11,7 @@ const INVEST_GPT_PATH_BASE = (() => {
   try {
     return new URL(INVEST_GPT_URL_BASE).pathname.replace(/\/+$/, '');
   } catch (error) {
-    return '/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje';
+    return '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje';
   }
 })();
 
@@ -115,6 +115,17 @@ const WATCHLIST_DISPATCH = {
   alarmPeriodMinutes: 2
 };
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
+const ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY = 'iskra_remote_execution_mode';
+const ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY = 'iskra_remote_selected_runner_id';
+const ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY = 'iskra_remote_runner_enabled';
+const ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY = 'iskra_remote_runner_name';
+const ISKRA_REMOTE_RUNNER = {
+  alarmName: 'iskra-remote-runner-cycle',
+  alarmPeriodMinutes: 1,
+  requestTimeoutMs: 20000,
+  retryCount: 2,
+  backoffMs: 1500
+};
 
 const AUTO_RESTORE_WINDOWS = {
   enabledStorageKey: 'auto_restore_windows_enabled',
@@ -227,6 +238,8 @@ let problemLogConsoleCaptureInProgress = false;
 let watchlistConnectionLogLastSignature = '';
 let watchlistConnectionLogLastTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
+let remoteRunnerCycleInProgress = false;
+let remoteRunnerCycleRequested = false;
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -1019,6 +1032,34 @@ function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   return snapshot;
 }
 
+function sanitizePromptChainSnapshot(rawPromptChain) {
+  if (!Array.isArray(rawPromptChain)) return [];
+  return rawPromptChain
+    .map((item) => (typeof item === 'string' ? item.trim() : ''))
+    .filter((item) => item.length > 0);
+}
+
+function sanitizeRemoteAnalysisQueueJobMetadata(rawRemote) {
+  if (!rawRemote || typeof rawRemote !== 'object') return null;
+  const remoteJobId = typeof rawRemote.remoteJobId === 'string'
+    ? rawRemote.remoteJobId.trim()
+    : (typeof rawRemote.jobId === 'string' ? rawRemote.jobId.trim() : '');
+  if (!remoteJobId) return null;
+  const remoteAttemptId = typeof rawRemote.remoteAttemptId === 'string'
+    ? rawRemote.remoteAttemptId.trim()
+    : (typeof rawRemote.attemptId === 'string' ? rawRemote.attemptId.trim() : '');
+  return {
+    remoteJobId,
+    remoteAttemptId,
+    remoteRunnerId: typeof rawRemote.remoteRunnerId === 'string'
+      ? rawRemote.remoteRunnerId.trim()
+      : (typeof rawRemote.runnerId === 'string' ? rawRemote.runnerId.trim() : ''),
+    controllerId: typeof rawRemote.controllerId === 'string' ? rawRemote.controllerId.trim() : '',
+    batchId: typeof rawRemote.batchId === 'string' ? rawRemote.batchId.trim() : '',
+    submissionId: typeof rawRemote.submissionId === 'string' ? rawRemote.submissionId.trim() : ''
+  };
+}
+
 function sanitizeAnalysisQueueJob(rawJob) {
   if (!rawJob || typeof rawJob !== 'object') return null;
   const kind = rawJob.kind === ANALYSIS_QUEUE_KIND_RESUME_STAGE
@@ -1053,6 +1094,17 @@ function sanitizeAnalysisQueueJob(rawJob) {
 
   if (Number.isInteger(rawJob.invocationWindowId)) sanitized.invocationWindowId = rawJob.invocationWindowId;
   if (Number.isInteger(rawJob.sourceWindowId)) sanitized.sourceWindowId = rawJob.sourceWindowId;
+  const promptChainSnapshot = sanitizePromptChainSnapshot(rawJob.promptChainSnapshot);
+  if (promptChainSnapshot.length > 0) {
+    sanitized.promptChainSnapshot = promptChainSnapshot;
+  }
+  if (typeof rawJob.promptHash === 'string' && rawJob.promptHash.trim()) {
+    sanitized.promptHash = rawJob.promptHash.trim();
+  }
+  const remote = sanitizeRemoteAnalysisQueueJobMetadata(rawJob.remote);
+  if (remote) {
+    sanitized.remote = remote;
+  }
 
   if (kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
     const tabSnapshot = sanitizeAnalysisQueueTabSnapshot(rawJob.tabSnapshot || rawJob.tab);
@@ -1531,6 +1583,1226 @@ function requestAnalysisQueueReconcile(reason = 'manual') {
   Promise.resolve().then(() => reconcileAnalysisQueueState(normalizedReason)).catch((error) => {
     console.warn('[analysis-queue] reconcile request failed:', error?.message || String(error));
   });
+}
+
+function normalizeRemoteExecutionMode(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  return normalized === 'remote' ? 'remote' : 'local';
+}
+
+async function getStoredRemoteExecutionMode() {
+  try {
+    const stored = await chrome.storage.local.get([ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY]);
+    return normalizeRemoteExecutionMode(stored?.[ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY]);
+  } catch (error) {
+    return 'local';
+  }
+}
+
+async function getStoredSelectedRemoteRunnerId() {
+  try {
+    const stored = await chrome.storage.local.get([ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY]);
+    return typeof stored?.[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY] === 'string'
+      ? stored[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY].trim()
+      : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+async function getStoredRemoteRunnerEnabled() {
+  try {
+    const stored = await chrome.storage.local.get([ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY]);
+    return stored?.[ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY] === true;
+  } catch (error) {
+    return false;
+  }
+}
+
+async function getStoredRemoteRunnerName() {
+  try {
+    const stored = await chrome.storage.local.get([ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY]);
+    return typeof stored?.[ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY] === 'string'
+      ? stored[ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY].trim()
+      : '';
+  } catch (error) {
+    return '';
+  }
+}
+
+function normalizeRemoteRunnerName(value) {
+  return typeof value === 'string' ? value.trim().slice(0, 80) : '';
+}
+
+function normalizeSelectedRemoteRunnerId(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+async function getRemoteExecutionConfigSnapshot(options = {}) {
+  const identityPromise = getConfiguredRemoteRunnerIdentity();
+  const localStatePromise = getRemoteRunnerLocalState();
+  const promptsReadyPromise = ensureCompanyPromptsReady().catch(() => false);
+  const [
+    executionMode,
+    selectedRunnerId,
+    runnerEnabled,
+    runnerName,
+    identity,
+    localState,
+    promptsReady
+  ] = await Promise.all([
+    getStoredRemoteExecutionMode(),
+    getStoredSelectedRemoteRunnerId(),
+    getStoredRemoteRunnerEnabled(),
+    getStoredRemoteRunnerName(),
+    identityPromise,
+    localStatePromise,
+    promptsReadyPromise
+  ]);
+  const promptHash = promptsReady ? await getCompanyPromptHash().catch(() => '') : '';
+  const alarmState = options?.alarmState && typeof options.alarmState === 'object'
+    ? options.alarmState
+    : await getAlarmSafe(ISKRA_REMOTE_RUNNER.alarmName).then((alarm) => ({
+      alarmActive: !!alarm,
+      nextRunAt: Number.isInteger(alarm?.scheduledTime) ? alarm.scheduledTime : null
+    })).catch(() => ({
+      alarmActive: false,
+      nextRunAt: null
+    }));
+  const activeRemoteJobId = typeof localState?.activeRemoteJob?.remote?.remoteJobId === 'string'
+    ? localState.activeRemoteJob.remote.remoteJobId
+    : '';
+  const queuedRemoteJobId = typeof localState?.queuedRemoteJob?.remote?.remoteJobId === 'string'
+    ? localState.queuedRemoteJob.remote.remoteJobId
+    : '';
+  return {
+    success: true,
+    executionMode,
+    selectedRunnerId,
+    runnerEnabled,
+    runnerName: runnerName || identity?.runnerName || '',
+    runnerId: typeof identity?.runnerId === 'string' ? identity.runnerId : '',
+    controllerId: typeof identity?.controllerId === 'string' ? identity.controllerId : '',
+    promptsLoaded: promptsReady === true,
+    promptHash,
+    localBusy: localState?.localBusy === true,
+    localQueueSize: Number.isInteger(localState?.localQueueSize) ? localState.localQueueSize : 0,
+    activeRemoteJobId,
+    queuedRemoteJobId,
+    alarmActive: alarmState?.alarmActive === true,
+    nextRunAt: Number.isInteger(alarmState?.nextRunAt) ? alarmState.nextRunAt : null
+  };
+}
+
+async function updateRemoteExecutionConfig(patch = {}) {
+  const nextStoragePatch = {};
+  if (Object.prototype.hasOwnProperty.call(patch, 'executionMode') || Object.prototype.hasOwnProperty.call(patch, 'remote')) {
+    const requestedMode = patch?.remote === true
+      ? 'remote'
+      : (patch?.remote === false ? 'local' : patch?.executionMode);
+    nextStoragePatch[ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY] = normalizeRemoteExecutionMode(requestedMode);
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'selectedRunnerId') || Object.prototype.hasOwnProperty.call(patch, 'runnerId')) {
+    nextStoragePatch[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY] = normalizeSelectedRemoteRunnerId(
+      Object.prototype.hasOwnProperty.call(patch, 'selectedRunnerId')
+        ? patch?.selectedRunnerId
+        : patch?.runnerId
+    );
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'runnerEnabled') || Object.prototype.hasOwnProperty.call(patch, 'enabled')) {
+    nextStoragePatch[ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY] = patch?.runnerEnabled === true || patch?.enabled === true;
+  }
+  if (Object.prototype.hasOwnProperty.call(patch, 'runnerName') || Object.prototype.hasOwnProperty.call(patch, 'name')) {
+    nextStoragePatch[ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY] = normalizeRemoteRunnerName(
+      Object.prototype.hasOwnProperty.call(patch, 'runnerName')
+        ? patch?.runnerName
+        : patch?.name
+    );
+  }
+
+  if (Object.keys(nextStoragePatch).length > 0) {
+    await chrome.storage.local.set(nextStoragePatch);
+  }
+
+  const alarmState = await syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm after config update failed:', error?.message || String(error));
+    return { alarmActive: false, nextRunAt: null };
+  });
+
+  if (
+    Object.prototype.hasOwnProperty.call(nextStoragePatch, ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY)
+    || Object.prototype.hasOwnProperty.call(nextStoragePatch, ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY)
+  ) {
+    requestRemoteRunnerCycle('remote_config_updated');
+  }
+
+  return getRemoteExecutionConfigSnapshot({ alarmState });
+}
+
+function createRemoteExecutionId(prefix = 'remote') {
+  return `${prefix}-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function buildPromptChainHashKey(promptChain) {
+  return JSON.stringify(sanitizePromptChainSnapshot(promptChain));
+}
+
+async function computePromptChainHash(promptChain) {
+  const normalizedPromptChain = sanitizePromptChainSnapshot(promptChain);
+  if (normalizedPromptChain.length === 0 || typeof WatchlistApiUtils?.sha256Hex !== 'function') {
+    return '';
+  }
+  const digest = await WatchlistApiUtils.sha256Hex(JSON.stringify(normalizedPromptChain));
+  return digest ? `sha256:${digest}` : '';
+}
+
+async function getCompanyPromptHash(forceReload = false) {
+  const cacheKey = buildPromptChainHashKey(PROMPTS_COMPANY);
+  if (!forceReload && cacheKey === promptsCompanyHashCacheKey && promptsCompanyHashCache) {
+    return promptsCompanyHashCache;
+  }
+  const nextHash = await computePromptChainHash(PROMPTS_COMPANY);
+  promptsCompanyHashCacheKey = cacheKey;
+  promptsCompanyHashCache = nextHash;
+  return nextHash;
+}
+
+function getIskraApiPath(kind = 'jobs') {
+  if (kind === 'runners') {
+    return typeof WatchlistApiUtils?.ISKRA_RUNNERS_PATH === 'string' && WatchlistApiUtils.ISKRA_RUNNERS_PATH.trim()
+      ? WatchlistApiUtils.ISKRA_RUNNERS_PATH.trim()
+      : '/api/v1/iskra/runners';
+  }
+  if (kind === 'runnerHeartbeat') {
+    return typeof WatchlistApiUtils?.ISKRA_RUNNERS_HEARTBEAT_PATH === 'string' && WatchlistApiUtils.ISKRA_RUNNERS_HEARTBEAT_PATH.trim()
+      ? WatchlistApiUtils.ISKRA_RUNNERS_HEARTBEAT_PATH.trim()
+      : '/api/v1/iskra/runners/heartbeat';
+  }
+  if (kind === 'claim') {
+    return typeof WatchlistApiUtils?.ISKRA_JOBS_CLAIM_PATH === 'string' && WatchlistApiUtils.ISKRA_JOBS_CLAIM_PATH.trim()
+      ? WatchlistApiUtils.ISKRA_JOBS_CLAIM_PATH.trim()
+      : '/api/v1/iskra/jobs/claim';
+  }
+  return typeof WatchlistApiUtils?.ISKRA_JOBS_PATH === 'string' && WatchlistApiUtils.ISKRA_JOBS_PATH.trim()
+    ? WatchlistApiUtils.ISKRA_JOBS_PATH.trim()
+    : '/api/v1/iskra/jobs';
+}
+
+function buildRemoteRunnerStatusApiPath(runnerId) {
+  const safeRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
+  return `${getIskraApiPath('runners')}/${encodeURIComponent(safeRunnerId)}/status`;
+}
+
+function buildRemoteJobApiPath(jobId, suffix = '') {
+  const safeJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  const safeSuffix = typeof suffix === 'string' ? suffix.trim() : '';
+  return `${getIskraApiPath('jobs')}/${encodeURIComponent(safeJobId)}${safeSuffix ? `/${safeSuffix}` : ''}`;
+}
+
+function normalizeRemoteApiErrorText(error, fallback = 'remote_api_failed') {
+  const text = typeof error?.message === 'string'
+    ? error.message
+    : String(error || '');
+  const normalized = text.trim();
+  return normalized || fallback;
+}
+
+async function performSignedIskraApiRequest(options = {}) {
+  const config = await resolveWatchlistDispatchConfiguration(options?.forceConfigReload === true);
+  if (!config?.ok) {
+    return {
+      success: false,
+      status: null,
+      error: config?.reason || 'watchlist_dispatch_config_unavailable',
+      payload: null,
+      intakeUrl: config?.intakeUrl || ''
+    };
+  }
+  if (typeof WatchlistApiUtils?.buildSignedJsonRequest !== 'function') {
+    return {
+      success: false,
+      status: null,
+      error: 'watchlist_request_signing_unavailable',
+      payload: null,
+      intakeUrl: config.intakeUrl
+    };
+  }
+
+  const method = typeof options?.method === 'string' && options.method.trim()
+    ? options.method.trim().toUpperCase()
+    : 'GET';
+  const retryCount = Number.isInteger(options?.retryCount)
+    ? Math.max(0, Math.min(4, options.retryCount))
+    : ISKRA_REMOTE_RUNNER.retryCount;
+  const timeoutMs = Number.isInteger(options?.timeoutMs)
+    ? Math.max(1000, options.timeoutMs)
+    : ISKRA_REMOTE_RUNNER.requestTimeoutMs;
+  const backoffMs = Number.isInteger(options?.backoffMs)
+    ? Math.max(0, options.backoffMs)
+    : ISKRA_REMOTE_RUNNER.backoffMs;
+
+  let lastStatus = null;
+  let lastError = 'remote_api_failed';
+  let lastPayload = null;
+  let lastUrl = '';
+
+  for (let attempt = 0; attempt <= retryCount; attempt += 1) {
+    try {
+      const signedRequest = await WatchlistApiUtils.buildSignedJsonRequest({
+        intakeUrl: config.intakeUrl,
+        keyId: config.keyId,
+        secret: config.secret,
+        method,
+        path: options?.path || '/',
+        payload: options?.payload && typeof options.payload === 'object' ? options.payload : {},
+        query: options?.query && typeof options.query === 'object' ? options.query : null
+      });
+      lastUrl = signedRequest.url || '';
+      const controller = new AbortController();
+      let timeoutId = null;
+      try {
+        const response = await Promise.race([
+          fetch(signedRequest.url, {
+            method: signedRequest.method,
+            headers: signedRequest.headers,
+            ...(signedRequest.method === 'GET' ? {} : { body: signedRequest.body }),
+            signal: controller.signal
+          }),
+          new Promise((_, reject) => {
+            timeoutId = setTimeout(() => {
+              try {
+                controller.abort();
+              } catch {
+                // Ignore abort exceptions in timeout branch.
+              }
+              reject(new Error(`remote_api_timeout_${timeoutMs}`));
+            }, timeoutMs);
+          })
+        ]);
+
+        if (timeoutId) {
+          clearTimeout(timeoutId);
+          timeoutId = null;
+        }
+
+        const responseText = await response.text().catch(() => '');
+        let responsePayload = {};
+        try {
+          responsePayload = responseText ? JSON.parse(responseText) : {};
+        } catch {
+          responsePayload = {};
+        }
+        lastPayload = responsePayload;
+
+        if (!response.ok) {
+          lastStatus = response.status;
+          lastError = (
+            (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
+            || (typeof responsePayload?.reason === 'string' && responsePayload.reason.trim())
+            || (typeof responseText === 'string' && responseText.trim())
+            || `http_${response.status}`
+          );
+          if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409 || response.status === 422) {
+            break;
+          }
+        } else {
+          return {
+            success: true,
+            status: response.status,
+            error: '',
+            payload: responsePayload && typeof responsePayload === 'object' ? responsePayload : {},
+            intakeUrl: lastUrl
+          };
+        }
+      } finally {
+        if (timeoutId) clearTimeout(timeoutId);
+      }
+    } catch (error) {
+      lastError = normalizeRemoteApiErrorText(error, 'remote_api_failed');
+    }
+
+    if (attempt < retryCount && backoffMs > 0) {
+      await sleep(backoffMs * (attempt + 1));
+    }
+  }
+
+  return {
+    success: false,
+    status: lastStatus,
+    error: lastError,
+    payload: lastPayload,
+    intakeUrl: lastUrl
+  };
+}
+
+async function listRemoteRunnersViaApi(options = {}) {
+  return performSignedIskraApiRequest({
+    method: 'GET',
+    path: getIskraApiPath('runners'),
+    query: { limit: options?.limit }
+  });
+}
+
+async function getRemoteRunnerStatusViaApi(runnerId, options = {}) {
+  return performSignedIskraApiRequest({
+    method: 'GET',
+    path: buildRemoteRunnerStatusApiPath(runnerId),
+    timeoutMs: options?.timeoutMs,
+    retryCount: options?.retryCount
+  });
+}
+
+async function createRemoteJobViaApi(payload) {
+  return performSignedIskraApiRequest({
+    method: 'POST',
+    path: getIskraApiPath('jobs'),
+    payload
+  });
+}
+
+async function claimRemoteJobViaApi(runnerId) {
+  return performSignedIskraApiRequest({
+    method: 'POST',
+    path: getIskraApiPath('claim'),
+    payload: { runnerId }
+  });
+}
+
+async function postRemoteJobEventViaApi(jobId, payload) {
+  return performSignedIskraApiRequest({
+    method: 'POST',
+    path: buildRemoteJobApiPath(jobId, 'event'),
+    payload
+  });
+}
+
+async function getRemoteJobViaApi(jobId) {
+  return performSignedIskraApiRequest({
+    method: 'GET',
+    path: buildRemoteJobApiPath(jobId)
+  });
+}
+
+async function listRemoteJobsViaApi(options = {}) {
+  return performSignedIskraApiRequest({
+    method: 'GET',
+    path: getIskraApiPath('jobs'),
+    query: {
+      runnerId: options?.runnerId,
+      status: options?.status,
+      batchId: options?.batchId,
+      limit: options?.limit
+    }
+  });
+}
+
+function findRemoteAnalysisQueueJob(jobs = []) {
+  const sourceJobs = Array.isArray(jobs) ? jobs : [];
+  return sourceJobs.find((job) => {
+    const remote = job?.remote && typeof job.remote === 'object' ? job.remote : null;
+    return !!(remote && typeof remote.remoteJobId === 'string' && remote.remoteJobId.trim());
+  }) || null;
+}
+
+function findActiveRemoteProcessRecord() {
+  for (const process of processRegistry.values()) {
+    if (!process || isClosedProcessStatus(process.status)) continue;
+    const remote = process?.remote && typeof process.remote === 'object' ? process.remote : null;
+    if (remote && typeof remote.remoteJobId === 'string' && remote.remoteJobId.trim()) {
+      return process;
+    }
+  }
+  return null;
+}
+
+function buildRemoteQueueJobLikeFromProcess(process) {
+  if (!process || typeof process !== 'object') return null;
+  const remote = process?.remote && typeof process.remote === 'object' ? process.remote : null;
+  const remoteJobId = typeof remote?.remoteJobId === 'string' ? remote.remoteJobId.trim() : '';
+  if (!remoteJobId) return null;
+  return {
+    jobId: typeof process?.queueJobId === 'string' && process.queueJobId.trim()
+      ? process.queueJobId.trim()
+      : remoteJobId,
+    runId: typeof process?.id === 'string' ? process.id : '',
+    promptHash: typeof process?.promptHash === 'string' ? process.promptHash.trim() : '',
+    title: typeof process?.title === 'string' ? process.title.trim() : '',
+    remote: {
+      remoteJobId,
+      remoteAttemptId: typeof remote?.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '',
+      remoteRunnerId: typeof remote?.remoteRunnerId === 'string' ? remote.remoteRunnerId.trim() : '',
+      controllerId: typeof remote?.controllerId === 'string' ? remote.controllerId.trim() : '',
+      batchId: typeof remote?.batchId === 'string' ? remote.batchId.trim() : '',
+      submissionId: typeof remote?.submissionId === 'string' ? remote.submissionId.trim() : ''
+    }
+  };
+}
+
+async function getRemoteRunnerLocalState() {
+  const [queueSnapshot, queueState] = await Promise.all([
+    getAnalysisQueueStatusSnapshot().catch(() => null),
+    getAnalysisQueueSnapshot().catch(() => createEmptyAnalysisQueueState()),
+    ensureProcessRegistryReady().catch(() => null)
+  ]);
+  const activeRemoteJob = findRemoteAnalysisQueueJob(queueState?.activeJobs);
+  const queuedWaitingRemoteJob = findRemoteAnalysisQueueJob(queueState?.waitingJobs);
+  const activeRemoteProcess = findActiveRemoteProcessRecord();
+  const processBackedRemoteJob = buildRemoteQueueJobLikeFromProcess(activeRemoteProcess);
+  const queuedRemoteJob = activeRemoteJob || queuedWaitingRemoteJob || processBackedRemoteJob;
+  const totalJobs = Number.isInteger(queueSnapshot?.totalJobs)
+    ? queueSnapshot.totalJobs
+    : (
+      (Array.isArray(queueState?.waitingJobs) ? queueState.waitingJobs.length : 0)
+      + (Array.isArray(queueState?.activeJobs) ? queueState.activeJobs.length : 0)
+    );
+  const totalJobsWithProcess = processBackedRemoteJob && totalJobs < 1
+    ? 1
+    : totalJobs;
+  return {
+    queueSnapshot,
+    queueState,
+    activeRemoteJob: activeRemoteJob || processBackedRemoteJob,
+    activeRemoteProcess,
+    queuedRemoteJob,
+    localBusy: totalJobsWithProcess > 0,
+    localQueueSize: totalJobsWithProcess
+  };
+}
+
+async function getConfiguredRemoteRunnerIdentity() {
+  const [installationId, runnerName] = await Promise.all([
+    ensureExtensionInstallationId(),
+    getStoredRemoteRunnerName()
+  ]);
+  const fallbackName = typeof installationId === 'string' && installationId.trim()
+    ? installationId.trim().slice(0, 24)
+    : 'remote-runner';
+  return {
+    controllerId: typeof installationId === 'string' ? installationId.trim() : '',
+    runnerId: typeof installationId === 'string' ? installationId.trim() : '',
+    runnerName: runnerName || fallbackName
+  };
+}
+
+function resolveRemoteJobConversationUrl(process = null) {
+  const candidates = [
+    typeof process?.chatUrl === 'string' ? process.chatUrl : '',
+    Array.isArray(process?.conversationUrls) ? process.conversationUrls[process.conversationUrls.length - 1] : ''
+  ];
+  for (const candidate of candidates) {
+    const normalized = normalizeChatConversationUrl(candidate);
+    if (normalized) return normalized;
+  }
+  return '';
+}
+
+function resolveRemoteJobResponseId(process = null, fallbackRunId = '') {
+  const knownIds = collectKnownProcessResponseIds(process, fallbackRunId);
+  return Array.from(knownIds)[0] || '';
+}
+
+function buildRemoteJobCompletedPayload(job, process, executionResult = null) {
+  const delivery = process ? getProcessQueueDeliveryState(process) : null;
+  const dispatchState = delivery?.state
+    || (delivery?.confirmed === true ? 'dispatch_confirmed' : (delivery?.saveOk === true ? 'dispatch_pending' : ''));
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  return {
+    title: typeof process?.title === 'string' && process.title.trim()
+      ? process.title.trim()
+      : (typeof job?.title === 'string' ? job.title : ''),
+    responseId: resolveRemoteJobResponseId(process, typeof job?.runId === 'string' ? job.runId : ''),
+    conversationUrl: resolveRemoteJobConversationUrl(process),
+    dispatchState,
+    dispatchSummary: typeof persistenceStatus?.dispatchSummary === 'string'
+      ? persistenceStatus.dispatchSummary
+      : (typeof process?.completedResponseDispatchSummary === 'string' ? process.completedResponseDispatchSummary : ''),
+    copyTrace: process ? buildProcessCopyTrace(process, typeof job?.runId === 'string' ? job.runId : '') : '',
+    verifiedCount: Number.isInteger(finalStagePersistence?.verifiedCount) ? finalStagePersistence.verifiedCount : null,
+    promptHash: typeof job?.promptHash === 'string' ? job.promptHash : '',
+    queueState: typeof process?.queueState === 'string' ? process.queueState : 'active',
+    runId: typeof job?.runId === 'string' ? job.runId : '',
+    jobId: typeof job?.jobId === 'string' ? job.jobId : '',
+    reason: typeof executionResult?.reason === 'string' ? executionResult.reason : ''
+  };
+}
+
+function buildRemoteJobFailureDetails(job, process, executionResult = null, fallbackError = '', fallbackReason = '') {
+  const normalizedError = (
+    (typeof process?.error === 'string' && process.error.trim())
+    || (typeof executionResult?.error === 'string' && executionResult.error.trim())
+    || (typeof fallbackError === 'string' && fallbackError.trim())
+    || 'remote_job_failed'
+  );
+  const normalizedReason = (
+    (typeof process?.reason === 'string' && process.reason.trim())
+    || (typeof executionResult?.reason === 'string' && executionResult.reason.trim())
+    || (typeof fallbackReason === 'string' && fallbackReason.trim())
+    || 'remote_job_failed'
+  );
+  return {
+    error: normalizedError,
+    payload: {
+      failure: {
+        statusCode: normalizedReason,
+        reason: normalizedReason,
+        error: normalizedError
+      },
+      queueState: typeof process?.queueState === 'string' ? process.queueState : '',
+      runId: typeof job?.runId === 'string' ? job.runId : '',
+      jobId: typeof job?.jobId === 'string' ? job.jobId : ''
+    }
+  };
+}
+
+async function reportRemoteJobEvent(jobId, eventType, attemptId, payload = null, error = '') {
+  const normalizedJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  const normalizedAttemptId = typeof attemptId === 'string' ? attemptId.trim() : '';
+  const normalizedEventType = typeof eventType === 'string' ? eventType.trim().toLowerCase() : '';
+  if (!normalizedJobId || !normalizedAttemptId || !normalizedEventType) {
+    return { success: false, error: 'invalid_remote_event' };
+  }
+  const identity = await getConfiguredRemoteRunnerIdentity();
+  const requestPayload = {
+    eventType: normalizedEventType,
+    attemptId: normalizedAttemptId,
+    runnerId: identity.runnerId
+  };
+  if (payload && typeof payload === 'object' && !Array.isArray(payload)) {
+    requestPayload.result = payload;
+  }
+  if (typeof error === 'string' && error.trim()) {
+    requestPayload.error = error.trim();
+  }
+  return postRemoteJobEventViaApi(normalizedJobId, requestPayload);
+}
+
+async function reportRemoteJobEnqueueFailure(remoteJob, error) {
+  const failure = buildRemoteJobFailureDetails(
+    remoteJob,
+    null,
+    null,
+    error?.message || String(error)
+  );
+  await reportRemoteJobEvent(
+    remoteJob.jobId,
+    'failed',
+    remoteJob.attemptId,
+    failure.payload,
+    failure.error
+  ).catch((eventError) => {
+    console.warn('[remote-runner] failed to report enqueue failure:', {
+      jobId: remoteJob?.jobId || '',
+      attemptId: remoteJob?.attemptId || '',
+      error: eventError?.message || String(eventError)
+    });
+  });
+  return failure;
+}
+
+async function enqueueClaimedRemoteJob(job) {
+  const remoteJob = job && typeof job === 'object' ? job : null;
+  const promptChainSnapshot = sanitizePromptChainSnapshot(remoteJob?.promptChainSnapshot);
+  const text = typeof remoteJob?.text === 'string' ? remoteJob.text : '';
+  if (!remoteJob || typeof remoteJob?.jobId !== 'string' || !remoteJob.jobId.trim()) {
+    throw new Error('remote_job_missing_id');
+  }
+  if (typeof remoteJob?.runId !== 'string' || !remoteJob.runId.trim()) {
+    throw new Error('remote_job_missing_run_id');
+  }
+  if (typeof remoteJob?.attemptId !== 'string' || !remoteJob.attemptId.trim()) {
+    throw new Error('remote_job_missing_attempt_id');
+  }
+  if (!text.trim()) {
+    throw new Error('remote_job_text_missing');
+  }
+  if (promptChainSnapshot.length === 0) {
+    throw new Error('remote_job_prompt_chain_missing');
+  }
+
+  const localJob = {
+    kind: ANALYSIS_QUEUE_KIND_ARTICLE,
+    jobId: remoteJob.jobId.trim(),
+    runId: remoteJob.runId.trim(),
+    analysisType: typeof remoteJob.analysisType === 'string' && remoteJob.analysisType.trim()
+      ? remoteJob.analysisType.trim()
+      : 'company',
+    title: typeof remoteJob.submittedTitle === 'string' && remoteJob.submittedTitle.trim()
+      ? remoteJob.submittedTitle.trim()
+      : 'Remote manual source',
+    sourceKind: 'manual_text',
+    sourceUrl: 'manual://source',
+    chatUrl: CHAT_URL,
+    queueBatchId: typeof remoteJob.batchId === 'string' ? remoteJob.batchId.trim() : '',
+    promptChainSnapshot,
+    promptHash: typeof remoteJob.promptHash === 'string' ? remoteJob.promptHash.trim() : '',
+    remote: {
+      remoteJobId: remoteJob.jobId.trim(),
+      remoteAttemptId: remoteJob.attemptId.trim(),
+      remoteRunnerId: typeof remoteJob.runnerId === 'string' ? remoteJob.runnerId.trim() : '',
+      controllerId: typeof remoteJob.controllerId === 'string' ? remoteJob.controllerId.trim() : '',
+      batchId: typeof remoteJob.batchId === 'string' ? remoteJob.batchId.trim() : '',
+      submissionId: typeof remoteJob.submissionId === 'string' ? remoteJob.submissionId.trim() : ''
+    },
+    tabSnapshot: {
+      id: `remote-${remoteJob.jobId.trim()}`,
+      title: typeof remoteJob.submittedTitle === 'string' && remoteJob.submittedTitle.trim()
+        ? remoteJob.submittedTitle.trim()
+        : 'Remote manual source',
+      url: 'manual://source',
+      manualText: text
+    }
+  };
+
+  const enqueueResult = await enqueueAnalysisJobs([localJob], {
+    reason: 'remote_claim_enqueue'
+  });
+  if ((enqueueResult?.queuedCount || 0) < 1) {
+    throw new Error('remote_job_enqueue_rejected');
+  }
+
+  await reportRemoteJobEvent(
+    remoteJob.jobId,
+    'received',
+    remoteJob.attemptId,
+    {
+      queueState: 'received',
+      promptHash: localJob.promptHash || '',
+      localQueueSize: Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : null,
+      runId: localJob.runId,
+      jobId: localJob.jobId
+    }
+  ).catch((error) => {
+    console.warn('[remote-runner] failed to report received event:', {
+      jobId: remoteJob.jobId,
+      attemptId: remoteJob.attemptId,
+      error: error?.message || String(error)
+    });
+  });
+
+  return {
+    success: true,
+    enqueueResult,
+    localJob
+  };
+}
+
+async function recoverAssignedRemoteJob(options = {}) {
+  const identity = await getConfiguredRemoteRunnerIdentity();
+  const localState = await getRemoteRunnerLocalState();
+  if (localState?.queuedRemoteJob || localState?.activeRemoteProcess) {
+    return {
+      success: true,
+      skipped: true,
+      reason: localState?.queuedRemoteJob ? 'local_remote_job_present' : 'local_remote_process_present'
+    };
+  }
+
+  const statusResult = await getRemoteRunnerStatusViaApi(identity.runnerId, {
+    timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
+    retryCount: 1
+  });
+  if (!statusResult?.success) {
+    return {
+      success: false,
+      skipped: true,
+      reason: statusResult?.error || 'remote_runner_status_failed',
+      status: statusResult?.status || null
+    };
+  }
+
+  const runner = statusResult?.payload?.runner && typeof statusResult.payload.runner === 'object'
+    ? statusResult.payload.runner
+    : null;
+  const activeRemoteJobId = typeof runner?.activeRemoteJobId === 'string' ? runner.activeRemoteJobId.trim() : '';
+  if (!activeRemoteJobId) {
+    return { success: true, skipped: true, reason: 'no_assigned_remote_job' };
+  }
+
+  const jobResult = await getRemoteJobViaApi(activeRemoteJobId);
+  if (!jobResult?.success) {
+    return {
+      success: false,
+      skipped: true,
+      reason: jobResult?.error || 'remote_job_fetch_failed',
+      status: jobResult?.status || null
+    };
+  }
+
+  const remoteJob = jobResult?.payload?.job && typeof jobResult.payload.job === 'object'
+    ? jobResult.payload.job
+    : null;
+  if (!remoteJob || typeof remoteJob?.jobId !== 'string' || !remoteJob.jobId.trim()) {
+    return { success: false, skipped: true, reason: 'remote_job_missing_payload' };
+  }
+  if (typeof remoteJob?.runnerId === 'string' && remoteJob.runnerId.trim() && remoteJob.runnerId.trim() !== identity.runnerId) {
+    return { success: true, skipped: true, reason: 'remote_job_assigned_elsewhere' };
+  }
+
+  const remoteStatus = typeof remoteJob?.status === 'string' ? remoteJob.status.trim().toLowerCase() : '';
+  if (!['claimed', 'received'].includes(remoteStatus)) {
+    return {
+      success: true,
+      skipped: true,
+      reason: remoteStatus ? `remote_job_${remoteStatus}` : 'remote_job_not_recoverable'
+    };
+  }
+
+  try {
+    const enqueueResult = await enqueueClaimedRemoteJob(remoteJob);
+    console.warn('[remote-runner] recovered assigned remote job into local queue:', {
+      runnerId: identity.runnerId,
+      jobId: remoteJob.jobId,
+      attemptId: remoteJob.attemptId,
+      reason: typeof options?.origin === 'string' ? options.origin : 'recovery'
+    });
+    return {
+      success: true,
+      recovered: true,
+      reason: 'assigned_remote_job_recovered',
+      job: remoteJob,
+      enqueueResult
+    };
+  } catch (error) {
+    const failure = await reportRemoteJobEnqueueFailure(remoteJob, error);
+    return {
+      success: false,
+      recovered: false,
+      reason: failure.error,
+      job: remoteJob
+    };
+  }
+}
+
+async function sendRemoteRunnerHeartbeat(options = {}) {
+  const [runnerEnabled, identity, localState, promptsReady] = await Promise.all([
+    getStoredRemoteRunnerEnabled(),
+    getConfiguredRemoteRunnerIdentity(),
+    getRemoteRunnerLocalState(),
+    ensureCompanyPromptsReady().catch(() => false)
+  ]);
+  const promptHash = promptsReady ? await getCompanyPromptHash().catch(() => '') : '';
+  const activeRemoteJobId = typeof localState?.queuedRemoteJob?.remote?.remoteJobId === 'string'
+    ? localState.queuedRemoteJob.remote.remoteJobId
+    : '';
+  return performSignedIskraApiRequest({
+    method: 'POST',
+    path: getIskraApiPath('runnerHeartbeat'),
+    payload: {
+      runnerId: identity.runnerId,
+      runnerName: identity.runnerName,
+      enabled: runnerEnabled,
+      promptsLoaded: promptsReady === true,
+      promptHash,
+      chatgptReady: promptsReady === true,
+      localBusy: localState?.localBusy === true,
+      localQueueSize: Number.isInteger(localState?.localQueueSize) ? localState.localQueueSize : 0,
+      extensionVersion: typeof chrome?.runtime?.getManifest === 'function'
+        ? (chrome.runtime.getManifest()?.version || '')
+        : '',
+      activeJobId: activeRemoteJobId || undefined,
+      capabilities: {
+        remoteManualTextV1: true,
+        promptChainSnapshotV1: true
+      }
+    },
+    timeoutMs: options?.timeoutMs
+  });
+}
+
+async function pollAndClaimRemoteJob(options = {}) {
+  const [runnerEnabled, identity, localState] = await Promise.all([
+    getStoredRemoteRunnerEnabled(),
+    getConfiguredRemoteRunnerIdentity(),
+    getRemoteRunnerLocalState()
+  ]);
+  if (!runnerEnabled) {
+    return { success: true, skipped: true, reason: 'runner_disabled' };
+  }
+  if (localState?.localBusy === true || localState?.queuedRemoteJob) {
+    return {
+      success: true,
+      skipped: true,
+      reason: localState?.queuedRemoteJob ? 'remote_job_already_present' : 'local_busy'
+    };
+  }
+
+  const claimResult = await claimRemoteJobViaApi(identity.runnerId);
+  if (!claimResult?.success) {
+    return {
+      success: false,
+      claimed: false,
+      reason: claimResult?.error || 'remote_claim_failed',
+      status: claimResult?.status || null
+    };
+  }
+
+  const claimPayload = claimResult.payload && typeof claimResult.payload === 'object'
+    ? claimResult.payload
+    : {};
+  if (claimPayload.claimed !== true || !claimPayload.job || typeof claimPayload.job !== 'object') {
+    return {
+      success: true,
+      claimed: false,
+      reason: typeof claimPayload.reason === 'string' ? claimPayload.reason : 'queue_empty'
+    };
+  }
+
+  try {
+    const enqueueResult = await enqueueClaimedRemoteJob(claimPayload.job);
+    return {
+      success: true,
+      claimed: true,
+      reason: 'claimed',
+      job: claimPayload.job,
+      enqueueResult
+    };
+  } catch (error) {
+    const failure = await reportRemoteJobEnqueueFailure(claimPayload.job, error);
+    return {
+      success: false,
+      claimed: true,
+      reason: failure.error,
+      job: claimPayload.job
+    };
+  }
+}
+
+function requestRemoteRunnerCycle(reason = 'manual') {
+  const normalizedReason = typeof reason === 'string' && reason.trim()
+    ? reason.trim()
+    : 'manual';
+  if (remoteRunnerCycleInProgress) {
+    remoteRunnerCycleRequested = true;
+    return;
+  }
+  remoteRunnerCycleRequested = true;
+  Promise.resolve().then(() => runRemoteRunnerCycle(normalizedReason)).catch((error) => {
+    console.warn('[remote-runner] cycle failed:', error?.message || String(error));
+  });
+}
+
+async function runRemoteRunnerCycle(reason = 'manual') {
+  if (remoteRunnerCycleInProgress) {
+    remoteRunnerCycleRequested = true;
+    return { success: false, skipped: true, reason: 'remote_runner_cycle_in_progress' };
+  }
+
+  remoteRunnerCycleInProgress = true;
+  const normalizedReason = typeof reason === 'string' && reason.trim()
+    ? reason.trim()
+    : 'manual';
+  try {
+    remoteRunnerCycleRequested = false;
+    const runnerEnabled = await getStoredRemoteRunnerEnabled();
+    if (!runnerEnabled) {
+      return { success: true, skipped: true, reason: 'runner_disabled' };
+    }
+
+    await sendRemoteRunnerHeartbeat().catch((error) => {
+      console.warn('[remote-runner] heartbeat failed:', {
+        reason: normalizedReason,
+        error: error?.message || String(error)
+      });
+    });
+
+    const localState = await getRemoteRunnerLocalState();
+    if (localState?.activeRemoteJob?.remote?.remoteJobId && localState?.activeRemoteJob?.remote?.remoteAttemptId) {
+      const activeProcess = processRegistry.get(localState.activeRemoteJob.runId) || null;
+      const delivery = activeProcess ? getProcessQueueDeliveryState(activeProcess) : null;
+      await reportRemoteJobEvent(
+        localState.activeRemoteJob.remote.remoteJobId,
+        'heartbeat',
+        localState.activeRemoteJob.remote.remoteAttemptId,
+        {
+          queueState: typeof activeProcess?.queueState === 'string' ? activeProcess.queueState : 'running',
+          phase: typeof activeProcess?.phase === 'string' ? activeProcess.phase : '',
+          dispatchState: delivery?.state || '',
+          runId: localState.activeRemoteJob.runId,
+          jobId: localState.activeRemoteJob.jobId
+        }
+      ).catch((error) => {
+        console.warn('[remote-runner] remote job heartbeat failed:', {
+          jobId: localState.activeRemoteJob.remote.remoteJobId,
+          attemptId: localState.activeRemoteJob.remote.remoteAttemptId,
+          error: error?.message || String(error)
+        });
+      });
+    }
+
+    const recoveryResult = await recoverAssignedRemoteJob({
+      origin: normalizedReason
+    });
+    if (recoveryResult?.recovered === true) {
+      return recoveryResult;
+    }
+
+    return pollAndClaimRemoteJob({
+      origin: normalizedReason
+    });
+  } finally {
+    remoteRunnerCycleInProgress = false;
+    if (remoteRunnerCycleRequested) {
+      requestRemoteRunnerCycle(`follow_up:${normalizedReason}`);
+    }
+  }
+}
+
+async function syncRemoteRunnerAlarm() {
+  const enabled = await getStoredRemoteRunnerEnabled();
+  if (!chrome?.alarms?.create) {
+    return { enabled, alarmActive: false, nextRunAt: null };
+  }
+  if (enabled) {
+    try {
+      chrome.alarms.create(ISKRA_REMOTE_RUNNER.alarmName, {
+        delayInMinutes: ISKRA_REMOTE_RUNNER.alarmPeriodMinutes,
+        periodInMinutes: ISKRA_REMOTE_RUNNER.alarmPeriodMinutes
+      });
+    } catch (error) {
+      console.warn('[remote-runner] create alarm failed:', error?.message || String(error));
+    }
+  } else {
+    await clearAlarmSafe(ISKRA_REMOTE_RUNNER.alarmName);
+  }
+  const alarm = await getAlarmSafe(ISKRA_REMOTE_RUNNER.alarmName);
+  return {
+    enabled,
+    alarmActive: !!alarm,
+    nextRunAt: Number.isInteger(alarm?.scheduledTime) ? alarm.scheduledTime : null
+  };
+}
+
+async function collectSupportedAnalysisTabs() {
+  const allTabs = [];
+  const patterns = getSupportedSourcesQuery();
+  for (const pattern of patterns) {
+    const tabs = await chrome.tabs.query({ url: pattern });
+    allTabs.push(...tabs);
+  }
+  return Array.from(
+    new Map(
+      allTabs
+        .filter((tab) => Number.isInteger(tab?.id))
+        .map((tab) => [tab.id, tab])
+    ).values()
+  ).sort(compareTabsByWindowAndIndex);
+}
+
+async function extractPreparedSourceFromTab(tab) {
+  if (!tab || typeof tab !== 'object' || !Number.isInteger(tab?.id)) {
+    return { success: false, error: 'invalid_source_tab' };
+  }
+  if (isYouTubeTabUrl(tab.url)) {
+    return { success: false, error: 'unsupported_youtube_source' };
+  }
+  try {
+    const extractionResults = await chrome.scripting.executeScript({
+      target: { tabId: tab.id },
+      function: extractText
+    });
+    const extractedText = extractionResults?.[0]?.result || '';
+    if (!extractedText || extractedText.length < 50) {
+      return {
+        success: false,
+        error: `text_too_short_${extractedText?.length || 0}`
+      };
+    }
+    return {
+      success: true,
+      title: typeof tab?.title === 'string' && tab.title.trim() ? tab.title.trim() : 'Bez tytulu',
+      text: extractedText,
+      sourceUrl: typeof tab?.url === 'string' ? tab.url : '',
+      tabId: tab.id,
+      windowId: Number.isInteger(tab?.windowId) ? tab.windowId : null
+    };
+  } catch (error) {
+    return {
+      success: false,
+      error: normalizeRemoteApiErrorText(error, 'text_extraction_failed')
+    };
+  }
+}
+
+async function buildPreparedAnalysisBatch(tabs, promptChain, analysisType, options = {}) {
+  const sourceTabs = Array.isArray(tabs) ? tabs.filter((tab) => !!tab) : [];
+  const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
+  if (promptChainSnapshot.length === 0) {
+    return { success: false, error: 'prompts_empty', items: [], skipped: [] };
+  }
+  if (sourceTabs.length === 0) {
+    return { success: false, error: 'no_supported_tabs', items: [], skipped: [] };
+  }
+
+  const [controllerId, promptHash] = await Promise.all([
+    ensureExtensionInstallationId(),
+    computePromptChainHash(promptChainSnapshot)
+  ]);
+  if (!promptHash) {
+    return { success: false, error: 'prompt_hash_unavailable', items: [], skipped: [] };
+  }
+  const preparedSources = [];
+  const skipped = [];
+  for (const tab of sourceTabs) {
+    const prepared = await extractPreparedSourceFromTab(tab);
+    if (prepared?.success === true) {
+      preparedSources.push(prepared);
+    } else {
+      skipped.push({
+        title: typeof tab?.title === 'string' ? tab.title : 'Bez tytulu',
+        tabId: Number.isInteger(tab?.id) ? tab.id : null,
+        error: prepared?.error || 'text_extraction_failed'
+      });
+    }
+  }
+
+  if (preparedSources.length === 0) {
+    return { success: false, error: skipped[0]?.error || 'no_prepared_sources', items: [], skipped };
+  }
+
+  const batchId = createRemoteExecutionId('remote-batch');
+  const submissionId = createRemoteExecutionId('remote-submit');
+  const instanceTotal = preparedSources.length;
+  const items = preparedSources.map((prepared, index) => {
+    const runId = createRemoteExecutionId(`${analysisType}-run`);
+    const jobId = createRemoteExecutionId(`${analysisType}-job`);
+    const createdAt = Date.now();
+    return {
+      schema: 'iskra.remote_job.v1',
+      jobId,
+      runId,
+      batchId,
+      submissionId,
+      requestDedupeKey: `${submissionId}:${index + 1}`,
+      controllerId,
+      runnerId: typeof options?.runnerId === 'string' ? options.runnerId.trim() : '',
+      analysisType,
+      sourceMode: 'manual_text',
+      submittedTitle: prepared.title,
+      text: prepared.text,
+      instanceIndex: index + 1,
+      instanceTotal,
+      promptChainSnapshot,
+      promptHash,
+      usesRunnerPrompts: false,
+      createdAt
+    };
+  });
+
+  return {
+    success: true,
+    controllerId,
+    batchId,
+    submissionId,
+    promptChainSnapshot,
+    promptHash,
+    analysisType,
+    items,
+    skipped
+  };
+}
+
+async function importPreparedOpenTabsForHostedQueue() {
+  const orderedTabs = await collectSupportedAnalysisTabs();
+  if (orderedTabs.length === 0) {
+    return {
+      success: false,
+      items: [],
+      skipped: [],
+      error: 'no_supported_tabs'
+    };
+  }
+
+  const items = [];
+  const skipped = [];
+  for (const tab of orderedTabs) {
+    const prepared = await extractPreparedSourceFromTab(tab);
+    if (prepared?.success === true) {
+      items.push({
+        title: prepared.title,
+        text: prepared.text,
+        sourceUrl: typeof prepared.sourceUrl === 'string' ? prepared.sourceUrl : '',
+        sourceKind: 'desktop_tab',
+        tabId: Number.isInteger(prepared.tabId) ? prepared.tabId : null,
+        windowId: Number.isInteger(prepared.windowId) ? prepared.windowId : null
+      });
+    } else {
+      skipped.push({
+        title: typeof tab?.title === 'string' ? tab.title : 'Bez tytulu',
+        tabId: Number.isInteger(tab?.id) ? tab.id : null,
+        error: prepared?.error || 'text_extraction_failed'
+      });
+    }
+  }
+
+  return {
+    success: items.length > 0,
+    items,
+    skipped,
+    error: items.length > 0 ? '' : (skipped[0]?.error || 'no_prepared_sources')
+  };
+}
+
+async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, options = {}) {
+  const safeRunnerId = typeof runnerId === 'string' ? runnerId.trim() : '';
+  if (!safeRunnerId) {
+    return { success: false, error: 'remote_runner_not_selected', submittedCount: 0 };
+  }
+  const items = Array.isArray(batch?.items) ? batch.items : [];
+  if (items.length === 0) {
+    return { success: false, error: 'empty_prepared_batch', submittedCount: 0 };
+  }
+
+  const results = [];
+  const failures = [];
+  for (const item of items) {
+    const submitPayload = {
+      ...item,
+      runnerId: safeRunnerId
+    };
+    const submitResult = await createRemoteJobViaApi(submitPayload);
+    const payload = submitResult?.payload && typeof submitResult.payload === 'object'
+      ? submitResult.payload
+      : {};
+    if (submitResult?.success !== true || payload.success !== true || !payload.job) {
+      failures.push({
+        jobId: item.jobId,
+        runId: item.runId,
+        error: submitResult?.error
+          || (typeof payload?.reason === 'string' ? payload.reason : 'remote_submit_failed'),
+        status: submitResult?.status || null
+      });
+      continue;
+    }
+    results.push({
+      job: payload.job,
+      created: payload.created === true,
+      idempotent: payload.idempotent === true
+    });
+  }
+
+  const createdCount = results.filter((entry) => entry.created === true).length;
+  const idempotentCount = results.filter((entry) => entry.idempotent === true).length;
+  return {
+    success: results.length > 0,
+    remote: true,
+    runnerId: safeRunnerId,
+    batchId: typeof batch?.batchId === 'string' ? batch.batchId : '',
+    submissionId: typeof batch?.submissionId === 'string' ? batch.submissionId : '',
+    submittedCount: results.length,
+    createdCount,
+    idempotentCount,
+    failedCount: failures.length,
+    skippedCount: Array.isArray(batch?.skipped) ? batch.skipped.length : 0,
+    totalTabs: items.length + (Array.isArray(batch?.skipped) ? batch.skipped.length : 0),
+    failures,
+    skipped: Array.isArray(batch?.skipped) ? batch.skipped : [],
+    jobs: results.map((entry) => entry.job)
+  };
 }
 
 function ensureProcessMonitorHeartbeatAlarm() {
@@ -6263,6 +7535,28 @@ async function cancelQueuedAnalysisJobs(matchFn, options = {}) {
       finishedAt: now,
       timestamp: now
     });
+    if (job?.remote?.remoteJobId && job?.remote?.remoteAttemptId) {
+      const failure = buildRemoteJobFailureDetails(
+        job,
+        processRegistry.get(job.runId) || null,
+        null,
+        statusText,
+        reason
+      );
+      await reportRemoteJobEvent(
+        job.remote.remoteJobId,
+        'failed',
+        job.remote.remoteAttemptId,
+        failure.payload,
+        failure.error
+      ).catch((error) => {
+        console.warn('[remote-runner] failed to report queued cancellation:', {
+          jobId: job.remote.remoteJobId,
+          attemptId: job.remote.remoteAttemptId,
+          error: error?.message || String(error)
+        });
+      });
+    }
   }
 
   await reconcileAnalysisQueueState('cancel_waiting_jobs');
@@ -6273,6 +7567,143 @@ async function cancelQueuedAnalysisJobs(matchFn, options = {}) {
     jobs: cancelledJobs,
     queueSize: queueSnapshot.queueSize,
     activeSlots: queueSnapshot.activeSlots
+  };
+}
+
+async function promoteQueuedAnalysisJob(matchFn, options = {}) {
+  const matcher = typeof matchFn === 'function' ? matchFn : null;
+  if (!matcher) {
+    return { success: false, promoted: false, job: null };
+  }
+
+  await ensureAnalysisQueueReady();
+  let promotedJob = null;
+  let changed = false;
+  await withAnalysisQueueMutationLock(async () => {
+    const state = cloneAnalysisQueueState();
+    const targetIndex = state.waitingJobs.findIndex((job) => matcher(job));
+    if (targetIndex < 0) {
+      return state;
+    }
+
+    const [targetJob] = state.waitingJobs.splice(targetIndex, 1);
+    if (!targetJob) {
+      return state;
+    }
+
+    state.waitingJobs.unshift(targetJob);
+    state.waitingJobs = state.waitingJobs.map((job, index) => ({
+      ...job,
+      sequence: index + 1
+    }));
+    sortAnalysisQueueWaitingJobs(state.waitingJobs);
+
+    promotedJob = state.waitingJobs.find((job) => matcher(job)) || targetJob;
+    changed = true;
+    return persistAnalysisQueueState(state);
+  });
+
+  if (!changed || !promotedJob) {
+    const queueSnapshot = await getAnalysisQueueStatusSnapshot();
+    return {
+      success: true,
+      promoted: false,
+      job: null,
+      queueSize: queueSnapshot.queueSize,
+      activeSlots: queueSnapshot.activeSlots
+    };
+  }
+
+  await reconcileAnalysisQueueState(typeof options?.reason === 'string' ? options.reason : 'promote_waiting_job');
+  const queueSnapshot = await getAnalysisQueueStatusSnapshot();
+  return {
+    success: true,
+    promoted: true,
+    job: promotedJob,
+    queueSize: queueSnapshot.queueSize,
+    activeSlots: queueSnapshot.activeSlots
+  };
+}
+
+function matchesAnalysisQueueJobForProcessIdentifiers(job, runId = '', queueJobId = '') {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  const normalizedQueueJobId = typeof queueJobId === 'string' ? queueJobId.trim() : '';
+  const jobRunId = typeof job?.runId === 'string' ? job.runId.trim() : '';
+  const jobId = typeof job?.jobId === 'string' ? job.jobId.trim() : '';
+  if (normalizedQueueJobId && jobId === normalizedQueueJobId) return true;
+  if (normalizedRunId && jobRunId === normalizedRunId) return true;
+  return false;
+}
+
+async function handleProcessQueueActionMessage(message = {}) {
+  const runId = typeof message?.runId === 'string' ? message.runId.trim() : '';
+  if (!runId) {
+    return { success: false, error: 'missing_process_id' };
+  }
+
+  const action = typeof message?.action === 'string' ? message.action.trim().toLowerCase() : '';
+  if (action !== 'remove' && action !== 'promote') {
+    return { success: false, error: 'invalid_queue_action' };
+  }
+
+  const queueJobId = typeof message?.queueJobId === 'string' ? message.queueJobId.trim() : '';
+  const process = processRegistry.get(runId) || null;
+  if (process && normalizeProcessStatus(process?.status) !== 'queued') {
+    return { success: false, error: 'process_not_queued' };
+  }
+
+  const matcher = (job) => matchesAnalysisQueueJobForProcessIdentifiers(job, runId, queueJobId);
+  if (action === 'remove') {
+    const result = await cancelQueuedAnalysisJobs(matcher, {
+      reason: 'queue_removed_from_panel',
+      statusText: 'Usunieto z kolejki'
+    });
+    const removedJob = Array.isArray(result?.jobs) && result.jobs.length > 0 ? result.jobs[0] : null;
+    if ((result?.cancelledCount || 0) <= 0 || !removedJob) {
+      return {
+        success: false,
+        error: 'queued_job_not_found',
+        queueSize: Number.isInteger(result?.queueSize) ? result.queueSize : 0,
+        activeSlots: Number.isInteger(result?.activeSlots) ? result.activeSlots : 0
+      };
+    }
+    return {
+      success: true,
+      action,
+      removed: true,
+      runId,
+      queueJobId: typeof removedJob?.jobId === 'string' ? removedJob.jobId : queueJobId,
+      queueSize: Number.isInteger(result?.queueSize) ? result.queueSize : 0,
+      activeSlots: Number.isInteger(result?.activeSlots) ? result.activeSlots : 0
+    };
+  }
+
+  const result = await promoteQueuedAnalysisJob(matcher, {
+    reason: 'promote_waiting_job_from_panel'
+  });
+  const promotedJob = result?.job && typeof result.job === 'object' ? result.job : null;
+  if (result?.promoted !== true || !promotedJob) {
+    return {
+      success: false,
+      error: 'queued_job_not_found',
+      queueSize: Number.isInteger(result?.queueSize) ? result.queueSize : 0,
+      activeSlots: Number.isInteger(result?.activeSlots) ? result.activeSlots : 0
+    };
+  }
+
+  const queueSnapshot = await getAnalysisQueueSnapshot();
+  const queuePosition = Array.isArray(queueSnapshot?.waitingJobs)
+    ? (queueSnapshot.waitingJobs.findIndex((job) => matchesAnalysisQueueJobForProcessIdentifiers(job, runId, queueJobId)) + 1)
+    : 0;
+  return {
+    success: true,
+    action,
+    promoted: true,
+    runId,
+    queueJobId: typeof promotedJob?.jobId === 'string' ? promotedJob.jobId : queueJobId,
+    queuePosition: queuePosition > 0 ? queuePosition : null,
+    queueSize: Number.isInteger(result?.queueSize) ? result.queueSize : 0,
+    activeSlots: Number.isInteger(result?.activeSlots) ? result.activeSlots : 0
   };
 }
 
@@ -6421,10 +7852,34 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         return;
       }
 
-      await ensureCompanyPromptsReady();
-      await executeAnalysisProcessJob(
+      const promptChain = Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0
+        ? scheduledJob.promptChainSnapshot
+        : PROMPTS_COMPANY;
+      if (!(Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0)) {
+        await ensureCompanyPromptsReady();
+      }
+      if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
+        await reportRemoteJobEvent(
+          scheduledJob.remote.remoteJobId,
+          'started',
+          scheduledJob.remote.remoteAttemptId,
+          {
+            queueState: 'running',
+            promptHash: typeof scheduledJob.promptHash === 'string' ? scheduledJob.promptHash : '',
+            runId: scheduledJob.runId,
+            jobId: scheduledJob.jobId
+          }
+        ).catch((error) => {
+          console.warn('[remote-runner] failed to report started event:', {
+            jobId: scheduledJob.remote.remoteJobId,
+            attemptId: scheduledJob.remote.remoteAttemptId,
+            error: error?.message || String(error)
+          });
+        });
+      }
+      const executionResult = await executeAnalysisProcessJob(
         scheduledJob.tabSnapshot,
-        PROMPTS_COMPANY,
+        promptChain,
         typeof scheduledJob.chatUrl === 'string' && scheduledJob.chatUrl.trim()
           ? scheduledJob.chatUrl.trim()
           : CHAT_URL,
@@ -6433,9 +7888,44 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
           invocationWindowId: Number.isInteger(scheduledJob.invocationWindowId) ? scheduledJob.invocationWindowId : null,
           runId: scheduledJob.runId,
           queueJobId: scheduledJob.jobId,
-          sourceKind: scheduledJob.sourceKind || ''
+          sourceKind: scheduledJob.sourceKind || '',
+          remote: scheduledJob.remote || null,
+          promptHash: typeof scheduledJob.promptHash === 'string' ? scheduledJob.promptHash : ''
         }
       );
+      if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
+        const currentProcess = processRegistry.get(scheduledJob.runId) || null;
+        const delivery = currentProcess ? getProcessQueueDeliveryState(currentProcess) : null;
+        if (delivery?.saveOk === true) {
+          await reportRemoteJobEvent(
+            scheduledJob.remote.remoteJobId,
+            'completed',
+            scheduledJob.remote.remoteAttemptId,
+            buildRemoteJobCompletedPayload(scheduledJob, currentProcess, executionResult)
+          ).catch((error) => {
+            console.warn('[remote-runner] failed to report completed event:', {
+              jobId: scheduledJob.remote.remoteJobId,
+              attemptId: scheduledJob.remote.remoteAttemptId,
+              error: error?.message || String(error)
+            });
+          });
+        } else {
+          const failure = buildRemoteJobFailureDetails(scheduledJob, currentProcess, executionResult);
+          await reportRemoteJobEvent(
+            scheduledJob.remote.remoteJobId,
+            'failed',
+            scheduledJob.remote.remoteAttemptId,
+            failure.payload,
+            failure.error
+          ).catch((error) => {
+            console.warn('[remote-runner] failed to report failed event:', {
+              jobId: scheduledJob.remote.remoteJobId,
+              attemptId: scheduledJob.remote.remoteAttemptId,
+              error: error?.message || String(error)
+            });
+          });
+        }
+      }
       requestAnalysisQueueReconcile('article_job_finished');
     })
     .catch(async (error) => {
@@ -6462,6 +7952,27 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         runId: scheduledJob.runId,
         error: error?.message || String(error)
       });
+      if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
+        const failure = buildRemoteJobFailureDetails(
+          scheduledJob,
+          processRegistry.get(scheduledJob.runId) || null,
+          null,
+          error?.message || String(error)
+        );
+        await reportRemoteJobEvent(
+          scheduledJob.remote.remoteJobId,
+          'failed',
+          scheduledJob.remote.remoteAttemptId,
+          failure.payload,
+          failure.error
+        ).catch((eventError) => {
+          console.warn('[remote-runner] failed to report execution exception:', {
+            jobId: scheduledJob.remote.remoteJobId,
+            attemptId: scheduledJob.remote.remoteAttemptId,
+            error: eventError?.message || String(eventError)
+          });
+        });
+      }
       await reportAnalysisQueueEvent('job_execution_exception', {
         job: scheduledJob,
         process: processRegistry.get(scheduledJob.runId) || null,
@@ -6792,6 +8303,10 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         });
       }
 
+      if (releaseEventRecords.length > 0) {
+        requestRemoteRunnerCycle('analysis_queue_release');
+      }
+
       if (!analysisQueueReconcileRequested) {
         break;
       }
@@ -6954,7 +8469,6 @@ async function extractLastAssistantResponseFromTab(tabId, maxWaitMs = 1800) {
           if (candidate.length > best.length) {
             best = candidate;
           }
-          if (best.length >= 50) break;
           await sleep(220);
         }
         return best;
@@ -7347,6 +8861,40 @@ async function stopSingleProcess(process, options = {}) {
   }
 
   await upsertProcess(runId, stopPatch);
+
+  if (process?.remote?.remoteJobId && process?.remote?.remoteAttemptId) {
+    const failure = buildRemoteJobFailureDetails(
+      {
+        jobId: process.remote.remoteJobId,
+        runId,
+        title: process?.title || '',
+        promptHash: typeof process?.promptHash === 'string' ? process.promptHash : '',
+        remote: process.remote
+      },
+      {
+        ...process,
+        reason,
+        status: 'stopped',
+        error: typeof process?.error === 'string' ? process.error : ''
+      },
+      null,
+      statusText,
+      reason
+    );
+    await reportRemoteJobEvent(
+      process.remote.remoteJobId,
+      'failed',
+      process.remote.remoteAttemptId,
+      failure.payload,
+      failure.error
+    ).catch((error) => {
+      console.warn('[remote-runner] failed to report manual stop:', {
+        jobId: process.remote.remoteJobId,
+        attemptId: process.remote.remoteAttemptId,
+        error: error?.message || String(error)
+      });
+    });
+  }
 
   return true;
 }
@@ -7991,6 +9539,8 @@ async function handleProcessDecisionAllMessage(message) {
 
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
+let promptsCompanyHashCache = '';
+let promptsCompanyHashCacheKey = '';
 
 // Jedno źródło prawdy dla etapów company chain.
 // Kolejność musi być zsynchronizowana z prompts-company.txt (po separatorze).
@@ -9354,18 +10904,43 @@ function findInvestCopyProcessForTab(targetTab, contextSnapshot) {
     return exactTabProcess;
   }
 
-  const conversationUrl = normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
-  if (!conversationUrl) {
-    return null;
-  }
-
   const processCandidates = Array.isArray(contextSnapshot?.processCandidates)
     ? contextSnapshot.processCandidates
     : [];
-  return processCandidates.find((process) => {
-    const processConversationUrl = normalizeChatConversationUrl(process?.chatUrl || process?.sourceUrl || '');
-    return !!(processConversationUrl && processConversationUrl === conversationUrl);
-  }) || null;
+  const conversationUrl = normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
+  if (conversationUrl) {
+    const matchedByConversationUrl = processCandidates.find((process) => {
+      const processConversationUrls = normalizeConversationUrlList([
+        ...(Array.isArray(process?.conversationUrls) ? process.conversationUrls : []),
+        typeof process?.chatUrl === 'string' ? process.chatUrl : '',
+        typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+      ]);
+      return processConversationUrls.includes(conversationUrl);
+    }) || null;
+    if (matchedByConversationUrl) {
+      return matchedByConversationUrl;
+    }
+  }
+
+  const windowId = Number.isInteger(targetTab?.windowId) ? targetTab.windowId : null;
+  if (!Number.isInteger(windowId)) {
+    return null;
+  }
+
+  const sameWindowCandidates = processCandidates.filter((process) => process?.windowId === windowId);
+  if (sameWindowCandidates.length === 1 && sameWindowCandidates[0] && typeof sameWindowCandidates[0] === 'object') {
+    return sameWindowCandidates[0];
+  }
+
+  const processByWindowId = contextSnapshot?.processByWindowId instanceof Map
+    ? contextSnapshot.processByWindowId
+    : new Map();
+  const sameWindowProcess = processByWindowId.get(windowId);
+  if (sameWindowProcess && typeof sameWindowProcess === 'object' && sameWindowCandidates.length <= 1) {
+    return sameWindowProcess;
+  }
+
+  return null;
 }
 
 function compareInvestCopyTargets(left, right) {
@@ -9529,6 +11104,141 @@ async function resolveLatestInvestCopyTarget(options = {}) {
   };
 }
 
+async function resolveInvestCopyDomFallback(target, options = {}) {
+  const tabId = Number.isInteger(target?.tabId) ? target.tabId : null;
+  const windowId = Number.isInteger(target?.windowId) ? target.windowId : null;
+  if (!Number.isInteger(tabId)) {
+    return {
+      text: '',
+      contract: null,
+      attemptCount: 0,
+      activated: false
+    };
+  }
+
+  const initialTimeoutMs = Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2400;
+  const retryTimeoutMs = Number.isInteger(options?.retryTabReadTimeoutMs)
+    ? options.retryTabReadTimeoutMs
+    : Math.max(initialTimeoutMs + 1600, 3600);
+  const firstText = await extractLastAssistantResponseFromTab(tabId, initialTimeoutMs);
+  const firstContract = buildResponseContractValidation(firstText);
+  if (firstContract?.valid === true) {
+    return {
+      text: firstText,
+      contract: firstContract,
+      attemptCount: 1,
+      activated: false
+    };
+  }
+
+  let activated = false;
+  if (options?.allowActivationRetry !== false) {
+    try {
+      activated = await prepareTabForDetection(tabId, windowId);
+    } catch (error) {
+      activated = false;
+    }
+  }
+  if (!activated) {
+    return {
+      text: firstText,
+      contract: firstContract,
+      attemptCount: 1,
+      activated: false
+    };
+  }
+
+  const secondText = await extractLastAssistantResponseFromTab(tabId, retryTimeoutMs);
+  const secondContract = buildResponseContractValidation(secondText);
+  const shouldPreferSecond = (secondContract?.valid === true && firstContract?.valid !== true)
+    || (typeof secondText === 'string' && secondText.length > firstText.length);
+
+  return {
+    text: shouldPreferSecond ? secondText : firstText,
+    contract: shouldPreferSecond ? secondContract : firstContract,
+    attemptCount: 2,
+    activated: true
+  };
+}
+
+async function resolveCopyLatestInvestResponsePayload(target, process, options = {}) {
+  const tabId = Number.isInteger(target?.tabId) ? target.tabId : null;
+  const tabReadTimeoutMs = Number.isInteger(options?.tabReadTimeoutMs) ? options.tabReadTimeoutMs : 2400;
+
+  if (process && typeof process === 'object') {
+    const strictResolvedResponse = await resolveCompletedProcessFinalResponseText(process, {
+      force: false
+    });
+    if (strictResolvedResponse?.success === true) {
+      return {
+        success: true,
+        responseText: strictResolvedResponse.responseText,
+        resolutionMode: 'process_strict'
+      };
+    }
+
+    const domFallback = Number.isInteger(tabId)
+      ? await resolveInvestCopyDomFallback(target, {
+        tabReadTimeoutMs,
+        allowActivationRetry: true
+      })
+      : { text: '', contract: null };
+    const domFallbackText = typeof domFallback?.text === 'string' ? domFallback.text : '';
+    const domFallbackContract = domFallback?.contract || buildResponseContractValidation(domFallbackText);
+    if (domFallbackText && domFallbackContract?.valid === true) {
+      return {
+        success: true,
+        responseText: domFallbackText,
+        resolutionMode: 'process_dom_contract',
+        processPatch: {
+          completedResponseText: domFallbackText,
+          completedResponseCapturedAt: Date.now()
+        }
+      };
+    }
+
+    return {
+      success: false,
+      reason: typeof strictResolvedResponse?.reason === 'string' && strictResolvedResponse.reason.trim()
+        ? strictResolvedResponse.reason.trim()
+        : 'missing_response_text'
+    };
+  }
+
+  if (!Number.isInteger(tabId)) {
+    return {
+      success: false,
+      reason: 'final_process_not_found'
+    };
+  }
+
+  const directFallback = await resolveInvestCopyDomFallback(target, {
+    tabReadTimeoutMs,
+    allowActivationRetry: true
+  });
+  const directFallbackText = typeof directFallback?.text === 'string' ? directFallback.text : '';
+  if (!directFallbackText) {
+    return {
+      success: false,
+      reason: 'final_process_not_found'
+    };
+  }
+
+  const directFallbackContract = directFallback?.contract || buildResponseContractValidation(directFallbackText);
+  if (directFallbackContract?.valid !== true) {
+    return {
+      success: false,
+      reason: 'invalid_final_response_contract'
+    };
+  }
+
+  return {
+    success: true,
+    responseText: directFallbackText,
+    resolutionMode: 'direct_save'
+  };
+}
+
 async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
   const operationId = typeof options?.operationId === 'string' && options.operationId.trim()
     ? options.operationId.trim()
@@ -9592,53 +11302,11 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
     return failureResult;
   }
 
-  if (!process || typeof process !== 'object') {
-    const failureReason = 'final_process_not_found';
-    reportCopyLatestInvestFinalResponseEvent({
-      operationId,
-      origin,
-      scope,
-      targetOrdinal,
-      targetTotal,
-      level: 'warn',
-      status: 'failed',
-      reason: failureReason,
-      error: failureReason,
-      runId: '',
-      tabId,
-      windowId,
-      targetTitle: title,
-      sourceUrl: typeof target?.url === 'string' ? target.url : '',
-      conversationUrl
-    });
-    console.warn('[copy-latest-invest] Target missing response', {
-      operationId,
-      origin,
-      scope,
-      targetOrdinal,
-      targetTotal,
-      tabId,
-      windowId,
-      error: failureReason
-    });
-    return {
-      success: false,
-      error: failureReason,
-      tabId,
-      windowId,
-      title,
-      conversationUrl,
-      processId: ''
-    };
-  }
-
-  const resolvedResponse = await resolveCompletedProcessFinalResponseText(process, {
-    force: false
-  });
+  const resolvedResponse = await resolveCopyLatestInvestResponsePayload(target, process, options);
   if (resolvedResponse?.success !== true) {
     const failureReason = typeof resolvedResponse?.reason === 'string' && resolvedResponse.reason.trim()
       ? resolvedResponse.reason.trim()
-      : 'missing_response_text';
+      : (!process || typeof process !== 'object' ? 'final_process_not_found' : 'missing_response_text');
     reportCopyLatestInvestFinalResponseEvent({
       operationId,
       origin,
@@ -9689,42 +11357,78 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
   };
 
   try {
-    const processPatch = {};
-    if (conversationUrl) processPatch.chatUrl = conversationUrl;
-    if (Number.isInteger(tabId)) processPatch.tabId = tabId;
-    if (Number.isInteger(windowId)) processPatch.windowId = windowId;
-    if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
-      await upsertProcess(process.id.trim(), processPatch);
-    }
-
-    const replayResult = await ensureCompletedProcessResponsePersisted(
-      {
-        ...process,
-        ...processPatch
-      },
-      {
-        force: false,
-        allowDomFallback: false,
-        tabId,
-        origin
+    if (process && typeof process === 'object') {
+      const processPatch = {};
+      if (conversationUrl) processPatch.chatUrl = conversationUrl;
+      if (Number.isInteger(tabId)) processPatch.tabId = tabId;
+      if (Number.isInteger(windowId)) processPatch.windowId = windowId;
+      if (resolvedResponse?.processPatch && typeof resolvedResponse.processPatch === 'object') {
+        Object.assign(processPatch, resolvedResponse.processPatch);
       }
-    );
+      if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
+        await upsertProcess(process.id.trim(), processPatch);
+      }
 
-    persistence.attempted = true;
-    persistence.success = replayResult?.success === true;
-    persistence.mode = 'process_replay';
-    persistence.reason = typeof replayResult?.reason === 'string' ? replayResult.reason : '';
-    persistence.copyTrace = typeof replayResult?.copyTrace === 'string' ? replayResult.copyTrace : '';
-    persistence.dispatchSummary = typeof replayResult?.dispatchSummary === 'string'
-      ? replayResult.dispatchSummary
-      : '';
-    persistence.conversationLogCount = Number.isInteger(replayResult?.conversationAnalysis?.conversationLogCount)
-      ? replayResult.conversationAnalysis.conversationLogCount
-      : null;
+      const replayResult = await ensureCompletedProcessResponsePersisted(
+        {
+          ...process,
+          ...processPatch
+        },
+        {
+          force: resolvedResponse?.resolutionMode === 'process_dom_contract',
+          allowDomFallback: false,
+          tabId,
+          origin
+        }
+      );
+
+      persistence.attempted = true;
+      persistence.success = replayResult?.success === true;
+      persistence.mode = 'process_replay';
+      persistence.reason = typeof replayResult?.reason === 'string' ? replayResult.reason : '';
+      persistence.copyTrace = typeof replayResult?.copyTrace === 'string' ? replayResult.copyTrace : '';
+      persistence.dispatchSummary = typeof replayResult?.dispatchSummary === 'string'
+        ? replayResult.dispatchSummary
+        : '';
+      persistence.conversationLogCount = Number.isInteger(replayResult?.conversationAnalysis?.conversationLogCount)
+        ? replayResult.conversationAnalysis.conversationLogCount
+        : null;
+    } else {
+      const directSaveResult = await saveResponse(
+        responseText,
+        title && title.trim() ? title.trim() : 'ChatGPT Invest fallback',
+        'company',
+        null,
+        generateResponseId('manual_copy_fallback'),
+        {
+          selected_response_reason: 'manual_copy_fallback'
+        },
+        conversationUrl || null,
+        {
+          sourceTitle: title && title.trim() ? title.trim() : 'ChatGPT Invest',
+          sourceName: 'ChatGPT Invest',
+          sourceUrl: typeof target?.url === 'string' && target.url.trim()
+            ? target.url.trim()
+            : (conversationUrl || '')
+        }
+      );
+
+      persistence.attempted = true;
+      persistence.success = directSaveResult?.success === true;
+      persistence.mode = 'direct_save';
+      persistence.reason = persistence.success === true ? 'saved' : 'save_failed';
+      persistence.copyTrace = typeof directSaveResult?.copyTrace === 'string' ? directSaveResult.copyTrace : '';
+      persistence.dispatchSummary = directSaveResult?.dispatch && typeof directSaveResult.dispatch === 'object'
+        ? formatDispatchUiSummary(directSaveResult.dispatch)
+        : '';
+      persistence.conversationLogCount = Number.isInteger(directSaveResult?.conversationAnalysis?.conversationLogCount)
+        ? directSaveResult.conversationAnalysis.conversationLogCount
+        : null;
+    }
   } catch (error) {
     persistence.attempted = true;
     persistence.success = false;
-    persistence.mode = 'process_replay';
+    persistence.mode = process && typeof process === 'object' ? 'process_replay' : 'direct_save';
     persistence.reason = error?.message || String(error);
   }
 
@@ -9816,7 +11520,8 @@ async function copyLatestInvestFinalResponse(options = {}) {
   const scope = options?.scope === 'all_open_windows' ? 'all_open_windows' : 'latest';
   const resolvedTargets = await resolveInvestCopyTargets({
     ...options,
-    scope
+    scope,
+    includeClosedProcesses: true
   });
 
   console.log('[copy-latest-invest] Targets resolved', {
@@ -19548,10 +21253,14 @@ ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
 });
+syncRemoteRunnerAlarm().catch((error) => {
+  console.warn('[remote-runner] sync alarm on boot failed:', error?.message || String(error));
+});
 logWatchlistDispatchStatusSnapshot('service_worker_boot:before_flush', false).catch(() => {});
 logWatchlistRemoteConnectionState('service_worker_boot', false).catch(() => {});
 runProcessMonitorHeartbeatSweep('service_worker_boot').catch(() => {});
 requestAnalysisQueueReconcile('service_worker_boot');
+requestRemoteRunnerCycle('service_worker_boot');
 flushWatchlistDispatchOutbox('service_worker_boot').catch((error) => {
   console.warn('[copy-flow] [dispatch:flush-error] reason=service_worker_boot', error);
 });
@@ -19654,6 +21363,10 @@ chrome.runtime.onInstalled.addListener(() => {
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onInstalled failed:', error);
   });
+  syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm onInstalled failed:', error?.message || String(error));
+  });
+  requestRemoteRunnerCycle('on_installed');
   logWatchlistDispatchStatusSnapshot('on_installed:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_installed', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_installed').catch((error) => {
@@ -19668,12 +21381,40 @@ chrome.runtime.onStartup.addListener(() => {
   syncAutoRestoreWindowsAlarm().catch((error) => {
     console.warn('[auto-restore] sync alarm onStartup failed:', error);
   });
+  syncRemoteRunnerAlarm().catch((error) => {
+    console.warn('[remote-runner] sync alarm onStartup failed:', error?.message || String(error));
+  });
+  requestRemoteRunnerCycle('on_startup');
   logWatchlistDispatchStatusSnapshot('on_startup:before_flush', false).catch(() => {});
   logWatchlistRemoteConnectionState('on_startup', false).catch(() => {});
   flushWatchlistDispatchOutbox('on_startup').catch((error) => {
     console.warn('[copy-flow] [dispatch:flush-error] reason=on_startup', error);
   });
 });
+
+if (chrome?.storage?.onChanged?.addListener) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes || typeof changes !== 'object') return;
+    const remoteKeys = [
+      ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY,
+      ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY,
+      ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY,
+      ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY
+    ];
+    const changedRemoteKeys = remoteKeys.filter((key) => Object.prototype.hasOwnProperty.call(changes, key));
+    if (changedRemoteKeys.length === 0) return;
+
+    if (
+      changedRemoteKeys.includes(ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY)
+      || changedRemoteKeys.includes(ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY)
+    ) {
+      syncRemoteRunnerAlarm().catch((error) => {
+        console.warn('[remote-runner] sync alarm on storage change failed:', error?.message || String(error));
+      });
+      requestRemoteRunnerCycle('remote_storage_changed');
+    }
+  });
+}
 
 if (typeof globalThis?.addEventListener === 'function') {
   globalThis.addEventListener('error', (event) => {
@@ -19772,6 +21513,13 @@ if (chrome?.alarms?.onAlarm) {
         console.warn('[monitor] process heartbeat alarm failed:', error);
       });
       requestAnalysisQueueReconcile('process_monitor_heartbeat_alarm');
+      return;
+    }
+
+    if (alarm.name === ISKRA_REMOTE_RUNNER.alarmName) {
+      runRemoteRunnerCycle('remote_runner_alarm').catch((error) => {
+        console.warn('[remote-runner] cycle alarm failed:', error);
+      });
       return;
     }
 
@@ -20272,6 +22020,10 @@ async function saveResponse(
 
 // Listener na wiadomości z content scriptu i popup
 chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
+  if (message.type === 'KEEPALIVE') {
+    sendResponse({ ok: true, ts: Date.now() });
+    return false;
+  }
   if (message.type === 'SAVE_RESPONSE') {
     saveResponse(
       message.text,
@@ -20358,7 +22110,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
       const runResult = await runAnalysis({
         invocationWindowId,
-        stopExistingInWindow: true
+        stopExistingInWindow: true,
+        remote: message?.remote === true,
+        executionMode: typeof message?.executionMode === 'string' ? message.executionMode : '',
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
+        selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : ''
       });
       reportAdminActionEvent('run_analysis', {
         level: runResult?.success === true ? 'info' : 'warn',
@@ -20383,6 +22139,216 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         error: error?.message || String(error)
       });
       sendResponse({ success: false, error: error?.message || 'run_analysis_start_failed' });
+    });
+    return true;
+  } else if (message.type === 'GET_REMOTE_EXECUTION_CONFIG') {
+    (async () => {
+      const result = await getRemoteExecutionConfigSnapshot();
+      sendResponse(result);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        executionMode: 'local',
+        selectedRunnerId: '',
+        runnerEnabled: false,
+        runnerName: '',
+        runnerId: '',
+        controllerId: '',
+        promptsLoaded: false,
+        promptHash: '',
+        localBusy: false,
+        localQueueSize: 0,
+        activeRemoteJobId: '',
+        queuedRemoteJobId: '',
+        alarmActive: false,
+        nextRunAt: null,
+        error: error?.message || 'remote_config_read_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'SET_REMOTE_EXECUTION_CONFIG') {
+    (async () => {
+      const result = await updateRemoteExecutionConfig({
+        executionMode: typeof message?.executionMode === 'string' ? message.executionMode : undefined,
+        remote: typeof message?.remote === 'boolean' ? message.remote : undefined,
+        selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : undefined,
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : undefined,
+        runnerEnabled: typeof message?.runnerEnabled === 'boolean' ? message.runnerEnabled : undefined,
+        enabled: typeof message?.enabled === 'boolean' ? message.enabled : undefined,
+        runnerName: typeof message?.runnerName === 'string' ? message.runnerName : undefined,
+        name: typeof message?.name === 'string' ? message.name : undefined
+      });
+      sendResponse(result);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'remote_config_update_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'RUN_REMOTE_RUNNER_CYCLE') {
+    (async () => {
+      const cycleResult = await runRemoteRunnerCycle(
+        typeof message?.origin === 'string' && message.origin.trim()
+          ? message.origin.trim()
+          : 'runtime-message'
+      );
+      const config = await getRemoteExecutionConfigSnapshot();
+      sendResponse({
+        ...config,
+        cycleResult
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        error: error?.message || 'remote_runner_cycle_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'LIST_REMOTE_RUNNERS') {
+    (async () => {
+      const apiResult = await listRemoteRunnersViaApi({
+        limit: Number.isInteger(message?.limit) ? message.limit : undefined
+      });
+      const payload = apiResult?.payload && typeof apiResult.payload === 'object'
+        ? apiResult.payload
+        : {};
+      sendResponse({
+        success: apiResult?.success === true && payload?.success !== false,
+        status: apiResult?.status || null,
+        count: Number.isInteger(payload?.count)
+          ? payload.count
+          : (Array.isArray(payload?.items) ? payload.items.length : 0),
+        items: Array.isArray(payload?.items) ? payload.items : [],
+        intakeUrl: typeof apiResult?.intakeUrl === 'string' ? apiResult.intakeUrl : '',
+        error: apiResult?.success === true ? '' : (apiResult?.error || 'remote_runner_list_failed')
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        status: null,
+        count: 0,
+        items: [],
+        intakeUrl: '',
+        error: error?.message || 'remote_runner_list_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'GET_REMOTE_RUNNER_STATUS') {
+    (async () => {
+      const [selectedRunnerId, identity] = await Promise.all([
+        getStoredSelectedRemoteRunnerId(),
+        getConfiguredRemoteRunnerIdentity()
+      ]);
+      const runnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
+        ? message.runnerId.trim()
+        : (selectedRunnerId || identity?.runnerId || '');
+      if (!runnerId) {
+        sendResponse({
+          success: false,
+          status: null,
+          runner: null,
+          error: 'remote_runner_not_selected'
+        });
+        return;
+      }
+      const apiResult = await getRemoteRunnerStatusViaApi(runnerId);
+      const payload = apiResult?.payload && typeof apiResult.payload === 'object'
+        ? apiResult.payload
+        : {};
+      sendResponse({
+        success: apiResult?.success === true && payload?.success !== false,
+        status: apiResult?.status || null,
+        runner: payload?.runner && typeof payload.runner === 'object' ? payload.runner : null,
+        intakeUrl: typeof apiResult?.intakeUrl === 'string' ? apiResult.intakeUrl : '',
+        error: apiResult?.success === true ? '' : (apiResult?.error || 'remote_runner_status_failed')
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        status: null,
+        runner: null,
+        intakeUrl: '',
+        error: error?.message || 'remote_runner_status_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'LIST_REMOTE_JOBS') {
+    (async () => {
+      const apiResult = await listRemoteJobsViaApi({
+        runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
+        status: typeof message?.status === 'string' ? message.status : '',
+        batchId: typeof message?.batchId === 'string' ? message.batchId : '',
+        limit: Number.isInteger(message?.limit) ? message.limit : undefined
+      });
+      const payload = apiResult?.payload && typeof apiResult.payload === 'object'
+        ? apiResult.payload
+        : {};
+      sendResponse({
+        success: apiResult?.success === true && payload?.success !== false,
+        status: apiResult?.status || null,
+        count: Number.isInteger(payload?.count)
+          ? payload.count
+          : (Array.isArray(payload?.items) ? payload.items.length : 0),
+        items: Array.isArray(payload?.items) ? payload.items : [],
+        intakeUrl: typeof apiResult?.intakeUrl === 'string' ? apiResult.intakeUrl : '',
+        error: apiResult?.success === true ? '' : (apiResult?.error || 'remote_job_list_failed')
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        status: null,
+        count: 0,
+        items: [],
+        intakeUrl: '',
+        error: error?.message || 'remote_job_list_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'GET_REMOTE_JOB') {
+    (async () => {
+      const jobId = typeof message?.jobId === 'string' ? message.jobId.trim() : '';
+      if (!jobId) {
+        sendResponse({
+          success: false,
+          status: null,
+          job: null,
+          error: 'remote_job_id_missing'
+        });
+        return;
+      }
+      const apiResult = await getRemoteJobViaApi(jobId);
+      const payload = apiResult?.payload && typeof apiResult.payload === 'object'
+        ? apiResult.payload
+        : {};
+      sendResponse({
+        success: apiResult?.success === true && payload?.success !== false,
+        status: apiResult?.status || null,
+        job: payload?.job && typeof payload.job === 'object' ? payload.job : null,
+        intakeUrl: typeof apiResult?.intakeUrl === 'string' ? apiResult.intakeUrl : '',
+        error: apiResult?.success === true ? '' : (apiResult?.error || 'remote_job_get_failed')
+      });
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        status: null,
+        job: null,
+        intakeUrl: '',
+        error: error?.message || 'remote_job_get_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'IMPORT_REMOTE_QUEUE_TABS') {
+    (async () => {
+      const result = await importPreparedOpenTabsForHostedQueue();
+      sendResponse(result);
+    })().catch((error) => {
+      sendResponse({
+        success: false,
+        items: [],
+        skipped: [],
+        error: error?.message || 'remote_queue_tab_import_failed'
+      });
     });
     return true;
   } else if (message.type === 'COUNT_COMPANY_CONVERSATION_MESSAGES') {
@@ -21067,6 +23033,47 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => {
         console.warn('[monitor] PROCESS_ACTION_RESOLVED failed:', error);
         sendResponse({ success: false });
+      });
+    return true;
+  } else if (message.type === 'PROCESS_QUEUE_ACTION') {
+    handleProcessQueueActionMessage(message)
+      .then((result) => {
+        const action = typeof message?.action === 'string' ? message.action.trim().toLowerCase() : '';
+        const success = result?.success === true;
+        reportAdminActionEvent('process_queue_action', {
+          level: success ? 'info' : 'warn',
+          status: success ? 'completed' : 'failed',
+          reason: success
+            ? (action === 'remove' ? 'queue_remove_completed' : 'queue_promote_completed')
+            : (result?.error || 'process_queue_action_failed'),
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          details: {
+            action,
+            runId: typeof message?.runId === 'string' ? message.runId : '',
+            queueJobId: typeof message?.queueJobId === 'string' ? message.queueJobId : '',
+            queueSize: Number.isInteger(result?.queueSize) ? result.queueSize : null,
+            activeSlots: Number.isInteger(result?.activeSlots) ? result.activeSlots : null,
+            queuePosition: Number.isInteger(result?.queuePosition) ? result.queuePosition : null
+          },
+          error: success ? '' : (result?.error || '')
+        });
+        sendResponse(result);
+      })
+      .catch((error) => {
+        console.warn('[monitor] PROCESS_QUEUE_ACTION failed:', error);
+        reportAdminActionEvent('process_queue_action', {
+          level: 'error',
+          status: 'failed',
+          reason: 'process_queue_action_failed',
+          origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+          error: error?.message || String(error),
+          details: {
+            action: typeof message?.action === 'string' ? message.action : '',
+            runId: typeof message?.runId === 'string' ? message.runId : '',
+            queueJobId: typeof message?.queueJobId === 'string' ? message.queueJobId : ''
+          }
+        });
+        sendResponse({ success: false, error: error?.message || 'process_queue_action_failed' });
       });
     return true;
   } else if (message.type === 'PROCESS_DECISION') {
@@ -21790,6 +23797,12 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     ? options.queueJobId.trim()
     : '';
   const queueManaged = !!queueJobId;
+  const remoteJobContext = options?.remote && typeof options.remote === 'object'
+    ? sanitizeRemoteAnalysisQueueJobMetadata(options.remote)
+    : null;
+  const promptHash = typeof options?.promptHash === 'string' && options.promptHash.trim()
+    ? options.promptHash.trim()
+    : '';
   let processTitle = tab?.title || 'Bez tytulu';
   let processTotalPrompts = promptChainSafe.length;
 
@@ -21825,6 +23838,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           slotReserved: true
         }
         : {}),
+      ...(remoteJobContext ? { remote: remoteJobContext } : {}),
+      ...(promptHash ? { promptHash } : {}),
       messages: []
     });
 
@@ -22216,6 +24231,19 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             ? persistedSaveErrorFromInject
             : 'save_response_failed')
       });
+      const finalStagePersistenceSummary = summarizeFinalStagePersistence({
+        attempted: true,
+        success: saveResult?.success === true,
+        reason: saveResult?.success === true ? 'saved' : 'save_response_failed',
+        responseId: saveResult?.response?.responseId || providedResponseId || '',
+        copyTrace: typeof saveResult?.copyTrace === 'string' ? saveResult.copyTrace : '',
+        dispatchSummary: persistenceSummary.dispatchSummary,
+        verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
+        dispatch: saveResult?.dispatch && typeof saveResult.dispatch === 'object' ? saveResult.dispatch : null,
+        conversationAnalysis: saveResult?.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+          ? saveResult.conversationAnalysis
+          : null
+      });
       finalStatus = persistenceSummary.lifecycleStatus || 'completed';
       finalPhase = persistenceSummary.phase || 'verify_remote';
       finalStatusCode = persistenceSummary.statusCode || 'process.completed';
@@ -22233,7 +24261,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           dispatch: persistenceSummary.dispatch || null,
           dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
           updatedAt: Date.now()
-        }
+        },
+        ...(finalStagePersistenceSummary ? { finalStagePersistence: finalStagePersistenceSummary } : {})
       };
       if (Object.keys(completedResponsePatch).length > 0) {
         completedResponsePatch.completedResponseSaved = persistenceSummary.saveOk;
@@ -23172,7 +25201,21 @@ async function runAnalysis(options = {}) {
     const invocationWindowId = Number.isInteger(options?.invocationWindowId)
       ? options.invocationWindowId
       : null;
-    if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId)) {
+    const explicitExecutionMode = options?.remote === true
+      ? 'remote'
+      : (options?.remote === false
+        ? 'local'
+        : (typeof options?.executionMode === 'string' ? options.executionMode : ''));
+    const executionMode = explicitExecutionMode
+      ? normalizeRemoteExecutionMode(explicitExecutionMode)
+      : await getStoredRemoteExecutionMode();
+    const selectedRunnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
+      ? options.runnerId.trim()
+      : (typeof options?.selectedRunnerId === 'string' && options.selectedRunnerId.trim()
+        ? options.selectedRunnerId.trim()
+        : await getStoredSelectedRemoteRunnerId());
+
+    if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId) && executionMode !== 'remote') {
       const preUngroupResult = await ungroupChatGptTabsInWindow(invocationWindowId, {
         origin: 'run-analysis-restart-pre-stop'
       });
@@ -23229,26 +25272,7 @@ async function runAnalysis(options = {}) {
     
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
-    const allTabs = [];
-    const patterns = getSupportedSourcesQuery();
-    console.log(`Szukam artykułów w ${patterns.length} źródłach:`, patterns);
-    
-    for (const pattern of patterns) {
-      const tabs = await chrome.tabs.query({url: pattern});
-      console.log(`  - ${pattern}: znaleziono ${tabs.length} kart`);
-      if (tabs.length > 0) {
-        tabs.forEach(tab => console.log(`    • ${tab.title} (${tab.url})`));
-      }
-      allTabs.push(...tabs);
-    }
-    
-    const orderedTabs = Array.from(
-      new Map(
-        allTabs
-          .filter((tab) => Number.isInteger(tab?.id))
-          .map((tab) => [tab.id, tab])
-      ).values()
-    ).sort(compareTabsByWindowAndIndex);
+    const orderedTabs = await collectSupportedAnalysisTabs();
 
     if (orderedTabs.length === 0) {
       console.log("❌ Brak otwartych kart z obsługiwanych źródeł");
@@ -23260,6 +25284,32 @@ async function runAnalysis(options = {}) {
     // KROK 3: Uruchom analizę company dla wszystkich znalezionych artykułów
     console.log("\n🚀 Krok 3: Uruchamianie analizy company");
     console.log(`   - Analiza spółki: ${orderedTabs.length} artykułów`);
+
+    if (executionMode === 'remote') {
+      if (!selectedRunnerId) {
+        console.log("❌ Brak wybranego runnera remote");
+        return { success: false, error: 'remote_runner_not_selected' };
+      }
+      const preparedBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_COMPANY, 'company', {
+        runnerId: selectedRunnerId
+      });
+      if (preparedBatch?.success !== true) {
+        return {
+          success: false,
+          error: preparedBatch?.error || 'remote_prepare_failed',
+          skippedCount: Array.isArray(preparedBatch?.skipped) ? preparedBatch.skipped.length : 0,
+          totalTabs: orderedTabs.length
+        };
+      }
+
+      const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, selectedRunnerId, {
+        invocationWindowId
+      });
+      return {
+        ...remoteResult,
+        queuedCount: Number.isInteger(remoteResult?.submittedCount) ? remoteResult.submittedCount : 0
+      };
+    }
 
     const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
       invocationWindowId,
@@ -24125,15 +26175,20 @@ async function injectToChat(
       return `${normalizedStageId}@P${currentPromptNumber}`;
     }
 
-    const forceStopResult = () => ({
-      success: false,
-      lastResponse: '',
-      error: 'force_stopped',
-      stopped: true,
-      reason: forceStopReason,
-      origin: forceStopOrigin,
-      metrics: buildMetricsSnapshot({ stopped: true })
-    });
+    // SW keepalive cleanup hook — set by prompt chain, called on force stop
+    let _swKeepaliveCleanup = null;
+    const forceStopResult = () => {
+      if (typeof _swKeepaliveCleanup === 'function') { try { _swKeepaliveCleanup(); } catch (_) {} }
+      return {
+        success: false,
+        lastResponse: '',
+        error: 'force_stopped',
+        stopped: true,
+        reason: forceStopReason,
+        origin: forceStopOrigin,
+        metrics: buildMetricsSnapshot({ stopped: true })
+      };
+    };
 
     // Shared helpers for injected context
     function compactText(text) {
@@ -24681,25 +26736,55 @@ async function injectToChat(
     }
 
     async function sendRuntimeMessageWithTimeout(message, timeoutMs = 15000) {
-      if (!chrome?.runtime?.sendMessage) {
-        return { ok: false, error: 'runtime_unavailable' };
-      }
-      const safeTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0
-        ? Math.max(1000, Math.min(timeoutMs, 60000))
-        : 15000;
-      const timeoutMarker = { __timeout__: true };
-      try {
-        const response = await Promise.race([
-          chrome.runtime.sendMessage(message),
-          new Promise((resolve) => setTimeout(() => resolve(timeoutMarker), safeTimeout))
-        ]);
-        if (response && response.__timeout__ === true) {
-          return { ok: false, error: 'runtime_timeout' };
+      const maxRetries = 3;
+      const retryDelays = [1500, 3000, 5000];
+      let lastError = 'runtime_unavailable';
+
+      for (let attempt = 0; attempt < maxRetries; attempt++) {
+        if (!chrome?.runtime?.sendMessage) {
+          if (attempt < maxRetries - 1) {
+            const delay = retryDelays[attempt] || 3000;
+            console.warn(`[runtime-bridge] chrome.runtime.sendMessage unavailable (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          return { ok: false, error: 'runtime_unavailable' };
         }
-        return { ok: true, response };
-      } catch (error) {
-        return { ok: false, error: normalizeRuntimeBridgeError(error?.message || String(error)) };
+        const safeTimeout = Number.isInteger(timeoutMs) && timeoutMs > 0
+          ? Math.max(1000, Math.min(timeoutMs, 60000))
+          : 15000;
+        const timeoutMarker = { __timeout__: true };
+        try {
+          const response = await Promise.race([
+            chrome.runtime.sendMessage(message),
+            new Promise((resolve) => setTimeout(() => resolve(timeoutMarker), safeTimeout))
+          ]);
+          if (response && response.__timeout__ === true) {
+            lastError = 'runtime_timeout';
+            if (attempt < maxRetries - 1) {
+              const delay = retryDelays[attempt] || 3000;
+              console.warn(`[runtime-bridge] runtime timeout (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
+              await new Promise((resolve) => setTimeout(resolve, delay));
+              continue;
+            }
+            return { ok: false, error: 'runtime_timeout' };
+          }
+          if (attempt > 0) {
+            console.log(`[runtime-bridge] recovered on attempt ${attempt + 1}/${maxRetries}`);
+          }
+          return { ok: true, response };
+        } catch (error) {
+          lastError = normalizeRuntimeBridgeError(error?.message || String(error));
+          if (lastError === 'runtime_unavailable' && attempt < maxRetries - 1) {
+            const delay = retryDelays[attempt] || 3000;
+            console.warn(`[runtime-bridge] ${error?.message || error} (attempt ${attempt + 1}/${maxRetries}), retrying in ${delay}ms...`);
+            await new Promise((resolve) => setTimeout(resolve, delay));
+            continue;
+          }
+          return { ok: false, error: lastError };
+        }
       }
+      return { ok: false, error: lastError };
     }
 
     async function fetchCompanyPromptByStageId(stageId) {
@@ -28848,12 +30933,16 @@ async function injectToChat(
     needsAction: false
   });
   
-  // Retry loop - czekaj na editor (contenteditable div, nie textarea!)
+  // Retry loop - czekaj na editor (textarea lub contenteditable div)
   while (Date.now() - startTime < textareaWaitMs) {
     if (shouldStopNow()) {
       return forceStopResult();
     }
-    const editor = document.querySelector('[role="textbox"]') ||
+    // Priority matches collectEditorCandidates — #prompt-textarea first (stable since oct-2025)
+    const editor = document.querySelector('textarea#prompt-textarea') ||
+                   document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                   document.querySelector('[role="textbox"]') ||
+                   document.querySelector('[contenteditable="true"]') ||
                    document.querySelector('[contenteditable]') ||
                    document.querySelector('[data-testid="composer-input"]');
     
@@ -29030,6 +31119,41 @@ async function injectToChat(
 
         console.log(`\n=== PROMPT CHAIN: ${promptChain.length} promptów do wykonania ===`);
         console.log(`Pełna lista promptów:`, promptChain);
+
+        // --- SW keepalive: ping co 20s żeby service worker nie umarł w MV3 ---
+        let _swKeepaliveTimer = null;
+        let _swKeepaliveCount = 0;
+        let _swKeepaliveErrors = 0;
+        function startSwKeepalive() {
+          if (_swKeepaliveTimer) return;
+          _swKeepaliveTimer = setInterval(() => {
+            if (!chrome?.runtime?.sendMessage) {
+              _swKeepaliveErrors++;
+              if (_swKeepaliveErrors <= 3) {
+                console.warn(`[sw-keepalive] chrome.runtime unavailable (errors=${_swKeepaliveErrors})`);
+              }
+              return;
+            }
+            _swKeepaliveCount++;
+            chrome.runtime.sendMessage({ type: 'KEEPALIVE', seq: _swKeepaliveCount }).catch((err) => {
+              _swKeepaliveErrors++;
+              if (_swKeepaliveErrors <= 5) {
+                console.warn(`[sw-keepalive] ping #${_swKeepaliveCount} failed: ${err?.message || err}`);
+              }
+            });
+          }, 20000);
+          console.log('[sw-keepalive] started (interval=20s)');
+        }
+        function stopSwKeepalive() {
+          if (_swKeepaliveTimer) {
+            clearInterval(_swKeepaliveTimer);
+            _swKeepaliveTimer = null;
+            console.log(`[sw-keepalive] stopped (pings=${_swKeepaliveCount}, errors=${_swKeepaliveErrors})`);
+          }
+        }
+        startSwKeepalive();
+        _swKeepaliveCleanup = stopSwKeepalive;
+
         delete window._lastResponseToSave;
         let canonicalPromptLookup = {
           prompts: [],
@@ -29195,6 +31319,7 @@ async function injectToChat(
                 // WAŻNE: Musimy zwrócić obiekt, nie undefined!
                 runMetrics.sendHardFail += 1;
                 logSend('HARD_FAIL', { promptIndex: absoluteCurrentPrompt, promptTotal: totalPromptsForRun });
+                stopSwKeepalive();
                 return {
                   success: false,
                   lastResponse: '',
@@ -29366,6 +31491,7 @@ async function injectToChat(
                 error: dataGapError,
                 needsAction: false
               });
+              stopSwKeepalive();
               return {
                 success: false,
                 lastResponse: '',
@@ -29514,6 +31640,7 @@ async function injectToChat(
         }
         
         // Sukces - pętla zakończona bez break
+        stopSwKeepalive();
         console.log(`\n🎉 ZAKOŃCZONO PROMPT CHAIN - wykonano wszystkie ${promptChain.length} promptów`);
         
         // Usuń licznik z animacją sukcesu
