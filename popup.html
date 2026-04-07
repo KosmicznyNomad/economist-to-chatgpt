@@ -302,6 +302,19 @@
   <details class="details">
     <summary>Narzedzia</summary>
     <div class="details-content">
+      <p class="card-title">Remote runner</p>
+      <input
+        class="dispatch-input"
+        id="remoteRunnerNameInput"
+        type="text"
+        placeholder="Nazwa runnera (np. drugiPC)"
+        autocomplete="off"
+      />
+      <div class="row row-2">
+        <button class="btn btn-primary btn-center" id="remoteRunnerToggleBtn">Wlacz runnera</button>
+        <button class="btn btn-center" id="remoteRunnerCycleBtn">Wymus cykl</button>
+      </div>
+      <p class="status status-compact" id="remoteRunnerStatus" aria-live="polite">Sprawdzam runner...</p>
       <div class="row">
         <button class="btn btn-center" id="repeatLastPromptAllBtn">Powtorz ostatni prompt (wszystkie)</button>
       </div>

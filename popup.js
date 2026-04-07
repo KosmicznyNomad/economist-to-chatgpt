@@ -129,8 +129,13 @@ const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindo
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
 const unfinishedProcessesBtn = document.getElementById('unfinishedProcessesBtn');
+const remoteRunnerNameInput = document.getElementById('remoteRunnerNameInput');
+const remoteRunnerToggleBtn = document.getElementById('remoteRunnerToggleBtn');
+const remoteRunnerCycleBtn = document.getElementById('remoteRunnerCycleBtn');
+const remoteRunnerStatus = document.getElementById('remoteRunnerStatus');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
+let remoteRunnerConfigSnapshot = null;
 const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
 
 const POPUP_SHORTCUTS = Object.freeze({
@@ -199,6 +204,126 @@ function setRestoreProcessWindowsStatus(text, isError = false) {
 
 function setAutoRestoreStatus(text, isError = false) {
   setStatusElement(autoRestoreStatus, text, isError);
+}
+
+function setRemoteRunnerStatus(text, isError = false) {
+  setStatusElement(remoteRunnerStatus, text, isError);
+}
+
+function compactRemoteIdentifier(rawValue, fallback = '') {
+  const normalized = typeof rawValue === 'string' ? rawValue.trim() : '';
+  if (!normalized) return fallback;
+  if (normalized.length <= 28) return normalized;
+  return `${normalized.slice(0, 12)}...${normalized.slice(-8)}`;
+}
+
+function normalizeRemoteRunnerApiErrorText(apiError = '') {
+  const normalized = typeof apiError === 'string' ? apiError.trim() : '';
+  if (!normalized) return '';
+  const lowered = normalized.toLowerCase();
+  if (lowered.includes('signal is aborted') || lowered.includes('aborterror') || lowered.includes('aborted without reason')) {
+    return 'chwilowe przerwanie odswiezania statusu';
+  }
+  return normalized;
+}
+
+function formatRemoteRunnerPopupStatus(config = {}, runner = null, apiError = '') {
+  const lines = [];
+  const normalizedApiError = normalizeRemoteRunnerApiErrorText(apiError);
+  const runnerEnabled = config?.runnerEnabled === true;
+  const localBusy = config?.localBusy === true;
+  const queueSize = Number.isInteger(config?.localQueueSize) ? Math.max(0, config.localQueueSize) : 0;
+  const runnerName = typeof config?.runnerName === 'string' ? config.runnerName.trim() : '';
+  const runnerId = typeof config?.runnerId === 'string' ? config.runnerId.trim() : '';
+  const promptHash = typeof config?.promptHash === 'string' ? config.promptHash.trim() : '';
+  const activeRemoteJobId = typeof config?.activeRemoteJobId === 'string' ? config.activeRemoteJobId.trim() : '';
+  const backendState = typeof runner?.state === 'string' ? runner.state.trim() : '';
+  const backendReason = typeof runner?.reason === 'string' ? runner.reason.trim() : '';
+  const queuedRemoteCount = Number.isInteger(runner?.queuedRemoteCount) ? Math.max(0, runner.queuedRemoteCount) : 0;
+
+  lines.push(`Runner lokalny: ${runnerEnabled ? 'ON' : 'OFF'}.`);
+  if (runnerName) {
+    lines.push(`Nazwa: ${runnerName}.`);
+  }
+  if (runnerId) {
+    lines.push(`ID: ${compactRemoteIdentifier(runnerId)}.`);
+  }
+  lines.push(`Prompty: ${config?.promptsLoaded === true ? 'OK' : 'brak'}. Alarm: ${config?.alarmActive === true ? 'ON' : 'OFF'}.`);
+  lines.push(`Lokalnie: ${localBusy ? 'busy' : 'idle'}, kolejka ${queueSize}.`);
+  if (activeRemoteJobId) {
+    lines.push(`Aktywny remote job: ${compactRemoteIdentifier(activeRemoteJobId)}.`);
+  }
+  if (backendState) {
+    lines.push(`Backend: ${backendState}${backendReason ? ` (${backendReason})` : ''}.`);
+    lines.push(`Zdalnie oczekuje: ${queuedRemoteCount}.`);
+  } else if (normalizedApiError) {
+    lines.push(`Backend: ${normalizedApiError}.`);
+  }
+  if (promptHash) {
+    lines.push(`Prompt hash: ${compactRemoteIdentifier(promptHash)}.`);
+  }
+  return lines.join('\n');
+}
+
+function applyRemoteRunnerUi(config = {}, runner = null, apiError = '') {
+  remoteRunnerConfigSnapshot = config && typeof config === 'object' ? config : {};
+  if (remoteRunnerNameInput && document.activeElement !== remoteRunnerNameInput) {
+    remoteRunnerNameInput.value = typeof remoteRunnerConfigSnapshot?.runnerName === 'string'
+      ? remoteRunnerConfigSnapshot.runnerName
+      : '';
+  }
+  if (remoteRunnerToggleBtn) {
+    remoteRunnerToggleBtn.dataset.enabled = remoteRunnerConfigSnapshot?.runnerEnabled === true ? 'true' : 'false';
+    remoteRunnerToggleBtn.textContent = remoteRunnerConfigSnapshot?.runnerEnabled === true
+      ? 'Wylacz runnera'
+      : 'Wlacz runnera';
+  }
+  if (remoteRunnerCycleBtn) {
+    remoteRunnerCycleBtn.disabled = remoteRunnerConfigSnapshot?.runnerEnabled !== true;
+  }
+  setRemoteRunnerStatus(formatRemoteRunnerPopupStatus(remoteRunnerConfigSnapshot, runner, apiError), false);
+}
+
+async function saveRemoteRunnerNameFromPopup() {
+  const runnerName = typeof remoteRunnerNameInput?.value === 'string'
+    ? remoteRunnerNameInput.value.trim()
+    : '';
+  const response = await sendRuntimeMessage({
+    type: 'SET_REMOTE_EXECUTION_CONFIG',
+    runnerName
+  });
+  if (response?.success === false) {
+    throw new Error(response.error || response.reason || 'remote_runner_config_failed');
+  }
+  return response;
+}
+
+async function refreshRemoteRunnerStatus() {
+  try {
+    const config = await sendRuntimeMessage({ type: 'GET_REMOTE_EXECUTION_CONFIG' });
+    if (config?.success === false) {
+      setRemoteRunnerStatus(`Runner: ${config.error || 'remote_runner_config_failed'}.`, true);
+      return;
+    }
+    let runner = null;
+    let apiError = '';
+    if (typeof config?.runnerId === 'string' && config.runnerId.trim()) {
+      const runnerResponse = await sendRuntimeMessage({
+        type: 'GET_REMOTE_RUNNER_STATUS',
+        runnerId: config.runnerId.trim()
+      });
+      if (runnerResponse?.success === false) {
+        apiError = runnerResponse.error || 'remote_runner_status_failed';
+      } else {
+        runner = runnerResponse?.runner && typeof runnerResponse.runner === 'object'
+          ? runnerResponse.runner
+          : null;
+      }
+    }
+    applyRemoteRunnerUi(config, runner, apiError);
+  } catch (error) {
+    setRemoteRunnerStatus(`Runner: ${error?.message || String(error)}.`, true);
+  }
 }
 
 function getAnalysisQueueUiMetrics(status) {
@@ -1937,6 +2062,89 @@ if (autoRestoreToggleBtn) {
   });
 }
 
+if (remoteRunnerNameInput) {
+  remoteRunnerNameInput.addEventListener('change', async () => {
+    try {
+      await saveRemoteRunnerNameFromPopup();
+      await refreshRemoteRunnerStatus();
+    } catch (error) {
+      setRemoteRunnerStatus(`Runner: ${error?.message || String(error)}.`, true);
+    }
+  });
+}
+
+if (remoteRunnerToggleBtn) {
+  remoteRunnerToggleBtn.addEventListener('click', async () => {
+    const nextEnabled = remoteRunnerToggleBtn.dataset.enabled !== 'true';
+    const originalLabel = remoteRunnerToggleBtn.textContent;
+    const originalCycleDisabled = remoteRunnerCycleBtn ? remoteRunnerCycleBtn.disabled : false;
+    remoteRunnerToggleBtn.disabled = true;
+    if (remoteRunnerCycleBtn) remoteRunnerCycleBtn.disabled = true;
+    remoteRunnerToggleBtn.textContent = nextEnabled ? 'Wlaczam runnera...' : 'Wylaczam runnera...';
+    setRemoteRunnerStatus(nextEnabled ? 'Runner: wlaczam i wysylam heartbeat...' : 'Runner: wylaczam...', false);
+
+    try {
+      const runnerName = typeof remoteRunnerNameInput?.value === 'string'
+        ? remoteRunnerNameInput.value.trim()
+        : '';
+      const response = await sendRuntimeMessage({
+        type: 'SET_REMOTE_EXECUTION_CONFIG',
+        runnerEnabled: nextEnabled,
+        runnerName
+      });
+      if (response?.success === false) {
+        throw new Error(response.error || response.reason || 'remote_runner_config_failed');
+      }
+      if (nextEnabled) {
+        const cycleResponse = await sendRuntimeMessage({
+          type: 'RUN_REMOTE_RUNNER_CYCLE',
+          origin: 'popup-remote-runner-toggle'
+        });
+        if (cycleResponse?.success === false) {
+          throw new Error(cycleResponse.error || cycleResponse.reason || 'remote_runner_cycle_failed');
+        }
+      }
+      await refreshRemoteRunnerStatus();
+    } catch (error) {
+      setRemoteRunnerStatus(`Runner: ${error?.message || String(error)}.`, true);
+      remoteRunnerToggleBtn.textContent = originalLabel || (nextEnabled ? 'Wlacz runnera' : 'Wylacz runnera');
+      if (remoteRunnerCycleBtn) {
+        remoteRunnerCycleBtn.disabled = originalCycleDisabled;
+      }
+    } finally {
+      remoteRunnerToggleBtn.disabled = false;
+    }
+  });
+}
+
+if (remoteRunnerCycleBtn) {
+  remoteRunnerCycleBtn.addEventListener('click', async () => {
+    const originalLabel = remoteRunnerCycleBtn.textContent;
+    remoteRunnerCycleBtn.disabled = true;
+    if (remoteRunnerToggleBtn) remoteRunnerToggleBtn.disabled = true;
+    remoteRunnerCycleBtn.textContent = 'Wymuszam...';
+    setRemoteRunnerStatus('Runner: wymuszam heartbeat i probe claimu...', false);
+
+    try {
+      await saveRemoteRunnerNameFromPopup();
+      const response = await sendRuntimeMessage({
+        type: 'RUN_REMOTE_RUNNER_CYCLE',
+        origin: 'popup-remote-runner-cycle'
+      });
+      if (response?.success === false) {
+        throw new Error(response.error || response.reason || 'remote_runner_cycle_failed');
+      }
+      await refreshRemoteRunnerStatus();
+    } catch (error) {
+      setRemoteRunnerStatus(`Runner: ${error?.message || String(error)}.`, true);
+    } finally {
+      remoteRunnerCycleBtn.textContent = originalLabel || 'Wymus cykl';
+      remoteRunnerCycleBtn.disabled = remoteRunnerConfigSnapshot?.runnerEnabled !== true;
+      if (remoteRunnerToggleBtn) remoteRunnerToggleBtn.disabled = false;
+    }
+  });
+}
+
 function isTextEntryElement(target) {
   if (!(target instanceof HTMLElement)) return false;
   const tag = (target.tagName || '').toUpperCase();
@@ -2131,9 +2339,11 @@ void Promise.all([
   refreshDispatchStatus(true),
   refreshAutoRestoreStatus(true),
   refreshAnalysisQueueStatus(),
+  refreshRemoteRunnerStatus(),
 ]);
 
 setInterval(() => {
   void refreshAutoRestoreStatus(false);
   void refreshAnalysisQueueStatus();
+  void refreshRemoteRunnerStatus();
 }, 15000);

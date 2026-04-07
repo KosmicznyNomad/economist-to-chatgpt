@@ -313,7 +313,8 @@ async function main() {
     runQueuedAnalysisJob: (job, reason) => {
       context.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
-    requestAnalysisQueueReconcile: () => {}
+    requestAnalysisQueueReconcile: () => {},
+    requestRemoteRunnerCycle: () => {}
   };
 
   vm.createContext(context);

@@ -6,6 +6,10 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createWatchlistApiUtils(root) {
   const PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
+  const ISKRA_RUNNERS_PATH = '/api/v1/iskra/runners';
+  const ISKRA_RUNNERS_HEARTBEAT_PATH = '/api/v1/iskra/runners/heartbeat';
+  const ISKRA_JOBS_PATH = '/api/v1/iskra/jobs';
+  const ISKRA_JOBS_CLAIM_PATH = '/api/v1/iskra/jobs/claim';
 
   function normalizeText(value, fallback = '') {
     const text = typeof value === 'string' ? value.trim() : '';
@@ -48,6 +52,49 @@
       parsed.search = '';
       parsed.hash = '';
       return parsed.toString();
+    } catch {
+      return '';
+    }
+  }
+
+  function normalizeApiPath(rawPath, fallback = '/') {
+    const value = normalizeText(rawPath, fallback);
+    if (!value) return fallback;
+    try {
+      if (/^https?:\/\//i.test(value)) {
+        return new URL(value).pathname || fallback;
+      }
+    } catch {
+      return fallback;
+    }
+    return value.startsWith('/') ? value : `/${value}`;
+  }
+
+  function appendQueryParams(endpoint, query = {}) {
+    const entries = query && typeof query === 'object' && !Array.isArray(query)
+      ? Object.entries(query)
+      : [];
+    entries.forEach(([key, rawValue]) => {
+      const normalizedKey = normalizeText(key);
+      if (!normalizedKey) return;
+      if (rawValue === null || rawValue === undefined || rawValue === '') return;
+      endpoint.searchParams.set(normalizedKey, String(rawValue));
+    });
+    return endpoint;
+  }
+
+  function buildWatchlistApiUrl(rawIntakeUrl, rawPath, query = null) {
+    const normalized = normalizeWatchlistIntakeUrl(rawIntakeUrl);
+    if (!normalized) return '';
+    try {
+      const endpoint = new URL(normalized);
+      endpoint.pathname = normalizeApiPath(rawPath, '/');
+      endpoint.search = '';
+      endpoint.hash = '';
+      if (query && typeof query === 'object' && !Array.isArray(query)) {
+        appendQueryParams(endpoint, query);
+      }
+      return endpoint.toString();
     } catch {
       return '';
     }
@@ -193,15 +240,203 @@
     };
   }
 
+  async function buildSignedJsonRequest(options = {}) {
+    const endpointUrl = buildWatchlistApiUrl(
+      options.intakeUrl || '',
+      options.path || options.apiPath || '/',
+      options.query && typeof options.query === 'object' ? options.query : null
+    );
+    if (!endpointUrl) {
+      throw new Error('invalid_watchlist_api_url');
+    }
+
+    const keyId = normalizeText(options.keyId);
+    const secret = normalizeText(options.secret);
+    if (!keyId || !secret) {
+      throw new Error('missing_watchlist_credentials');
+    }
+
+    const method = normalizeText(options.method, 'POST').toUpperCase();
+    const requestPayload = options.payload && typeof options.payload === 'object' && !Array.isArray(options.payload)
+      ? options.payload
+      : {};
+    const body = method === 'GET' ? '' : JSON.stringify(requestPayload);
+    const timestamp = String(
+      Number.isInteger(options.timestamp)
+        ? options.timestamp
+        : Math.floor(Date.now() / 1000)
+    );
+    const nonce = normalizeText(options.nonce) || createNonce();
+    const endpoint = new URL(endpointUrl);
+    const bodyHash = await sha256Hex(body);
+    const canonical = buildCanonicalString({
+      method,
+      path: endpoint.pathname || '/',
+      timestamp,
+      nonce,
+      bodyHash
+    });
+    const signature = await hmacSha256Hex(secret, canonical);
+    const headers = {
+      'X-Watchlist-Key-Id': keyId,
+      'X-Watchlist-Timestamp': timestamp,
+      'X-Watchlist-Nonce': nonce,
+      'X-Watchlist-Signature': signature
+    };
+    if (method !== 'GET') {
+      headers['Content-Type'] = 'application/json';
+    }
+
+    return {
+      url: endpoint.toString(),
+      method,
+      requestPayload,
+      body,
+      timestamp,
+      nonce,
+      bodyHash,
+      canonical,
+      headers
+    };
+  }
+
+  async function signedJsonFetch(options = {}) {
+    const signedRequest = await buildSignedJsonRequest(options);
+    const response = await fetch(signedRequest.url, {
+      method: signedRequest.method,
+      headers: signedRequest.headers,
+      ...(signedRequest.method === 'GET' ? {} : { body: signedRequest.body }),
+      ...(options.signal ? { signal: options.signal } : {})
+    });
+    return { response, signedRequest };
+  }
+
+  function buildIskraRunnerStatusPath(runnerId) {
+    const safeRunnerId = normalizeText(runnerId);
+    if (!safeRunnerId) {
+      throw new Error('runner_id_required');
+    }
+    return `${ISKRA_RUNNERS_PATH}/${encodeURIComponent(safeRunnerId)}/status`;
+  }
+
+  function buildIskraJobEventPath(jobId) {
+    const safeJobId = normalizeText(jobId);
+    if (!safeJobId) {
+      throw new Error('job_id_required');
+    }
+    return `${ISKRA_JOBS_PATH}/${encodeURIComponent(safeJobId)}/event`;
+  }
+
+  function buildIskraJobPath(jobId) {
+    const safeJobId = normalizeText(jobId);
+    if (!safeJobId) {
+      throw new Error('job_id_required');
+    }
+    return `${ISKRA_JOBS_PATH}/${encodeURIComponent(safeJobId)}`;
+  }
+
+  async function buildSignedRunnerHeartbeatRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'POST',
+      path: ISKRA_RUNNERS_HEARTBEAT_PATH,
+      payload: options.payload || {}
+    });
+  }
+
+  async function buildSignedGetRunnerStatusRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'GET',
+      path: buildIskraRunnerStatusPath(options.runnerId)
+    });
+  }
+
+  async function buildSignedListRemoteRunnersRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'GET',
+      path: ISKRA_RUNNERS_PATH,
+      query: {
+        limit: options.limit
+      }
+    });
+  }
+
+  async function buildSignedCreateRemoteJobRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'POST',
+      path: ISKRA_JOBS_PATH,
+      payload: options.payload || {}
+    });
+  }
+
+  async function buildSignedClaimRemoteJobRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'POST',
+      path: ISKRA_JOBS_CLAIM_PATH,
+      payload: options.payload || {}
+    });
+  }
+
+  async function buildSignedPostRemoteJobEventRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'POST',
+      path: buildIskraJobEventPath(options.jobId),
+      payload: options.payload || {}
+    });
+  }
+
+  async function buildSignedGetRemoteJobRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'GET',
+      path: buildIskraJobPath(options.jobId)
+    });
+  }
+
+  async function buildSignedListRemoteJobsRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'GET',
+      path: ISKRA_JOBS_PATH,
+      query: {
+        runnerId: options.runnerId,
+        status: options.status,
+        batchId: options.batchId,
+        limit: options.limit
+      }
+    });
+  }
+
   return {
     PROBLEM_LOGS_QUERY_PATH,
+    ISKRA_RUNNERS_PATH,
+    ISKRA_RUNNERS_HEARTBEAT_PATH,
+    ISKRA_JOBS_PATH,
+    ISKRA_JOBS_CLAIM_PATH,
     normalizeWatchlistIntakeUrl,
+    normalizeApiPath,
+    buildWatchlistApiUrl,
     buildProblemLogsQueryUrl,
     buildProblemLogsQueryPayload,
     buildCanonicalString,
     createNonce,
     sha256Hex,
     hmacSha256Hex,
-    buildSignedProblemLogsQueryRequest
+    buildSignedProblemLogsQueryRequest,
+    buildSignedJsonRequest,
+    signedJsonFetch,
+    buildSignedRunnerHeartbeatRequest,
+    buildSignedGetRunnerStatusRequest,
+    buildSignedListRemoteRunnersRequest,
+    buildSignedCreateRemoteJobRequest,
+    buildSignedClaimRemoteJobRequest,
+    buildSignedPostRemoteJobEventRequest,
+    buildSignedGetRemoteJobRequest,
+    buildSignedListRemoteJobsRequest
   };
 });

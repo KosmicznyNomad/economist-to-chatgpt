@@ -76,6 +76,7 @@ Required auth headers:
 - `unfinished-processes.html` / `unfinished-processes.js` - recovery helper for incomplete runs
 - `prompts-company.txt` - active company prompt chain
 - `COMPANY_CHAIN_STAGE_MAP.md` - readable stage map for the company chain
+- `REMOTE_RUNNER_MVP_TEST.md` - hands-on smoke test for the remote runner MVP
 
 ## Notes
 - `prompts-portfolio.txt` may still exist in the repo as a legacy artifact; it is not part of the current documented runtime flow.
@@ -84,4 +85,12 @@ Required auth headers:
 ## Quick validation
 1. `Get-ChildItem -Path . -Filter *.js -Recurse | ForEach-Object { node --check $_.FullName }`
 2. `Get-ChildItem -Filter test-*.js | Sort-Object Name | ForEach-Object { node $_.FullName }`
-3. `python -m pytest -q tests/test_intake_api.py tests/test_storage_backend.py`
+3. Manual smoke check in Chrome:
+   - load the unpacked extension
+   - open `popup.html` and verify start/resume controls render
+   - open `process-monitor.html` and verify queue/process state renders without errors
+   - open `responses.html` and verify saved-response rendering and Stage 12 view-model output
+
+## Backend note
+- The `backend/` folder currently only contains a local virtual environment scaffold (`.venv`) and does not ship repo-managed Python tests.
+- If intake/storage backend tests are added later, document their entrypoints here before referencing them in the validation checklist.

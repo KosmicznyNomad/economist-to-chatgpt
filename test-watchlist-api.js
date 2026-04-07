@@ -57,6 +57,23 @@ function testCreateNonceUsesSecureRandomShape() {
   assert.notStrictEqual(first, second);
 }
 
+function testBuildWatchlistApiUrlReplacesPathAndAddsQuery() {
+  const url = WatchlistApiUtils.buildWatchlistApiUrl(
+    'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    '/api/v1/iskra/jobs',
+    {
+      runnerId: 'ext-runner',
+      status: 'queued',
+      limit: 5
+    }
+  );
+
+  assert.strictEqual(
+    url,
+    'https://iskierka-watchlist.duckdns.org/api/v1/iskra/jobs?runnerId=ext-runner&status=queued&limit=5'
+  );
+}
+
 async function testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest() {
   const signed = await WatchlistApiUtils.buildSignedProblemLogsQueryRequest({
     intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
@@ -88,11 +105,90 @@ async function testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest()
   assert.ok(/^[a-f0-9]{64}$/i.test(signed.headers['X-Watchlist-Signature']));
 }
 
+async function testBuildSignedJsonRequestUsesPathOnlyInCanonicalForGet() {
+  const signed = await WatchlistApiUtils.buildSignedJsonRequest({
+    intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    path: '/api/v1/iskra/jobs',
+    method: 'GET',
+    keyId: 'extension-primary',
+    secret: 'top-secret',
+    query: {
+      runnerId: 'ext-runner',
+      status: 'queued',
+      limit: 5
+    },
+    timestamp: 1_710_000_000,
+    nonce: 'nonce-fixed'
+  });
+
+  assert.strictEqual(
+    signed.url,
+    'https://iskierka-watchlist.duckdns.org/api/v1/iskra/jobs?runnerId=ext-runner&status=queued&limit=5'
+  );
+  assert.strictEqual(signed.method, 'GET');
+  assert.strictEqual(signed.body, '');
+  assert.strictEqual(
+    signed.canonical,
+    [
+      'GET',
+      '/api/v1/iskra/jobs',
+      '1710000000',
+      'nonce-fixed',
+      signed.bodyHash
+    ].join('\n')
+  );
+  assert.ok(!('Content-Type' in signed.headers));
+}
+
+async function testBuildSignedCreateAndListRemoteHelpers() {
+  const createSigned = await WatchlistApiUtils.buildSignedCreateRemoteJobRequest({
+    intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    keyId: 'extension-primary',
+    secret: 'top-secret',
+    payload: {
+      jobId: 'rjob-1',
+      runId: 'run-1'
+    },
+    timestamp: 1_710_000_000,
+    nonce: 'nonce-create'
+  });
+  const listSigned = await WatchlistApiUtils.buildSignedListRemoteJobsRequest({
+    intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    keyId: 'extension-primary',
+    secret: 'top-secret',
+    runnerId: 'ext-runner',
+    status: 'started',
+    batchId: 'rbatch-1',
+    limit: 10,
+    timestamp: 1_710_000_000,
+    nonce: 'nonce-list'
+  });
+
+  assert.strictEqual(
+    createSigned.url,
+    'https://iskierka-watchlist.duckdns.org/api/v1/iskra/jobs'
+  );
+  assert.strictEqual(createSigned.method, 'POST');
+  assert.deepStrictEqual(createSigned.requestPayload, {
+    jobId: 'rjob-1',
+    runId: 'run-1'
+  });
+  assert.strictEqual(
+    listSigned.url,
+    'https://iskierka-watchlist.duckdns.org/api/v1/iskra/jobs?runnerId=ext-runner&status=started&batchId=rbatch-1&limit=10'
+  );
+  assert.strictEqual(listSigned.method, 'GET');
+  assert.ok(/^[a-f0-9]{64}$/i.test(listSigned.headers['X-Watchlist-Signature']));
+}
+
 async function main() {
   testBuildProblemLogsQueryUrlUsesCanonicalPostEndpoint();
   testBuildProblemLogsQueryPayloadAcceptsCamelAndSnakeCase();
   testCreateNonceUsesSecureRandomShape();
+  testBuildWatchlistApiUrlReplacesPathAndAddsQuery();
   await testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest();
+  await testBuildSignedJsonRequestUsesPathOnlyInCanonicalForGet();
+  await testBuildSignedCreateAndListRemoteHelpers();
   console.log('test-watchlist-api.js: ok');
 }
 

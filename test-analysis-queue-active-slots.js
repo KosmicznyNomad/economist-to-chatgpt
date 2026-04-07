@@ -544,7 +544,8 @@ function buildScenarioContext() {
     runQueuedAnalysisJob: (job, reason) => {
       scenarioContext.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
-    requestAnalysisQueueReconcile: () => {}
+    requestAnalysisQueueReconcile: () => {},
+    requestRemoteRunnerCycle: () => {}
   };
 
   const functionNames = [
