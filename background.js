@@ -2757,6 +2757,45 @@ async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, option
     return { success: false, error: 'empty_prepared_batch', submittedCount: 0 };
   }
 
+  const statusResult = await getRemoteRunnerStatusViaApi(safeRunnerId, {
+    timeoutMs: options?.timeoutMs,
+    retryCount: options?.retryCount
+  });
+  if (!statusResult?.success) {
+    return {
+      success: false,
+      error: statusResult?.error || 'remote_runner_status_failed',
+      runnerId: safeRunnerId,
+      submittedCount: 0,
+      failedCount: items.length,
+      skippedCount: Array.isArray(batch?.skipped) ? batch.skipped.length : 0,
+      totalTabs: items.length + (Array.isArray(batch?.skipped) ? batch.skipped.length : 0),
+      failures: [],
+      skipped: Array.isArray(batch?.skipped) ? batch.skipped : [],
+      jobs: []
+    };
+  }
+
+  const runnerStatus = statusResult?.payload?.runner && typeof statusResult.payload.runner === 'object'
+    ? statusResult.payload.runner
+    : null;
+  const runnerState = typeof runnerStatus?.state === 'string' ? runnerStatus.state.trim().toLowerCase() : '';
+  if (!runnerStatus || runnerStatus.queueable !== true || runnerState !== 'ready') {
+    return {
+      success: false,
+      error: runnerState ? `runner_${runnerState}` : 'runner_blocked',
+      runnerId: safeRunnerId,
+      runnerStatus,
+      submittedCount: 0,
+      failedCount: items.length,
+      skippedCount: Array.isArray(batch?.skipped) ? batch.skipped.length : 0,
+      totalTabs: items.length + (Array.isArray(batch?.skipped) ? batch.skipped.length : 0),
+      failures: [],
+      skipped: Array.isArray(batch?.skipped) ? batch.skipped : [],
+      jobs: []
+    };
+  }
+
   const results = [];
   const failures = [];
   for (const item of items) {
@@ -8152,8 +8191,14 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         });
         let reservedSlots = occupiedSlots.length;
         sortAnalysisQueueWaitingJobs(state.waitingJobs);
+        let manualPdfReservedSlots = state.activeJobs.filter((job) => job?.sourceKind === 'manual_pdf').length;
         while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
-          const waitingJob = state.waitingJobs.shift();
+          const waitingIndex = state.waitingJobs.findIndex((job) => {
+            if (job?.sourceKind !== 'manual_pdf') return true;
+            return manualPdfReservedSlots < MANUAL_PDF_QUEUE_MAX_CONCURRENCY;
+          });
+          if (waitingIndex < 0) break;
+          const [waitingJob] = state.waitingJobs.splice(waitingIndex, 1);
           const activatedJob = sanitizeAnalysisQueueJob({
             ...waitingJob,
             startedAt: now,
@@ -8164,6 +8209,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           state.activeJobs.push(activatedJob);
           startJobs.push(activatedJob);
           reservedSlots += 1;
+          if (activatedJob.sourceKind === 'manual_pdf') {
+            manualPdfReservedSlots += 1;
+          }
         }
 
         await persistAnalysisQueueState(state);
@@ -24309,9 +24357,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       finalPhase = 'response_wait';
       finalError = result?.error || '';
       if (finalError === 'pdf_attach_failed') {
+        const pdfAttachError = typeof injectMetrics?.pdfAttachError === 'string'
+          ? injectMetrics.pdfAttachError.trim()
+          : '';
         finalStatusCode = 'chat.pdf_attach_failed';
-        finalStatusText = 'pdf_attach_failed';
+        finalStatusText = pdfAttachError
+          ? `pdf_attach_failed (${pdfAttachError})`
+          : 'pdf_attach_failed';
         finalReason = 'pdf_attach_failed';
+        finalError = pdfAttachError || 'pdf_attach_failed';
       } else {
         finalStatusCode = 'process.inject_failed';
         finalStatusText = 'Blad procesu';
@@ -25055,9 +25109,15 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         finalPhase = 'response_wait';
         finalError = result?.error || '';
         if (finalError === 'pdf_attach_failed') {
+          const pdfAttachError = typeof injectMetrics?.pdfAttachError === 'string'
+            ? injectMetrics.pdfAttachError.trim()
+            : '';
           finalStatusCode = 'chat.pdf_attach_failed';
-          finalStatusText = 'pdf_attach_failed';
+          finalStatusText = pdfAttachError
+            ? `pdf_attach_failed (${pdfAttachError})`
+            : 'pdf_attach_failed';
           finalReason = 'pdf_attach_failed';
+          finalError = pdfAttachError || 'pdf_attach_failed';
         } else {
           finalStatusCode = 'process.inject_failed';
           finalStatusText = 'Blad procesu';

@@ -474,6 +474,36 @@ async function testDuplicateActiveJobsReleaseSupersededContext() {
   assert.strictEqual(releasedProcess.status, 'stopped', 'Superseded duplicate should be marked as stopped.');
 }
 
+async function testManualPdfJobsRespectDedicatedConcurrencyCap() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [
+      { jobId: 'aq-pdf-1', runId: 'run-pdf-1', sequence: 1, createdAt: now, sourceKind: 'manual_pdf' },
+      { jobId: 'aq-pdf-2', runId: 'run-pdf-2', sequence: 2, createdAt: now, sourceKind: 'manual_pdf' },
+      { jobId: 'aq-pdf-3', runId: 'run-pdf-3', sequence: 3, createdAt: now, sourceKind: 'manual_pdf' },
+      { jobId: 'aq-pdf-4', runId: 'run-pdf-4', sequence: 4, createdAt: now, sourceKind: 'manual_pdf' },
+      { jobId: 'aq-web-1', runId: 'run-web-1', sequence: 5, createdAt: now, sourceKind: 'article' }
+    ],
+    activeJobs: [],
+    maxConcurrent: 7,
+    lastSequence: 5
+  };
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('manual_pdf_cap');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    ['run-pdf-1', 'run-pdf-2', 'run-pdf-3', 'run-web-1'],
+    'Queue should cap manual PDF jobs at 3 while still using remaining slots for other sources.'
+  );
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-pdf-4'],
+    'Fourth manual PDF job should stay queued until a dedicated PDF slot is free.'
+  );
+}
+
 function buildScenarioContext() {
   const scenarioContext = {
     console,
@@ -484,6 +514,7 @@ function buildScenarioContext() {
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
+    MANUAL_PDF_QUEUE_MAX_CONCURRENCY: 3,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
@@ -597,6 +628,7 @@ async function main() {
   await testCompletedPendingDispatchKeepsSlotReserved();
   await testLocalSaveFailureClosesCompletedProcessWindow();
   await testDuplicateActiveJobsReleaseSupersededContext();
+  await testManualPdfJobsRespectDedicatedConcurrencyCap();
   console.log('analysis queue active slot test: ok');
 }
 
