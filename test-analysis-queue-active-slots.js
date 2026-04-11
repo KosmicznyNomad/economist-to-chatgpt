@@ -207,12 +207,12 @@ async function testCountsAllLiveProcesses() {
   context = buildScenarioContext();
   const now = Date.now();
   context.analysisQueueState = {
-    waitingJobs: [{ jobId: 'aq-wait-1', runId: 'run-wait-1', sequence: 8, createdAt: now }],
+    waitingJobs: [{ jobId: 'aq-wait-1', runId: 'run-wait-1', sequence: 9, createdAt: now }],
     activeJobs: [],
-    maxConcurrent: 7,
-    lastSequence: 8
+    maxConcurrent: 8,
+    lastSequence: 9
   };
-  for (let index = 1; index <= 7; index += 1) {
+  for (let index = 1; index <= 8; index += 1) {
     const runId = `run-live-${index}`;
     context.processRegistry.set(runId, {
       id: runId,
@@ -228,11 +228,11 @@ async function testCountsAllLiveProcesses() {
   }
 
   const status = await context.getAnalysisQueueStatusSnapshot();
-  assert.strictEqual(status.activeSlots, 7, 'Queue status should count all live process windows.');
+  assert.strictEqual(status.activeSlots, 8, 'Queue status should count all live process windows.');
 
   context.startedJobs = [];
   await context.reconcileAnalysisQueueState('live_slots_full');
-  assert.strictEqual(context.startedJobs.length, 0, 'Queue must not start when 7 live processes already occupy all slots.');
+  assert.strictEqual(context.startedJobs.length, 0, 'Queue must not start when 8 live processes already occupy all visible slots.');
   assert.strictEqual(context.analysisQueueState.waitingJobs.length, 1, 'Waiting job should stay queued when slots are full.');
 }
 
@@ -483,7 +483,7 @@ function buildScenarioContext() {
     Set,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 8,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
@@ -502,7 +502,7 @@ function buildScenarioContext() {
     analysisQueueState: {
       waitingJobs: [],
       activeJobs: [],
-      maxConcurrent: 7,
+      maxConcurrent: 8,
       lastSequence: 0
     },
     analysisQueueVersion: 0,
@@ -544,7 +544,8 @@ function buildScenarioContext() {
     runQueuedAnalysisJob: (job, reason) => {
       scenarioContext.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
-    requestAnalysisQueueReconcile: () => {}
+    requestAnalysisQueueReconcile: () => {},
+    requestRemoteRunnerCycle: () => {}
   };
 
   const functionNames = [
@@ -552,6 +553,7 @@ function buildScenarioContext() {
     'compareAnalysisQueueJobs',
     'sortAnalysisQueueWaitingJobs',
     'normalizeProcessLifecycleStatus',
+    'normalizeProcessPhase',
     'normalizeProcessStatus',
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',

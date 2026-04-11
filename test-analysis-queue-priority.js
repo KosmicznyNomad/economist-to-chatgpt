@@ -243,7 +243,7 @@ function buildPriorityContext() {
     ProcessContractUtils,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 8,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
@@ -262,7 +262,7 @@ function buildPriorityContext() {
     analysisQueueState: {
       waitingJobs: [],
       activeJobs: [],
-      maxConcurrent: 7,
+      maxConcurrent: 8,
       lastSequence: 0
     },
     analysisQueueVersion: 0,
@@ -271,6 +271,14 @@ function buildPriorityContext() {
     upserts: [],
     closedRuns: [],
     sanitizeManualPdfAttachmentContext: () => null,
+    sanitizePromptChainSnapshot: (rawPromptChain) => (
+      Array.isArray(rawPromptChain)
+        ? rawPromptChain
+          .map((item) => (typeof item === 'string' ? item.trim() : ''))
+          .filter(Boolean)
+        : []
+    ),
+    sanitizeRemoteAnalysisQueueJobMetadata: () => null,
     ensureAnalysisQueueReady: async () => context.analysisQueueState,
     ensureProcessRegistryReady: async () => context.processRegistry,
     withAnalysisQueueMutationLock: async (task) => task(),
@@ -297,6 +305,7 @@ function buildPriorityContext() {
     },
     reportAnalysisQueueEvent: async () => true,
     requestAnalysisQueueReconcile: () => {},
+    requestRemoteRunnerCycle: () => {},
     buildStaleQueueReleasePatch: async () => null,
     runQueuedAnalysisJob: (job, reason) => {
       context.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
@@ -311,6 +320,7 @@ function buildPriorityContext() {
     'sortAnalysisQueueWaitingJobs',
     'sanitizeAnalysisQueueState',
     'normalizeProcessLifecycleStatus',
+    'normalizeProcessPhase',
     'normalizeProcessStatus',
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',

@@ -146,13 +146,41 @@ function formatTabWindow(entry) {
   return `T:${tab} W:${windowId}`;
 }
 
+const REASON_LABELS = {
+  ok_started: 'start procesu',
+  ok_progress: 'realny postep',
+  ok_completed: 'zakonczono',
+  state_progress: 'nadal w toku',
+  state_running: 'nadal aktywny',
+  heartbeat_stale: 'brak realnego postepu',
+  stuck_same_prompt: 'utknal na tym samym prompcie - wymaga wznowienia',
+  manual_resume: 'wymaga wznowienia',
+  continue_button: 'wymaga Continue'
+};
+
+function humanizeReasonToken(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) return '';
+  return normalized.replace(/[_-]+/g, ' ');
+}
+
+function getReasonLabel(reason) {
+  const normalized = typeof reason === 'string' ? reason.trim().toLowerCase() : '';
+  if (!normalized) return '';
+  return REASON_LABELS[normalized] || humanizeReasonToken(normalized);
+}
+
 function formatReason(entry) {
   if (!entry || typeof entry !== 'object') return '-';
   const reason = typeof entry.reason === 'string' ? entry.reason.trim() : '';
+  const reasonLabel = getReasonLabel(reason);
+  if (entry?.heartbeat === true) {
+    return reasonLabel ? `pulse | ${reasonLabel}` : 'pulse';
+  }
+  if (reasonLabel) return reasonLabel;
   const category = typeof entry.category === 'string' ? entry.category.trim() : '';
-  if (category && reason) return `${category} | ${reason}`;
-  if (category) return category;
   if (reason) return reason;
+  if (category) return category;
   return '-';
 }
 

@@ -354,9 +354,50 @@ async function testQuarantinedVerifyStateIsTerminal() {
   );
 }
 
+async function testMaterializationUnavailableVerifyStateStaysPending() {
+  const context = createBaseContext(async () => ({
+    ok: true,
+    status: 200,
+    headers: {
+      get: () => ''
+    },
+    json: async () => ({
+      success: false,
+      pending: false,
+      state: 'materialization_unavailable',
+      reason: 'materialization_unavailable',
+      event_id: 26994,
+      materialized_row_count: 0,
+      expected_materialized_row_count: 1
+    })
+  }));
+  loadVerifyHelpers(context);
+
+  const result = await context.verifyWatchlistDispatchDelivery({
+    deliveryAcceptedAt: Date.now(),
+    deliveryEventId: '26994',
+    deliveryIntakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    payload: {
+      responseId: 'resp-3',
+      runId: 'run-3'
+    }
+  }, 'run-3/resp-3');
+
+  assert.strictEqual(result.success, false, 'Unavailable materialization should not be treated as verified.');
+  assert.strictEqual(result.pending, true, 'Unavailable materialization should remain pending for retry.');
+  assert.strictEqual(result.state, 'materialization_unavailable');
+  assert.strictEqual(result.stage, 'verify_state');
+  assert.strictEqual(
+    context.logs.some((entry) => entry.code === 'verify_attempt_pending' && entry.details?.state === 'materialization_unavailable'),
+    true,
+    'Unavailable materialization should emit pending verification diagnostics.'
+  );
+}
+
 async function main() {
   await testMissingVerifyEndpointFallsBackToAcceptedDelivery();
   await testQuarantinedVerifyStateIsTerminal();
+  await testMaterializationUnavailableVerifyStateStaysPending();
 
   console.log('watchlist verify fallback test: ok');
 }

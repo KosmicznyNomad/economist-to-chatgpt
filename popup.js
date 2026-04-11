@@ -202,7 +202,7 @@ function setAutoRestoreStatus(text, isError = false) {
 }
 
 function getAnalysisQueueUiMetrics(status) {
-  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 7;
+  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 8;
   const reservedSlots = Number.isInteger(status?.reservedSlots)
     ? Math.max(0, status.reservedSlots)
     : (Number.isInteger(status?.activeSlots) ? Math.max(0, status.activeSlots) : 0);
@@ -414,6 +414,10 @@ function safePreview(value, fallback = 'n/a') {
   return text.length > 48 ? `${text.slice(0, 45)}...` : text;
 }
 
+function formatDispatchConfigSources(status) {
+  return ` Zrodla: URL=${tokenSourceLabel(status?.intakeUrlSource)}, Key ID=${tokenSourceLabel(status?.keyIdSource)}, Token=${tokenSourceLabel(status?.tokenSource)}.`;
+}
+
 const DISPATCH_REASON_LABELS = {
   dispatch_disabled: 'dispatch wylaczony',
   invalid_payload: 'niepoprawny payload',
@@ -549,11 +553,11 @@ function formatDispatchStatus(status) {
   if (!status || status.success === false) {
     const reason = getDispatchReasonLabel(status?.reason || '');
     return reason
-      ? `Intake status: blad odczytu (${reason}).`
-      : 'Intake status: blad odczytu.';
+      ? `Intake status: blad odczytu (${reason}).${formatDispatchConfigSources(status)}`
+      : `Intake status: blad odczytu.${formatDispatchConfigSources(status)}`;
   }
   if (!status.enabled) {
-    return 'Intake status: wylaczony.';
+    return `Intake status: wylaczony.${formatDispatchConfigSources(status)}`;
   }
 
   const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
@@ -580,19 +584,20 @@ function formatDispatchStatus(status) {
   const flushInProgressText = status.flushInProgress
     ? ` Flush aktywny: tak${flushInProgressAgeMs > 0 ? `, wiek=${Math.round(flushInProgressAgeMs / 1000)}s` : ''}${flushInProgressReason ? `, reason=${flushInProgressReason}` : ''}${flushInProgressSinceText ? `, start=${flushInProgressSinceText}` : ''}.`
     : '';
+  const sourcesText = formatDispatchConfigSources(status);
   const base = `Kolejka: ${queueSize}. Ostatni flush: ${flushText}.${flushInProgressText}${retryText}${errorText}${latestProcessLogText}${supportIdText}`;
 
   if (status.configured) {
     if (status.tokenSource === 'inline_config') {
-      return `Intake status: skonfigurowany centralnie (inline config, bez lokalnego klucza). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}. ${base}`;
+      return `Intake status: skonfigurowany centralnie (inline config, bez lokalnego klucza). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}.${sourcesText} ${base}`;
     }
-    return `Intake status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}. ${base}`;
+    return `Intake status: skonfigurowany (${tokenSourceLabel(status.tokenSource)}). URL: ${safePreview(status.intakeUrl)}. Key ID: ${safePreview(status.keyId)}.${sourcesText} ${base}`;
   }
   const reasonLabel = getDispatchReasonLabel(status.reason || '');
   if (reasonLabel) {
-    return `Intake status: ${reasonLabel}. ${base}`;
+    return `Intake status: ${reasonLabel}.${sourcesText} ${base}`;
   }
-  return `Intake status: ${status.reason || 'nieznany'}. ${base}`;
+  return `Intake status: ${status.reason || 'nieznany'}.${sourcesText} ${base}`;
 }
 
 function formatDispatchFlushResult(flushResult) {

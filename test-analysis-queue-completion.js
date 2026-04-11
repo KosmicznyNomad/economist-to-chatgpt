@@ -313,7 +313,8 @@ async function main() {
     runQueuedAnalysisJob: (job, reason) => {
       context.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
-    requestAnalysisQueueReconcile: () => {}
+    requestAnalysisQueueReconcile: () => {},
+    requestRemoteRunnerCycle: () => {}
   };
 
   vm.createContext(context);
@@ -322,6 +323,7 @@ async function main() {
     'compareAnalysisQueueJobs',
     'sortAnalysisQueueWaitingJobs',
     'normalizeProcessLifecycleStatus',
+    'normalizeProcessPhase',
     'normalizeProcessStatus',
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
@@ -373,6 +375,56 @@ async function main() {
   );
   assert.strictEqual(keepDecision.action, 'keep');
   assert.strictEqual(keepDecision.queueState, 'awaiting_final_stage');
+
+  assert.strictEqual(
+    context.hasProcessReachedFinalStage({
+      status: 'completed',
+      phase: 'verify_remote',
+      statusCode: 'dispatch.confirmed',
+      currentPrompt: 4,
+      totalPrompts: 5,
+      stageIndex: 3,
+      completedResponseCapturedAt: 1234,
+      completedResponseSaveTrace: 'copy/run-1',
+      persistenceStatus: {
+        saveOk: true,
+        dispatch: {
+          state: 'dispatch_confirmed',
+          sent: 1,
+          failed: 0,
+          pending: 0
+        }
+      }
+    }),
+    true,
+    'Completed process with explicit final persistence evidence should be recognized as finished even if prompt counters lag.'
+  );
+
+  const releaseDecisionFromPersistenceFallback = context.resolveAnalysisQueueReleaseDecision(
+    { jobId: 'aq-1', runId: 'run-1' },
+    {
+      id: 'run-1',
+      status: 'completed',
+      phase: 'verify_remote',
+      statusCode: 'dispatch.confirmed',
+      currentPrompt: 4,
+      totalPrompts: 5,
+      stageIndex: 3,
+      completedResponseCapturedAt: 1234,
+      completedResponseSaveTrace: 'copy/run-1',
+      persistenceStatus: {
+        saveOk: true,
+        dispatch: {
+          state: 'dispatch_confirmed',
+          sent: 1,
+          failed: 0,
+          pending: 0
+        }
+      }
+    }
+  );
+  assert.strictEqual(releaseDecisionFromPersistenceFallback.action, 'release');
+  assert.strictEqual(releaseDecisionFromPersistenceFallback.reason, 'dispatch_confirmed');
 
   const releaseDecision = context.resolveAnalysisQueueReleaseDecision(
     { jobId: 'aq-1', runId: 'run-1' },

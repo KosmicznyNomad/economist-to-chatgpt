@@ -145,7 +145,13 @@ const reasonLabels = {
   auto_recovery_textarea_not_found: 'Auto-resend: brak pola wpisywania',
   auto_recovery_provider_invalid_response: 'Auto-resend: niepoprawna odpowiedz providera',
   data_gap_unresolved: 'DATA_GAPS nierozwiazany',
-  data_gap_rewind_applied: 'DATA_GAPS rewind zastosowany'
+  data_gap_rewind_applied: 'DATA_GAPS rewind zastosowany',
+  continue_button: 'Wymaga Continue',
+  manual_resume: 'Wymaga wznowienia',
+  stuck_same_prompt: 'Brak realnego postepu - wznow recznie',
+  heartbeat_stale: 'Brak realnego postepu (heartbeat)',
+  state_progress: 'Pulse bez nowego postepu',
+  state_running: 'Pulse: nadal aktywny'
 };
 const persistenceErrorLabels = {
   runtime_unavailable: 'most runtime niedostepny',
@@ -268,7 +274,10 @@ function getProcessContract(process) {
   const lifecycleStatus = typeof process?.lifecycleStatus === 'string'
     ? process.lifecycleStatus
     : (typeof process?.status === 'string' ? process.status : 'running');
-  const actionRequired = process?.needsAction ? 'manual_resume' : 'none';
+  const rawActionRequired = typeof process?.actionRequired === 'string'
+    ? process.actionRequired.trim().toLowerCase()
+    : '';
+  const actionRequired = rawActionRequired || (process?.needsAction ? 'manual_resume' : 'none');
   return {
     lifecycleStatus,
     phase: typeof process?.phase === 'string' ? process.phase : '',
@@ -1057,7 +1066,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const queueStartingSlots = Number.isInteger(queue?.startingSlots)
     ? queue.startingSlots
     : Math.max(0, queueSlots - queueLiveSlots);
-  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 7;
+  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 8;
   const queueSize = Number.isInteger(queue?.queueSize) ? queue.queueSize : 0;
 
   if (processSummary) {
@@ -1843,7 +1852,9 @@ function updateProcessCard(entry, process, isSelected) {
   if (needsAction) {
     refs.hint.textContent = actionRequired === 'continue_button'
       ? 'Kliknij Continue w ChatGPT albo wybierz akcje.'
-      : 'Wybierz akcje lub otworz okno ChatGPT.';
+      : (normalizeCodeToken(process?.reason) === 'stuck_same_prompt'
+        ? 'Proces utknal bez realnego postepu. Otworz okno ChatGPT i wznow albo pomin.'
+        : 'Wybierz akcje lub otworz okno ChatGPT.')
     refs.hint.style.display = 'block';
   } else {
     refs.hint.textContent = '';

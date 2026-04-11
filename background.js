@@ -33,7 +33,7 @@ const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
-const ANALYSIS_QUEUE_MAX_CONCURRENT = 7;
+const ANALYSIS_QUEUE_MAX_CONCURRENT = 8;
 const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
 const ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS = 45 * 1000;
 const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
@@ -152,7 +152,9 @@ const PROCESS_MONITOR_HEARTBEAT = {
   touchIntervalMs: PROCESS_STREAM_HEARTBEAT_MS,
   // Treat runs as stale when no progress update arrives within TTL.
   staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
-  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2
+  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2,
+  severeRemoteDispatchMs: 15 * 60 * 1000,
+  stuckSamePromptMs: 15 * 60 * 1000
 };
 const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   initialDelayMs: 2000,
@@ -2854,6 +2856,7 @@ async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowT
   const stageName = typeof process.stageName === 'string' ? process.stageName : '';
   const statusText = `origin=${origin || 'heartbeat'} stale_for_s=${staleSeconds}`;
   const signatureBucket = Math.floor(nowTs / PROCESS_MONITOR_HEARTBEAT.staleWarnCooldownMs);
+  const forceRemoteDispatch = shouldForceRemoteHeartbeatStaleDispatch(process, staleMs);
 
   const entry = await appendProblemLog({
     timestamp: nowTs,
@@ -2866,7 +2869,7 @@ async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowT
     status,
     reason: 'heartbeat_stale',
     statusText,
-    message: `No process progress update for ${staleSeconds}s`,
+    message: `No real process progress update for ${staleSeconds}s`,
     currentPrompt: safeCurrentPrompt,
     totalPrompts: safeTotalPrompts,
     stageIndex: safeStageIndex,
@@ -2874,6 +2877,8 @@ async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowT
     tabId: Number.isInteger(process.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process.windowId) ? process.windowId : null,
     chatUrl: typeof process.chatUrl === 'string' ? process.chatUrl : '',
+    heartbeat: true,
+    forceRemoteDispatch,
     signature: [
       'process-monitor-heartbeat-stale',
       runId,
@@ -2886,6 +2891,75 @@ async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowT
     ].join('|')
   });
   return !!entry;
+}
+
+function hasProcessHeartbeatRemoteEscalationSignal(process) {
+  if (!process || typeof process !== 'object') return false;
+  const actionRequired = normalizeProcessActionRequired(
+    process.actionRequired || '',
+    deriveProcessActionRequired(process)
+  );
+  if (process.needsAction === true || actionRequired !== 'none') return true;
+  const markerText = [
+    typeof process.reason === 'string' ? process.reason : '',
+    typeof process.statusCode === 'string' ? process.statusCode : '',
+    typeof process.statusText === 'string' ? process.statusText : '',
+    typeof process.error === 'string' ? process.error : ''
+  ].join(' ').toLowerCase();
+  return /\b(invalid_response|continue_button|execute_script_failed|tab_closed_[a-z_]+)\b/.test(markerText)
+    || markerText.includes('no tab with id');
+}
+
+function shouldForceRemoteHeartbeatStaleDispatch(process, staleMs) {
+  const severeThresholdMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.severeRemoteDispatchMs)
+    && PROCESS_MONITOR_HEARTBEAT.severeRemoteDispatchMs > 0
+    ? PROCESS_MONITOR_HEARTBEAT.severeRemoteDispatchMs
+    : (15 * 60 * 1000);
+  if (Number.isFinite(staleMs) && staleMs >= severeThresholdMs) return true;
+  return hasProcessHeartbeatRemoteEscalationSignal(process);
+}
+
+function shouldEscalateQueueProcessToManualResume(process, activity, progressAgeMs) {
+  if (!process || typeof process !== 'object' || process.queueManaged !== true) return false;
+  if (!activity || activity.active !== true || activity.live !== true) return false;
+  const status = normalizeProcessStatus(process.status || process.lifecycleStatus || '');
+  if (status !== 'running' && status !== 'starting' && status !== 'started') return false;
+  const phase = normalizeProcessPhase(process.phase || '', '');
+  if (phase === 'save_local' || phase === 'dispatch_remote' || phase === 'verify_remote') return false;
+  const actionRequired = normalizeProcessActionRequired(
+    process.actionRequired || '',
+    deriveProcessActionRequired(process)
+  );
+  if (process.needsAction === true || actionRequired !== 'none') return false;
+  const thresholdMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.stuckSamePromptMs)
+    && PROCESS_MONITOR_HEARTBEAT.stuckSamePromptMs > 0
+    ? PROCESS_MONITOR_HEARTBEAT.stuckSamePromptMs
+    : (15 * 60 * 1000);
+  return Number.isFinite(progressAgeMs) && progressAgeMs >= thresholdMs;
+}
+
+function buildStuckSamePromptPatch(process, nowTs, progressAgeMs) {
+  const status = normalizeProcessStatus(process?.status || process?.lifecycleStatus || 'running');
+  const lifecycleStatus = status === 'starting' || status === 'started'
+    ? 'running'
+    : (status || 'running');
+  const staleMinutes = Math.max(1, Math.round(Math.max(0, progressAgeMs) / 60000));
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null;
+  const promptText = (currentPrompt !== null || totalPrompts !== null)
+    ? ` | P${currentPrompt !== null ? currentPrompt : '?'}/${totalPrompts !== null ? totalPrompts : '?'}`
+    : '';
+  return {
+    lifecycleStatus,
+    status: lifecycleStatus,
+    needsAction: true,
+    actionRequired: 'manual_resume',
+    reason: 'stuck_same_prompt',
+    statusCode: 'process.stuck_same_prompt',
+    statusText: `Brak realnego postepu przez ok. ${staleMinutes} min${promptText}. Otworz ChatGPT i wznow proces.`,
+    timestamp: nowTs,
+    lastActivityAt: nowTs
+  };
 }
 
 async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
@@ -2906,18 +2980,49 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
     let staleDetected = 0;
     let staleLogged = 0;
     let touched = 0;
+    let released = 0;
+    let escalated = 0;
     let fresh = 0;
 
     for (const process of active) {
       const runId = typeof process?.id === 'string' ? process.id : '';
       if (!runId) continue;
-
       const lastProgressAt = getProcessLastProgressTimestamp(process);
       const progressAgeMs = lastProgressAt > 0
         ? Math.max(0, nowTs - lastProgressAt)
         : Number.MAX_SAFE_INTEGER;
       const processTs = Number.isInteger(process.timestamp) ? process.timestamp : 0;
       const recordAgeMs = processTs > 0 ? Math.max(0, nowTs - processTs) : Number.MAX_SAFE_INTEGER;
+
+      if (process.queueManaged === true) {
+        const activity = await getAnalysisQueueProcessActivityState(process, nowTs);
+        if (activity?.active !== true && activity?.reason === 'local_context_missing') {
+          const stalePatch = await buildStaleQueueReleasePatch(process, nowTs);
+          if (stalePatch) {
+            const releasedRecord = await upsertProcess(runId, {
+              queueManaged: true,
+              queueState: 'slot_released',
+              slotReserved: false,
+              slotReleasedAt: nowTs,
+              slotReleaseReason: 'local_context_missing',
+              ...(typeof process?.queueJobId === 'string' && process.queueJobId.trim()
+                ? { queueJobId: process.queueJobId.trim() }
+                : {}),
+              ...stalePatch
+            });
+            if (releasedRecord) released += 1;
+          }
+          processStaleWarnLastEmitTsByRunId.delete(runId);
+          continue;
+        }
+        if (shouldEscalateQueueProcessToManualResume(process, activity, progressAgeMs)) {
+          const stuckPatch = buildStuckSamePromptPatch(process, nowTs, progressAgeMs);
+          const escalatedRecord = await upsertProcess(runId, stuckPatch);
+          if (escalatedRecord) escalated += 1;
+          processStaleWarnLastEmitTsByRunId.delete(runId);
+          continue;
+        }
+      }
 
       if (progressAgeMs >= PROCESS_MONITOR_HEARTBEAT.staleTtlMs) {
         staleDetected += 1;
@@ -2944,6 +3049,8 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       origin,
       active: active.length,
       touched,
+      released,
+      escalated,
       fresh,
       staleDetected,
       staleLogged
@@ -5088,15 +5195,25 @@ function problemLogSourceMatches(sourceText, token) {
 
 function isLowSignalProblemLogEntry(entry) {
   if (!entry || typeof entry !== 'object') return false;
+  const level = normalizeProblemLogLevel(entry.level);
   const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  const message = typeof entry.message === 'string' ? entry.message.trim().toLowerCase() : '';
 
+  if (entry.forceRemoteDispatch === true && reason === 'heartbeat_stale') return false;
   if (reason === 'remote_connection_configured') return true;
   if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
   if (problemLogSourceMatches(source, 'process-monitor-heartbeat')) return true;
   if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
-    return entry.heartbeat === true;
+    if (entry.heartbeat === true) return true;
+    if (level === 'info' && (reason === 'ok_progress' || reason === 'ok_started')) return true;
+  }
+  if (level === 'info' && problemLogSourceMatches(source, 'analysis-queue') && category === 'analysis_queue') {
+    if (reason === 'manual_source_enqueue' || reason === 'process_upsert') return true;
+    if (message.includes('job_enqueued')) return true;
+    if (message.includes('job_started')) return true;
+    if (message.includes('reconcile_summary')) return true;
   }
   return false;
 }
@@ -5122,8 +5239,8 @@ function isLowSignalProblemLogPayload(payload) {
 
 function shouldDispatchProblemLogRemotely(entry) {
   if (!entry || typeof entry !== 'object') return false;
-  if (entry.forceRemoteDispatch === true) return true;
   if (isLowSignalProblemLogEntry(entry)) return false;
+  if (entry.forceRemoteDispatch === true) return true;
 
   const level = normalizeProblemLogLevel(entry.level);
   if (level === 'error' || level === 'warn') return true;
@@ -5251,10 +5368,41 @@ function hasProcessReachedFinalStage(process) {
   const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : 0;
   const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : 0;
   const stageIndex = Number.isInteger(stage?.stageIndex) ? stage.stageIndex : null;
-  if (totalPrompts <= 0) return true;
-  if (currentPrompt < totalPrompts) return false;
-  if (stageIndex !== null && stageIndex < (totalPrompts - 1)) return false;
-  return true;
+  if (totalPrompts > 0) {
+    const reachedByCounters = currentPrompt >= totalPrompts
+      && (stageIndex === null || stageIndex >= (totalPrompts - 1));
+    if (reachedByCounters) return true;
+  } else {
+    return true;
+  }
+
+  const normalizedPhase = normalizeProcessPhase(process?.phase || '', '');
+  const normalizedStatusCode = typeof process?.statusCode === 'string'
+    ? process.statusCode.trim().toLowerCase()
+    : '';
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  const completedDispatch = process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
+    ? process.completedResponseDispatch
+    : null;
+  const hasCompletedPayload = Number.isInteger(process?.completedResponseCapturedAt)
+    || process?.completedResponseSaved === true
+    || (typeof process?.completedResponseSaveTrace === 'string' && process.completedResponseSaveTrace.trim().length > 0)
+    || !!completedDispatch
+    || !!finalStagePersistence;
+  const hasFinalPipelineMarker = normalizedPhase === 'dispatch_remote'
+    || normalizedPhase === 'verify_remote'
+    || normalizedStatusCode === 'dispatch.confirmed'
+    || normalizedStatusCode === 'dispatch.verify_pending'
+    || normalizedStatusCode === 'dispatch.pending'
+    || normalizedStatusCode === 'storage.saved_local'
+    || persistenceStatus?.saveOk === true;
+
+  return hasCompletedPayload && hasFinalPipelineMarker;
 }
 
 function buildProcessProblemLogEntry(runId, process, options = {}) {
@@ -5271,32 +5419,41 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
   const issueDetected = shouldRecordIssueForProcess(process);
   const successDetected = shouldRecordSuccessForProcess(process, status, stage);
   const stateDetected = !issueDetected && !successDetected;
+  const heartbeatOnly = options?.heartbeat === true && !issueDetected;
 
   const reasonRaw = typeof process.reason === 'string' ? process.reason.trim() : '';
   const errorRaw = typeof process.error === 'string' ? process.error.trim() : '';
   const statusTextRaw = typeof process.statusText === 'string' ? process.statusText.trim() : '';
-  const reason = issueDetected
+  const canonicalReason = issueDetected
     ? (reasonRaw || (isFailedProcessStatus(status) ? 'failed_status' : (process.needsAction ? 'needs_action' : 'process_issue')))
     : successDetected
       ? buildProcessSuccessReason(status, stage)
       : (reasonRaw || buildProcessStateReason(status, stage));
+  const reason = heartbeatOnly
+    ? (reasonRaw || buildProcessStateReason(status, stage))
+    : canonicalReason;
   const error = issueDetected ? errorRaw : '';
-  const statusText = issueDetected
+  const canonicalStatusText = issueDetected
     ? (statusTextRaw || '')
     : successDetected
-      ? buildProcessSuccessStatusText(reason, stage)
+      ? buildProcessSuccessStatusText(canonicalReason, stage)
       : (statusTextRaw || buildProcessStateStatusText(status, stage));
+  const statusText = heartbeatOnly
+    ? (statusTextRaw || buildProcessStateStatusText(status, stage))
+    : canonicalStatusText;
   const message = issueDetected
     ? trimProblemLogText(statusTextRaw || reasonRaw || errorRaw || status || 'process_issue', 260)
-    : successDetected
-      ? trimProblemLogText(statusText || reason, 260)
-      : trimProblemLogText(statusTextRaw || statusText || reason || status || 'process_state', 260);
-  const signatureStatusText = trimProblemLogText(statusText || '', 120);
+    : heartbeatOnly
+      ? trimProblemLogText(statusText || reason || status || 'heartbeat', 260)
+      : successDetected
+        ? trimProblemLogText(canonicalStatusText || canonicalReason, 260)
+        : trimProblemLogText(statusTextRaw || statusText || reason || status || 'process_state', 260);
+  const signatureStatusText = trimProblemLogText(canonicalStatusText || '', 120);
 
   const signature = [
     runId,
     issueDetected ? 'issue' : (successDetected ? 'ok' : 'state'),
-    reason,
+    canonicalReason,
     status,
     error,
     Number.isInteger(stage.currentPrompt) ? stage.currentPrompt : '',
@@ -6046,19 +6203,22 @@ async function upsertProcess(runId, patch = {}) {
   if (!next) return null;
   mergeProcessConversationUrls(existing, next);
   processRegistryVersion = Math.max(processRegistryVersion, Number.isInteger(next.version) ? next.version : 0);
-  const problemEntry = buildProcessProblemLogEntry(runId, next);
+  const baseProblemEntry = buildProcessProblemLogEntry(runId, next);
   const knownSignature = problemLogLastSignatureByRunId.get(runId) || '';
-  const signatureChanged = !!(problemEntry?.signature && problemEntry.signature !== knownSignature);
-  const heartbeatDue = !!(problemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
-  if (problemEntry && heartbeatDue && !signatureChanged) {
-    problemEntry.heartbeat = true;
-  }
+  const signatureChanged = !!(baseProblemEntry?.signature && baseProblemEntry.signature !== knownSignature);
+  const heartbeatDue = !!(baseProblemEntry?.signature && !signatureChanged && shouldEmitProcessProblemHeartbeat(runId, next));
+  const problemEntry = heartbeatDue && !signatureChanged
+    ? buildProcessProblemLogEntry(runId, next, { heartbeat: true })
+    : baseProblemEntry;
+  const signatureToRemember = baseProblemEntry?.signature || problemEntry?.signature || '';
   if (problemEntry?.signature && (signatureChanged || heartbeatDue)) {
     const emittedEntry = await appendProblemLog(problemEntry);
     if (emittedEntry) {
       processLogLastEmitTsByRunId.set(runId, Date.now());
     }
-    problemLogLastSignatureByRunId.set(runId, problemEntry.signature);
+    if (signatureToRemember) {
+      problemLogLastSignatureByRunId.set(runId, signatureToRemember);
+    }
   } else if (!problemEntry) {
     problemLogLastSignatureByRunId.delete(runId);
     processLogLastEmitTsByRunId.delete(runId);
@@ -7065,35 +7225,45 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
 
   const delivery = getProcessQueueDeliveryState(process);
   if (delivery.confirmed !== true) return false;
-  if (lifecycleStatus !== 'completed') {
-    await upsertProcess(normalizedRunId, {
-      lifecycleStatus: 'completed',
-      status: 'completed',
-      phase: 'verify_remote',
-      actionRequired: 'none',
-      statusCode: 'dispatch.confirmed',
-      timestamp: Date.now()
-    });
-    process = processRegistry.get(normalizedRunId) || process;
-  }
-
-  const trace = buildProcessCopyTrace(process, normalizedRunId);
-  const now = Date.now();
+  const nowTs = Date.now();
+  const shouldNormalizeReleaseReason = (() => {
+    const rawReason = typeof process?.slotReleaseReason === 'string' ? process.slotReleaseReason.trim() : '';
+    return !rawReason
+      || rawReason === 'local_save_failed'
+      || rawReason === 'dispatch_pending'
+      || rawReason === 'dispatch_confirmed_late';
+  })();
+  await upsertProcess(normalizedRunId, {
+    lifecycleStatus: 'completed',
+    status: 'completed',
+    phase: 'verify_remote',
+    actionRequired: 'none',
+    needsAction: false,
+    statusCode: 'dispatch.confirmed',
+    statusText: 'Zakonczono. Zapis lokalny i sync do Watchlist gotowe.',
+    reason: 'dispatch_confirmed',
+    error: '',
+    finishedAt: Number.isInteger(process?.finishedAt) ? process.finishedAt : nowTs,
+    ...(shouldNormalizeReleaseReason ? { slotReleaseReason: 'dispatch_confirmed' } : {}),
+    timestamp: nowTs
+  });
+  process = processRegistry.get(normalizedRunId) || process;
   if (process.queueState !== 'dispatch_confirmed') {
     await upsertProcess(normalizedRunId, {
       queueManaged: true,
       queueJobId: typeof process.queueJobId === 'string' ? process.queueJobId : '',
       queueState: 'dispatch_confirmed',
       slotReserved: false,
-      slotReleasedAt: Number.isInteger(process.slotReleasedAt) ? process.slotReleasedAt : now,
+      slotReleasedAt: Number.isInteger(process.slotReleasedAt) ? process.slotReleasedAt : nowTs,
       slotReleaseReason: typeof process.slotReleaseReason === 'string' && process.slotReleaseReason.trim()
         ? process.slotReleaseReason.trim()
-        : 'dispatch_confirmed_late',
-      timestamp: now
+        : 'dispatch_confirmed',
+      timestamp: nowTs
     });
     process = processRegistry.get(normalizedRunId) || process;
   }
 
+  const trace = buildProcessCopyTrace(process, normalizedRunId);
   const closed = await closeProcessWindowAfterQueueSuccess(process);
   emitWatchlistDispatchProcessLog(closed ? 'info' : 'warn', 'completed_process_window_close', closed
     ? 'Closed queued process window after dispatch confirmation'
@@ -13826,6 +13996,16 @@ function normalizeExecuteScriptErrorMessage(error) {
   return String(error || '').trim();
 }
 
+function isExecuteScriptTabGoneError(error) {
+  const normalized = normalizeExecuteScriptErrorMessage(error).toLowerCase();
+  if (!normalized) return false;
+  if (normalized.includes('no tab with id')) return true;
+  if (normalized.includes('the tab was closed')) return true;
+  if (normalized.includes('tab was closed')) return true;
+  if (normalized.includes('tab closed')) return true;
+  return false;
+}
+
 function isRetryableExecuteScriptTransientError(error) {
   const normalized = normalizeExecuteScriptErrorMessage(error).toLowerCase();
   if (!normalized) return false;
@@ -17801,7 +17981,8 @@ function isWatchlistVerificationPendingState(state) {
   const normalized = normalizeWatchlistVerifyState(state);
   return normalized === 'not_found'
     || normalized === 'materialization_pending'
-    || normalized === 'materialization_partial';
+    || normalized === 'materialization_partial'
+    || normalized === 'materialization_unavailable';
 }
 
 function isWatchlistVerificationTerminalState(state) {
@@ -17809,8 +17990,7 @@ function isWatchlistVerificationTerminalState(state) {
   return normalized === 'missing_fields'
     || normalized === 'mismatch'
     || normalized === 'ingest_failed'
-    || normalized === 'ingest_quarantined'
-    || normalized === 'materialization_unavailable';
+    || normalized === 'ingest_quarantined';
 }
 
 function getWatchlistVerifyRetryDelayMs(verifyAttemptCount = 0) {
@@ -21908,6 +22088,30 @@ async function saveResponse(
       ? 'error'
       : (pipelineDispatchState === 'dispatch_confirmed' ? 'info' : 'warn');
     const completedStage12Snapshot = buildCompletedStage12Snapshot(responseText, normalizedSourceMeta.sourceTitle || source);
+    const finalSaveResult = {
+      success: true,
+      response: lastSaved || newResponse,
+      copyTrace,
+      verifiedCount: verifiedResponses.length,
+      dispatch: dispatchOutcome,
+      dispatchProcessLog: dispatchProcessLog.slice(-16),
+      conversationAnalysis
+    };
+    const persistenceSummary = buildPersistenceUiSummary({
+      hasResponse: true,
+      saveResult: finalSaveResult
+    });
+    const finalStagePersistenceSummary = summarizeFinalStagePersistence({
+      attempted: true,
+      success: true,
+      reason: 'saved',
+      responseId: normalizedResponseId,
+      copyTrace,
+      dispatchSummary: persistenceSummary.dispatchSummary,
+      verifiedCount: verifiedResponses.length,
+      dispatch: dispatchOutcome,
+      conversationAnalysis
+    });
     const persistenceLifecycleStatus = pipelineDispatchState === 'dispatch_confirmed'
       ? 'completed'
       : (pipelineDispatchState === 'dispatch_failed' || dispatchOutcome.queueSkipped === true ? 'failed' : 'finalizing');
@@ -21984,14 +22188,78 @@ async function saveResponse(
     console.log(`Fingerprint: ${copyFingerprint}`);
     console.log(`${'*'.repeat(80)}\n`);
     if (normalizedRunId) {
+      const nowTs = Date.now();
+      const existingProcess = processRegistry.get(normalizedRunId) || null;
+      const selectedPrompt = Number.isInteger(normalizedStage?.selected_response_prompt)
+        ? normalizedStage.selected_response_prompt
+        : (Number.isInteger(existingProcess?.currentPrompt) ? existingProcess.currentPrompt : null);
+      const selectedStageIndex = Number.isInteger(normalizedStage?.selected_response_stage_index)
+        ? normalizedStage.selected_response_stage_index
+        : (Number.isInteger(existingProcess?.stageIndex)
+          ? existingProcess.stageIndex
+          : (Number.isInteger(selectedPrompt) && selectedPrompt > 0 ? selectedPrompt - 1 : null));
+      const totalPromptsForProcess = Number.isInteger(existingProcess?.totalPrompts) && existingProcess.totalPrompts > 0
+        ? Math.max(existingProcess.totalPrompts, Number.isInteger(selectedPrompt) && selectedPrompt > 0 ? selectedPrompt : 0)
+        : (Number.isInteger(selectedPrompt) && selectedPrompt > 0 ? selectedPrompt : null);
+      const normalizedReason = persistenceLifecycleStatus === 'completed'
+        ? 'dispatch_confirmed'
+        : (persistenceLifecycleStatus === 'finalizing'
+          ? 'dispatch_pending'
+          : (dispatchOutcome.queueSkipped === true ? 'dispatch_skipped' : 'dispatch_failed'));
       await upsertProcess(normalizedRunId, {
         lifecycleStatus: persistenceLifecycleStatus,
         status: persistenceLifecycleStatus,
         phase: persistencePhase,
         actionRequired: 'none',
+        needsAction: false,
         statusCode: persistenceStatusCode,
+        statusText: persistenceSummary.statusText,
+        reason: normalizedReason,
+        error: '',
         completedStage12Snapshot,
-        timestamp: Date.now()
+        completedResponseCapturedAt: nowTs,
+        completedResponseLength: responseText.length,
+        completedResponseTruncated: false,
+        completedResponseSaved: persistenceSummary.saveOk === true,
+        completedResponseDispatch: persistenceSummary.dispatch || null,
+        completedResponseDispatchSummary: persistenceSummary.dispatchSummary,
+        completedResponseDispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
+        completedResponseSaveTrace: persistenceSummary.copyTrace || copyTrace,
+        persistenceLog: persistenceSummary.logLines,
+        persistenceStatus: {
+          hasResponse: true,
+          saveOk: persistenceSummary.saveOk,
+          dispatchSummary: persistenceSummary.dispatchSummary,
+          copyTrace: persistenceSummary.copyTrace || copyTrace,
+          saveError: persistenceSummary.saveError,
+          bridgeError: persistenceSummary.bridgeError || '',
+          dispatch: persistenceSummary.dispatch || null,
+          dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
+          updatedAt: nowTs
+        },
+        ...(finalStagePersistenceSummary
+          ? {
+              finalStagePersistence: {
+                ...finalStagePersistenceSummary,
+                origin: 'save_response',
+                updatedAt: nowTs
+              }
+            }
+          : {}),
+        ...(Number.isInteger(selectedPrompt) && selectedPrompt > 0
+          ? { currentPrompt: selectedPrompt }
+          : {}),
+        ...(Number.isInteger(totalPromptsForProcess) && totalPromptsForProcess > 0
+          ? { totalPrompts: totalPromptsForProcess }
+          : {}),
+        ...(Number.isInteger(selectedStageIndex) && selectedStageIndex >= 0
+          ? {
+              stageIndex: selectedStageIndex,
+              stageName: `Prompt ${selectedStageIndex + 1}`
+            }
+          : {}),
+        finishedAt: Number.isInteger(existingProcess?.finishedAt) ? existingProcess.finishedAt : nowTs,
+        timestamp: nowTs
       });
     }
     return {
@@ -24050,6 +24318,13 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           }
         });
       } catch (executeError) {
+        const executeErrorMessage = executeError?.message || 'executeScript failed';
+        if (Number.isInteger(chatTabId) && isExecuteScriptTabGoneError(executeError)) {
+          const markedStopped = await markTrackedProcessStoppedForClosedTab(chatTabId);
+          if (markedStopped) {
+            return { success: false, title, reason: 'tab_closed_during_execution', error: `executeScript error: ${executeErrorMessage}` };
+          }
+        }
         await upsertProcess(processId, {
           title: processTitle,
           analysisType,
@@ -24057,12 +24332,12 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           needsAction: false,
           statusText: 'Blad executeScript',
           reason: 'execute_script_failed',
-          error: executeError?.message || 'executeScript failed',
+          error: executeErrorMessage,
           autoRecovery: null,
           finishedAt: Date.now(),
           timestamp: Date.now()
         });
-        return { success: false, title, reason: 'execute_script_failed', error: `executeScript error: ${executeError.message}` };
+        return { success: false, title, reason: 'execute_script_failed', error: `executeScript error: ${executeErrorMessage}` };
       }
 
       if (!results || results.length === 0) {
@@ -24666,12 +24941,19 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           });
           console.log(`✅ executeScript zakończony pomyślnie`);
         } catch (executeError) {
+          const executeErrorMessage = executeError?.message || 'executeScript failed';
           console.error(`\n${'='.repeat(80)}`);
           console.error(`❌ executeScript FAILED`);
           console.error(`  Tab ID: ${chatTabId}`);
-          console.error(`  Error: ${executeError.message}`);
+          console.error(`  Error: ${executeErrorMessage}`);
           console.error(`  Stack: ${executeError.stack}`);
           console.error(`${'='.repeat(80)}\n`);
+          if (Number.isInteger(chatTabId) && isExecuteScriptTabGoneError(executeError)) {
+            const markedStopped = await markTrackedProcessStoppedForClosedTab(chatTabId);
+            if (markedStopped) {
+              return { success: false, title, reason: 'tab_closed_during_execution', error: `executeScript error: ${executeErrorMessage}` };
+            }
+          }
           await upsertProcess(processId, {
             title: processTitle,
             analysisType,
@@ -24679,12 +24961,12 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             needsAction: false,
             statusText: 'Blad executeScript',
             reason: 'execute_script_failed',
-            error: executeError.message || 'executeScript failed',
+            error: executeErrorMessage,
             autoRecovery: null,
             finishedAt: Date.now(),
             timestamp: Date.now()
           });
-          return { success: false, title, error: `executeScript error: ${executeError.message}` };
+          return { success: false, title, reason: 'execute_script_failed', error: `executeScript error: ${executeErrorMessage}` };
         }
 
         if (!results || results.length === 0) {

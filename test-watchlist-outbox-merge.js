@@ -196,7 +196,7 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-function loadFunctions(functionNames) {
+function loadFunctions(functionNames, overrides = {}) {
   const context = {
     console,
     Date,
@@ -208,7 +208,8 @@ function loadFunctions(functionNames) {
       const text = typeof value === 'string' ? value : '';
       return text.length > maxLength ? text.slice(0, maxLength) : text;
     },
-    textFingerprint: (value) => String(value || '')
+    textFingerprint: (value) => String(value || ''),
+    ...overrides
   };
   vm.createContext(context);
   functionNames.forEach((functionName) => {
@@ -405,11 +406,153 @@ function testFreshDuplicatesCollapseToSingleItem() {
   assert.strictEqual(items[0].payload.responseId, 'resp-fresh');
 }
 
+function testLowSignalProblemLogPayloadsAreDroppedFromOutbox() {
+  const context = loadFunctions([
+    'problemLogSourceMatches',
+    'normalizeProblemLogLevel',
+    'isLowSignalProblemLogEntry',
+    'isLowSignalProblemLogPayload',
+    'getWatchlistOutboxDedupKey',
+    'normalizeWatchlistEventId',
+    'normalizeWatchlistVerifyState',
+    'normalizeWatchlistOutboxPositiveInt',
+    'normalizeWatchlistOutboxNonNegativeInt',
+    'rankWatchlistOutboxItem',
+    'choosePreferredWatchlistOutboxItem',
+    'mergeWatchlistOutboxItems',
+    'sanitizeWatchlistOutbox'
+  ], {
+    PROBLEM_LOG_REMOTE_SCHEMA: 'iskra.problem_log.v1'
+  });
+  const now = Date.now();
+  const items = context.sanitizeWatchlistOutbox([
+    {
+      payload: {
+        schema: 'iskra.problem_log.v1',
+        analysisType: 'problem_log:info',
+        source: 'analysis-queue',
+        stage: {
+          level: 'info',
+          source: 'analysis-queue',
+          category: 'analysis_queue',
+          reason: 'manual_source_enqueue'
+        },
+        text: 'job_enqueued | ok | queued=10'
+      },
+      queuedAt: now - 2000
+    },
+    {
+      payload: {
+        schema: 'iskra.problem_log.v1',
+        analysisType: 'problem_log:info',
+        source: 'process-monitor',
+        stage: {
+          level: 'info',
+          source: 'process-monitor',
+          category: 'process_stream',
+          reason: 'ok_progress'
+        },
+        text: 'progress p2/13'
+      },
+      queuedAt: now - 1000
+    },
+    {
+      payload: {
+        schema: 'iskra.problem_log.v1',
+        analysisType: 'problem_log:error',
+        source: 'process-monitor',
+        stage: {
+          level: 'error',
+          source: 'process-monitor',
+          category: 'process_stream',
+          reason: 'execute_script_failed'
+        },
+        text: 'executeScript failed'
+      },
+      queuedAt: now
+    }
+  ]);
+
+  assert.strictEqual(items.length, 1);
+  assert.strictEqual(items[0].payload.stage.reason, 'execute_script_failed');
+}
+
+function testLowSignalEntriesDoNotBypassRemoteDispatchVeto() {
+  const context = loadFunctions([
+    'problemLogSourceMatches',
+    'normalizeProblemLogLevel',
+    'isLowSignalProblemLogEntry',
+    'shouldDispatchProblemLogRemotely'
+  ]);
+
+  assert.strictEqual(
+    context.shouldDispatchProblemLogRemotely({
+      level: 'info',
+      source: 'analysis-queue',
+      category: 'analysis_queue',
+      reason: 'manual_source_enqueue',
+      message: 'job_enqueued | ok | queued=10',
+      forceRemoteDispatch: true
+    }),
+    false
+  );
+
+  assert.strictEqual(
+    context.shouldDispatchProblemLogRemotely({
+      level: 'warn',
+      source: 'analysis-queue',
+      category: 'analysis_queue',
+      reason: 'queue_execution_exception',
+      message: 'job_execution_exception | failed',
+      forceRemoteDispatch: true
+    }),
+    true
+  );
+}
+
+function testSevereHeartbeatStaleCanDispatchRemotely() {
+  const context = loadFunctions([
+    'problemLogSourceMatches',
+    'normalizeProblemLogLevel',
+    'isLowSignalProblemLogEntry',
+    'shouldDispatchProblemLogRemotely'
+  ]);
+
+  assert.strictEqual(
+    context.shouldDispatchProblemLogRemotely({
+      level: 'warn',
+      source: 'process-monitor-heartbeat',
+      category: 'process_state',
+      reason: 'heartbeat_stale',
+      message: 'No real process progress update for 960s',
+      heartbeat: true,
+      forceRemoteDispatch: false
+    }),
+    false
+  );
+
+  assert.strictEqual(
+    context.shouldDispatchProblemLogRemotely({
+      level: 'warn',
+      source: 'process-monitor-heartbeat',
+      category: 'process_state',
+      reason: 'heartbeat_stale',
+      message: 'No real process progress update for 960s',
+      heartbeat: true,
+      forceRemoteDispatch: true
+    }),
+    true
+  );
+}
+
 function main() {
   testAcceptedDuplicatePreservesAcceptedState();
   testVerifyPendingDuplicatePreservesRetryState();
   testVerifiedDuplicatePreservesVerifiedState();
   testFreshDuplicatesCollapseToSingleItem();
+  testLowSignalProblemLogPayloadsAreDroppedFromOutbox();
+  testLowSignalEntriesDoNotBypassRemoteDispatchVeto();
+  testSevereHeartbeatStaleCanDispatchRemotely();
   console.log('test-watchlist-outbox-merge.js: ok');
 }
 

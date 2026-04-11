@@ -204,7 +204,7 @@ function buildContext() {
     getAnalysisQueueStatusSnapshot: async () => ({
       success: true,
       queuedCount: 0,
-      maxConcurrent: 7,
+      maxConcurrent: 8,
       queueSize: 0,
       activeSlots: 0,
       reservedSlots: 0,
@@ -217,7 +217,7 @@ function buildContext() {
         success: true,
         jobs,
         queuedCount: jobs.length,
-        maxConcurrent: 7,
+        maxConcurrent: 8,
         queueSize: jobs.length,
         activeSlots: 1,
         reservedSlots: 2,
@@ -241,7 +241,7 @@ function toPlainJson(value) {
 async function testReturnsQueueSnapshotForEmptyInput() {
   const context = buildContext();
   const result = await context.processArticles([], [], '', 'company');
-  assert.strictEqual(result.maxConcurrent, 7);
+  assert.strictEqual(result.maxConcurrent, 8);
   assert.strictEqual(result.queuedCount, 0);
   assert.strictEqual(context.captured, null);
 }
@@ -260,7 +260,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     manualPdfProviderId: 'provider-1'
   });
 
-  assert.strictEqual(result.maxConcurrent, 7);
+  assert.strictEqual(result.maxConcurrent, 8);
   assert.strictEqual(result.queuedCount, 2);
   assert.ok(context.captured, 'enqueueAnalysisJobs should be called');
   assert.strictEqual(context.captured.options.reason, 'process_articles_enqueue');
