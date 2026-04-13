@@ -1288,6 +1288,14 @@ function normalizeProcessRecord(record) {
   } else {
     delete normalized.completionAudit;
   }
+  const normalizedPerformanceTelemetry = typeof ProcessContractUtils.normalizeProcessPerformanceTelemetry === 'function'
+    ? ProcessContractUtils.normalizeProcessPerformanceTelemetry(normalized.performanceTelemetry)
+    : null;
+  if (normalizedPerformanceTelemetry) {
+    normalized.performanceTelemetry = normalizedPerformanceTelemetry;
+  } else {
+    delete normalized.performanceTelemetry;
+  }
   if (normalized.actionRequired === 'none') {
     normalized.needsAction = false;
   }
@@ -7053,6 +7061,14 @@ async function upsertProcess(runId, patch = {}) {
       phase: nextPhase
     })
   );
+  const nextPerformanceTelemetry = typeof ProcessContractUtils.mergeProcessPerformanceTelemetry === 'function'
+    ? ProcessContractUtils.mergeProcessPerformanceTelemetry(existing, patchData, {
+      nowTs,
+      previousPhase,
+      nextPhase,
+      nextLifecycleStatus
+    })
+    : (patchData.performanceTelemetry || existing.performanceTelemetry || null);
 
   const next = normalizeProcessRecord({
     ...existing,
@@ -7078,6 +7094,7 @@ async function upsertProcess(runId, patch = {}) {
       ? patchData.lastActivityAt
       : nowTs,
     timestamp: nowTs,
+    ...(nextPerformanceTelemetry ? { performanceTelemetry: nextPerformanceTelemetry } : {}),
     version: Math.max(
       Number.isInteger(existing.version) ? existing.version : 0,
       Number.isInteger(patchData.version) ? patchData.version : 0

@@ -25,6 +25,9 @@ let historyOpen = false;
 let viewFilterMode = 'all';
 let viewQueryValue = '';
 let lastPushUpdateAt = 0;
+let scheduledRefreshTimer = null;
+let refreshInFlight = false;
+let refreshQueued = false;
 const processCardMap = new Map();
 const processSeenAt = new Map();
 let stageNamesCompany = [];
@@ -35,6 +38,9 @@ const processCompanySnapshotCache = new Map();
 const processCompanySnapshotInFlight = new Map();
 const PROCESS_AUDIT_CACHE_TTL_MS = 45_000;
 const PROCESS_COMPANY_SNAPSHOT_TTL_MS = 60_000;
+const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
+const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
+const MONITOR_UI_TICK_MS = 10_000;
 
 console.log('[panel] Monitor procesow uruchomiony');
 
@@ -74,9 +80,69 @@ function shouldRunFallbackRefresh() {
 // Push-first monitor; backup poll only when channel looks stale.
 setInterval(() => {
   if (!shouldRunFallbackRefresh()) return;
-  void refreshProcesses();
+  scheduleProcessRefresh('fallback_poll', 0);
 }, 20_000);
+setInterval(() => {
+  if (document.hidden) return;
+  if (activeProcessesCache.length === 0) return;
+  updateUI(activeProcessesCache, { force: true });
+}, MONITOR_UI_TICK_MS);
 installProcessMonitorRuntimeProblemLogging();
+
+function scheduleProcessRefresh(reason = 'manual', delayMs = 0) {
+  if (scheduledRefreshTimer !== null) {
+    clearTimeout(scheduledRefreshTimer);
+    scheduledRefreshTimer = null;
+  }
+  const nextDelayMs = Number.isInteger(delayMs) && delayMs >= 0 ? delayMs : 0;
+  scheduledRefreshTimer = setTimeout(() => {
+    scheduledRefreshTimer = null;
+    void runScheduledProcessRefresh(reason);
+  }, nextDelayMs);
+}
+
+async function runScheduledProcessRefresh(reason = 'manual') {
+  if (refreshInFlight) {
+    refreshQueued = true;
+    return;
+  }
+  refreshInFlight = true;
+  try {
+    await refreshProcesses();
+  } catch (error) {
+    console.warn('[panel] Scheduled refresh failed:', reason, error?.message || error);
+  } finally {
+    refreshInFlight = false;
+    if (refreshQueued) {
+      refreshQueued = false;
+      scheduleProcessRefresh('queued_follow_up', 150);
+    }
+  }
+}
+
+if (chrome?.storage?.onChanged?.addListener) {
+  chrome.storage.onChanged.addListener((changes, areaName) => {
+    if (areaName !== 'local' || !changes || typeof changes !== 'object') return;
+    if (!changes[PROCESS_MONITOR_STORAGE_KEY] && !changes[ANALYSIS_QUEUE_STORAGE_KEY]) return;
+    scheduleProcessRefresh('storage_changed', 100);
+  });
+}
+
+if (typeof document?.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      scheduleProcessRefresh('visibility_change', 0);
+    }
+  });
+}
+
+if (typeof window?.addEventListener === 'function') {
+  ['focus', 'pageshow', 'online'].forEach((eventName) => {
+    window.addEventListener(eventName, () => {
+      scheduleProcessRefresh(eventName, 0);
+    });
+  });
+}
 
 if (historyToggle && historyList) {
   historyToggle.addEventListener('click', () => {
@@ -1006,6 +1072,99 @@ function formatClock(timestamp) {
   return `${hh}:${mm}:${ss}`;
 }
 
+function formatDurationCompact(durationMs) {
+  if (!Number.isInteger(durationMs) || durationMs < 0) return 'n/a';
+  if (durationMs < 1000) return `${durationMs}ms`;
+  const totalSeconds = Math.floor(durationMs / 1000);
+  const seconds = totalSeconds % 60;
+  const totalMinutes = Math.floor(totalSeconds / 60);
+  const minutes = totalMinutes % 60;
+  const hours = Math.floor(totalMinutes / 60);
+  if (hours > 0) return `${hours}h ${minutes}m`;
+  if (minutes > 0) return `${minutes}m ${seconds}s`;
+  return `${seconds}s`;
+}
+
+function getProcessPerformanceSnapshot(process) {
+  if (!process || typeof process !== 'object') return null;
+  if (ProcessContractUtils && typeof ProcessContractUtils.buildProcessPerformanceSnapshot === 'function') {
+    return ProcessContractUtils.buildProcessPerformanceSnapshot(process);
+  }
+  return null;
+}
+
+function getPerformanceAuditLevel(snapshot) {
+  const severity = typeof snapshot?.highestSeverity === 'string' ? snapshot.highestSeverity : '';
+  if (severity === 'error') return 'err';
+  if (severity === 'warn') return 'warn';
+  return 'ok';
+}
+
+function buildPerformanceProblemSummary(snapshot, limit = 2) {
+  const problems = Array.isArray(snapshot?.problems) ? snapshot.problems : [];
+  if (problems.length === 0) return '';
+  return problems
+    .slice(0, Math.max(1, limit))
+    .map((problem) => {
+      const label = typeof problem?.label === 'string' ? problem.label.trim() : '';
+      const valueMs = Number.isInteger(problem?.valueMs) ? formatDurationCompact(problem.valueMs) : '';
+      return [label, valueMs].filter(Boolean).join(': ');
+    })
+    .filter(Boolean)
+    .join(' | ');
+}
+
+function formatPhaseTotalsSummary(snapshot) {
+  const totals = snapshot?.phaseTotalsMs && typeof snapshot.phaseTotalsMs === 'object'
+    ? snapshot.phaseTotalsMs
+    : null;
+  if (!totals) return 'brak';
+  const phaseOrder = Array.isArray(ProcessContractUtils?.PHASES) ? ProcessContractUtils.PHASES : [];
+  const parts = phaseOrder
+    .filter((phase) => Number.isInteger(totals?.[phase]) && totals[phase] > 0)
+    .map((phase) => `${phase}=${formatDurationCompact(totals[phase])}`);
+  return parts.length > 0 ? parts.join(' | ') : 'brak';
+}
+
+function formatProcessPerformanceText(process) {
+  const snapshot = getProcessPerformanceSnapshot(process);
+  if (!snapshot) return 'Brak danych diagnostycznych dla tego procesu.';
+
+  const lines = [];
+  const runtimeParts = [];
+  if (Number.isInteger(snapshot.runtimeMs)) runtimeParts.push(`Runtime: ${formatDurationCompact(snapshot.runtimeMs)}`);
+  if (Number.isInteger(snapshot.phaseElapsedMs)) runtimeParts.push(`Faza ${snapshot.phase}: ${formatDurationCompact(snapshot.phaseElapsedMs)}`);
+  if (Number.isInteger(snapshot.lastActivityAgeMs)) runtimeParts.push(`Aktywnosc: ${formatDurationCompact(snapshot.lastActivityAgeMs)} temu`);
+  lines.push(runtimeParts.length > 0 ? runtimeParts.join(' | ') : 'Runtime: brak');
+
+  const promptParts = [`Prompty: ${snapshot.promptCount || 0}`];
+  if (Number.isInteger(snapshot.promptGapAvgMs)) promptParts.push(`avg gap=${formatDurationCompact(snapshot.promptGapAvgMs)}`);
+  if (Number.isInteger(snapshot.promptGapMaxMs)) promptParts.push(`max gap=${formatDurationCompact(snapshot.promptGapMaxMs)}`);
+  if (Number.isInteger(snapshot.timeSinceLastPromptMs)) promptParts.push(`ostatni prompt=${formatDurationCompact(snapshot.timeSinceLastPromptMs)} temu`);
+  lines.push(promptParts.join(' | '));
+
+  lines.push(`Fazy: ${formatPhaseTotalsSummary(snapshot)}`);
+
+  const finalizationParts = [];
+  if (Number.isInteger(snapshot.captureToPersistenceMs)) {
+    finalizationParts.push(`capture->wysylka=${formatDurationCompact(snapshot.captureToPersistenceMs)}`);
+  }
+  if (Number.isInteger(snapshot.windowCloseMs)) {
+    finalizationParts.push(
+      snapshot.windowClosePending
+        ? `zamykanie okna trwa ${formatDurationCompact(snapshot.windowCloseMs)}`
+        : `zamkniecie okna=${formatDurationCompact(snapshot.windowCloseMs)}`
+    );
+  }
+  if (finalizationParts.length > 0) {
+    lines.push(`Finalizacja: ${finalizationParts.join(' | ')}`);
+  }
+
+  const problemSummary = buildPerformanceProblemSummary(snapshot, 3);
+  lines.push(problemSummary ? `Obciazenie: ${problemSummary}` : 'Obciazenie: brak sygnalow przeciazenia');
+  return lines.join('\n');
+}
+
 function buildStatusCounts(processes) {
   const counts = {};
   (Array.isArray(processes) ? processes : []).forEach((process) => {
@@ -1818,6 +1977,7 @@ function updateProcessCard(entry, process, isSelected) {
   const updatedAt = Number.isInteger(process?.lastActivityAt)
     ? process.lastActivityAt
     : (Number.isInteger(process.timestamp) ? process.timestamp : startedAt);
+  const performanceSnapshot = getProcessPerformanceSnapshot(process);
   const tabLabel = Number.isInteger(process.tabId) ? String(process.tabId) : '-';
   const windowLabel = Number.isInteger(process.windowId) ? String(process.windowId) : '-';
 
@@ -1876,7 +2036,16 @@ function updateProcessCard(entry, process, isSelected) {
     refs.statusMeta.style.display = 'none';
   }
 
-  refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni: ${formatClock(updatedAt)}`;
+  const timingParts = [];
+  timingParts.push(`Start: ${formatClock(startedAt)}`);
+  if (Number.isInteger(performanceSnapshot?.runtimeMs)) {
+    timingParts.push(`Runtime: ${formatDurationCompact(performanceSnapshot.runtimeMs)}`);
+  }
+  if (Number.isInteger(performanceSnapshot?.phaseElapsedMs)) {
+    timingParts.push(`Faza: ${formatDurationCompact(performanceSnapshot.phaseElapsedMs)}`);
+  }
+  timingParts.push(`Ostatni: ${formatClock(updatedAt)}`);
+  refs.timingMeta.textContent = timingParts.join(' | ');
   const locationBase = lifecycleStatus === 'queued' && tabLabel === '-' && windowLabel === '-'
     ? 'Oczekuje na wolny slot'
     : `Tab ${tabLabel} | Okno ${windowLabel}`;
@@ -1914,8 +2083,14 @@ function updateProcessCard(entry, process, isSelected) {
       );
     refs.hint.style.display = 'block';
   } else {
-    refs.hint.textContent = '';
-    refs.hint.style.display = 'none';
+    const problemSummary = buildPerformanceProblemSummary(performanceSnapshot, 2);
+    if (problemSummary) {
+      refs.hint.textContent = `Diag: ${problemSummary}`;
+      refs.hint.style.display = 'block';
+    } else {
+      refs.hint.textContent = '';
+      refs.hint.style.display = 'none';
+    }
   }
 }
 
@@ -3253,12 +3428,20 @@ function renderDetails() {
   }
   detailsContainer.appendChild(header);
 
+  const performanceSnapshot = getProcessPerformanceSnapshot(selected);
   const companySnapshotCard = buildDetailsAuditCard('Snapshot decyzji');
+  const diagnosticsCard = buildDetailsAuditCard('Diagnostyka runtime');
   const completionAuditCard = buildDetailsAuditCard('Audit finalizacji');
   const companyAuditCard = buildDetailsAuditCard('Audit etapow');
+  detailsContainer.appendChild(diagnosticsCard.card);
   detailsContainer.appendChild(companySnapshotCard.card);
   detailsContainer.appendChild(completionAuditCard.card);
   detailsContainer.appendChild(companyAuditCard.card);
+  setAuditBody(
+    diagnosticsCard.body,
+    formatProcessPerformanceText(selected),
+    getPerformanceAuditLevel(performanceSnapshot)
+  );
   setAuditBody(
     completionAuditCard.body,
     formatProcessCompletionAuditText(selected?.completionAudit),
