@@ -249,15 +249,6 @@ function resolveRemoteIntakeOriginCandidate(rawUrl = '') {
   }
 }
 
-function resolveRemoteRunnerFriendlyName(config = {}) {
-  const runnerId = typeof config?.runnerId === 'string' ? config.runnerId.trim() : '';
-  const runnerName = typeof config?.runnerName === 'string' ? config.runnerName.trim() : '';
-  if (runnerId.endsWith('9') || runnerName.endsWith('9')) {
-    return 'Komputer w szafce 9';
-  }
-  return runnerName || compactRemoteIdentifier(runnerId, 'wybierz runnera');
-}
-
 function resolveRemoteIntakePageUrl() {
   const configuredOrigin = resolveRemoteIntakeOriginCandidate(watchlistDispatchStatusSnapshot?.intakeUrl)
     || resolveRemoteIntakeOriginCandidate(watchlistIntakeUrlInput?.value)
@@ -275,20 +266,10 @@ function resolveRemoteIntakePageUrl() {
 }
 
 function applyRemoteIntakeUi() {
-  const targetUrl = resolveRemoteIntakePageUrl();
-  let targetOrigin = REMOTE_INTAKE_FALLBACK_ORIGIN;
-  try {
-    targetOrigin = new URL(targetUrl).origin;
-  } catch {
-    // Keep fallback origin.
-  }
   if (openRemoteIntakeBtn) {
     openRemoteIntakeBtn.disabled = false;
   }
-  setRemoteIntakeStatus(
-    `Cel: ${targetOrigin}${REMOTE_INTAKE_PATH}. Runner: ${resolveRemoteRunnerFriendlyName(remoteRunnerConfigSnapshot)}.`,
-    false
-  );
+  setRemoteIntakeStatus('', false);
 }
 
 function normalizeRemoteRunnerApiErrorText(apiError = '') {
@@ -2011,16 +1992,16 @@ if (openRemoteIntakeBtn) {
   openRemoteIntakeBtn.addEventListener('click', async () => {
     const originalLabel = openRemoteIntakeBtn.textContent;
     openRemoteIntakeBtn.disabled = true;
-    openRemoteIntakeBtn.textContent = 'Otwieram intake...';
-    setRemoteIntakeStatus('Otwieram zdalny panel Iskry z formularzem nowego artykulu...', false);
+    openRemoteIntakeBtn.textContent = 'Otwieram...';
+    setRemoteIntakeStatus('', false);
 
     try {
       const targetUrl = resolveRemoteIntakePageUrl();
       await chrome.tabs.create({ url: targetUrl });
       window.close();
     } catch (error) {
-      setRemoteIntakeStatus(`Remote intake: ${error?.message || String(error)}.`, true);
-      openRemoteIntakeBtn.textContent = originalLabel || 'Nowy artykul w zdalnej kolejce';
+      setRemoteIntakeStatus(`Nie udalo sie otworzyc Iskry: ${error?.message || String(error)}.`, true);
+      openRemoteIntakeBtn.textContent = originalLabel || 'Dodaj artykul do Iskry';
       openRemoteIntakeBtn.disabled = false;
     }
   });

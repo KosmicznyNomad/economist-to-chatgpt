@@ -2927,6 +2927,141 @@ function formatConversationAuditText(audit) {
   return lines.join('\n');
 }
 
+function getProcessCompletionAuditStateLabel(state) {
+  const normalized = typeof state === 'string' ? state.trim().toLowerCase() : '';
+  if (!normalized) return 'n/a';
+  const labels = {
+    response_missing: 'brak odpowiedzi koncowej',
+    save_failed: 'blad zapisu lokalnego',
+    save_pending: 'zapis lokalny w toku',
+    saved_local: 'zapis lokalny OK',
+    dispatch_pending: 'dispatch oczekuje',
+    dispatch_failed: 'dispatch nieudany',
+    dispatch_skipped: 'dispatch pominiety',
+    dispatch_confirmed: 'dispatch potwierdzony',
+    dispatch_confirmed_window_closed: 'dispatch potwierdzony, karta zamknieta',
+    dispatch_confirmed_window_close_failed: 'dispatch potwierdzony, ale karta nie zamknela sie',
+    captured: 'captured',
+    saved: 'saved',
+    failed: 'failed',
+    pending: 'pending',
+    confirmed: 'confirmed',
+    closed: 'closed',
+    retrying: 'retrying',
+    requested: 'requested',
+    not_requested: 'not requested',
+    not_available: 'not available'
+  };
+  return labels[normalized] || normalized.replace(/[_-]+/g, ' ');
+}
+
+function getProcessCompletionAuditLevel(audit) {
+  if (!audit || typeof audit !== 'object') return 'warn';
+  const overall = typeof audit?.overallState === 'string' ? audit.overallState.trim().toLowerCase() : '';
+  const dispatchState = typeof audit?.dispatchState === 'string' ? audit.dispatchState.trim().toLowerCase() : '';
+  const windowState = typeof audit?.windowCloseState === 'string' ? audit.windowCloseState.trim().toLowerCase() : '';
+  if (
+    overall === 'save_failed'
+    || overall === 'dispatch_failed'
+    || overall === 'dispatch_confirmed_window_close_failed'
+    || dispatchState === 'dispatch_failed'
+    || windowState === 'failed'
+  ) {
+    return 'err';
+  }
+  if (
+    overall === 'dispatch_confirmed'
+    || overall === 'dispatch_confirmed_window_closed'
+    || (audit?.dispatchConfirmed === true && windowState !== 'failed')
+  ) {
+    return 'ok';
+  }
+  return 'warn';
+}
+
+function formatProcessCompletionAuditText(audit) {
+  if (!audit || typeof audit !== 'object') {
+    return 'Brak audytu finalizacji dla tego procesu.';
+  }
+
+  const lines = [];
+  const overallLabel = getProcessCompletionAuditStateLabel(audit?.overallState);
+  const updatedAt = Number.isInteger(audit?.updatedAt) ? formatDateTime(audit.updatedAt) : '-';
+  lines.push(`Ogolnie: ${overallLabel} | updated: ${updatedAt}`);
+
+  const responseLabel = audit?.hasResponse === true ? 'jest odpowiedz koncowa' : 'brak odpowiedzi koncowej';
+  const responseAt = Number.isInteger(audit?.responseCapturedAt) ? formatDateTime(audit.responseCapturedAt) : '-';
+  lines.push(`Odpowiedz: ${responseLabel} | captured: ${responseAt}`);
+
+  const saveParts = [`save=${getProcessCompletionAuditStateLabel(audit?.saveState)}`];
+  if (Number.isInteger(audit?.saveUpdatedAt)) {
+    saveParts.push(`at=${formatDateTime(audit.saveUpdatedAt)}`);
+  }
+  if (typeof audit?.saveError === 'string' && audit.saveError.trim()) {
+    saveParts.push(`err=${shortenText(audit.saveError, 88)}`);
+  }
+  lines.push(`Lokalnie: ${saveParts.join(', ')}`);
+
+  const dispatchParts = [`dispatch=${getProcessCompletionAuditStateLabel(audit?.dispatchState)}`];
+  if (audit?.dispatchConfirmed === true) {
+    dispatchParts.push('verify=confirmed');
+  } else if (typeof audit?.verifyState === 'string' && audit.verifyState.trim()) {
+    dispatchParts.push(`verify=${audit.verifyState.trim()}`);
+  }
+  if (Number.isInteger(audit?.dispatchAccepted) && audit.dispatchAccepted > 0) {
+    dispatchParts.push(`accepted=${audit.dispatchAccepted}`);
+  }
+  if (Number.isInteger(audit?.dispatchSent) && audit.dispatchSent > 0) {
+    dispatchParts.push(`sent=${audit.dispatchSent}`);
+  }
+  if (Number.isInteger(audit?.dispatchPending) && audit.dispatchPending > 0) {
+    dispatchParts.push(`pending=${audit.dispatchPending}`);
+  }
+  if (Number.isInteger(audit?.dispatchFailed) && audit.dispatchFailed > 0) {
+    dispatchParts.push(`failed=${audit.dispatchFailed}`);
+  }
+  if (typeof audit?.verifyEventId === 'string' && audit.verifyEventId.trim()) {
+    dispatchParts.push(`event=${audit.verifyEventId.trim()}`);
+  }
+  if (Number.isInteger(audit?.dispatchUpdatedAt)) {
+    dispatchParts.push(`at=${formatDateTime(audit.dispatchUpdatedAt)}`);
+  }
+  lines.push(`Baza: ${dispatchParts.join(', ')}`);
+
+  const windowParts = [`window=${getProcessCompletionAuditStateLabel(audit?.windowCloseState)}`];
+  if (Number.isInteger(audit?.windowCloseAttempts) && audit.windowCloseAttempts > 0) {
+    windowParts.push(`attempts=${audit.windowCloseAttempts}`);
+  }
+  const windowAt = Number.isInteger(audit?.windowCloseClosedAt)
+    ? audit.windowCloseClosedAt
+    : (Number.isInteger(audit?.windowCloseLastAttemptAt)
+      ? audit.windowCloseLastAttemptAt
+      : (Number.isInteger(audit?.windowCloseRequestedAt) ? audit.windowCloseRequestedAt : null));
+  if (Number.isInteger(windowAt)) {
+    windowParts.push(`at=${formatDateTime(windowAt)}`);
+  }
+  if (typeof audit?.windowCloseError === 'string' && audit.windowCloseError.trim()) {
+    windowParts.push(`err=${shortenText(audit.windowCloseError, 88)}`);
+  }
+  lines.push(`Okno: ${windowParts.join(', ')}`);
+
+  const checkpoints = Array.isArray(audit?.checkpoints) ? audit.checkpoints : [];
+  if (checkpoints.length > 0) {
+    const summary = checkpoints
+      .slice(0, 6)
+      .map((entry) => {
+        const code = typeof entry?.code === 'string' ? entry.code.trim() : 'event';
+        const state = getProcessCompletionAuditStateLabel(entry?.state);
+        const ts = Number.isInteger(entry?.ts) ? formatDateTime(entry.ts) : '-';
+        return `${code}:${state}@${ts}`;
+      })
+      .join(' | ');
+    lines.push(`Checkpointy: ${summary}`);
+  }
+
+  return lines.join('\n');
+}
+
 async function hydrateDetailsCards(process, snapshotBody, auditBody) {
   if (!process || !process.id) return;
   const expectedProcessId = String(process.id);
@@ -3119,9 +3254,16 @@ function renderDetails() {
   detailsContainer.appendChild(header);
 
   const companySnapshotCard = buildDetailsAuditCard('Snapshot decyzji');
+  const completionAuditCard = buildDetailsAuditCard('Audit finalizacji');
   const companyAuditCard = buildDetailsAuditCard('Audit etapow');
   detailsContainer.appendChild(companySnapshotCard.card);
+  detailsContainer.appendChild(completionAuditCard.card);
   detailsContainer.appendChild(companyAuditCard.card);
+  setAuditBody(
+    completionAuditCard.body,
+    formatProcessCompletionAuditText(selected?.completionAudit),
+    getProcessCompletionAuditLevel(selected?.completionAudit)
+  );
   void hydrateDetailsCards(selected, companySnapshotCard.body, companyAuditCard.body);
 
   const messageList = document.createElement('div');

@@ -207,6 +207,18 @@ const context = {
       stageIndex: Number.isInteger(stageIndex) ? stageIndex : null
     };
   },
+  normalizeComposerThinkingEffort(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeChatGptModeKind(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeChatGptPlanHint(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeChatGptMonitoringLabel(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
   normalizeChatConversationUrl(value) {
     return typeof value === 'string' ? value.trim() : '';
   },
@@ -242,6 +254,9 @@ vm.createContext(context);
   'buildOperatorStatusText',
   'normalizeProcessStatus',
   'isClosedProcessStatus',
+  'normalizeProcessWindowCloseState',
+  'trimProcessAuditText',
+  'buildProcessCompletionAudit',
   'normalizeProcessRecord',
   'applyQueuePositionsToProcesses'
 ].forEach((functionName) => {
@@ -284,6 +299,52 @@ function testNormalizeProcessRecordPreservesOpenActionRequired() {
   assert.strictEqual(normalized.statusCode, 'chat.continue_button');
 }
 
+function testNormalizeProcessRecordBuildsCompletionAudit() {
+  const normalized = context.normalizeProcessRecord({
+    id: 'run-3',
+    status: 'completed',
+    lifecycleStatus: 'completed',
+    currentPrompt: 13,
+    totalPrompts: 13,
+    completedResponseText: '{"schema":"economist.response.v2"}',
+    completedResponseCapturedAt: 3000,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      hasResponse: true,
+      saveOk: true,
+      updatedAt: 3010,
+      dispatch: {
+        state: 'dispatch_pending',
+        accepted: 1,
+        sent: 1,
+        failed: 0,
+        deferred: 0,
+        remaining: 0,
+        verifyState: 'http_accepted'
+      }
+    },
+    windowClose: {
+      state: 'retrying',
+      requestedAt: 3020,
+      lastAttemptAt: 3030,
+      attemptCount: 2,
+      lastError: 'window_contains_other_tabs'
+    },
+    timestamp: 3040
+  });
+
+  assert(normalized?.completionAudit);
+  assert.strictEqual(normalized.completionAudit.hasResponse, true);
+  assert.strictEqual(normalized.completionAudit.saveState, 'saved');
+  assert.strictEqual(normalized.completionAudit.dispatchState, 'dispatch_pending');
+  assert.strictEqual(normalized.completionAudit.dispatchConfirmed, false);
+  assert.strictEqual(normalized.completionAudit.windowCloseState, 'retrying');
+  assert.strictEqual(normalized.completionAudit.windowCloseAttempts, 2);
+  assert.strictEqual(normalized.completionAudit.overallState, 'dispatch_pending');
+  assert(Array.isArray(normalized.completionAudit.checkpoints));
+  assert(normalized.completionAudit.checkpoints.some((entry) => entry.code === 'dispatch'));
+}
+
 function testApplyQueuePositionsToProcessesAddsAndClearsPositions() {
   const records = [
     { id: 'run-a', title: 'A' },
@@ -302,6 +363,7 @@ function testApplyQueuePositionsToProcessesAddsAndClearsPositions() {
 function main() {
   testNormalizeProcessRecordBackfillsLegacyFields();
   testNormalizeProcessRecordPreservesOpenActionRequired();
+  testNormalizeProcessRecordBuildsCompletionAudit();
   testApplyQueuePositionsToProcessesAddsAndClearsPositions();
   console.log('test-process-snapshot-normalization.js passed');
 }

@@ -722,6 +722,262 @@ function normalizeProcessWindowCloseState(rawState) {
   return normalized;
 }
 
+function trimProcessAuditText(value, maxLength = 180) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  if (!Number.isInteger(maxLength) || maxLength <= 0 || text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function buildProcessCompletionAudit(process) {
+  if (!process || typeof process !== 'object') return null;
+
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : {};
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : {};
+  const dispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
+    ? persistenceStatus.dispatch
+    : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
+      ? process.completedResponseDispatch
+      : (finalStagePersistence && typeof finalStagePersistence === 'object' ? finalStagePersistence : {}));
+  const dbVerification = dispatch?.dbVerification && typeof dispatch.dbVerification === 'object'
+    ? dispatch.dbVerification
+    : null;
+  const windowClose = normalizeProcessWindowCloseState(process.windowClose);
+
+  const hasResponseText = typeof process?.completedResponseText === 'string'
+    && process.completedResponseText.trim().length > 0;
+  const responseCapturedAt = Number.isInteger(process?.completedResponseCapturedAt) && process.completedResponseCapturedAt > 0
+    ? process.completedResponseCapturedAt
+    : null;
+  const hasResponse = persistenceStatus?.hasResponse === true
+    || hasResponseText
+    || responseCapturedAt !== null
+    || process?.completedResponseSaved === true
+    || finalStagePersistence?.success === true;
+
+  const saveOk = typeof persistenceStatus?.saveOk === 'boolean'
+    ? persistenceStatus.saveOk
+    : (typeof process?.completedResponseSaved === 'boolean'
+      ? process.completedResponseSaved
+      : (typeof finalStagePersistence?.success === 'boolean' ? finalStagePersistence.success : null));
+  const saveError = trimProcessAuditText(
+    typeof persistenceStatus?.saveError === 'string'
+      ? persistenceStatus.saveError
+      : (typeof process?.error === 'string' ? process.error : ''),
+    220
+  );
+  const saveUpdatedAt = Number.isInteger(persistenceStatus?.updatedAt) && persistenceStatus.updatedAt > 0
+    ? persistenceStatus.updatedAt
+    : (Number.isInteger(finalStagePersistence?.updatedAt) && finalStagePersistence.updatedAt > 0
+      ? finalStagePersistence.updatedAt
+      : responseCapturedAt);
+  let saveState = 'missing';
+  if (saveOk === true) {
+    saveState = 'saved';
+  } else if (saveOk === false) {
+    saveState = 'failed';
+  } else if (hasResponse) {
+    saveState = saveError ? 'failed' : 'pending';
+  }
+
+  const dispatchStateRaw = typeof dispatch?.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
+  const verifyState = trimProcessAuditText(
+    typeof dispatch?.verifyState === 'string'
+      ? dispatch.verifyState
+      : (typeof dbVerification?.reason === 'string'
+        ? dbVerification.reason
+        : (dbVerification?.found === true ? 'verified' : '')),
+    120
+  );
+  const normalizedVerifyState = typeof verifyState === 'string' ? verifyState.trim().toLowerCase() : '';
+  const verifyEventId = (() => {
+    if (typeof dispatch?.verifyEventId === 'string' && dispatch.verifyEventId.trim()) {
+      return dispatch.verifyEventId.trim();
+    }
+    if (Number.isInteger(dbVerification?.eventId) && dbVerification.eventId > 0) {
+      return String(dbVerification.eventId);
+    }
+    return '';
+  })();
+  const dispatchAccepted = Number.isInteger(dispatch?.accepted) ? dispatch.accepted : 0;
+  const dispatchSent = Number.isInteger(dispatch?.sent) ? dispatch.sent : 0;
+  const dispatchFailed = Number.isInteger(dispatch?.failed) ? dispatch.failed : 0;
+  const dispatchDeferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
+  const dispatchRemaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : 0;
+  const dispatchPending = Number.isInteger(dispatch?.pending) ? dispatch.pending : (dispatchDeferred + dispatchRemaining);
+  const queueSkipped = dispatch?.queueSkipped === true || finalStagePersistence?.queueSkipped === true;
+  const flushSkipped = dispatch?.flushSkipped === true || finalStagePersistence?.flushSkipped === true;
+  const dispatchConfirmed = (saveOk === true)
+    && (dispatchStateRaw === 'dispatch_confirmed' || normalizedVerifyState === 'verified');
+  const dispatchUpdatedAt = Number.isInteger(dispatch?.updatedAt) && dispatch.updatedAt > 0
+    ? dispatch.updatedAt
+    : (Number.isInteger(dbVerification?.checkedAt) && dbVerification.checkedAt > 0
+      ? dbVerification.checkedAt
+      : saveUpdatedAt);
+
+  let dispatchState = dispatchStateRaw;
+  if (!dispatchState) {
+    if (dispatchConfirmed) {
+      dispatchState = 'dispatch_confirmed';
+    } else if (dispatchFailed > 0) {
+      dispatchState = 'dispatch_failed';
+    } else if (dispatchAccepted > 0 || dispatchSent > 0 || dispatchPending > 0 || queueSkipped || flushSkipped) {
+      dispatchState = 'dispatch_pending';
+    } else if (saveOk === true) {
+      dispatchState = 'saved_local';
+    }
+  }
+
+  const hasWindowContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+  const windowCloseState = typeof windowClose?.state === 'string' && windowClose.state.trim()
+    ? windowClose.state.trim()
+    : (hasWindowContext ? 'not_requested' : 'not_available');
+  const windowCloseRequestedAt = Number.isInteger(windowClose?.requestedAt) && windowClose.requestedAt > 0
+    ? windowClose.requestedAt
+    : null;
+  const windowCloseLastAttemptAt = Number.isInteger(windowClose?.lastAttemptAt) && windowClose.lastAttemptAt > 0
+    ? windowClose.lastAttemptAt
+    : null;
+  const windowCloseClosedAt = Number.isInteger(windowClose?.closedAt) && windowClose.closedAt > 0
+    ? windowClose.closedAt
+    : null;
+  const windowCloseAttempts = Number.isInteger(windowClose?.attemptCount) && windowClose.attemptCount >= 0
+    ? windowClose.attemptCount
+    : 0;
+  const windowCloseError = trimProcessAuditText(
+    typeof windowClose?.lastError === 'string' ? windowClose.lastError : '',
+    160
+  );
+  const windowCloseReason = trimProcessAuditText(
+    typeof windowClose?.lastReason === 'string' ? windowClose.lastReason : '',
+    120
+  );
+
+  if (
+    !hasResponse
+    && saveState === 'missing'
+    && !dispatchState
+    && windowCloseState === 'not_available'
+  ) {
+    return null;
+  }
+
+  let overallState = 'final_stage_detected';
+  if (!hasResponse) {
+    overallState = 'response_missing';
+  } else if (saveState === 'failed') {
+    overallState = 'save_failed';
+  } else if (saveState !== 'saved') {
+    overallState = 'save_pending';
+  } else if (dispatchConfirmed) {
+    if (windowCloseState === 'closed') {
+      overallState = 'dispatch_confirmed_window_closed';
+    } else if (windowCloseState === 'failed') {
+      overallState = 'dispatch_confirmed_window_close_failed';
+    } else {
+      overallState = 'dispatch_confirmed';
+    }
+  } else if (dispatchState === 'dispatch_failed') {
+    overallState = 'dispatch_failed';
+  } else if (dispatchState === 'dispatch_skipped') {
+    overallState = 'dispatch_skipped';
+  } else if (dispatchState === 'dispatch_pending' || dispatchState === 'dispatch_queued_no_flush_result') {
+    overallState = 'dispatch_pending';
+  } else if (dispatchState === 'saved_local') {
+    overallState = 'saved_local';
+  }
+
+  const checkpoints = [];
+  if (responseCapturedAt !== null) {
+    checkpoints.push({
+      code: 'response',
+      state: hasResponse ? 'captured' : 'missing',
+      ts: responseCapturedAt,
+      detail: Number.isInteger(process?.completedResponseLength) && process.completedResponseLength > 0
+        ? `len=${process.completedResponseLength}`
+        : ''
+    });
+  }
+  if (saveState !== 'missing' || saveError) {
+    checkpoints.push({
+      code: 'save_local',
+      state: saveState,
+      ts: saveUpdatedAt || responseCapturedAt || Date.now(),
+      detail: saveError
+    });
+  }
+  if (dispatchState) {
+    const dispatchParts = [];
+    if (dispatchAccepted > 0) dispatchParts.push(`accepted=${dispatchAccepted}`);
+    if (dispatchSent > 0) dispatchParts.push(`sent=${dispatchSent}`);
+    if (dispatchPending > 0) dispatchParts.push(`pending=${dispatchPending}`);
+    if (dispatchFailed > 0) dispatchParts.push(`failed=${dispatchFailed}`);
+    if (verifyState) dispatchParts.push(`verify=${verifyState}`);
+    if (verifyEventId) dispatchParts.push(`event=${verifyEventId}`);
+    checkpoints.push({
+      code: 'dispatch',
+      state: dispatchConfirmed ? 'confirmed' : dispatchState,
+      ts: dispatchUpdatedAt || saveUpdatedAt || responseCapturedAt || Date.now(),
+      detail: trimProcessAuditText(dispatchParts.join(', '), 220)
+    });
+  }
+  if (windowCloseState !== 'not_available') {
+    checkpoints.push({
+      code: 'window_close',
+      state: windowCloseState,
+      ts: windowCloseClosedAt || windowCloseLastAttemptAt || windowCloseRequestedAt || saveUpdatedAt || responseCapturedAt || Date.now(),
+      detail: trimProcessAuditText(
+        [windowCloseReason, windowCloseError].filter(Boolean).join(' | '),
+        220
+      )
+    });
+  }
+
+  const updatedAt = [
+    responseCapturedAt,
+    saveUpdatedAt,
+    dispatchUpdatedAt,
+    windowCloseClosedAt,
+    windowCloseLastAttemptAt,
+    windowCloseRequestedAt,
+    Number.isInteger(process?.finishedAt) ? process.finishedAt : null,
+    Number.isInteger(process?.timestamp) ? process.timestamp : null
+  ]
+    .filter((value) => Number.isInteger(value) && value > 0)
+    .reduce((max, value) => Math.max(max, value), 0);
+
+  return {
+    hasResponse,
+    responseCapturedAt,
+    saveState,
+    saveOk: saveOk === true,
+    saveUpdatedAt: Number.isInteger(saveUpdatedAt) ? saveUpdatedAt : null,
+    saveError,
+    dispatchState,
+    dispatchConfirmed,
+    dispatchAccepted,
+    dispatchSent,
+    dispatchFailed,
+    dispatchPending,
+    verifyState,
+    verifyEventId,
+    dispatchUpdatedAt: Number.isInteger(dispatchUpdatedAt) ? dispatchUpdatedAt : null,
+    windowCloseState,
+    windowCloseRequestedAt,
+    windowCloseLastAttemptAt,
+    windowCloseClosedAt,
+    windowCloseAttempts,
+    windowCloseError,
+    overallState,
+    updatedAt: updatedAt || null,
+    checkpoints
+  };
+}
+
 function isFailedProcessStatus(status) {
   const normalized = normalizeProcessStatus(status);
   return normalized === 'failed' || normalized === 'error';
@@ -1025,6 +1281,12 @@ function normalizeProcessRecord(record) {
     normalized.windowClose = normalizedWindowClose;
   } else {
     delete normalized.windowClose;
+  }
+  const normalizedCompletionAudit = buildProcessCompletionAudit(normalized);
+  if (normalizedCompletionAudit) {
+    normalized.completionAudit = normalizedCompletionAudit;
+  } else {
+    delete normalized.completionAudit;
   }
   if (normalized.actionRequired === 'none') {
     normalized.needsAction = false;
@@ -7999,6 +8261,20 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
         },
         timestamp: now
       });
+      if (typeof emitWatchlistDispatchProcessLog === 'function') {
+        emitWatchlistDispatchProcessLog('info', 'completed_process_window_close_result', 'Process window already absent; marked as closed', {
+          runId: normalizedRunId,
+          origin: typeof options?.origin === 'string' && options.origin.trim()
+            ? options.origin.trim()
+            : 'process_window_close_retry',
+          state: 'closed',
+          reason: inspectResult.reason || 'window_missing',
+          attemptCount: currentAttemptCount,
+          tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+          windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+          dispatchState: plan?.delivery?.state || ''
+        });
+      }
       clearProcessWindowCloseRetry(normalizedRunId);
       return { success: true, closed: true, reason: inspectResult.reason || 'window_missing' };
     }
@@ -8017,6 +8293,21 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
         },
         timestamp: now
       });
+      if (typeof emitWatchlistDispatchProcessLog === 'function') {
+        emitWatchlistDispatchProcessLog('info', 'completed_process_window_close_result', 'Completed process tab/window closed', {
+          runId: normalizedRunId,
+          origin: typeof options?.origin === 'string' && options.origin.trim()
+            ? options.origin.trim()
+            : 'process_window_close_retry',
+          state: 'closed',
+          reason: closeResult.reason || closeResult.closeMode || 'closed',
+          closeMode: closeResult.closeMode || '',
+          attemptCount: currentAttemptCount,
+          tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+          windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+          dispatchState: plan?.delivery?.state || ''
+        });
+      }
       clearProcessWindowCloseRetry(normalizedRunId);
       return { success: true, closed: true, reason: closeResult.reason || 'closed' };
     }
@@ -8036,6 +8327,26 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
       windowClose: windowCloseState,
       timestamp: now
     });
+    if (typeof emitWatchlistDispatchProcessLog === 'function') {
+      emitWatchlistDispatchProcessLog(
+        currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'warn' : 'info',
+        'completed_process_window_close_result',
+        currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+          ? 'Completed process window close exhausted retries'
+          : 'Completed process window close still pending',
+        {
+          runId: normalizedRunId,
+          origin: windowCloseState.lastReason,
+          state: windowCloseState.state,
+          reason: closeResult.reason || 'close_failed',
+          closeMode: closeResult.closeMode || '',
+          attemptCount: currentAttemptCount,
+          tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+          windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+          dispatchState: plan?.delivery?.state || ''
+        }
+      );
+    }
 
     if (currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts) {
       clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });

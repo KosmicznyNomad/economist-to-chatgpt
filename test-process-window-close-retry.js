@@ -200,6 +200,7 @@ function extractFunctionSource(source, functionName) {
 async function main() {
   const timers = [];
   const clearedTimers = [];
+  const auditLogs = [];
   let removeAttempt = 0;
 
   const context = vm.createContext({
@@ -242,6 +243,9 @@ async function main() {
       };
       context.processRegistry.set(runId, next);
       return next;
+    },
+    emitWatchlistDispatchProcessLog(level, code, message, details) {
+      auditLogs.push({ level, code, message, details });
     },
     setTimeout(callback, delayMs) {
       const id = timers.length + 1;
@@ -318,6 +322,14 @@ async function main() {
   assert.strictEqual(removeAttempt, 2);
   assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'closed');
   assert.ok(Number.isInteger(context.processRegistry.get('run-close').windowClose.closedAt));
+  assert(
+    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'retrying'),
+    'Should log pending window-close retries.'
+  );
+  assert(
+    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'closed'),
+    'Should log successful window-close completion.'
+  );
 
   console.log('test-process-window-close-retry.js: ok');
 }
