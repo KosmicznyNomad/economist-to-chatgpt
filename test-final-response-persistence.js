@@ -4,6 +4,7 @@ const path = require('path');
 const vm = require('vm');
 
 const DecisionContractUtils = require('./decision-contract.js');
+const ProcessContractUtils = require('./process-contract.js');
 
 const backgroundPath = path.join(__dirname, 'background.js');
 const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
@@ -142,6 +143,59 @@ function makeCurrent16Line(role, company) {
   ].join('; ');
 }
 
+function makeStructuredV2Response(company = 'Alpha Corp') {
+  return JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          data_decyzji: '2026-03-20',
+          status_decyzji: 'WATCH',
+          spolka: `${company} (ALP:NASDAQ)`,
+          zrodlo_tezy: 'Alpha source',
+          material_zrodlowy_podcast: 'Alpha source',
+          teza_inwestycyjna: 'Alpha thesis',
+          bear_scenario_total: 'Bear_TOTAL: 10',
+          base_scenario_total: 'Base_TOTAL: 20',
+          bull_scenario_total: 'Bull_TOTAL: 30',
+          voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
+          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          rodzina_spolki: 'Technologia i oprogramowanie',
+          typ_spolki: 'Software',
+          model_przychodu: 'Subscription',
+          region: 'USA',
+          waluta: 'USD'
+        },
+        taxonomy: {
+          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          company_family: 'Technologia i oprogramowanie',
+          company_type: 'Software',
+          revenue_model: 'Subscription',
+          region: 'USA',
+          currency: 'USD'
+        },
+        kpi: {
+          schema_id: 'core10',
+          items: [
+            { key: 'FQ', value: 8 },
+            { key: 'TE', value: 7 },
+            { key: 'CM', value: 9 },
+            { key: 'VS', value: 6 },
+            { key: 'TQ', value: 7 },
+            { key: 'PP', value: 8 },
+            { key: 'CP', value: 5 },
+            { key: 'CD', value: 7 },
+            { key: 'NO', value: 8 },
+            { key: 'MR', value: 6 }
+          ]
+        },
+        extras: {}
+      }
+    ]
+  });
+}
+
 const context = {
   console,
   JSON,
@@ -175,6 +229,9 @@ const context = {
 
 vm.createContext(context);
 [
+  'extractResponseIdFromCopyTrace',
+  'collectKnownProcessResponseIds',
+  'findStoredCompletedResponseForProcess',
   'normalizeStructuredWatchlistValue',
   'normalizeStructuredWatchlistObject',
   'normalizeStructuredWatchlistNamedSection',
@@ -199,15 +256,15 @@ async function testRequiresCompletedPayload() {
   assert.strictEqual(result.reason, 'completed_response_missing');
 }
 
-async function testRequiresFinalPromptCompletion() {
+async function testAcceptsCompletedPayloadEvenWhenPromptCountersLag() {
   const result = await context.resolveCompletedProcessFinalResponseText({
     currentPrompt: 11,
     totalPrompts: 12,
-    completedResponseText: makeCurrent16Line('PRIMARY', 'Alpha Corp')
+    completedResponseText: makeStructuredV2Response('Alpha Corp')
   });
 
-  assert.strictEqual(result.success, false);
-  assert.strictEqual(result.reason, 'not_final_stage');
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.contractKind, 'economist.response.v2');
 }
 
 async function testRejectsInvalidFinalContract() {
@@ -225,67 +282,241 @@ async function testAcceptsStructuredV2FinalContract() {
   const result = await context.resolveCompletedProcessFinalResponseText({
     currentPrompt: 12,
     totalPrompts: 12,
-    completedResponseText: JSON.stringify({
-      schema: 'economist.response.v2',
-      records: [
-        {
-          decision_role: 'PRIMARY',
-          fields: {
-            data_decyzji: '2026-03-20',
-            status_decyzji: 'WATCH',
-            spolka: 'Alpha Corp (ALP:NASDAQ)',
-            zrodlo_tezy: 'Alpha source',
-            material_zrodlowy_podcast: 'Alpha source',
-            teza_inwestycyjna: 'Alpha thesis',
-            bear_scenario_total: 'Bear_TOTAL: 10',
-            base_scenario_total: 'Base_TOTAL: 20',
-            bull_scenario_total: 'Bull_TOTAL: 30',
-            voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
-            sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
-            rodzina_spolki: 'Technologia i oprogramowanie',
-            typ_spolki: 'Software',
-            model_przychodu: 'Subscription',
-            region: 'USA',
-            waluta: 'USD'
-          },
-          taxonomy: {
-            sector: 'Software steruje praca, pieniedzmi i ryzykiem',
-            company_family: 'Technologia i oprogramowanie',
-            company_type: 'Software',
-            revenue_model: 'Subscription',
-            region: 'USA',
-            currency: 'USD'
-          },
-          kpi: {
-            schema_id: 'core10',
-            items: [
-              { key: 'FQ', value: 8 },
-              { key: 'TE', value: 7 },
-              { key: 'CM', value: 9 },
-              { key: 'VS', value: 6 },
-              { key: 'TQ', value: 7 },
-              { key: 'PP', value: 8 },
-              { key: 'CP', value: 5 },
-              { key: 'CD', value: 7 },
-              { key: 'NO', value: 8 },
-              { key: 'MR', value: 6 }
-            ]
-          },
-          extras: {}
-        }
-      ]
-    })
+    completedResponseText: makeStructuredV2Response('Alpha Corp')
   });
 
   assert.strictEqual(result.success, true);
   assert.strictEqual(result.contractKind, 'economist.response.v2');
 }
 
+async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {
+  context.readCanonicalResponsesFromStorage = async () => ([
+    {
+      responseId: 'resp-alpha',
+      runId: 'run-alpha',
+      analysisType: 'company',
+      conversationUrl: 'https://chatgpt.com/c/alpha',
+      timestamp: 1775987605000,
+      text: makeStructuredV2Response('Alpha Corp')
+    }
+  ]);
+
+  const result = await context.resolveCompletedProcessFinalResponseText({
+    id: 'run-alpha',
+    analysisType: 'company',
+    currentPrompt: 12,
+    totalPrompts: 12,
+    completedResponseText: '',
+    chatUrl: 'https://chatgpt.com/c/alpha',
+    finalStagePersistence: {
+      responseId: 'resp-alpha'
+    }
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.resolutionSource, 'canonical_storage');
+  assert.strictEqual(result.storageResponseId, 'resp-alpha');
+  assert.strictEqual(result.responseText, makeStructuredV2Response('Alpha Corp'));
+  assert.strictEqual(result.processPatch.completedResponseText, makeStructuredV2Response('Alpha Corp'));
+}
+
+function testCriticalCompletedResponsePatchFlushesImmediately() {
+  const flushContext = vm.createContext({
+    console,
+    isClosedProcessStatus(status) {
+      return ['completed', 'failed', 'stopped'].includes(String(status || '').trim().toLowerCase());
+    },
+    normalizeProcessActionRequired(value, fallback = 'none') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    deriveProcessActionRequired() {
+      return 'none';
+    }
+  });
+
+  vm.runInContext(extractFunctionSource(backgroundSource, 'shouldFlushProcessUpdateImmediately'), flushContext);
+
+  const shouldFlush = flushContext.shouldFlushProcessUpdateImmediately(
+    {
+      id: 'run-alpha',
+      lifecycleStatus: 'finalizing',
+      currentPrompt: 12,
+      queueState: ''
+    },
+    {
+      id: 'run-alpha',
+      lifecycleStatus: 'finalizing',
+      currentPrompt: 12,
+      queueState: ''
+    },
+    {
+      completedResponseText: makeStructuredV2Response('Alpha Corp'),
+      completedResponseCapturedAt: 1775987605000
+    }
+  );
+
+  assert.strictEqual(shouldFlush, true);
+
+  const shouldFlushWindowClose = flushContext.shouldFlushProcessUpdateImmediately(
+    {
+      id: 'run-alpha',
+      lifecycleStatus: 'completed',
+      currentPrompt: 12,
+      queueState: 'dispatch_pending'
+    },
+    {
+      id: 'run-alpha',
+      lifecycleStatus: 'completed',
+      currentPrompt: 12,
+      queueState: 'dispatch_pending'
+    },
+    {
+      windowClose: {
+        state: 'retrying',
+        attemptCount: 1
+      }
+    }
+  );
+
+  assert.strictEqual(shouldFlushWindowClose, true);
+}
+
+function testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot() {
+  const retryContext = vm.createContext({
+    console,
+    ProcessContractUtils,
+    normalizeWatchlistVerifyState(value) {
+      return typeof value === 'string' ? value.trim().toLowerCase() : '';
+    },
+    extractAssistantTextFromProcess(process) {
+      if (!process || typeof process !== 'object') return '';
+      return typeof process.completedResponseText === 'string' ? process.completedResponseText : '';
+    }
+  });
+
+  [
+    'getCompletedProcessFinalityState',
+    'normalizeProcessLifecycleStatus',
+    'normalizeProcessStatus',
+    'resolveProcessStageSnapshot',
+    'hasProcessReachedFinalStage',
+    'isExplicitlyVerifiedDispatch',
+    'getProcessPersistenceDispatchSnapshot',
+    'getProcessQueueDeliveryState',
+    'resolveCompletedProcessPersistenceRetryPlan'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), retryContext);
+  });
+
+  const plan = retryContext.resolveCompletedProcessPersistenceRetryPlan({
+    id: 'run-alpha',
+    status: 'finalizing',
+    lifecycleStatus: 'finalizing',
+    currentPrompt: 12,
+    totalPrompts: 12,
+    stageIndex: 11,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_pending',
+        accepted: 1,
+        sent: 1,
+        failed: 0,
+        deferred: 0,
+        remaining: 0,
+        verifyState: 'http_accepted'
+      }
+    }
+  });
+
+  assert.strictEqual(plan.needed, true);
+  assert.strictEqual(plan.mode, 'flush');
+  assert.strictEqual(plan.reason, 'dispatch_pending');
+}
+
+async function testProcessProgressCarriesCompletedResponsePayload() {
+  const upsertCalls = [];
+  const responseText = makeStructuredV2Response('Alpha Corp');
+  const progressContext = vm.createContext({
+    console,
+    Date,
+    Math,
+    Number,
+    String,
+    Array,
+    JSON,
+    Map,
+    resolveProcessId: async () => 'run-progress',
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    normalizeProcessActionRequired(value, fallback = 'none') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    deriveProcessActionRequired() {
+      return 'none';
+    },
+    resolveProcessConversationUrlFromMessage() {
+      return 'https://chatgpt.com/c/progress';
+    },
+    ensureProcessRegistryReady: async () => {},
+    processRegistry: new Map([
+      ['run-progress', { id: 'run-progress', currentPrompt: 12, totalPrompts: 12 }]
+    ]),
+    applyChatGptComputationStatePatch(target, source) {
+      if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {
+        return target;
+      }
+      if (typeof source.chatGptModeKind === 'string' && source.chatGptModeKind.trim()) {
+        target.chatGptModeKind = source.chatGptModeKind.trim();
+      }
+      return target;
+    },
+    applyMonotonicProcessPatch(existing, patch) {
+      return patch;
+    },
+    upsertProcess: async (runId, patch) => {
+      upsertCalls.push({ runId, patch });
+    }
+  });
+
+  vm.runInContext(extractFunctionSource(backgroundSource, 'handleProcessProgressMessage'), progressContext);
+
+  const handled = await progressContext.handleProcessProgressMessage({
+    lifecycleStatus: 'finalizing',
+    phase: 'save_local',
+    statusCode: 'storage.saving_local',
+    responseId: 'resp-progress',
+    completedResponseText: responseText,
+    completedResponseLength: responseText.length,
+    completedResponseCapturedAt: 1775987605000,
+    completedResponseSaved: false
+  }, null);
+
+  assert.strictEqual(handled, true);
+  assert.strictEqual(upsertCalls.length, 1);
+  assert.strictEqual(upsertCalls[0].runId, 'run-progress');
+  assert.strictEqual(upsertCalls[0].patch.responseId, 'resp-progress');
+  assert.strictEqual(upsertCalls[0].patch.completedResponseText, responseText);
+  assert.strictEqual(upsertCalls[0].patch.completedResponseLength, responseText.length);
+  assert.strictEqual(upsertCalls[0].patch.completedResponseCapturedAt, 1775987605000);
+  assert.strictEqual(upsertCalls[0].patch.completedResponseSaved, false);
+  assert.strictEqual(upsertCalls[0].patch.chatGptModeKind, undefined);
+}
+
 async function main() {
   await testRequiresCompletedPayload();
-  await testRequiresFinalPromptCompletion();
+  await testAcceptsCompletedPayloadEvenWhenPromptCountersLag();
   await testRejectsInvalidFinalContract();
   await testAcceptsStructuredV2FinalContract();
+  await testFallsBackToCanonicalStorageWhenProcessPayloadMissing();
+  testCriticalCompletedResponsePatchFlushesImmediately();
+  testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot();
+  await testProcessProgressCarriesCompletedResponsePayload();
   console.log('test-final-response-persistence.js: ok');
 }
 

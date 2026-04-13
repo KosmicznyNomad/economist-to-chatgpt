@@ -2,6 +2,7 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
+const ProcessContractUtils = require('./process-contract.js');
 
 const backgroundPath = path.join(__dirname, 'background.js');
 const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
@@ -92,6 +93,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '(') {
       parenDepth += 1;
       continue;
@@ -182,6 +184,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '{') depth += 1;
     if (char === '}') {
       depth -= 1;
@@ -195,166 +198,128 @@ function extractFunctionSource(source, functionName) {
 }
 
 async function main() {
-  const context = {
+  const timers = [];
+  const clearedTimers = [];
+  let removeAttempt = 0;
+
+  const context = vm.createContext({
     console,
-    Promise,
     Date,
+    Math,
+    Number,
+    String,
+    Array,
+    JSON,
     Map,
     Set,
+    ProcessContractUtils,
+    PROCESS_WINDOW_CLOSE_RETRY: {
+      initialDelayMs: 1500,
+      maxDelayMs: 60 * 1000,
+      maxAttempts: 24
+    },
     processRegistry: new Map(),
-    ISKRA_REMOTE_RUNNER: {
-      requestTimeoutMs: 20000
+    processWindowCloseRetryTimersByRunId: new Map(),
+    processWindowCloseRetryAttemptCountByRunId: new Map(),
+    processWindowCloseRetryInFlight: new Set(),
+    normalizeWatchlistVerifyState(value) {
+      return typeof value === 'string' ? value.trim().toLowerCase() : '';
     },
-    isClosedProcessStatus: (status) => ['completed', 'failed', 'stopped', 'cancelled'].includes(String(status || '').trim()),
-    ensureProcessRegistryReady: async () => true,
-    createEmptyAnalysisQueueState: () => ({
-      waitingJobs: [],
-      activeJobs: [],
-      lastSequence: 0
-    }),
-    getAnalysisQueueStatusSnapshot: async () => ({
-      totalJobs: 0,
-      queueSize: 0,
-      activeJobs: 0
-    }),
-    getAnalysisQueueSnapshot: async () => ({
-      waitingJobs: [],
-      activeJobs: []
-    }),
-    getConfiguredRemoteRunnerIdentity: async () => ({
-      runnerId: 'runner-1'
-    }),
-    getStoredRemoteRunnerEnabled: async () => true,
-    getAnalysisQueuePaused: async () => false,
-    getRemoteJobSuppression: async () => null,
-    retrySuppressedRemoteJobFailure: async () => ({ success: true }),
-    getRemoteRunnerStatusViaApi: async (runnerId, options = {}) => {
-      context.runnerStatusCalls.push({ runnerId, options });
-      return {
-        success: true,
-        payload: {
-          runner: {
-            runnerId,
-            activeRemoteJobId: 'remote-job-1'
-          }
-        }
+    ensureProcessRegistryReady: async () => {},
+    getTabByIdSafe: async () => ({ id: 11, windowId: 22 }),
+    queryTabsInWindowSafe: async () => ({ ok: true, tabs: [{ id: 11 }], reason: '' }),
+    removeTabSafe: async () => {
+      removeAttempt += 1;
+      return removeAttempt >= 2;
+    },
+    removeWindowSafe: async () => false,
+    upsertProcess: async (runId, patch) => {
+      const current = context.processRegistry.get(runId) || { id: runId };
+      const next = {
+        ...current,
+        ...patch,
+        windowClose: patch?.windowClose ? { ...(current.windowClose || {}), ...patch.windowClose } : current.windowClose
       };
+      context.processRegistry.set(runId, next);
+      return next;
     },
-    getRemoteJobViaApi: async (jobId) => {
-      context.jobFetchCalls.push(jobId);
-      return {
-        success: true,
-        payload: {
-          job: {
-            jobId,
-            runId: 'run-1',
-            runnerId: 'runner-1',
-            attemptId: 'attempt-1',
-            status: 'claimed',
-            promptChainSnapshot: ['prompt a'],
-            text: 'manual text'
-          }
-        }
-      };
+    setTimeout(callback, delayMs) {
+      const id = timers.length + 1;
+      timers.push({ id, callback, delayMs });
+      return id;
     },
-    enqueueClaimedRemoteJob: async (job) => {
-      context.enqueuedJobs.push(job);
-      return {
-        success: true,
-        queueSize: 1
-      };
-    },
-    reportRemoteJobEnqueueFailure: async (job, error) => ({
-      error: error?.message || String(error),
-      job
-    }),
-    runnerStatusCalls: [],
-    jobFetchCalls: [],
-    enqueuedJobs: [],
-    suppressionRetries: []
-  };
-
-  context.processRegistry.set('run-process-1', {
-    id: 'run-process-1',
-    status: 'running',
-    title: 'Remote active process',
-    promptHash: 'sha256:test',
-    remote: {
-      remoteJobId: 'remote-process-job',
-      remoteAttemptId: 'attempt-process-1',
-      remoteRunnerId: 'runner-1'
+    clearTimeout(id) {
+      clearedTimers.push(id);
     }
   });
 
-  vm.createContext(context);
   [
-    'findRemoteAnalysisQueueJob',
-    'findActiveRemoteProcessRecord',
-    'buildRemoteQueueJobLikeFromProcess',
-    'getRemoteRunnerLocalState',
-    'recoverAssignedRemoteJob'
+    'normalizeProcessLifecycleStatus',
+    'normalizeProcessStatus',
+    'resolveProcessStageSnapshot',
+    'hasProcessReachedFinalStage',
+    'isExplicitlyVerifiedDispatch',
+    'getProcessPersistenceDispatchSnapshot',
+    'getProcessQueueDeliveryState',
+    'normalizeProcessWindowCloseState',
+    'inspectProcessWindowContext',
+    'attemptProcessWindowClose',
+    'getProcessWindowCloseRetryDelayMs',
+    'clearProcessWindowCloseRetry',
+    'resolveProcessWindowCloseRetryPlan',
+    'scheduleProcessWindowCloseRetriesForSnapshot',
+    'scheduleProcessWindowCloseRetry',
+    'runProcessWindowCloseRetry',
+    'closeProcessWindowAfterQueueSuccess'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
     });
   });
 
-  const localStateWithProcess = await context.getRemoteRunnerLocalState();
-  assert.strictEqual(localStateWithProcess.localBusy, true);
-  assert.strictEqual(localStateWithProcess.localQueueSize, 1);
-  assert.strictEqual(localStateWithProcess.activeRemoteJob.remote.remoteJobId, 'remote-process-job');
-
-  context.processRegistry.clear();
-
-  const recoveryResult = await context.recoverAssignedRemoteJob({
-    origin: 'test'
-  });
-
-  assert.strictEqual(recoveryResult.success, true);
-  assert.strictEqual(recoveryResult.recovered, true);
-  assert.strictEqual(recoveryResult.reason, 'assigned_remote_job_recovered');
-  assert.strictEqual(context.runnerStatusCalls.length, 1);
-  assert.strictEqual(context.jobFetchCalls.length, 1);
-  assert.strictEqual(context.enqueuedJobs.length, 1);
-  assert.strictEqual(context.enqueuedJobs[0].jobId, 'remote-job-1');
-  assert.strictEqual(context.enqueuedJobs[0].attemptId, 'attempt-1');
-
-  context.getRemoteJobSuppression = async () => ({
-    payload: {
-      failure: {
-        statusCode: 'manual_stop',
-        reason: 'manual_stop',
-        error: 'Przerwano przez uzytkownika'
+  context.processRegistry.set('run-close', {
+    id: 'run-close',
+    status: 'completed',
+    lifecycleStatus: 'completed',
+    currentPrompt: 13,
+    totalPrompts: 13,
+    stageIndex: 12,
+    tabId: 11,
+    windowId: 22,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_pending',
+        accepted: 1,
+        sent: 1,
+        failed: 0,
+        deferred: 0,
+        remaining: 0,
+        verifyState: 'http_accepted'
       }
-    },
-    error: 'Przerwano przez uzytkownika'
+    }
   });
-  context.retrySuppressedRemoteJobFailure = async (job) => {
-    context.suppressionRetries.push(job.jobId);
-    return { success: true };
-  };
 
-  const suppressedResult = await context.recoverAssignedRemoteJob({
-    origin: 'test-suppressed'
+  const firstClose = await context.closeProcessWindowAfterQueueSuccess(context.processRegistry.get('run-close'), {
+    origin: 'test-first-close'
   });
-  assert.strictEqual(suppressedResult.success, true);
-  assert.strictEqual(suppressedResult.skipped, true);
-  assert.strictEqual(suppressedResult.reason, 'remote_job_suppressed');
-  assert.strictEqual(context.suppressionRetries.length, 1);
-  assert.strictEqual(context.suppressionRetries[0], 'remote-job-1');
-  assert.strictEqual(context.enqueuedJobs.length, 1, 'Suppressed remote job must not be re-enqueued.');
 
-  context.getRemoteJobSuppression = async () => null;
-  context.getAnalysisQueuePaused = async () => true;
-  const pausedResult = await context.recoverAssignedRemoteJob({
-    origin: 'test-paused'
+  assert.strictEqual(firstClose, false);
+  assert.strictEqual(removeAttempt, 1);
+  assert.strictEqual(timers.length, 1);
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'retrying');
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose.attemptCount, 1);
+
+  const retryClose = await context.runProcessWindowCloseRetry('run-close', {
+    origin: 'test-retry'
   });
-  assert.strictEqual(pausedResult.success, true);
-  assert.strictEqual(pausedResult.skipped, true);
-  assert.strictEqual(pausedResult.reason, 'queue_paused');
-  assert.strictEqual(context.enqueuedJobs.length, 1, 'Paused recovery must not enqueue remote work.');
 
-  console.log('remote runner recovery test: ok');
+  assert.strictEqual(retryClose.closed, true);
+  assert.strictEqual(removeAttempt, 2);
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'closed');
+  assert.ok(Number.isInteger(context.processRegistry.get('run-close').windowClose.closedAt));
+
+  console.log('test-process-window-close-retry.js: ok');
 }
 
 main().catch((error) => {

@@ -194,134 +194,99 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-function clone(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
 async function main() {
-  const buildContext = () => {
-    const scenarioContext = {
-      console,
-      Date,
-      Promise,
-      Map,
-      Set,
-      analysisQueueState: {
-        waitingJobs: [
-          {
-            jobId: 'aq-remote-1',
-            runId: 'run-remote-1',
-            remote: {
-              remoteJobId: 'remote-job-1',
-              remoteAttemptId: 'attempt-1'
-            }
+  const setCalls = [];
+  const queuedPayloads = [];
+  const context = {
+    console,
+    Promise,
+    runId: 'run-1',
+    sourceTitleForSave: 'Article title',
+    articleTitle: 'Article title',
+    analysisType: 'company',
+    sourceNameForSave: 'Economist',
+    sourceUrlForSave: 'https://example.com/article',
+    location: {
+      href: 'https://chatgpt.com/c/test'
+    },
+    buildInjectedResponseId: () => 'generated-response-id',
+    buildCopyTrace: (runId, responseId) => `${runId || 'no-run'}/${responseId || 'no-response'}`,
+    normalizeWatchlistDispatchPayload: (payload) => ({
+      ...payload,
+      schema: 'dispatch.v1'
+    }),
+    applyChatGptComputationStatePatch(target, source) {
+      if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {
+        return target;
+      }
+      Object.assign(target, source);
+      return target;
+    },
+    detectChatGptComputationState: () => ({
+      composerThinkingEffort: 'heavy',
+      chatGptModeKind: 'thinking',
+      chatGptModelSwitcherLabel: 'ChatGPT Pro',
+      chatGptThinkingEffortDetected: 'heavy',
+      chatGptComputationLabel: 'ChatGPT Pro | Thinking | Heavy',
+      chatGptComputationDetectedAt: 1_710_000_123_456
+    }),
+    enqueueWatchlistDispatchPayload: async (payload, trace) => {
+      queuedPayloads.push({ payload, trace });
+      return {
+        queued: true,
+        queueSize: 3
+      };
+    },
+    chrome: {
+      storage: {
+        local: {
+          get: async () => ({
+            responses: []
+          }),
+          set: async (payload) => {
+            setCalls.push(payload);
           }
-        ]
-      },
-      processRegistry: new Map(),
-      reportedEvents: [],
-      rememberedSuppressions: [],
-      upserts: [],
-      ensureAnalysisQueueReady: async () => scenarioContext.analysisQueueState,
-      withAnalysisQueueMutationLock: async (task) => task(),
-      cloneAnalysisQueueState: () => clone(scenarioContext.analysisQueueState),
-      persistAnalysisQueueState: async (state) => {
-        scenarioContext.analysisQueueState = clone(state);
-        return scenarioContext.analysisQueueState;
-      },
-      sortAnalysisQueueWaitingJobs: (jobs) => jobs,
-      upsertProcess: async (runId, patch) => {
-        scenarioContext.upserts.push({ runId, patch: clone(patch) });
-        return { id: runId, ...clone(patch) };
-      },
-      reportRemoteJobEvent: async (jobId, eventType, attemptId, payload, error) => {
-        scenarioContext.reportedEvents.push({
-          jobId,
-          eventType,
-          attemptId,
-          payload: clone(payload),
-          error
-        });
-        return { success: true };
-      },
-      rememberRemoteJobSuppression: async (job, details) => {
-        scenarioContext.rememberedSuppressions.push({
-          jobId: job?.remote?.remoteJobId || job?.jobId || '',
-          reason: details?.reason || ''
-        });
-        return { success: true };
-      },
-      reconcileAnalysisQueueState: async () => ({ success: true }),
-      getAnalysisQueueStatusSnapshot: async () => ({
-        queueSize: scenarioContext.analysisQueueState.waitingJobs.length,
-        activeSlots: 0
-      })
-    };
-    return scenarioContext;
+        },
+        session: {}
+      }
+    },
+    ResponseStorageUtils: null,
+    DecisionContractUtils: null,
+    globalThis: null
   };
-
-  let context = buildContext();
+  context.globalThis = context;
 
   vm.createContext(context);
-  ['buildRemoteJobFailureDetails', 'cancelQueuedAnalysisJobs'].forEach((functionName) => {
-    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
-      filename: 'background.js'
-    });
+  vm.runInContext(extractFunctionSource(backgroundSource, 'persistResponseViaLocalEmergencyFallback'), context, {
+    filename: 'background.js'
   });
 
-  const result = await context.cancelQueuedAnalysisJobs(() => true, {
-    reason: 'stop_window_queued_cancelled',
-    statusText: 'Anulowano oczekujace joby'
-  });
+  const result = await context.persistResponseViaLocalEmergencyFallback(
+    'Final response text',
+    'resp-1',
+    {
+      selected_response_prompt: 7
+    }
+  );
 
   assert.strictEqual(result.success, true);
-  assert.strictEqual(result.cancelledCount, 1);
-  assert.strictEqual(context.reportedEvents.length, 1);
-  assert.deepStrictEqual(context.reportedEvents[0], {
-    jobId: 'remote-job-1',
-    eventType: 'failed',
-    attemptId: 'attempt-1',
-    payload: {
-      failure: {
-        statusCode: 'stop_window_queued_cancelled',
-        reason: 'stop_window_queued_cancelled',
-        error: 'Anulowano oczekujace joby'
-      },
-      queueState: '',
-      runId: 'run-remote-1',
-      jobId: 'aq-remote-1'
-    },
-    error: 'Anulowano oczekujace joby'
-  });
-  assert.strictEqual(context.analysisQueueState.waitingJobs.length, 0);
-  assert.strictEqual(context.upserts.length, 1);
-  assert.strictEqual(context.upserts[0].patch.status, 'cancelled');
-  assert.strictEqual(context.rememberedSuppressions.length, 1);
+  assert.strictEqual(result.outboxQueued, true);
+  assert.strictEqual(result.queueSize, 3);
+  assert.strictEqual(queuedPayloads.length, 1, 'Emergency fallback should use shared outbox enqueue helper.');
+  assert.strictEqual(queuedPayloads[0].payload.composerThinkingEffort, 'heavy');
+  assert.strictEqual(queuedPayloads[0].payload.chatGptModeKind, 'thinking');
+  assert.strictEqual(queuedPayloads[0].payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
+  assert.strictEqual(queuedPayloads[0].payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
+  assert.strictEqual(
+    setCalls.some((payload) => Object.prototype.hasOwnProperty.call(payload, 'watchlist_dispatch_outbox')),
+    false,
+    'Emergency fallback must not overwrite dispatch outbox directly.'
+  );
 
-  context = buildContext();
-  context.upsertProcess = async () => {
-    throw new Error('upsert_failed');
-  };
-  vm.createContext(context);
-  ['buildRemoteJobFailureDetails', 'cancelQueuedAnalysisJobs'].forEach((functionName) => {
-    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
-      filename: 'background.js'
-    });
-  });
-  const failedResult = await context.cancelQueuedAnalysisJobs(() => true, {
-    reason: 'stop_window_queued_cancelled',
-    statusText: 'Anulowano oczekujace joby'
-  });
-  assert.strictEqual(failedResult.success, false);
-  assert.strictEqual(failedResult.cancelledCount, 0);
-  assert.strictEqual(failedResult.requeuedCount, 1);
-  assert.strictEqual(context.analysisQueueState.waitingJobs.length, 1, 'Failed cancellation should restore the queued job.');
-  assert.strictEqual(context.reportedEvents.length, 0, 'Failed local cancellation must not report remote failure.');
-
-  console.log('analysis queue remote cancel test: ok');
+  console.log('emergency local save fallback test: ok');
 }
 
 main().catch((error) => {
-  console.error(error?.stack || error?.message || String(error));
-  process.exitCode = 1;
+  console.error(error);
+  process.exit(1);
 });

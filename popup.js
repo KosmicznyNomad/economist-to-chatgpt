@@ -109,6 +109,7 @@ function createReloadResumeMonitorSessionId(origin = 'popup') {
 
 const runStatus = document.getElementById('runStatus');
 const analysisQueueStatus = document.getElementById('analysisQueueStatus');
+const analysisQueuePauseBtn = document.getElementById('analysisQueuePauseBtn');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
 const watchlistCredentialsHint = document.getElementById('watchlistCredentialsHint');
 const watchlistCredentialsForm = document.getElementById('watchlistCredentialsForm');
@@ -133,10 +134,15 @@ const remoteRunnerNameInput = document.getElementById('remoteRunnerNameInput');
 const remoteRunnerToggleBtn = document.getElementById('remoteRunnerToggleBtn');
 const remoteRunnerCycleBtn = document.getElementById('remoteRunnerCycleBtn');
 const remoteRunnerStatus = document.getElementById('remoteRunnerStatus');
+const openRemoteIntakeBtn = document.getElementById('openRemoteIntakeBtn');
+const remoteIntakeStatus = document.getElementById('remoteIntakeStatus');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
+let analysisQueueStatusSnapshot = null;
 let remoteRunnerConfigSnapshot = null;
 const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
+const REMOTE_INTAKE_FALLBACK_ORIGIN = 'https://iskierka-watchlist.duckdns.org';
+const REMOTE_INTAKE_PATH = '/iskra';
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -210,11 +216,79 @@ function setRemoteRunnerStatus(text, isError = false) {
   setStatusElement(remoteRunnerStatus, text, isError);
 }
 
+function setRemoteIntakeStatus(text, isError = false) {
+  setStatusElement(remoteIntakeStatus, text, isError);
+}
+
 function compactRemoteIdentifier(rawValue, fallback = '') {
   const normalized = typeof rawValue === 'string' ? rawValue.trim() : '';
   if (!normalized) return fallback;
   if (normalized.length <= 28) return normalized;
   return `${normalized.slice(0, 12)}...${normalized.slice(-8)}`;
+}
+
+function isRemoteInternetHost(hostname = '') {
+  const normalized = typeof hostname === 'string' ? hostname.trim().toLowerCase() : '';
+  if (!normalized) return false;
+  return normalized !== '127.0.0.1'
+    && normalized !== 'localhost'
+    && normalized !== '0.0.0.0'
+    && normalized !== '::1';
+}
+
+function resolveRemoteIntakeOriginCandidate(rawUrl = '') {
+  const normalized = typeof rawUrl === 'string' ? rawUrl.trim() : '';
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    if (!/^https?:$/i.test(parsed.protocol)) return '';
+    if (!isRemoteInternetHost(parsed.hostname)) return '';
+    return parsed.origin;
+  } catch {
+    return '';
+  }
+}
+
+function resolveRemoteRunnerFriendlyName(config = {}) {
+  const runnerId = typeof config?.runnerId === 'string' ? config.runnerId.trim() : '';
+  const runnerName = typeof config?.runnerName === 'string' ? config.runnerName.trim() : '';
+  if (runnerId.endsWith('9') || runnerName.endsWith('9')) {
+    return 'Komputer w szafce 9';
+  }
+  return runnerName || compactRemoteIdentifier(runnerId, 'wybierz runnera');
+}
+
+function resolveRemoteIntakePageUrl() {
+  const configuredOrigin = resolveRemoteIntakeOriginCandidate(watchlistDispatchStatusSnapshot?.intakeUrl)
+    || resolveRemoteIntakeOriginCandidate(watchlistIntakeUrlInput?.value)
+    || REMOTE_INTAKE_FALLBACK_ORIGIN;
+  const targetUrl = new URL(REMOTE_INTAKE_PATH, `${configuredOrigin}/`);
+  targetUrl.searchParams.set('focus', 'compose');
+  targetUrl.searchParams.set('source', 'extension-popup');
+  const runnerId = typeof remoteRunnerConfigSnapshot?.runnerId === 'string'
+    ? remoteRunnerConfigSnapshot.runnerId.trim()
+    : '';
+  if (runnerId) {
+    targetUrl.searchParams.set('runnerId', runnerId);
+  }
+  return targetUrl.toString();
+}
+
+function applyRemoteIntakeUi() {
+  const targetUrl = resolveRemoteIntakePageUrl();
+  let targetOrigin = REMOTE_INTAKE_FALLBACK_ORIGIN;
+  try {
+    targetOrigin = new URL(targetUrl).origin;
+  } catch {
+    // Keep fallback origin.
+  }
+  if (openRemoteIntakeBtn) {
+    openRemoteIntakeBtn.disabled = false;
+  }
+  setRemoteIntakeStatus(
+    `Cel: ${targetOrigin}${REMOTE_INTAKE_PATH}. Runner: ${resolveRemoteRunnerFriendlyName(remoteRunnerConfigSnapshot)}.`,
+    false
+  );
 }
 
 function normalizeRemoteRunnerApiErrorText(apiError = '') {
@@ -233,6 +307,7 @@ function formatRemoteRunnerPopupStatus(config = {}, runner = null, apiError = ''
   const runnerEnabled = config?.runnerEnabled === true;
   const localBusy = config?.localBusy === true;
   const queueSize = Number.isInteger(config?.localQueueSize) ? Math.max(0, config.localQueueSize) : 0;
+  const queuePaused = config?.queuePaused === true;
   const runnerName = typeof config?.runnerName === 'string' ? config.runnerName.trim() : '';
   const runnerId = typeof config?.runnerId === 'string' ? config.runnerId.trim() : '';
   const promptHash = typeof config?.promptHash === 'string' ? config.promptHash.trim() : '';
@@ -250,6 +325,7 @@ function formatRemoteRunnerPopupStatus(config = {}, runner = null, apiError = ''
   }
   lines.push(`Prompty: ${config?.promptsLoaded === true ? 'OK' : 'brak'}. Alarm: ${config?.alarmActive === true ? 'ON' : 'OFF'}.`);
   lines.push(`Lokalnie: ${localBusy ? 'busy' : 'idle'}, kolejka ${queueSize}.`);
+  lines.push(`Kolejka lokalna: ${queuePaused ? 'wstrzymana' : 'aktywna'}.`);
   if (activeRemoteJobId) {
     lines.push(`Aktywny remote job: ${compactRemoteIdentifier(activeRemoteJobId)}.`);
   }
@@ -282,6 +358,7 @@ function applyRemoteRunnerUi(config = {}, runner = null, apiError = '') {
     remoteRunnerCycleBtn.disabled = remoteRunnerConfigSnapshot?.runnerEnabled !== true;
   }
   setRemoteRunnerStatus(formatRemoteRunnerPopupStatus(remoteRunnerConfigSnapshot, runner, apiError), false);
+  applyRemoteIntakeUi();
 }
 
 async function saveRemoteRunnerNameFromPopup() {
@@ -347,13 +424,22 @@ function getAnalysisQueueUiMetrics(status) {
   };
 }
 
+function getAnalysisQueueStateLabel(status) {
+  return status?.paused === true ? 'wstrzymana' : 'aktywna';
+}
+
 function formatAnalysisQueueSummary(status, options = {}) {
   const metrics = getAnalysisQueueUiMetrics(status);
   const includePrefix = options?.includePrefix !== false;
+  const includeState = typeof options?.includeState === 'boolean'
+    ? options.includeState
+    : includePrefix;
   const includeQueue = options?.includeQueue !== false;
   const parts = [];
   if (includePrefix) {
-    parts.push('Kolejka analiz:');
+    parts.push(includeState ? `Kolejka analiz: ${getAnalysisQueueStateLabel(status)}` : 'Kolejka analiz:');
+  } else if (includeState) {
+    parts.push(getAnalysisQueueStateLabel(status));
   }
   parts.push(`sloty ${metrics.reservedSlots}/${metrics.maxConcurrent}`);
   if (metrics.startingSlots > 0) {
@@ -371,8 +457,19 @@ function formatAnalysisQueueSummary(status, options = {}) {
 function formatAnalysisQueueStatus(status) {
   return formatAnalysisQueueSummary(status, {
     includePrefix: true,
+    includeState: true,
     includeQueue: true
   });
+}
+
+function applyAnalysisQueueUi(status = {}) {
+  analysisQueueStatusSnapshot = status && typeof status === 'object' ? status : {};
+  if (analysisQueuePauseBtn) {
+    const paused = analysisQueueStatusSnapshot?.paused === true;
+    analysisQueuePauseBtn.dataset.paused = paused ? 'true' : 'false';
+    analysisQueuePauseBtn.textContent = paused ? 'Wznow kolejke' : 'Wstrzymaj kolejke';
+  }
+  setAnalysisQueueStatus(formatAnalysisQueueStatus(analysisQueueStatusSnapshot), false);
 }
 
 async function refreshAnalysisQueueStatus() {
@@ -382,7 +479,7 @@ async function refreshAnalysisQueueStatus() {
       setAnalysisQueueStatus(`Kolejka analiz: blad (${response.error || 'unknown'}).`, true);
       return;
     }
-    setAnalysisQueueStatus(formatAnalysisQueueStatus(response), false);
+    applyAnalysisQueueUi(response);
   } catch (error) {
     setAnalysisQueueStatus(`Kolejka analiz: blad (${error?.message || String(error)}).`, true);
   }
@@ -558,6 +655,7 @@ const DISPATCH_REASON_LABELS = {
   missing_response_id: 'brak responseId',
   materialization_pending: 'materializacja DB oczekuje',
   materialization_partial: 'materializacja DB czesciowa',
+  expected_records_missing: 'brak oczekiwanych rekordow materializacji',
   missing_fields: 'braki danych po stronie intake',
   mismatch: 'niezgodnosc danych verify',
   ingest_failed: 'ingest zakonczony bledem',
@@ -778,6 +876,7 @@ function applyDispatchStatusSnapshot(status) {
   }
   applyWatchlistCredentialsUi(watchlistDispatchStatusSnapshot);
   applyDispatchButtonsState();
+  applyRemoteIntakeUi();
 }
 
 async function refreshDispatchStatus(forceReload = false) {
@@ -1344,6 +1443,15 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   if (!button) return;
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all';
+  const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
+    ? options.composerThinkingEffort.trim().toLowerCase()
+    : '';
+  const hasExplicitThinkingEffort = (
+    composerThinkingEffort === 'light'
+    || composerThinkingEffort === 'standard'
+    || composerThinkingEffort === 'extended'
+    || composerThinkingEffort === 'heavy'
+  );
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalText = button.textContent;
   button.disabled = true;
@@ -1351,14 +1459,20 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   setRunStatus('Powtarzam ostatni prompt we wszystkich aktywnych procesach company...');
 
   try {
-    const response = await sendRuntimeMessage({
+    const message = {
       type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
       origin,
       scope: 'active_company_invest_processes',
       forceRepeatLastPrompt: true,
       monitorSessionId,
       openMonitorWindow: true
-    });
+    };
+    if (hasExplicitThinkingEffort) {
+      message.composerThinkingEffort = composerThinkingEffort;
+    } else {
+      message.useStoredComposerThinkingEffort = true;
+    }
+    const response = await sendRuntimeMessage(message);
 
     if (!response || Object.keys(response).length === 0) {
       setRunStatus('Polecenie powtorzenia promptu zostalo wyslane.');
@@ -1422,6 +1536,7 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
   const verifyState = typeof finalStagePersistence?.verifyState === 'string'
     ? finalStagePersistence.verifyState.trim()
     : '';
+  const normalizedVerifyState = normalizeDispatchToken(verifyState);
   const verifyEventId = typeof finalStagePersistence?.verifyEventId === 'string'
     ? finalStagePersistence.verifyEventId.trim()
     : '';
@@ -1462,8 +1577,19 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
     const safeFailed = failed ?? 0;
     const safePending = pending ?? 0;
 
-    if (safeSent > 0 && safePending === 0 && safeFailed === 0) {
-      return `BAZA OK: zapis lokalny + wysylka potwierdzona (wyslano_do_bazy=${safeSent}).`;
+    if (normalizedVerifyState === 'verified') {
+      return `BAZA OK: zapis lokalny + verify DB potwierdzone (accepted=${safeAccepted}, wyslano=${safeSent}).${diagnosticSuffix}`;
+    }
+
+    if (
+      normalizedVerifyState === 'expected_records_missing'
+      || normalizedVerifyState === 'materialization_unavailable'
+      || normalizedVerifyState === 'missing_fields'
+      || normalizedVerifyState === 'mismatch'
+      || normalizedVerifyState === 'ingest_failed'
+      || normalizedVerifyState === 'ingest_quarantined'
+    ) {
+      return `BAZA: zapis lokalny OK, verify DB zakonczone bledem (${verifyState || 'terminal'}).${diagnosticSuffix}`;
     }
 
     if (safeSent > 0 && (safePending > 0 || safeFailed > 0)) {
@@ -1475,7 +1601,11 @@ function formatFinalStagePersistenceStatus(finalStagePersistence) {
 
     if (safePending > 0 && safeSent === 0 && safeFailed === 0) {
       const reasonPart = skipReasonLabel ? `, powod=${skipReasonLabel}` : '';
-      return `BAZA: zapis lokalny OK, oczekiwanie na materializacje w DB (accepted=${safeAccepted}, pending=${safePending}${reasonPart}).${diagnosticSuffix}`;
+      return `BAZA: zapis lokalny OK, oczekiwanie na verify DB (accepted=${safeAccepted}, pending=${safePending}${reasonPart}).${diagnosticSuffix}`;
+    }
+
+    if (safeSent > 0 && safePending === 0 && safeFailed === 0) {
+      return `BAZA: zapis lokalny OK, intake przyjal payload, verify DB nadal niepotwierdzone (accepted=${safeAccepted}, wyslano=${safeSent}).${diagnosticSuffix}`;
     }
 
     if (safeFailed > 0 && safeSent === 0) {
@@ -1693,6 +1823,18 @@ function formatCopyLatestInvestFinalResponseStatus(response) {
     const persistenceSuccessCount = Number.isInteger(response?.persistenceSuccessCount)
       ? response.persistenceSuccessCount
       : results.filter((row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true).length;
+    const localSaveSuccessCount = Number.isInteger(response?.localSaveSuccessCount)
+      ? response.localSaveSuccessCount
+      : results.filter((row) => row?.persistence?.localSaveOk === true || row?.persistence?.success === true).length;
+    const intakeAcceptedCount = Number.isInteger(response?.intakeAcceptedCount)
+      ? response.intakeAcceptedCount
+      : results.filter((row) => row?.persistence?.acceptedByIntake === true).length;
+    const verifiedDbCount = Number.isInteger(response?.verifiedDbCount)
+      ? response.verifiedDbCount
+      : results.filter((row) => row?.persistence?.verifiedInDb === true).length;
+    const terminalFailureCount = Number.isInteger(response?.terminalFailureCount)
+      ? response.terminalFailureCount
+      : results.filter((row) => row?.persistence?.terminalFailure === true).length;
     const lines = [
       `Skopiowano finalne odpowiedzi z ${copied}/${requested} okien Invest.`,
       `Otwarte okna Invest: ${windowCount}. Laczna dlugosc: ${textLength} znakow.`
@@ -1705,7 +1847,12 @@ function formatCopyLatestInvestFinalResponseStatus(response) {
     }
 
     if (persistenceAttemptedCount > 0) {
-      lines.push(`Fallback save: ${persistenceSuccessCount}/${persistenceAttemptedCount} OK.`);
+      lines.push(`Lokalny zapis: ${localSaveSuccessCount}/${persistenceAttemptedCount} OK.`);
+      lines.push(`Intake accepted: ${intakeAcceptedCount}/${Math.max(localSaveSuccessCount, 1)}.`);
+      lines.push(`DB verified: ${verifiedDbCount}/${Math.max(localSaveSuccessCount, 1)}.`);
+      if (terminalFailureCount > 0) {
+        lines.push(`Terminal DB errors: ${terminalFailureCount}.`);
+      }
     }
 
     if (failed > 0) {
@@ -1746,12 +1893,26 @@ function formatCopyLatestInvestFinalResponseStatus(response) {
   }
 
   if (persistence?.attempted) {
-    if (persistence.success === true) {
-      lines.push('Fallback save: OK.');
+    if (persistence.mode === 'already_verified') {
+      lines.push('Recovery: Already verified.');
+    } else if (persistence.mode === 'retry_existing_dispatch') {
+      lines.push('Recovery: Retry dispatch.');
+    } else if (persistence.mode === 'replay_missing_dispatch') {
+      lines.push('Recovery: Replay final response.');
+    }
+    if (persistence.localSaveOk === true || persistence.success === true) {
+      lines.push('Lokalny zapis: OK.');
+      if (persistence.verifiedInDb === true) {
+        lines.push('DB verified: OK.');
+      } else if (persistence.acceptedByIntake === true) {
+        lines.push('DB verified: pending.');
+      } else if (persistence.terminalFailure === true) {
+        lines.push('DB verified: terminal failure.');
+      }
     } else if (typeof persistence.reason === 'string' && persistence.reason.trim()) {
-      lines.push(`Fallback save: ${persistence.reason.trim()}.`);
+      lines.push(`Lokalny zapis: ${persistence.reason.trim()}.`);
     } else {
-      lines.push('Fallback save: nieudany.');
+      lines.push('Lokalny zapis: nieudany.');
     }
   }
 
@@ -1844,6 +2005,25 @@ async function getActiveTabInCurrentWindow() {
     chrome.tabs.query({ active: true, currentWindow: true }, (rows) => resolve(Array.isArray(rows) ? rows : []));
   });
   return tabs.length > 0 ? tabs[0] : null;
+}
+
+if (openRemoteIntakeBtn) {
+  openRemoteIntakeBtn.addEventListener('click', async () => {
+    const originalLabel = openRemoteIntakeBtn.textContent;
+    openRemoteIntakeBtn.disabled = true;
+    openRemoteIntakeBtn.textContent = 'Otwieram intake...';
+    setRemoteIntakeStatus('Otwieram zdalny panel Iskry z formularzem nowego artykulu...', false);
+
+    try {
+      const targetUrl = resolveRemoteIntakePageUrl();
+      await chrome.tabs.create({ url: targetUrl });
+      window.close();
+    } catch (error) {
+      setRemoteIntakeStatus(`Remote intake: ${error?.message || String(error)}.`, true);
+      openRemoteIntakeBtn.textContent = originalLabel || 'Nowy artykul w zdalnej kolejce';
+      openRemoteIntakeBtn.disabled = false;
+    }
+  });
 }
 
 const runBtn = document.getElementById('runBtn');
@@ -2069,6 +2249,37 @@ if (remoteRunnerNameInput) {
       await refreshRemoteRunnerStatus();
     } catch (error) {
       setRemoteRunnerStatus(`Runner: ${error?.message || String(error)}.`, true);
+    }
+  });
+}
+
+if (analysisQueuePauseBtn) {
+  analysisQueuePauseBtn.addEventListener('click', async () => {
+    const nextPaused = analysisQueuePauseBtn.dataset.paused !== 'true';
+    const originalLabel = analysisQueuePauseBtn.textContent;
+    analysisQueuePauseBtn.disabled = true;
+    analysisQueuePauseBtn.textContent = nextPaused ? 'Wstrzymuje...' : 'Wznawiam...';
+    setAnalysisQueueStatus(
+      nextPaused ? 'Kolejka analiz: wstrzymuje kolejne uruchomienia...' : 'Kolejka analiz: wznawiam kolejke...',
+      false
+    );
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'SET_ANALYSIS_QUEUE_PAUSED',
+        paused: nextPaused,
+        origin: 'popup-analysis-queue-toggle'
+      });
+      if (response?.success === false) {
+        throw new Error(response.error || response.reason || 'analysis_queue_pause_failed');
+      }
+      applyAnalysisQueueUi(response);
+      await refreshRemoteRunnerStatus();
+    } catch (error) {
+      setAnalysisQueueStatus(`Kolejka analiz: blad (${error?.message || String(error)}).`, true);
+      analysisQueuePauseBtn.textContent = originalLabel || (nextPaused ? 'Wstrzymaj kolejke' : 'Wznow kolejke');
+    } finally {
+      analysisQueuePauseBtn.disabled = false;
     }
   });
 }

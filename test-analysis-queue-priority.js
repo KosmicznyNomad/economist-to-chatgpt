@@ -318,6 +318,8 @@ function buildPriorityContext() {
       return true;
     },
     reportAnalysisQueueEvent: async () => true,
+    ensureAnalysisQueuePauseReady: async () => false,
+    getAnalysisQueuePaused: async () => false,
     requestAnalysisQueueReconcile: () => {},
     requestRemoteRunnerCycle: () => {},
     buildStaleQueueReleasePatch: async () => null,
@@ -338,6 +340,8 @@ function buildPriorityContext() {
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
     'hasProcessReachedFinalStage',
+    'normalizeWatchlistVerifyState',
+    'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'getAnalysisQueueCompletionTimestamp',

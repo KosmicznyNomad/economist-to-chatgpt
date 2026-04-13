@@ -44,8 +44,8 @@ Stage 12 render flow:
 `response.text -> decision-contract.js -> decision-view-model.js -> responses/process-monitor`
 
 ## Stage 12 contract
-- `current`: 2 lines, current prompt emits 17 fields each with trailing `KPI Scorecard`, `PRIMARY` then `SECONDARY`
-- `shortfall`: 1 valid `PRIMARY` line plus shortfall marker
+- `current`: preferred output is `economist.response.v2` JSON with `records[]`; compatibility-read still accepts the legacy/current semicolon formats
+- `shortfall`: 1 valid `PRIMARY` record when only one company passes; structured v2 uses a single record plus `extras.shortfall_reason`
 - `legacy`: old format accepted for compatibility-read only
 - `invalid`: malformed or non-contract output
 

@@ -96,9 +96,81 @@ function testMarketRowDedupPrefersHigherContractScoreThenSignal() {
   );
 }
 
+function testValidatedStage12StateStructuredV2() {
+  const structuredText = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          data_decyzji: '2026-04-12',
+          status_decyzji: 'WATCH',
+          spolka: 'Camtek (CAMT:NASDAQ)',
+          material_zrodlowy_podcast: 'SemiAnalysis Rubin Ultra',
+          teza_inwestycyjna: 'Camtek thesis',
+          bear_scenario_total: 'Bear_TOTAL: 34.40',
+          base_scenario_total: 'Base_TOTAL: 44.64',
+          bull_scenario_total: 'Bull_TOTAL: 57.04',
+          voi_falsy_kluczowe_ryzyka: 'VOI: orders, Fals: delay, Primary risk: memory cycle, Composite: 4.3/5.0, EntryScore: 8.2/10, Sizing: 3%'
+        },
+        taxonomy: {
+          sector: 'Technologia',
+          company_family: 'Polprzewodniki',
+          company_type: 'Metrologia',
+          revenue_model: 'Sprzet i software',
+          region: 'USA',
+          currency: 'USD'
+        },
+        opportunity: {
+          value_chain_position: 'Tool-of-record'
+        },
+        character: {
+          quality_state: 'ELITE',
+          proof_class: 'FUNDED',
+          primary_kill_risk: 'memory cycle'
+        },
+        kpi: {
+          schema_id: 'core10',
+          items: [
+            { key: 'FQ', value: 9 },
+            { key: 'TE', value: 8 },
+            { key: 'CM', value: 8 },
+            { key: 'VS', value: 7 },
+            { key: 'TQ', value: 8 },
+            { key: 'PP', value: 7 },
+            { key: 'CP', value: 6 },
+            { key: 'CD', value: 8 },
+            { key: 'NO', value: 8 },
+            { key: 'MR', value: 7 }
+          ]
+        },
+        extras: {
+          record_version: 'watchlist.v3_decision_rich'
+        }
+      }
+    ]
+  });
+
+  const state = DecisionViewModelUtils.buildValidatedStage12State({
+    responseId: 'resp-structured-v2',
+    timestamp: 1_712_874_400_000,
+    source: 'Structured source',
+    text: structuredText
+  }, DecisionContractUtils);
+
+  assert.strictEqual(state.status, 'shortfall');
+  assert.strictEqual(state.recordCount, 1);
+  assert.strictEqual(state.primaryRecord.company, 'Camtek (CAMT:NASDAQ)');
+  assert.strictEqual(state.primaryRecord.composite, '4.3/5.0');
+  assert.strictEqual(state.primaryRecord.entryScore, '8.2/10');
+  assert.strictEqual(state.primaryRecord.sizing, '3%');
+  assert.strictEqual(state.primaryRecord.sector, 'Technologia');
+}
+
 function main() {
   testValidatedStage12StateCurrentAndLegacy();
   testMarketRowDedupPrefersHigherContractScoreThenSignal();
+  testValidatedStage12StateStructuredV2();
   console.log('test-decision-view-model.js: ok');
 }
 

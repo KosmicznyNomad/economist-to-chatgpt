@@ -292,6 +292,8 @@ async function main() {
         }));
     },
     buildStaleQueueReleasePatch: async () => null,
+    ensureAnalysisQueuePauseReady: async () => false,
+    getAnalysisQueuePaused: async () => false,
     sanitizeAnalysisQueueJob: (job) => clone(job),
     persistAnalysisQueueState: async (state) => {
       context.analysisQueueState = clone(state);
@@ -327,6 +329,8 @@ async function main() {
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
     'hasProcessReachedFinalStage',
+    'normalizeWatchlistVerifyState',
+    'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'getAnalysisQueueCompletionTimestamp',
@@ -347,8 +351,8 @@ async function main() {
       totalPrompts: 5,
       stageIndex: 4
     }),
-    true,
-    'Completed process at the last stage should be recognized as finished.'
+    false,
+    'Prompt counters alone should not mark the process as finished.'
   );
   assert.strictEqual(
     context.hasProcessReachedFinalStage({
@@ -372,8 +376,9 @@ async function main() {
       completedResponseSaved: true
     }
   );
-  assert.strictEqual(keepDecision.action, 'keep');
-  assert.strictEqual(keepDecision.queueState, 'awaiting_final_stage');
+  assert.strictEqual(keepDecision.action, 'release');
+  assert.strictEqual(keepDecision.closeWindow, true);
+  assert.strictEqual(keepDecision.reason, 'dispatch_pending');
 
   const releaseDecision = context.resolveAnalysisQueueReleaseDecision(
     { jobId: 'aq-1', runId: 'run-1' },
@@ -422,6 +427,34 @@ async function main() {
   assert.strictEqual(pendingDispatchDecision.action, 'release');
   assert.strictEqual(pendingDispatchDecision.closeWindow, true);
   assert.strictEqual(pendingDispatchDecision.reason, 'dispatch_pending');
+  assert.strictEqual(pendingDispatchDecision.slotReleaseReason, 'final_stage_local_saved');
+
+  const localSaveFailedDecision = context.resolveAnalysisQueueReleaseDecision(
+    { jobId: 'aq-1', runId: 'run-1' },
+    {
+      id: 'run-1',
+      status: 'completed',
+      currentPrompt: 5,
+      totalPrompts: 5,
+      stageIndex: 4,
+      completedResponseCapturedAt: 1000,
+      completedResponseSaved: false,
+      persistenceStatus: {
+        saveOk: false,
+        dispatch: {
+          state: 'dispatch_pending',
+          sent: 0,
+          failed: 0,
+          pending: 1
+        }
+      }
+    },
+    1000
+  );
+  assert.strictEqual(localSaveFailedDecision.action, 'release');
+  assert.strictEqual(localSaveFailedDecision.closeWindow, false);
+  assert.strictEqual(localSaveFailedDecision.reason, 'local_save_failed');
+  assert.strictEqual(localSaveFailedDecision.slotReleaseReason, 'final_stage_save_failed');
 
   const cappedDispatchDeadlineDecision = context.resolveAnalysisQueueReleaseDecision(
     { jobId: 'aq-1', runId: 'run-1', dispatchDeadlineAt: 601000 },

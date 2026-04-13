@@ -374,7 +374,7 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   assert.deepStrictEqual(context.closedRuns, ['run-1']);
 }
 
-async function testLocalSaveFailureClosesCompletedProcessWindow() {
+async function testLocalSaveFailureKeepsCompletedProcessWindowOpen() {
   context = buildScenarioContext();
   const now = Date.now();
   context.analysisQueueState = {
@@ -408,8 +408,8 @@ async function testLocalSaveFailureClosesCompletedProcessWindow() {
   await context.reconcileAnalysisQueueState('completed_local_save_failed');
   assert.deepStrictEqual(
     context.closedRuns,
-    ['run-1'],
-    'Completed process with local save failure should still close its process window.'
+    [],
+    'Completed process with local save failure should keep its process window open for recovery.'
   );
   assert.deepStrictEqual(
     context.startedJobs.map((job) => job.runId),
@@ -504,6 +504,59 @@ async function testManualPdfJobsRespectDedicatedConcurrencyCap() {
   );
 }
 
+async function testPausedQueueKeepsWaitingJobsQueued() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-paused-1', runId: 'run-paused-1', sequence: 1, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 1
+  };
+  context.getAnalysisQueuePaused = async () => true;
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(status.paused, true, 'Queue status should expose the paused flag.');
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('queue_paused');
+  assert.strictEqual(context.startedJobs.length, 0, 'Paused queue must not start waiting jobs.');
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-paused-1'],
+    'Waiting jobs should stay queued while pause is active.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs, []);
+}
+
+async function testLatePauseRequeuesFreshlyActivatedJobs() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-late-pause-1', runId: 'run-late-pause-1', sequence: 1, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 1
+  };
+  context.pauseNow = false;
+  context.getAnalysisQueuePaused = async () => context.pauseNow === true;
+  context.withAnalysisQueueMutationLock = async (task) => {
+    const result = await task();
+    context.pauseNow = true;
+    return result;
+  };
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('queue_pause_race');
+  assert.strictEqual(context.startedJobs.length, 0, 'Late pause should prevent freshly activated jobs from starting.');
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs, []);
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-late-pause-1'],
+    'Late pause should move freshly activated jobs back to waiting.'
+  );
+}
+
 function buildScenarioContext() {
   const scenarioContext = {
     console,
@@ -575,6 +628,8 @@ function buildScenarioContext() {
     runQueuedAnalysisJob: (job, reason) => {
       scenarioContext.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
     },
+    ensureAnalysisQueuePauseReady: async () => false,
+    getAnalysisQueuePaused: async () => false,
     requestAnalysisQueueReconcile: () => {},
     requestRemoteRunnerCycle: () => {}
   };
@@ -588,8 +643,11 @@ function buildScenarioContext() {
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
     'hasProcessReachedFinalStage',
+    'normalizeWatchlistVerifyState',
+    'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'buildStaleQueueReleasePatch',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
     'getProcessLastActivityTimestamp',
@@ -626,9 +684,11 @@ async function main() {
   await testClosedWindowDoesNotConsumeSlot();
   await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();
   await testCompletedPendingDispatchKeepsSlotReserved();
-  await testLocalSaveFailureClosesCompletedProcessWindow();
+  await testLocalSaveFailureKeepsCompletedProcessWindowOpen();
   await testDuplicateActiveJobsReleaseSupersededContext();
   await testManualPdfJobsRespectDedicatedConcurrencyCap();
+  await testPausedQueueKeepsWaitingJobsQueued();
+  await testLatePauseRequeuesFreshlyActivatedJobs();
   console.log('analysis queue active slot test: ok');
 }
 

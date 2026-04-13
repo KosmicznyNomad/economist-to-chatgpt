@@ -199,126 +199,87 @@ function clone(value) {
 }
 
 async function main() {
-  const buildContext = () => {
-    const scenarioContext = {
-      console,
-      Date,
-      Promise,
-      Map,
-      Set,
-      analysisQueueState: {
-        waitingJobs: [
-          {
-            jobId: 'aq-remote-1',
-            runId: 'run-remote-1',
-            remote: {
-              remoteJobId: 'remote-job-1',
-              remoteAttemptId: 'attempt-1'
-            }
-          }
-        ]
-      },
-      processRegistry: new Map(),
-      reportedEvents: [],
-      rememberedSuppressions: [],
-      upserts: [],
-      ensureAnalysisQueueReady: async () => scenarioContext.analysisQueueState,
-      withAnalysisQueueMutationLock: async (task) => task(),
-      cloneAnalysisQueueState: () => clone(scenarioContext.analysisQueueState),
-      persistAnalysisQueueState: async (state) => {
-        scenarioContext.analysisQueueState = clone(state);
-        return scenarioContext.analysisQueueState;
-      },
-      sortAnalysisQueueWaitingJobs: (jobs) => jobs,
-      upsertProcess: async (runId, patch) => {
-        scenarioContext.upserts.push({ runId, patch: clone(patch) });
-        return { id: runId, ...clone(patch) };
-      },
-      reportRemoteJobEvent: async (jobId, eventType, attemptId, payload, error) => {
-        scenarioContext.reportedEvents.push({
-          jobId,
-          eventType,
-          attemptId,
-          payload: clone(payload),
-          error
-        });
-        return { success: true };
-      },
-      rememberRemoteJobSuppression: async (job, details) => {
-        scenarioContext.rememberedSuppressions.push({
-          jobId: job?.remote?.remoteJobId || job?.jobId || '',
-          reason: details?.reason || ''
-        });
-        return { success: true };
-      },
-      reconcileAnalysisQueueState: async () => ({ success: true }),
-      getAnalysisQueueStatusSnapshot: async () => ({
-        queueSize: scenarioContext.analysisQueueState.waitingJobs.length,
-        activeSlots: 0
-      })
-    };
-    return scenarioContext;
+  const context = {
+    console,
+    Date,
+    Promise,
+    Map,
+    Set,
+    upserts: [],
+    suppressions: [],
+    remoteEvents: [],
+    isClosedProcessStatus: () => false,
+    upsertProcess: async (runId, patch) => {
+      context.upserts.push({ runId, patch: clone(patch) });
+      return { id: runId, ...clone(patch) };
+    },
+    rememberRemoteJobSuppression: async (job, details) => {
+      context.suppressions.push({
+        job: clone(job),
+        details: clone(details)
+      });
+      return { success: true };
+    },
+    reportRemoteJobEvent: async (jobId, eventType, attemptId, payload, error) => {
+      context.remoteEvents.push({
+        jobId,
+        eventType,
+        attemptId,
+        payload: clone(payload),
+        error
+      });
+      return { success: true };
+    }
   };
 
-  let context = buildContext();
-
   vm.createContext(context);
-  ['buildRemoteJobFailureDetails', 'cancelQueuedAnalysisJobs'].forEach((functionName) => {
+  ['buildRemoteJobFailureDetails', 'stopSingleProcess'].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
     });
   });
 
-  const result = await context.cancelQueuedAnalysisJobs(() => true, {
-    reason: 'stop_window_queued_cancelled',
-    statusText: 'Anulowano oczekujace joby'
+  const process = {
+    id: 'run-stop-1',
+    status: 'running',
+    title: 'Stop me',
+    promptHash: 'hash-stop-1',
+    remote: {
+      remoteJobId: 'remote-job-stop-1',
+      remoteAttemptId: 'attempt-stop-1'
+    }
+  };
+
+  const result = await context.stopSingleProcess(process, {
+    reason: 'manual_stop',
+    statusText: 'Przerwano przez uzytkownika'
   });
 
-  assert.strictEqual(result.success, true);
-  assert.strictEqual(result.cancelledCount, 1);
-  assert.strictEqual(context.reportedEvents.length, 1);
-  assert.deepStrictEqual(context.reportedEvents[0], {
-    jobId: 'remote-job-1',
+  assert.strictEqual(result, true);
+  assert.strictEqual(context.upserts.length, 1);
+  assert.strictEqual(context.upserts[0].patch.status, 'stopped');
+  assert.strictEqual(context.suppressions.length, 1);
+  assert.strictEqual(context.suppressions[0].job.jobId, 'remote-job-stop-1');
+  assert.strictEqual(context.suppressions[0].details.reason, 'manual_stop');
+  assert.strictEqual(context.remoteEvents.length, 1);
+  assert.deepStrictEqual(context.remoteEvents[0], {
+    jobId: 'remote-job-stop-1',
     eventType: 'failed',
-    attemptId: 'attempt-1',
+    attemptId: 'attempt-stop-1',
     payload: {
       failure: {
-        statusCode: 'stop_window_queued_cancelled',
-        reason: 'stop_window_queued_cancelled',
-        error: 'Anulowano oczekujace joby'
+        statusCode: 'manual_stop',
+        reason: 'manual_stop',
+        error: 'Przerwano przez uzytkownika'
       },
       queueState: '',
-      runId: 'run-remote-1',
-      jobId: 'aq-remote-1'
+      runId: 'run-stop-1',
+      jobId: 'remote-job-stop-1'
     },
-    error: 'Anulowano oczekujace joby'
+    error: 'Przerwano przez uzytkownika'
   });
-  assert.strictEqual(context.analysisQueueState.waitingJobs.length, 0);
-  assert.strictEqual(context.upserts.length, 1);
-  assert.strictEqual(context.upserts[0].patch.status, 'cancelled');
-  assert.strictEqual(context.rememberedSuppressions.length, 1);
 
-  context = buildContext();
-  context.upsertProcess = async () => {
-    throw new Error('upsert_failed');
-  };
-  vm.createContext(context);
-  ['buildRemoteJobFailureDetails', 'cancelQueuedAnalysisJobs'].forEach((functionName) => {
-    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
-      filename: 'background.js'
-    });
-  });
-  const failedResult = await context.cancelQueuedAnalysisJobs(() => true, {
-    reason: 'stop_window_queued_cancelled',
-    statusText: 'Anulowano oczekujace joby'
-  });
-  assert.strictEqual(failedResult.success, false);
-  assert.strictEqual(failedResult.cancelledCount, 0);
-  assert.strictEqual(failedResult.requeuedCount, 1);
-  assert.strictEqual(context.analysisQueueState.waitingJobs.length, 1, 'Failed cancellation should restore the queued job.');
-  assert.strictEqual(context.reportedEvents.length, 0, 'Failed local cancellation must not report remote failure.');
-
-  console.log('analysis queue remote cancel test: ok');
+  console.log('remote runner manual stop test: ok');
 }
 
 main().catch((error) => {
