@@ -3,8 +3,17 @@ const promptCount = document.getElementById('promptCount');
 const submitBtn = document.getElementById('submitBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 
-const PROMPT_SEPARATOR_LINE_REGEX = /\n[ \t]*(?:\u25C4|\u00E2\u2014\u201E)?PROMPT_SEPARATOR(?:\u25BA|\u00E2\u2013\u015F)?[ \t]*\n/g;
-const PROMPT_SEPARATOR_INLINE_REGEX = /(?:\u25C4|\u00E2\u2014\u201E)?PROMPT_SEPARATOR(?:\u25BA|\u00E2\u2013\u015F)?/g;
+const PROMPT_SEPARATOR_TOKEN_SOURCE = String.raw`PROMPT(?:[ _-]+)SEPARATOR`;
+const PROMPT_SEPARATOR_PREFIX_SOURCE = String.raw`(?:\u25C4|\u00E2\u2014\u201E)?[ \t-]*`;
+const PROMPT_SEPARATOR_SUFFIX_SOURCE = String.raw`[ \t-]*(?:\u25BA|\u00E2\u2013\u015F)?`;
+const PROMPT_SEPARATOR_LINE_REGEX = new RegExp(
+  String.raw`\n${PROMPT_SEPARATOR_PREFIX_SOURCE}${PROMPT_SEPARATOR_TOKEN_SOURCE}${PROMPT_SEPARATOR_SUFFIX_SOURCE}\n`,
+  'g'
+);
+const PROMPT_SEPARATOR_INLINE_REGEX = new RegExp(
+  `${PROMPT_SEPARATOR_PREFIX_SOURCE}${PROMPT_SEPARATOR_TOKEN_SOURCE}${PROMPT_SEPARATOR_SUFFIX_SOURCE}`,
+  'g'
+);
 
 function parsePrompts(text) {
   const normalizedText = typeof text === 'string'

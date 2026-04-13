@@ -8,19 +8,31 @@ const assert = require('assert');
 const PROMPTS_PATH = path.join(__dirname, 'prompts-company.txt');
 const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i;
 const MAX_REPLAYS_PER_STAGE = 2;
+const PROMPT_SEPARATOR_TOKEN_SOURCE = String.raw`PROMPT(?:[ _-]+)SEPARATOR`;
+const PROMPT_SEPARATOR_PREFIX_SOURCE = String.raw`(?:\u25C4|\u00E2\u2014\u201E)?[ \t-]*`;
+const PROMPT_SEPARATOR_SUFFIX_SOURCE = String.raw`[ \t-]*(?:\u25BA|\u00E2\u2013\u015F)?`;
+const PROMPT_SEPARATOR_LINE_REGEX = new RegExp(
+  String.raw`\n${PROMPT_SEPARATOR_PREFIX_SOURCE}${PROMPT_SEPARATOR_TOKEN_SOURCE}${PROMPT_SEPARATOR_SUFFIX_SOURCE}\n`,
+  'g'
+);
+const PROMPT_SEPARATOR_INLINE_REGEX = new RegExp(
+  `${PROMPT_SEPARATOR_PREFIX_SOURCE}${PROMPT_SEPARATOR_TOKEN_SOURCE}${PROMPT_SEPARATOR_SUFFIX_SOURCE}`,
+  'g'
+);
 
 const STAGE_TO_PROMPT_INDEX = new Map([
-  ['1', 2],
-  ['2', 3],
-  ['3', 4],
-  ['4', 5],
-  ['5', 6],
-  ['6', 7],
-  ['7', 8],
-  ['8', 9],
-  ['9', 10],
-  ['10', 11],
-  ['11', 12]
+  ['1', 1],
+  ['2', 2],
+  ['3', 3],
+  ['4', 4],
+  ['5', 5],
+  ['6', 6],
+  ['7', 7],
+  ['8', 8],
+  ['9', 9],
+  ['10', 10],
+  ['11', 10],
+  ['12', 11]
 ]);
 
 function normalizeStageId(value) {
@@ -51,6 +63,26 @@ function parseDirective(responseText) {
 
 function normalizePromptText(text) {
   return String(text || '').replace(/\s+/g, ' ').trim().toLowerCase();
+}
+
+function parsePromptChainText(rawText) {
+  const normalizedText = typeof rawText === 'string'
+    ? rawText.replace(/\uFEFF/g, '').replace(/\r\n?/g, '\n')
+    : '';
+  if (!normalizedText.trim()) return [];
+
+  const splitAndClean = (text, separatorRegex) => text
+    .split(separatorRegex)
+    .map((item) => item.trim())
+    .filter((item) => item.length > 0);
+
+  const lineSeparated = splitAndClean(normalizedText, PROMPT_SEPARATOR_LINE_REGEX);
+  if (lineSeparated.length > 1) return lineSeparated;
+
+  const inlineSeparated = splitAndClean(normalizedText, PROMPT_SEPARATOR_INLINE_REGEX);
+  if (inlineSeparated.length > 1) return inlineSeparated;
+
+  return [normalizedText.trim()];
 }
 
 function stripUnknownStages(trace) {
@@ -197,10 +229,7 @@ function queueMissingPromptForDataGap({
 
 function loadPromptByStage() {
   const promptsText = fs.readFileSync(PROMPTS_PATH, 'utf8');
-  const prompts = promptsText
-    .split(/\W+PROMPT_SEPARATOR\W+/)
-    .map((value) => value.trim())
-    .filter((value) => value.length > 0);
+  const prompts = parsePromptChainText(promptsText);
 
   const promptByStageId = new Map();
   for (const [stageId, index] of STAGE_TO_PROMPT_INDEX.entries()) {
@@ -213,8 +242,23 @@ function loadPromptByStage() {
 
 function run() {
   const { prompts, promptByStageId } = loadPromptByStage();
-  assert(prompts.length >= 13, 'prompts-company.txt should contain full prompt chain');
+  assert.strictEqual(prompts.length, 12, 'prompts-company.txt should contain the current 12-prompt chain');
   assert(promptByStageId.has('2') && promptByStageId.has('3'), 'stage prompts 2 and 3 must be present');
+  assert.strictEqual(
+    promptByStageId.get('10'),
+    promptByStageId.get('11'),
+    'Stage 11 should resolve to the same prompt text as Stage 10 in the current chain'
+  );
+  assert.deepStrictEqual(
+    parsePromptChainText('Prompt A\n--- PROMPT SEPARATOR ---\nPrompt B'),
+    ['Prompt A', 'Prompt B'],
+    'parser should accept dashed separator lines'
+  );
+  assert.deepStrictEqual(
+    parsePromptChainText('Prompt A◄PROMPT_SEPARATOR►Prompt B'),
+    ['Prompt A', 'Prompt B'],
+    'parser should remain backward-compatible with legacy separator token'
+  );
 
   // Test 1: parser should accept only strict one-line DATA_GAP directive.
   assert.strictEqual(parseDirective('DATA_GAP_STAGE=2.5').stageId, '2.5');
@@ -223,11 +267,14 @@ function run() {
   assert.strictEqual(parseDirective('SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN'), null);
 
   // Test 2: stage sequence should rollback exactly as requested: 3 -> 2 -> 3 -> next.
-  const promptChain = prompts.slice(2); // starts from stage 1 prompt in this project
+  const promptChain = prompts.slice(1); // starts from stage 1 prompt in the current chain
   const replayCounts = new Map();
   const stageByPrompt = new Map();
   for (const [stageId, promptText] of promptByStageId.entries()) {
-    stageByPrompt.set(normalizePromptText(promptText), stageId);
+    const normalized = normalizePromptText(promptText);
+    if (!stageByPrompt.has(normalized)) {
+      stageByPrompt.set(normalized, stageId);
+    }
   }
 
   const executed = [];
@@ -253,12 +300,12 @@ function run() {
     }
   }
 
-  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'];
+  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12'];
   assert.deepStrictEqual(stripUnknownStages(executed), expected);
 
   // Test 2b: if missing stage is far earlier (e.g. at stage 7), replay must start
   // from missing stage and continue sequentially up to current stage.
-  const promptChainFar = prompts.slice(2);
+  const promptChainFar = prompts.slice(1);
   const executedFar = [];
   let injectedFar = false;
   for (let i = 0; i < promptChainFar.length; i += 1) {
@@ -282,13 +329,13 @@ function run() {
   }
   const expectedFar = [
     '1', '2', '3', '4', '5', '6', '7',
-    '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'
+    '2', '3', '4', '5', '6', '7', '8', '9', '10', '12'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedFar), expectedFar);
 
   // Test 2d: self-reference directive (missing stage == current stage) should
   // recover by rewinding one prompt and replaying up to current stage.
-  const promptChainSelf = prompts.slice(2);
+  const promptChainSelf = prompts.slice(1);
   const executedSelf = [];
   let injectedSelf = false;
   for (let i = 0; i < promptChainSelf.length; i += 1) {
@@ -313,14 +360,14 @@ function run() {
   const expectedSelf = [
     '1', '2', '3',
     '2', '3',
-    '4', '5', '6', '7', '8', '9', '10', '11'
+    '4', '5', '6', '7', '8', '9', '10', '12'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedSelf), expectedSelf);
 
   // Test 2c: generic rollback rule for many stage pairs.
   // For each current stage C and missing stage M where M < C (by prompt number),
   // expect replay sequence M..C inserted right after C.
-  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11'];
+  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12'];
   const orderedByPromptNumber = orderedStages
     .map((stageId) => ({
       stageId,
@@ -333,7 +380,7 @@ function run() {
     const currentStage = stagesByPromptNumber[c];
     for (let m = 0; m < c; m += 1) {
       const missingStage = stagesByPromptNumber[m];
-      const chain = prompts.slice(2);
+      const chain = prompts.slice(1);
       const trace = [];
       let injectedPair = false;
       for (let i = 0; i < chain.length; i += 1) {
@@ -397,8 +444,8 @@ function run() {
 
   // Test 3b: replay counters should be scoped by stage+current prompt number.
   const perPromptReplayCounts = new Map();
-  const chainForStage3 = prompts.slice(2);
-  const chainForStage4 = prompts.slice(2);
+  const chainForStage3 = prompts.slice(1);
+  const chainForStage4 = prompts.slice(1);
   const stage3Prompt = promptByStageId.get('3');
   const stage4Prompt = promptByStageId.get('4');
   const stage3Index = chainForStage3.findIndex((item) => normalizePromptText(item) === normalizePromptText(stage3Prompt));

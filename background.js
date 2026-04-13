@@ -1,4 +1,4 @@
-﻿const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
+const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
 const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const CHAT_GPT_HOSTS = new Set([
@@ -9555,93 +9555,79 @@ const STAGE_METADATA_COMPANY = [
   {
     promptIndex: 1,
     promptNumber: 2,
-    stageId: 'setup',
-    stageName: "Pipeline Setup (Rules + Data Contract)",
-    description: "Stage inheritance, time-anchor rules, data discipline, and execution order lock."
-  },
-  {
-    promptIndex: 2,
-    promptNumber: 3,
     stageId: '1',
     stageName: "Stage 1: Sub-segment Validation",
     description: "Invoice-first sub-segment map, gates, timing funnel, delivered pool."
   },
   {
-    promptIndex: 3,
-    promptNumber: 4,
+    promptIndex: 2,
+    promptNumber: 3,
     stageId: '2',
-    stageName: "Stage 2: Stock Universe (15 names)",
+    stageName: "Stage 2: Company Mapping (15 names)",
     description: "Exposure-based company mapping from invoice items to listed names."
   },
   {
-    promptIndex: 4,
-    promptNumber: 5,
+    promptIndex: 3,
+    promptNumber: 4,
     stageId: '3',
     stageName: "Stage 3: Thesis-Linked Traction Pack",
     description: "Contract semantics, traction quality, and VOI objects for valuation handoff."
   },
   {
-    promptIndex: 5,
-    promptNumber: 6,
-    stageId: '3.1',
-    stageName: "Stage 3.1: Traction Scoring (15 names)",
-    description: "TS/TQ/CP scoring rubric and thesis-stream traction objects for the full company universe."
-  },
-  {
-    promptIndex: 6,
-    promptNumber: 7,
+    promptIndex: 4,
+    promptNumber: 5,
     stageId: '4',
     stageName: "Stage 4: Reverse DCF Lite + Driver Screen",
     description: "Core vs wedge vs total, asymmetry pre-filter, dominant valuation driver."
   },
   {
-    promptIndex: 7,
-    promptNumber: 8,
+    promptIndex: 5,
+    promptNumber: 6,
     stageId: '5',
     stageName: "Stage 5: Competitive Position (4 finalists)",
-    description: "Replaceability, moat durability, and S-curve timing selection."
+    description: "Replaceability, moat durability, and finalist selection from the advanced set."
   },
   {
-    promptIndex: 8,
-    promptNumber: 9,
+    promptIndex: 6,
+    promptNumber: 7,
     stageId: '6',
-    stageName: "Stage 6: DuPont ROE Quality",
-    description: "ROE decomposition (margin x turnover x leverage) under thesis impact."
+    stageName: "Stage 6: Returns on Capital & Capital Allocation",
+    description: "ROIC, CROIC, incremental returns, and value-destructive growth checks."
   },
   {
-    promptIndex: 9,
-    promptNumber: 10,
+    promptIndex: 7,
+    promptNumber: 8,
     stageId: '7',
     stageName: "Stage 7: Revaluation Parameter Selection",
     description: "Single KPI with VOI window and measurable re-rate force."
   },
   {
-    promptIndex: 10,
-    promptNumber: 11,
+    promptIndex: 8,
+    promptNumber: 9,
     stageId: '8',
     stageName: "Stage 8: Thesis Monetization Quantification",
-    description: "Incremental wedge cash flows (Bear/Base/Bull), SoP-compatible NPV block."
+    description: "Incremental wedge cash flows (Bear/Base/Bull), capture ceilings, and NPV blocks."
   },
   {
-    promptIndex: 11,
-    promptNumber: 12,
+    promptIndex: 9,
+    promptNumber: 10,
     stageId: '9',
     stageName: "Stage 9: Reverse DCF (TOTAL)",
     description: "Market-implied growth/margin extraction and divergence diagnostics."
   },
   {
-    promptIndex: 12,
-    promptNumber: 13,
+    promptIndex: 10,
+    promptNumber: 11,
     stageId: '10',
     stageName: "Stage 10: Four-Gate Decision + Stage 11 Composite Rank",
     description: "Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection."
   },
   {
-    promptIndex: 13,
-    promptNumber: 14,
+    promptIndex: 11,
+    promptNumber: 12,
     stageId: '12',
-    stageName: "Stage 12: Four-Gate Output Record",
-    description: "Two-line decision records (PRIMARY and SECONDARY) for downstream ingestion."
+    stageName: "Stage 12: Final Investment Record Builder",
+    description: "Final structured watchlist records for downstream ingestion."
   }
 ];
 
@@ -9653,24 +9639,25 @@ const STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageNam
 // a clean "Stage X" marker in their heading.
 const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['0', 0],
-  ['1', 2],
-  ['2', 3],
-  ['3', 4],
-  ['3.1', 5],
-  ['4', 6],
-  ['5', 7],
-  ['6', 8],
-  ['7', 9],
-  ['8', 10],
-  ['9', 11],
-  ['10', 12],
-  ['11', 12], // Stage 11 exists as a section inside the Stage 10 prompt
-  ['12', 13],
-  ['10.5', 12], // legacy alias: old chain used Stage 10.5 for composite rank
-  ['2.5', 6], // legacy alias: old chain used 2.5 for Reverse DCF Lite
-  ['3.2', 6], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
-  ['3.5', 8], // legacy alias: old chain treated DuPont as 3.5
-  ['6.5', 8] // compatibility alias: midpoint naming for DuPont
+  ['setup', 1], // compatibility alias: setup rules now live inside the Stage 1 prompt
+  ['1', 1],
+  ['2', 2],
+  ['3', 3],
+  ['3.1', 3], // traction scoring now lives inside the Stage 3 prompt
+  ['4', 4],
+  ['5', 5],
+  ['6', 6],
+  ['7', 7],
+  ['8', 8],
+  ['9', 9],
+  ['10', 10],
+  ['11', 10], // Stage 11 exists as a section inside the Stage 10 prompt
+  ['12', 11],
+  ['10.5', 10], // legacy alias: old chain used Stage 10.5 for composite rank
+  ['2.5', 4], // legacy alias: old chain used 2.5 for Reverse DCF Lite
+  ['3.2', 4], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
+  ['3.5', 6], // legacy alias now resolves to returns quality
+  ['6.5', 6] // compatibility midpoint alias for returns quality
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -21191,8 +21178,17 @@ async function runAutoRestoreWindowsCycle(options = {}) {
   }
 }
 
-const PROMPT_SEPARATOR_LINE_REGEX = /\n[ \t]*(?:\u25C4|\u00E2\u2014\u201E)?PROMPT_SEPARATOR(?:\u25BA|\u00E2\u2013\u015F)?[ \t]*\n/g;
-const PROMPT_SEPARATOR_INLINE_REGEX = /(?:\u25C4|\u00E2\u2014\u201E)?PROMPT_SEPARATOR(?:\u25BA|\u00E2\u2013\u015F)?/g;
+const PROMPT_SEPARATOR_TOKEN_SOURCE = String.raw`PROMPT(?:[ _-]+)SEPARATOR`;
+const PROMPT_SEPARATOR_PREFIX_SOURCE = String.raw`(?:\u25C4|\u00E2\u2014\u201E)?[ \t-]*`;
+const PROMPT_SEPARATOR_SUFFIX_SOURCE = String.raw`[ \t-]*(?:\u25BA|\u00E2\u2013\u015F)?`;
+const PROMPT_SEPARATOR_LINE_REGEX = new RegExp(
+  String.raw`\n${PROMPT_SEPARATOR_PREFIX_SOURCE}${PROMPT_SEPARATOR_TOKEN_SOURCE}${PROMPT_SEPARATOR_SUFFIX_SOURCE}\n`,
+  'g'
+);
+const PROMPT_SEPARATOR_INLINE_REGEX = new RegExp(
+  `${PROMPT_SEPARATOR_PREFIX_SOURCE}${PROMPT_SEPARATOR_TOKEN_SOURCE}${PROMPT_SEPARATOR_SUFFIX_SOURCE}`,
+  'g'
+);
 
 function parsePromptChainText(rawText) {
   const normalizedText = typeof rawText === 'string'
@@ -21226,7 +21222,7 @@ async function loadPrompts() {
     // Parse in a way that tolerates UTF-8 and mojibake separator variants.
     PROMPTS_COMPANY = parsePromptChainText(companyText);
 
-    if (PROMPTS_COMPANY.length <= 1 && companyText.includes('PROMPT_SEPARATOR')) {
+    if (PROMPTS_COMPANY.length <= 1 && /PROMPT(?:[ _-]+)SEPARATOR/.test(companyText)) {
       console.warn('[prompts] Separator token found but parsed as a single prompt - verify file encoding.');
     }
 
@@ -31831,8 +31827,6 @@ function waitForTabComplete(tabId) {
     });
   });
 }
-
-
 
 
 
