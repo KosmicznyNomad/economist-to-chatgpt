@@ -276,7 +276,7 @@
 
     if (effectiveActionRequired === 'continue_button') return 'Wymagana akcja: ChatGPT pokazuje Continue.';
     if (effectiveActionRequired === 'login_needed') return 'Wymagana akcja: zaloguj sie do ChatGPT.';
-    if (effectiveActionRequired === 'rate_limit') return 'Wymagana akcja: ChatGPT zwrocil rate limit.';
+    if (effectiveActionRequired === 'rate_limit') return 'Wymagana akcja: ChatGPT zwrocil limit/restriction.';
     if (effectiveActionRequired === 'manual_resume') return 'Wymagana akcja: wznow proces recznie.';
 
     switch (statusCode) {

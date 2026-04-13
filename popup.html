@@ -67,6 +67,20 @@
       color: var(--muted);
     }
 
+    .card-copy {
+      margin: 0 0 10px;
+      color: #475569;
+      font-size: 12px;
+      line-height: 1.45;
+    }
+
+    .card-accent {
+      border-color: rgba(15, 23, 42, 0.1);
+      background:
+        linear-gradient(180deg, rgba(255, 255, 255, 0.98), rgba(248, 250, 252, 0.98)),
+        radial-gradient(circle at top right, rgba(15, 23, 42, 0.06), transparent 48%);
+    }
+
     .row {
       display: flex;
       gap: 8px;
@@ -228,6 +242,15 @@
     <p class="subtitle">Skroty na przyciskach</p>
   </div>
 
+  <div class="card card-accent">
+    <p class="card-title">Remote Intake</p>
+    <p class="card-copy">Otworz internetowy panel Iskry i od razu przejdz do dodania nowego artykulu do zdalnej kolejki.</p>
+    <div class="row">
+      <button class="btn btn-primary" id="openRemoteIntakeBtn">Nowy artykul w zdalnej kolejce</button>
+    </div>
+    <p class="status status-compact" id="remoteIntakeStatus" aria-live="polite" hidden></p>
+  </div>
+
   <div class="card">
     <p class="card-title">Analiza</p>
     <div class="row row-2">
@@ -262,6 +285,9 @@
   </div>
   <p class="status status-compact" id="runStatus" aria-live="polite" hidden></p>
   <p class="status status-compact" id="analysisQueueStatus" aria-live="polite" hidden></p>
+  <div class="row">
+    <button class="btn btn-center" id="analysisQueuePauseBtn">Wstrzymaj kolejke</button>
+  </div>
 
   <details class="details">
     <summary>Watchlist</summary>
@@ -302,6 +328,19 @@
   <details class="details">
     <summary>Narzedzia</summary>
     <div class="details-content">
+      <p class="card-title">Remote runner</p>
+      <input
+        class="dispatch-input"
+        id="remoteRunnerNameInput"
+        type="text"
+        placeholder="Nazwa runnera (np. drugiPC)"
+        autocomplete="off"
+      />
+      <div class="row row-2">
+        <button class="btn btn-primary btn-center" id="remoteRunnerToggleBtn">Wlacz runnera</button>
+        <button class="btn btn-center" id="remoteRunnerCycleBtn">Wymus cykl</button>
+      </div>
+      <p class="status status-compact" id="remoteRunnerStatus" aria-live="polite">Sprawdzam runner...</p>
       <div class="row">
         <button class="btn btn-center" id="repeatLastPromptAllBtn">Powtorz ostatni prompt (wszystkie)</button>
       </div>

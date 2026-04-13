@@ -55,11 +55,25 @@ function testFinalizingCompletionSemantics() {
   assert.match(completed.statusText, /sync do Watchlist gotowe/i);
 }
 
+function testRateLimitNeedsActionContract() {
+  const contract = ProcessContractUtils.getProcessContract({
+    lifecycleStatus: 'running',
+    phase: 'response_wait',
+    actionRequired: 'rate_limit'
+  });
+
+  assert.strictEqual(contract.lifecycleStatus, 'running');
+  assert.strictEqual(contract.actionRequired, 'rate_limit');
+  assert.strictEqual(contract.statusCode, 'chat.rate_limited');
+  assert.match(contract.statusText, /limit|restriction/i);
+}
+
 function main() {
   testQueueContract();
   testLegacyFailureBackfill();
   testNeedsActionInference();
   testFinalizingCompletionSemantics();
+  testRateLimitNeedsActionContract();
   console.log('test-process-contract.js passed');
 }
 

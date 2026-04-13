@@ -130,6 +130,82 @@ function buildVmContext(overrides = {}) {
     String,
     Array,
     JSON,
+    processRegistry: new Map(),
+    normalizeWatchlistVerifyState(value) {
+      return typeof value === 'string' ? value.trim().toLowerCase() : '';
+    },
+    isExplicitlyVerifiedDispatch(dispatch) {
+      const state = typeof dispatch?.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
+      const verifyState = typeof dispatch?.verifyState === 'string' ? dispatch.verifyState.trim().toLowerCase() : '';
+      return state === 'dispatch_confirmed' || verifyState === 'verified';
+    },
+    isAcceptedWatchlistDispatch(dispatch) {
+      const accepted = Number.isInteger(dispatch?.accepted) ? dispatch.accepted : 0;
+      const sent = Number.isInteger(dispatch?.sent) ? dispatch.sent : 0;
+      const verifyState = typeof dispatch?.verifyState === 'string' ? dispatch.verifyState.trim().toLowerCase() : '';
+      return accepted > 0
+        || sent > 0
+        || ['http_accepted', 'verified', 'materialization_pending', 'materialization_partial', 'materialization_unavailable', 'expected_records_missing', 'missing_fields', 'mismatch', 'ingest_failed', 'ingest_quarantined'].includes(verifyState);
+    },
+    isTerminalWatchlistDispatchFailure(dispatch) {
+      const failed = Number.isInteger(dispatch?.failed) ? dispatch.failed : 0;
+      const verifyState = typeof dispatch?.verifyState === 'string' ? dispatch.verifyState.trim().toLowerCase() : '';
+      return failed > 0
+        || dispatch?.queueSkipped === true
+        || ['materialization_unavailable', 'expected_records_missing', 'missing_fields', 'mismatch', 'ingest_failed', 'ingest_quarantined'].includes(verifyState);
+    },
+    getProcessPersistenceDispatchSnapshot(process) {
+      return process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || null;
+    },
+    getProcessQueueDeliveryState(process) {
+      const dispatch = process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || null;
+      const saveOk = process?.persistenceStatus?.saveOk === true || process?.completedResponseSaved === true;
+      const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
+      const remaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : 0;
+      return {
+        saveOk,
+        state: typeof dispatch?.state === 'string' ? dispatch.state : '',
+        failed: Number.isInteger(dispatch?.failed) ? dispatch.failed : 0,
+        pending: deferred + remaining,
+        deferred,
+        remaining,
+        confirmed: (typeof dispatch?.state === 'string' && dispatch.state === 'dispatch_confirmed')
+          || (typeof dispatch?.verifyState === 'string' && dispatch.verifyState.trim().toLowerCase() === 'verified')
+      };
+    },
+    resolveCompletedProcessPersistenceRetryPlan(process) {
+      const dispatch = process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || null;
+      const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
+      const remaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : 0;
+      const delivery = {
+        saveOk: process?.persistenceStatus?.saveOk === true || process?.completedResponseSaved === true,
+        state: typeof dispatch?.state === 'string' ? dispatch.state : '',
+        failed: Number.isInteger(dispatch?.failed) ? dispatch.failed : 0,
+        pending: deferred + remaining,
+        deferred,
+        remaining,
+        confirmed: (typeof dispatch?.state === 'string' && dispatch.state === 'dispatch_confirmed')
+          || (typeof dispatch?.verifyState === 'string' && dispatch.verifyState.trim().toLowerCase() === 'verified')
+      };
+      return {
+        needed: false,
+        mode: '',
+        reason: delivery.confirmed ? 'already_confirmed' : '',
+        delivery
+      };
+    },
+    replayCompletedResponseForProcess: async () => ({
+      attempted: true,
+      success: true,
+      reason: 'saved',
+      recoveryMode: 'replayed'
+    }),
+    runCompletedProcessPersistenceRetry: async () => ({
+      success: true,
+      confirmed: false,
+      pending: true,
+      delivery: null
+    }),
     ...overrides
   });
 }
@@ -163,6 +239,452 @@ async function testCopyLatestInvestRequestsClosedProcesses() {
   assert.strictEqual(capturedOptions.scope, 'all_open_windows');
   assert.strictEqual(result.success, false);
   assert.strictEqual(result.error, 'invest_tab_not_found');
+}
+
+async function testResolveInvestCopyTargetsAcceptsLegacyInvestUrls() {
+  const legacyInvestUrl = 'https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje/c/69d2262e-06fc-8387-8f6d-aa81c3e325e9';
+  const context = buildVmContext({
+    CHAT_GPT_HOSTS: new Set([
+      'chatgpt.com',
+      'www.chatgpt.com',
+      'chat.openai.com',
+      'www.chat.openai.com'
+    ]),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    chrome: {
+      tabs: {
+        query: async (queryInfo = {}) => {
+          const tab = {
+            id: 701,
+            windowId: 77,
+            url: legacyInvestUrl,
+            active: true,
+            lastAccessed: 250,
+            title: 'Invest legacy'
+          };
+          if (queryInfo?.active === true && queryInfo?.currentWindow === true) {
+            return [tab];
+          }
+          return [tab];
+        }
+      }
+    },
+    getProcessSnapshot: async () => [],
+    compareProcessesForRestore() {
+      return 0;
+    },
+    isClosedProcessStatus() {
+      return false;
+    },
+    isQueuedProcessStatus() {
+      return false;
+    },
+    compareTabsByWindowAndIndex(left, right) {
+      return (left?.id || 0) - (right?.id || 0);
+    },
+    compareTabsByRecentAccess(left, right) {
+      return (right?.lastAccessed || 0) - (left?.lastAccessed || 0);
+    },
+    getTabEffectiveUrl(tab) {
+      return typeof tab?.url === 'string' ? tab.url.trim() : '';
+    },
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    normalizeConversationUrlList(values) {
+      const seen = new Set();
+      const result = [];
+      (Array.isArray(values) ? values : []).forEach((value) => {
+        const normalized = typeof value === 'string' ? value.trim() : '';
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        result.push(normalized);
+      });
+      return result;
+    },
+    getCompletedProcessFinalityState() {
+      return {
+        ready: false,
+        completedResponseText: ''
+      };
+    },
+    buildResponseContractValidation() {
+      return {
+        valid: false,
+        kind: 'invalid'
+      };
+    }
+  });
+
+  [
+    'isInvestGptUrl',
+    'collectCompanyInvestContextSnapshot',
+    'getActiveInvestTabIdInCurrentWindow',
+    'findInvestCopyProcessForTab',
+    'compareInvestCopyTargets',
+    'buildInvestCopyTargetFromTab',
+    'resolveInvestCopyTargets'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.resolveInvestCopyTargets({
+    scope: 'all_open_windows',
+    includeClosedProcesses: true
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.investTabCount, 1);
+  assert.strictEqual(result.windowCount, 1);
+  assert.strictEqual(result.activeInvestTabId, 701);
+  assert.strictEqual(result.targets.length, 1);
+  assert.strictEqual(result.targets[0].tabId, 701);
+  assert.strictEqual(result.targets[0].url, legacyInvestUrl);
+}
+
+async function testResolveInvestCopyTargetsFallsBackToProcessContextWhenNoInvestTabs() {
+  const conversationUrl = 'https://chatgpt.com/c/invest-process-only';
+  const context = buildVmContext({
+    CHAT_GPT_HOSTS: new Set([
+      'chatgpt.com',
+      'www.chatgpt.com',
+      'chat.openai.com',
+      'www.chat.openai.com'
+    ]),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    chrome: {
+      tabs: {
+        query: async (queryInfo = {}) => {
+          const tab = {
+            id: 901,
+            windowId: 44,
+            url: conversationUrl,
+            active: true,
+            lastAccessed: 880,
+            title: 'Invest process only'
+          };
+          if (queryInfo?.active === true && queryInfo?.currentWindow === true) {
+            return [tab];
+          }
+          return [tab];
+        }
+      }
+    },
+    getProcessSnapshot: async () => [
+      {
+        id: 'run-process-only',
+        tabId: 901,
+        windowId: 44,
+        status: 'completed',
+        title: 'Invest process only',
+        chatUrl: conversationUrl,
+        sourceUrl: 'https://chatgpt.com/g/g-p-legacy-inwestycje',
+        completedResponseText: 'VALID FINAL RESPONSE',
+        timestamp: 990
+      }
+    ],
+    compareProcessesForRestore() {
+      return 0;
+    },
+    isClosedProcessStatus() {
+      return false;
+    },
+    isQueuedProcessStatus() {
+      return false;
+    },
+    compareTabsByWindowAndIndex(left, right) {
+      return (left?.id || 0) - (right?.id || 0);
+    },
+    compareTabsByRecentAccess(left, right) {
+      return (right?.lastAccessed || 0) - (left?.lastAccessed || 0);
+    },
+    getTabEffectiveUrl(tab) {
+      return typeof tab?.url === 'string' ? tab.url.trim() : '';
+    },
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    normalizeConversationUrlList(values) {
+      const seen = new Set();
+      const result = [];
+      (Array.isArray(values) ? values : []).forEach((value) => {
+        const normalized = typeof value === 'string' ? value.trim() : '';
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        result.push(normalized);
+      });
+      return result;
+    },
+    getCompletedProcessFinalityState(process) {
+      return {
+        ready: !!process?.completedResponseText,
+        completedResponseText: process?.completedResponseText || ''
+      };
+    },
+    buildResponseContractValidation(text) {
+      return {
+        valid: text === 'VALID FINAL RESPONSE',
+        kind: text === 'VALID FINAL RESPONSE' ? 'current16' : 'invalid'
+      };
+    }
+  });
+
+  [
+    'isInvestGptUrl',
+    'collectCompanyInvestContextSnapshot',
+    'getActiveInvestTabIdInCurrentWindow',
+    'findInvestCopyProcessForTab',
+    'compareInvestCopyTargets',
+    'buildInvestCopyTargetFromTab',
+    'buildInvestCopyTargetFromProcess',
+    'resolveInvestCopyTargets'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.resolveInvestCopyTargets({
+    scope: 'latest',
+    includeClosedProcesses: true
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.investTabCount, 0);
+  assert.strictEqual(result.windowCount, 1);
+  assert.strictEqual(result.activeInvestTabId, 901);
+  assert.strictEqual(result.targets.length, 1);
+  assert.strictEqual(result.targets[0].tabId, 901);
+  assert.strictEqual(result.targets[0].windowId, 44);
+  assert.strictEqual(result.targets[0].process.id, 'run-process-only');
+  assert.strictEqual(result.targets[0].url, conversationUrl);
+}
+
+async function testResolveInvestCopyTargetsIgnoresNonInvestProcessFromSameWindow() {
+  const legacyInvestUrl = 'https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje/c/69d2262e-06fc-8387-8f6d-aa81c3e325e9';
+  const context = buildVmContext({
+    CHAT_GPT_HOSTS: new Set([
+      'chatgpt.com',
+      'www.chatgpt.com',
+      'chat.openai.com',
+      'www.chat.openai.com'
+    ]),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    chrome: {
+      tabs: {
+        query: async (queryInfo = {}) => {
+          const tab = {
+            id: 701,
+            windowId: 77,
+            url: legacyInvestUrl,
+            active: true,
+            lastAccessed: 250,
+            title: 'Invest live'
+          };
+          if (queryInfo?.active === true && queryInfo?.currentWindow === true) {
+            return [tab];
+          }
+          return [tab];
+        }
+      }
+    },
+    getProcessSnapshot: async () => [
+      {
+        id: 'run-non-invest',
+        windowId: 77,
+        status: 'running',
+        title: 'Auto Start: Prompt 2',
+        chatUrl: 'https://chatgpt.com/c/non-invest-chat',
+        sourceUrl: 'https://www.barrons.com/articles/example',
+        currentPrompt: 2,
+        totalPrompts: 10,
+        timestamp: 500
+      }
+    ],
+    compareProcessesForRestore() {
+      return 0;
+    },
+    isClosedProcessStatus() {
+      return false;
+    },
+    isQueuedProcessStatus() {
+      return false;
+    },
+    compareTabsByWindowAndIndex(left, right) {
+      return (left?.id || 0) - (right?.id || 0);
+    },
+    compareTabsByRecentAccess(left, right) {
+      return (right?.lastAccessed || 0) - (left?.lastAccessed || 0);
+    },
+    getTabEffectiveUrl(tab) {
+      return typeof tab?.url === 'string' ? tab.url.trim() : '';
+    },
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    normalizeConversationUrlList(values) {
+      const seen = new Set();
+      const result = [];
+      (Array.isArray(values) ? values : []).forEach((value) => {
+        const normalized = typeof value === 'string' ? value.trim() : '';
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        result.push(normalized);
+      });
+      return result;
+    },
+    getCompletedProcessFinalityState() {
+      return {
+        ready: false,
+        completedResponseText: ''
+      };
+    },
+    buildResponseContractValidation() {
+      return {
+        valid: false,
+        kind: 'invalid'
+      };
+    }
+  });
+
+  [
+    'isInvestGptUrl',
+    'collectCompanyInvestContextSnapshot',
+    'getActiveInvestTabIdInCurrentWindow',
+    'findInvestCopyProcessForTab',
+    'compareInvestCopyTargets',
+    'buildInvestCopyTargetFromTab',
+    'buildInvestCopyTargetFromProcess',
+    'resolveInvestCopyTargets'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.resolveInvestCopyTargets({
+    scope: 'latest',
+    includeClosedProcesses: true
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.targets.length, 1);
+  assert.strictEqual(result.targets[0].tabId, 701);
+  assert.strictEqual(result.targets[0].windowId, 77);
+  assert.strictEqual(result.targets[0].process, null);
+  assert.strictEqual(result.targets[0].url, legacyInvestUrl);
+}
+
+async function testResolveInvestCopyTargetsPrefersLiveTabOverProcessFallbackInSameWindow() {
+  const liveConversationUrl = 'https://chatgpt.com/g/g-p-6970fbfa4c348191ba16b549b09ce706-inwestycje/c/invest-live';
+  const fallbackConversationUrl = 'https://chatgpt.com/c/invest-stale';
+  const context = buildVmContext({
+    CHAT_GPT_HOSTS: new Set([
+      'chatgpt.com',
+      'www.chatgpt.com',
+      'chat.openai.com',
+      'www.chat.openai.com'
+    ]),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    chrome: {
+      tabs: {
+        query: async (queryInfo = {}) => {
+          const tab = {
+            id: 811,
+            windowId: 91,
+            url: liveConversationUrl,
+            active: true,
+            lastAccessed: 900,
+            title: 'Invest live'
+          };
+          if (queryInfo?.active === true && queryInfo?.currentWindow === true) {
+            return [tab];
+          }
+          return [tab];
+        }
+      }
+    },
+    getProcessSnapshot: async () => [
+      {
+        id: 'run-stale',
+        tabId: 912,
+        windowId: 91,
+        status: 'completed',
+        title: 'Invest stale',
+        chatUrl: fallbackConversationUrl,
+        sourceUrl: fallbackConversationUrl,
+        completedResponseText: 'VALID FINAL RESPONSE',
+        timestamp: 100
+      }
+    ],
+    compareProcessesForRestore() {
+      return 0;
+    },
+    isClosedProcessStatus() {
+      return false;
+    },
+    isQueuedProcessStatus() {
+      return false;
+    },
+    compareTabsByWindowAndIndex(left, right) {
+      return (left?.id || 0) - (right?.id || 0);
+    },
+    compareTabsByRecentAccess(left, right) {
+      return (right?.lastAccessed || 0) - (left?.lastAccessed || 0);
+    },
+    getTabEffectiveUrl(tab) {
+      return typeof tab?.url === 'string' ? tab.url.trim() : '';
+    },
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    normalizeConversationUrlList(values) {
+      const seen = new Set();
+      const result = [];
+      (Array.isArray(values) ? values : []).forEach((value) => {
+        const normalized = typeof value === 'string' ? value.trim() : '';
+        if (!normalized || seen.has(normalized)) return;
+        seen.add(normalized);
+        result.push(normalized);
+      });
+      return result;
+    },
+    getCompletedProcessFinalityState(process) {
+      return {
+        ready: !!process?.completedResponseText,
+        completedResponseText: process?.completedResponseText || ''
+      };
+    },
+    buildResponseContractValidation(text) {
+      return {
+        valid: text === 'VALID FINAL RESPONSE',
+        kind: text === 'VALID FINAL RESPONSE' ? 'current16' : 'invalid'
+      };
+    }
+  });
+
+  [
+    'isInvestGptUrl',
+    'collectCompanyInvestContextSnapshot',
+    'getActiveInvestTabIdInCurrentWindow',
+    'findInvestCopyProcessForTab',
+    'compareInvestCopyTargets',
+    'buildInvestCopyTargetFromTab',
+    'buildInvestCopyTargetFromProcess',
+    'resolveInvestCopyTargets'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.resolveInvestCopyTargets({
+    scope: 'all_open_windows',
+    includeClosedProcesses: true
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.targets.length, 1);
+  assert.strictEqual(result.targets[0].tabId, 811);
+  assert.strictEqual(result.targets[0].targetSource, 'live_tab');
 }
 
 async function testFindInvestCopyProcessUsesConversationHistory() {
@@ -376,6 +898,44 @@ async function testResolveCopyLatestInvestRetriesProcessDomFallbackAfterActivati
   assert.strictEqual(extractCalls, 2, 'process flow should retry DOM extraction after activation');
 }
 
+async function testResolveCopyLatestInvestPassesThroughProcessPatchFromStrictResolution() {
+  const context = buildVmContext({
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: true,
+      responseText: 'VALID FINAL RESPONSE',
+      processPatch: {
+        completedResponseText: 'VALID FINAL RESPONSE',
+        completedResponseCapturedAt: 1775987605000
+      }
+    })
+  });
+
+  [
+    'resolveCopyLatestInvestResponsePayload'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.resolveCopyLatestInvestResponsePayload(
+    {
+      tabId: 41,
+      windowId: 9
+    },
+    {
+      id: 'run-strict'
+    },
+    {
+      tabReadTimeoutMs: 1200
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.resolutionMode, 'process_strict');
+  assert.strictEqual(result.responseText, 'VALID FINAL RESPONSE');
+  assert.strictEqual(result.processPatch.completedResponseText, 'VALID FINAL RESPONSE');
+  assert.strictEqual(result.processPatch.completedResponseCapturedAt, 1775987605000);
+}
+
 async function testResolveCopyLatestInvestReportsInvalidContractForRejectedDomFallback() {
   const context = buildVmContext({
     resolveCompletedProcessFinalResponseText: async () => ({
@@ -558,12 +1118,31 @@ async function testCopyLatestInvestBatchReportsPartialSuccessAcrossAllWindows() 
   assert.strictEqual(summaryEvent.batchSucceeded, 2);
   assert.strictEqual(summaryEvent.batchFailed, 1);
   assert.strictEqual(summaryEvent.persistenceMode, 'batch_all_open_windows');
-  assert.strictEqual(summaryEvent.dispatchSummary, 'copied=2/3, failed=1, save=2/2, urls=2');
+  assert.strictEqual(summaryEvent.dispatchSummary, 'copied=2/3, failed=1, save=2/2, accepted=0, verified=0, terminal=0, urls=2');
 }
 
 async function testCopyLatestInvestUsesAlreadySavedProcessWithoutDuplicateDirectSave() {
   const saveCalls = [];
+  const retryCalls = [];
   const context = buildVmContext({
+    processRegistry: new Map([
+      ['run-saved', {
+        id: 'run-saved',
+        completedResponseSaved: true,
+        persistenceStatus: {
+          saveOk: true,
+          dispatch: {
+            state: 'dispatch_pending',
+            accepted: 1,
+            sent: 1,
+            failed: 0,
+            deferred: 1,
+            remaining: 0,
+            verifyState: 'http_accepted'
+          }
+        }
+      }]
+    ]),
     normalizeChatConversationUrl(value) {
       return typeof value === 'string' ? value.trim() : '';
     },
@@ -571,16 +1150,36 @@ async function testCopyLatestInvestUsesAlreadySavedProcessWithoutDuplicateDirect
       success: true,
       responseText: 'VALID FINAL RESPONSE'
     }),
-    ensureCompletedProcessResponsePersisted: async () => ({
+    replayCompletedResponseForProcess: async () => ({
       attempted: false,
       success: true,
-      reason: 'already_saved',
-      copyTrace: 'process/reused',
-      dispatchSummary: '',
-      conversationAnalysis: {
-        conversationLogCount: 3
-      }
+      reason: 'already_saved_retryable',
+      recoveryMode: 'retry_existing_dispatch',
+      dispatch: {
+        state: 'dispatch_pending',
+        accepted: 1,
+        sent: 1,
+        failed: 0,
+        deferred: 1,
+        remaining: 0,
+        verifyState: 'http_accepted'
+      },
+      dispatchSummary: 'accepted=1'
     }),
+    runCompletedProcessPersistenceRetry: async (...args) => {
+      retryCalls.push(args);
+      return {
+        success: true,
+        pending: true,
+        delivery: {
+          saveOk: true,
+          state: 'dispatch_pending',
+          failed: 0,
+          pending: 1,
+          confirmed: false
+        }
+      };
+    },
     upsertProcess: async () => true,
     buildResponseContractValidation(text) {
       return {
@@ -630,22 +1229,118 @@ async function testCopyLatestInvestUsesAlreadySavedProcessWithoutDuplicateDirect
   );
 
   assert.strictEqual(result.success, true);
-  assert.strictEqual(result.persistence.mode, 'process_replay');
+  assert.strictEqual(result.persistence.mode, 'retry_existing_dispatch');
   assert.strictEqual(result.persistence.success, true);
-  assert.strictEqual(result.persistence.reason, 'already_saved');
+  assert.strictEqual(result.persistence.reason, 'dispatch_retry_pending');
+  assert.strictEqual(retryCalls.length, 1, 'already-saved process should retry existing dispatch');
   assert.strictEqual(saveCalls.length, 0, 'already-saved process should not fall back to direct save');
+}
+
+async function testCopyLatestInvestAllowsProcessOnlyTargetWithoutTabId() {
+  const eventCalls = [];
+  const saveCalls = [];
+  const context = buildVmContext({
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: true,
+      responseText: 'VALID FINAL RESPONSE'
+    }),
+    replayCompletedResponseForProcess: async () => ({
+      attempted: false,
+      success: true,
+      reason: 'already_saved_replay_required',
+      recoveryMode: 'replay_missing_dispatch'
+    }),
+    ensureCompletedProcessResponsePersisted: async () => ({
+      attempted: true,
+      success: true,
+      reason: 'saved',
+      recoveryMode: 'replayed',
+      copyTrace: 'process/replayed',
+      dispatchSummary: 'accepted=1',
+      dispatch: {
+        state: 'dispatch_pending',
+        accepted: 1,
+        sent: 1,
+        failed: 0,
+        verifyState: 'http_accepted'
+      },
+      conversationAnalysis: {
+        conversationLogCount: 1
+      }
+    }),
+    upsertProcess: async () => true,
+    reportCopyLatestInvestFinalResponseEvent(payload) {
+      eventCalls.push(payload);
+    },
+    saveResponse: async (...args) => {
+      saveCalls.push(args);
+      return {
+        success: true,
+        copyTrace: 'unexpected/direct-save'
+      };
+    },
+    formatDispatchUiSummary() {
+      return '';
+    }
+  });
+
+  [
+    'resolveInvestCopyDomFallback',
+    'resolveCopyLatestInvestResponsePayload',
+    'copyLatestInvestFinalResponseForTarget'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.copyLatestInvestFinalResponseForTarget(
+    {
+      tabId: null,
+      windowId: 14,
+      title: 'Invest process only',
+      url: 'https://chatgpt.com/c/invest-process-only',
+      conversationUrl: 'https://chatgpt.com/c/invest-process-only',
+      process: {
+        id: 'run-process-only'
+      }
+    },
+    {
+      origin: 'test-copy',
+      scope: 'latest',
+      targetOrdinal: 1,
+      targetTotal: 1,
+      tabReadTimeoutMs: 900
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.text, 'VALID FINAL RESPONSE');
+  assert.strictEqual(result.processId, 'run-process-only');
+  assert.strictEqual(result.persistence.mode, 'replay_missing_dispatch');
+  assert.strictEqual(result.persistence.success, true);
+  assert.strictEqual(result.persistence.reason, 'saved');
+  assert.strictEqual(saveCalls.length, 0, 'process-only target should not fall back to direct save');
+  assert.ok(eventCalls.length > 0, 'copy flow should emit a telemetry event');
 }
 
 async function main() {
   await testCopyLatestInvestRequestsClosedProcesses();
+  await testResolveInvestCopyTargetsAcceptsLegacyInvestUrls();
+  await testResolveInvestCopyTargetsFallsBackToProcessContextWhenNoInvestTabs();
+  await testResolveInvestCopyTargetsIgnoresNonInvestProcessFromSameWindow();
+  await testResolveInvestCopyTargetsPrefersLiveTabOverProcessFallbackInSameWindow();
   await testFindInvestCopyProcessUsesConversationHistory();
   await testCopyLatestInvestFallsBackToDirectSaveWithoutProcess();
   await testResolveCopyLatestInvestReturnsFinalProcessNotFoundWhenDomIsEmpty();
   await testResolveCopyLatestInvestRetriesProcessDomFallbackAfterActivation();
+  await testResolveCopyLatestInvestPassesThroughProcessPatchFromStrictResolution();
   await testResolveCopyLatestInvestReportsInvalidContractForRejectedDomFallback();
   await testResolveCopyLatestInvestRetriesDirectFallbackAfterActivation();
   await testCopyLatestInvestBatchReportsPartialSuccessAcrossAllWindows();
   await testCopyLatestInvestUsesAlreadySavedProcessWithoutDuplicateDirectSave();
+  await testCopyLatestInvestAllowsProcessOnlyTargetWithoutTabId();
   console.log('test-copy-latest-invest-final-response.js: ok');
 }
 

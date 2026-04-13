@@ -1,4 +1,4 @@
-# Company Chain Stage Map
+﻿# Company Chain Stage Map
 
 This document is the readable contract for `prompts-company.txt` and runtime stage labels.
 

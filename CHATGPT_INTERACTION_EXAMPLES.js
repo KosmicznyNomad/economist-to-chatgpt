@@ -12,17 +12,24 @@
 // ============================================
 
 /**
- * Znajduje edytor wiadomości (contenteditable)
+ * Znajduje edytor wiadomości.
  * @returns {HTMLElement|null}
  */
 function findEditor() {
   return (
+    document.querySelector('textarea#prompt-textarea') ||
     document.querySelector('[role="textbox"][contenteditable="true"]') ||
     document.querySelector('div[contenteditable="true"]') ||
     document.querySelector('[data-testid="composer-input"]') ||
     document.querySelector('[contenteditable]') ||
     document.querySelector('[role="textbox"]')
   );
+}
+
+function isTextInputEditor(editor) {
+  if (!editor) return false;
+  const tagName = String(editor.tagName || '').toLowerCase();
+  return tagName === 'textarea' || tagName === 'input';
 }
 
 /**
@@ -71,7 +78,7 @@ function findStopButton() {
 }
 
 /**
- * Znajduje przycisk Retry (po błędzie)
+ * Znajduje historyczny/opcjonalny przycisk Retry.
  * @returns {HTMLElement|null}
  */
 function findRetryButton() {
@@ -97,7 +104,10 @@ function isChatGPTGenerating() {
 
   // Sprawdź stan edytora
   const editor = findEditor();
-  const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+  const editorDisabled = editor && (
+    (isTextInputEditor(editor) && (editor.disabled || editor.readOnly))
+    || editor.getAttribute('contenteditable') === 'false'
+  );
   if (editorDisabled) return true;
 
   // Sprawdź przycisk Send
@@ -113,7 +123,10 @@ function isChatGPTGenerating() {
  */
 function isInterfaceReady() {
   const editor = findEditor();
-  const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+  const editorReady = editor && (
+    (isTextInputEditor(editor) && !editor.disabled && !editor.readOnly)
+    || editor.getAttribute('contenteditable') === 'true'
+  );
   const noGeneration = !findStopButton();
   return noGeneration && editorReady;
 }
@@ -153,6 +166,14 @@ async function insertTextToEditor(text) {
     // 1. Focus i pauza
     editor.focus();
     await new Promise(r => setTimeout(r, 300));
+
+    if (isTextInputEditor(editor)) {
+      editor.value = text;
+      editor.dispatchEvent(new InputEvent('input', { bubbles: true, inputType: 'insertText', data: text }));
+      editor.dispatchEvent(new Event('change', { bubbles: true }));
+      console.log(`Text inserted into textarea (${text.length} chars)`);
+      return true;
+    }
 
     // 2. Wyczyść zawartość (Selection API)
     const selection = window.getSelection();
@@ -263,8 +284,15 @@ async function clickSendButton() {
   while (verifyTime < maxVerifyWait) {
     const stopBtn = findStopButton();
     const editor = findEditor();
-    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
-    const editorEmpty = editor && (editor.textContent || '').trim().length === 0;
+    const editorDisabled = editor && (
+      (isTextInputEditor(editor) && (editor.disabled || editor.readOnly))
+      || editor.getAttribute('contenteditable') === 'false'
+    );
+    const editorEmpty = editor && (
+      isTextInputEditor(editor)
+        ? String(editor.value || '').trim().length === 0
+        : (editor.textContent || '').trim().length === 0
+    );
     const sendBtn = findSendButton();
     const sendDisabled = sendBtn && sendBtn.disabled;
     
@@ -522,46 +550,14 @@ async function clickEditButton() {
 }
 
 /**
- * Edytuje ostatnią wiadomość i wysyła ponownie (Edit+Resend)
+ * Historyczny workflow Edit+Resend.
+ * Runtime recovery celowo go nie używa; podstawową ścieżką jest ponowne wysłanie promptu.
  * UWAGA: Wymaga await!
  * @returns {Promise<boolean>}
  */
 async function editAndResendLastMessage() {
-  try {
-    console.log('🔧 Próbuję naprawić przez Edit+Resend...');
-
-    // 1. Kliknij Edit
-    const editSuccess = await clickEditButton();
-    if (!editSuccess) {
-      console.warn('⚠️ Nie udało się kliknąć Edit');
-      return false;
-    }
-
-    // 2. Znajdź przycisk Send (pojawi się po Edit)
-    let sendButton = findSendButton();
-    if (!sendButton) {
-      console.warn('⚠️ Nie znaleziono przycisku Send po Edit');
-      return false;
-    }
-
-    if (sendButton.disabled) {
-      console.warn('⚠️ Przycisk Send jest disabled');
-      return false;
-    }
-
-    console.log('✓ Znaleziono przycisk Send - klikam...');
-    sendButton.click();
-
-    // Czekaj aby prompt się wysłał
-    await new Promise(r => setTimeout(r, 1000));
-
-    console.log('✅ Edit+Resend wykonane pomyślnie');
-    return true;
-
-  } catch (error) {
-    console.error('❌ Błąd w editAndResendLastMessage:', error);
-    return false;
-  }
+  console.warn('Edit+Resend is deprecated in this project. Use prompt resend / repeat-last instead.');
+  return false;
 }
 
 // ============================================

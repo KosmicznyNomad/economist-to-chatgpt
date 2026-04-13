@@ -115,10 +115,15 @@ const WATCHLIST_DISPATCH = {
   alarmPeriodMinutes: 2
 };
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
+const ANALYSIS_QUEUE_PAUSED_STORAGE_KEY = 'analysis_queue_paused';
 const ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY = 'iskra_remote_execution_mode';
 const ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY = 'iskra_remote_selected_runner_id';
 const ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY = 'iskra_remote_runner_enabled';
 const ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY = 'iskra_remote_runner_name';
+const ISKRA_REMOTE_JOB_SUPPRESSIONS_STORAGE_KEY = 'iskra_remote_job_suppressions';
+const ISKRA_REMOTE_JOB_SUPPRESSION_TTL_MS = 7 * 24 * 60 * 60 * 1000;
+const ISKRA_REMOTE_JOB_SUPPRESSION_MAX_ITEMS = 500;
+const ISKRA_REMOTE_JOB_SUPPRESSION_REPORT_RETRY_MS = 60 * 1000;
 const ISKRA_REMOTE_RUNNER = {
   alarmName: 'iskra-remote-runner-cycle',
   alarmPeriodMinutes: 1,
@@ -158,6 +163,11 @@ const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   initialDelayMs: 2000,
   maxDelayMs: 5 * 60 * 1000,
   maxAttempts: 96
+};
+const PROCESS_WINDOW_CLOSE_RETRY = {
+  initialDelayMs: 1500,
+  maxDelayMs: 60 * 1000,
+  maxAttempts: 24
 };
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
@@ -218,6 +228,11 @@ let unfinishedResumeBatchInProgress = false;
 let unfinishedResumeBatchActiveJobId = '';
 let analysisQueueState = null;
 let analysisQueueReady = null;
+let analysisQueuePaused = false;
+let analysisQueuePauseReady = null;
+let remoteJobSuppressions = new Map();
+let remoteJobSuppressionsReady = null;
+let remoteJobSuppressionMutationQueue = Promise.resolve();
 let analysisQueueReconcileInProgress = false;
 let analysisQueueReconcileRequested = false;
 let analysisQueueDeadlineTimer = null;
@@ -231,6 +246,9 @@ const processStaleWarnLastEmitTsByRunId = new Map();
 const completedProcessPersistenceRetryTimersByRunId = new Map();
 const completedProcessPersistenceRetryAttemptCountByRunId = new Map();
 const completedProcessPersistenceRetryInFlight = new Set();
+const processWindowCloseRetryTimersByRunId = new Map();
+const processWindowCloseRetryAttemptCountByRunId = new Map();
+const processWindowCloseRetryInFlight = new Set();
 const manualPdfQueueBatches = new Map();
 const problemLogConsoleErrorDedup = new Map();
 let problemLogConsoleCaptureInstalled = false;
@@ -269,6 +287,177 @@ function normalizeComposerThinkingEffort(value) {
     return normalized;
   }
   return '';
+}
+
+function normalizeChatGptMonitoringLabel(value, maxLength = 180) {
+  const normalized = typeof value === 'string'
+    ? value.replace(/\s+/g, ' ').trim()
+    : '';
+  if (!normalized) return '';
+  const limit = Number.isInteger(maxLength) && maxLength >= 32
+    ? maxLength
+    : 180;
+  return normalized.slice(0, limit);
+}
+
+function normalizeChatGptModeKind(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'thinking' || normalized === 'instant' || normalized === 'auto') {
+    return normalized;
+  }
+  return '';
+}
+
+function normalizeChatGptPlanHint(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'pro') return normalized;
+  return '';
+}
+
+function applyChatGptComputationStatePatch(target, source) {
+  if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {
+    return target;
+  }
+
+  const requestedThinkingEffort = normalizeComposerThinkingEffort(source.composerThinkingEffort);
+  if (requestedThinkingEffort) target.composerThinkingEffort = requestedThinkingEffort;
+
+  const chatGptModeKind = normalizeChatGptModeKind(source.chatGptModeKind);
+  if (chatGptModeKind) target.chatGptModeKind = chatGptModeKind;
+
+  const chatGptPlanHint = normalizeChatGptPlanHint(source.chatGptPlanHint);
+  if (chatGptPlanHint) target.chatGptPlanHint = chatGptPlanHint;
+
+  const chatGptModeLabel = normalizeChatGptMonitoringLabel(source.chatGptModeLabel, 120);
+  if (chatGptModeLabel) target.chatGptModeLabel = chatGptModeLabel;
+
+  const chatGptModelSwitcherLabel = normalizeChatGptMonitoringLabel(source.chatGptModelSwitcherLabel, 160);
+  if (chatGptModelSwitcherLabel) target.chatGptModelSwitcherLabel = chatGptModelSwitcherLabel;
+
+  const chatGptThinkingEffortDetected = normalizeComposerThinkingEffort(source.chatGptThinkingEffortDetected);
+  if (chatGptThinkingEffortDetected) target.chatGptThinkingEffortDetected = chatGptThinkingEffortDetected;
+
+  const chatGptThinkingEffortLabel = normalizeChatGptMonitoringLabel(source.chatGptThinkingEffortLabel, 120);
+  if (chatGptThinkingEffortLabel) target.chatGptThinkingEffortLabel = chatGptThinkingEffortLabel;
+
+  const chatGptComputationLabel = normalizeChatGptMonitoringLabel(source.chatGptComputationLabel, 220);
+  if (chatGptComputationLabel) target.chatGptComputationLabel = chatGptComputationLabel;
+
+  if (Number.isInteger(source.chatGptComputationDetectedAt) && source.chatGptComputationDetectedAt > 0) {
+    target.chatGptComputationDetectedAt = source.chatGptComputationDetectedAt;
+  }
+
+  return target;
+}
+
+function normalizeChatGptUiText(value) {
+  return String(value ?? '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+function isChatGptLimitOrRestrictionText(text) {
+  const lowered = normalizeChatGptUiText(text);
+  if (!lowered) return false;
+  return /\blimit\s*:/.test(lowered);
+}
+
+function isInjectRateLimitBlockedResult(result) {
+  return !!(
+    result
+    && typeof result === 'object'
+    && result.success === false
+    && result.error === 'rate_limit_blocked'
+  );
+}
+
+function buildInjectRateLimitNeedsActionPatch(result = {}, fallback = {}) {
+  const currentPrompt = Number.isInteger(result?.currentPrompt)
+    ? result.currentPrompt
+    : (
+      Number.isInteger(fallback?.currentPrompt)
+        ? fallback.currentPrompt
+        : 0
+    );
+  const totalPrompts = Number.isInteger(result?.totalPrompts)
+    ? result.totalPrompts
+    : (
+      Number.isInteger(fallback?.totalPrompts)
+        ? fallback.totalPrompts
+        : 0
+    );
+  const stageIndex = Number.isInteger(result?.stageIndex)
+    ? result.stageIndex
+    : (
+      Number.isInteger(fallback?.stageIndex)
+        ? fallback.stageIndex
+        : (currentPrompt > 0 ? currentPrompt - 1 : null)
+    );
+  const phase = typeof result?.phase === 'string' && result.phase.trim()
+    ? result.phase.trim()
+    : (
+      typeof fallback?.phase === 'string' && fallback.phase.trim()
+        ? fallback.phase.trim()
+        : 'response_wait'
+    );
+  const stageName = typeof result?.stageName === 'string' && result.stageName.trim()
+    ? result.stageName.trim()
+    : (
+      typeof fallback?.stageName === 'string' && fallback.stageName.trim()
+        ? fallback.stageName.trim()
+        : (
+          Number.isInteger(stageIndex)
+            ? `Prompt ${stageIndex + 1}`
+            : (currentPrompt > 0 ? `Prompt ${currentPrompt}` : 'Start')
+        )
+    );
+  const statusText = typeof result?.statusText === 'string' && result.statusText.trim()
+    ? result.statusText.trim()
+    : (
+      typeof fallback?.statusText === 'string' && fallback.statusText.trim()
+        ? fallback.statusText.trim()
+        : 'Wymaga akcji: limit/restriction w ChatGPT.'
+    );
+  const reason = typeof result?.reason === 'string' && result.reason.trim()
+    ? result.reason.trim()
+    : 'limit_or_restriction';
+  const conversationUrl = normalizeChatConversationUrl(
+    result?.conversationUrl
+    || fallback?.conversationUrl
+    || fallback?.chatUrl
+    || ''
+  );
+
+  const patch = {
+    lifecycleStatus: 'running',
+    status: 'running',
+    phase,
+    actionRequired: 'rate_limit',
+    statusCode: 'chat.rate_limited',
+    needsAction: true,
+    statusText,
+    reason,
+    error: 'rate_limit_blocked',
+    autoRecovery: null,
+    timestamp: Date.now()
+  };
+  if (Number.isInteger(currentPrompt) && currentPrompt > 0) {
+    patch.currentPrompt = currentPrompt;
+  }
+  if (Number.isInteger(totalPrompts) && totalPrompts > 0) {
+    patch.totalPrompts = totalPrompts;
+  }
+  if (Number.isInteger(stageIndex) && stageIndex >= 0) {
+    patch.stageIndex = stageIndex;
+  }
+  if (stageName) {
+    patch.stageName = stageName;
+  }
+  if (conversationUrl) {
+    patch.chatUrl = conversationUrl;
+  }
+  return patch;
 }
 
 async function getStoredResumeComposerThinkingEffort() {
@@ -491,6 +680,48 @@ function normalizeAutoRecoveryState(rawState) {
   return normalized;
 }
 
+function normalizeProcessWindowCloseState(rawState) {
+  if (!rawState || typeof rawState !== 'object') return null;
+
+  const normalized = {};
+  const state = typeof rawState.state === 'string' ? rawState.state.trim().toLowerCase() : '';
+  if (state) normalized.state = state;
+  if (Number.isInteger(rawState.requestedAt) && rawState.requestedAt > 0) {
+    normalized.requestedAt = rawState.requestedAt;
+  }
+  if (Number.isInteger(rawState.lastAttemptAt) && rawState.lastAttemptAt > 0) {
+    normalized.lastAttemptAt = rawState.lastAttemptAt;
+  }
+  if (Number.isInteger(rawState.attemptCount) && rawState.attemptCount >= 0) {
+    normalized.attemptCount = rawState.attemptCount;
+  }
+  if (Number.isInteger(rawState.closedAt) && rawState.closedAt > 0) {
+    normalized.closedAt = rawState.closedAt;
+  }
+  if (typeof rawState.lastError === 'string' && rawState.lastError.trim()) {
+    normalized.lastError = rawState.lastError.trim();
+  }
+  if (typeof rawState.lastReason === 'string' && rawState.lastReason.trim()) {
+    normalized.lastReason = rawState.lastReason.trim();
+  }
+
+  if (!normalized.state) {
+    if (Number.isInteger(normalized.closedAt)) {
+      normalized.state = 'closed';
+    } else if ((normalized.attemptCount || 0) > 0) {
+      normalized.state = 'retrying';
+    } else if (Number.isInteger(normalized.requestedAt)) {
+      normalized.state = 'requested';
+    }
+  }
+
+  if (!normalized.state) return null;
+  if (!Number.isInteger(normalized.attemptCount) || normalized.attemptCount < 0) {
+    normalized.attemptCount = 0;
+  }
+  return normalized;
+}
+
 function isFailedProcessStatus(status) {
   const normalized = normalizeProcessStatus(status);
   return normalized === 'failed' || normalized === 'error';
@@ -668,6 +899,57 @@ function normalizeProcessRecord(record) {
   if (typeof normalized.statusCode !== 'string' || !normalized.statusCode.trim()) delete normalized.statusCode;
   if (typeof normalized.stageName !== 'string') delete normalized.stageName;
   if (!Number.isInteger(normalized.stageIndex)) delete normalized.stageIndex;
+  const normalizedRequestedThinkingEffort = normalizeComposerThinkingEffort(normalized.composerThinkingEffort);
+  if (normalizedRequestedThinkingEffort) {
+    normalized.composerThinkingEffort = normalizedRequestedThinkingEffort;
+  } else {
+    delete normalized.composerThinkingEffort;
+  }
+  const normalizedChatGptModeKind = normalizeChatGptModeKind(normalized.chatGptModeKind);
+  if (normalizedChatGptModeKind) {
+    normalized.chatGptModeKind = normalizedChatGptModeKind;
+  } else {
+    delete normalized.chatGptModeKind;
+  }
+  const normalizedChatGptPlanHint = normalizeChatGptPlanHint(normalized.chatGptPlanHint);
+  if (normalizedChatGptPlanHint) {
+    normalized.chatGptPlanHint = normalizedChatGptPlanHint;
+  } else {
+    delete normalized.chatGptPlanHint;
+  }
+  const normalizedChatGptModeLabel = normalizeChatGptMonitoringLabel(normalized.chatGptModeLabel, 120);
+  if (normalizedChatGptModeLabel) {
+    normalized.chatGptModeLabel = normalizedChatGptModeLabel;
+  } else {
+    delete normalized.chatGptModeLabel;
+  }
+  const normalizedChatGptModelSwitcherLabel = normalizeChatGptMonitoringLabel(normalized.chatGptModelSwitcherLabel, 160);
+  if (normalizedChatGptModelSwitcherLabel) {
+    normalized.chatGptModelSwitcherLabel = normalizedChatGptModelSwitcherLabel;
+  } else {
+    delete normalized.chatGptModelSwitcherLabel;
+  }
+  const normalizedChatGptThinkingEffortDetected = normalizeComposerThinkingEffort(normalized.chatGptThinkingEffortDetected);
+  if (normalizedChatGptThinkingEffortDetected) {
+    normalized.chatGptThinkingEffortDetected = normalizedChatGptThinkingEffortDetected;
+  } else {
+    delete normalized.chatGptThinkingEffortDetected;
+  }
+  const normalizedChatGptThinkingEffortLabel = normalizeChatGptMonitoringLabel(normalized.chatGptThinkingEffortLabel, 120);
+  if (normalizedChatGptThinkingEffortLabel) {
+    normalized.chatGptThinkingEffortLabel = normalizedChatGptThinkingEffortLabel;
+  } else {
+    delete normalized.chatGptThinkingEffortLabel;
+  }
+  const normalizedChatGptComputationLabel = normalizeChatGptMonitoringLabel(normalized.chatGptComputationLabel, 220);
+  if (normalizedChatGptComputationLabel) {
+    normalized.chatGptComputationLabel = normalizedChatGptComputationLabel;
+  } else {
+    delete normalized.chatGptComputationLabel;
+  }
+  if (!Number.isInteger(normalized.chatGptComputationDetectedAt) || normalized.chatGptComputationDetectedAt <= 0) {
+    delete normalized.chatGptComputationDetectedAt;
+  }
   const normalizedChatUrl = normalizeChatConversationUrl(
     typeof normalized.chatUrl === 'string' ? normalized.chatUrl : ''
   );
@@ -737,6 +1019,12 @@ function normalizeProcessRecord(record) {
     } else {
       delete normalized.autoRecovery;
     }
+  }
+  const normalizedWindowClose = normalizeProcessWindowCloseState(normalized.windowClose);
+  if (normalizedWindowClose) {
+    normalized.windowClose = normalizedWindowClose;
+  } else {
+    delete normalized.windowClose;
   }
   if (normalized.actionRequired === 'none') {
     normalized.needsAction = false;
@@ -860,6 +1148,7 @@ async function ensureProcessRegistryReady() {
         processSnapshotVersion = processRegistryVersion;
         rehydrateProcessProblemLogState(records);
         scheduleCompletedProcessPersistenceRetriesForSnapshot(records, 'process_registry_ready');
+        scheduleProcessWindowCloseRetriesForSnapshot(records, 'process_registry_ready');
       } catch (error) {
         console.warn('[monitor] Failed to read process monitor state:', error);
         processRegistry.clear();
@@ -870,6 +1159,10 @@ async function ensureProcessRegistryReady() {
         completedProcessPersistenceRetryTimersByRunId.clear();
         completedProcessPersistenceRetryAttemptCountByRunId.clear();
         completedProcessPersistenceRetryInFlight.clear();
+        processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
+        processWindowCloseRetryTimersByRunId.clear();
+        processWindowCloseRetryAttemptCountByRunId.clear();
+        processWindowCloseRetryInFlight.clear();
       }
     })();
   }
@@ -901,6 +1194,16 @@ function shouldFlushProcessUpdateImmediately(existingProcess = null, nextProcess
   const existingQueueState = typeof existing?.queueState === 'string' ? existing.queueState.trim() : '';
   const nextQueueState = typeof next?.queueState === 'string' ? next.queueState.trim() : '';
   if (existingQueueState !== nextQueueState) return true;
+
+  if (
+    'completedResponseText' in candidatePatch
+    || 'completedResponseCapturedAt' in candidatePatch
+    || 'completedResponseSaved' in candidatePatch
+    || 'persistenceStatus' in candidatePatch
+    || 'windowClose' in candidatePatch
+  ) {
+    return true;
+  }
 
   if ('slotReserved' in candidatePatch || 'slotReleasedAt' in candidatePatch || 'queuePosition' in candidatePatch) {
     return true;
@@ -1178,6 +1481,376 @@ function createEmptyAnalysisQueueState() {
     maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
     lastSequence: 0
   };
+}
+
+async function ensureAnalysisQueuePauseReady() {
+  if (!analysisQueuePauseReady) {
+    analysisQueuePauseReady = (async () => {
+      try {
+        const stored = await chrome.storage.local.get([ANALYSIS_QUEUE_PAUSED_STORAGE_KEY]);
+        analysisQueuePaused = stored?.[ANALYSIS_QUEUE_PAUSED_STORAGE_KEY] === true;
+      } catch (error) {
+        console.warn('[analysis-queue] Failed to read pause state:', error?.message || String(error));
+        analysisQueuePaused = false;
+      }
+      return analysisQueuePaused;
+    })();
+  }
+  return analysisQueuePauseReady;
+}
+
+async function getAnalysisQueuePaused() {
+  await ensureAnalysisQueuePauseReady();
+  return analysisQueuePaused === true;
+}
+
+async function setAnalysisQueuePaused(paused, options = {}) {
+  await ensureAnalysisQueuePauseReady();
+  const nextPaused = paused === true;
+  const previousPaused = analysisQueuePaused === true;
+  if (previousPaused === nextPaused) {
+    return {
+      success: true,
+      paused: nextPaused,
+      changed: false
+    };
+  }
+  await chrome.storage.local.set({ [ANALYSIS_QUEUE_PAUSED_STORAGE_KEY]: nextPaused });
+  analysisQueuePaused = nextPaused;
+  if (options?.requestReconcile !== false) {
+    requestAnalysisQueueReconcile(nextPaused ? 'queue_paused' : 'queue_resumed');
+  }
+  if (!nextPaused && options?.requestRemoteRunnerCycle !== false) {
+    requestRemoteRunnerCycle('queue_resumed');
+  }
+  return {
+    success: true,
+    paused: nextPaused,
+    changed: previousPaused !== nextPaused
+  };
+}
+
+function cloneRemoteJobSuppressionValue(value) {
+  if (!value || typeof value !== 'object') return null;
+  try {
+    return typeof structuredClone === 'function'
+      ? structuredClone(value)
+      : JSON.parse(JSON.stringify(value));
+  } catch {
+    return null;
+  }
+}
+
+function buildRemoteJobSuppressionKey(jobId = '', attemptId = '') {
+  const normalizedJobId = typeof jobId === 'string' ? jobId.trim() : '';
+  const normalizedAttemptId = typeof attemptId === 'string' ? attemptId.trim() : '';
+  if (!normalizedJobId) return '';
+  return normalizedAttemptId
+    ? `${normalizedJobId}::${normalizedAttemptId}`
+    : normalizedJobId;
+}
+
+function sanitizeRemoteJobSuppressionEntry(rawKey = '', rawEntry = null, nowTs = Date.now()) {
+  const source = rawEntry && typeof rawEntry === 'object' ? rawEntry : {};
+  const keyText = typeof rawKey === 'string' ? rawKey.trim() : '';
+  const keyParts = keyText ? keyText.split('::') : [];
+  const jobId = typeof source.jobId === 'string' && source.jobId.trim()
+    ? source.jobId.trim()
+    : (keyParts[0] || '');
+  const attemptId = typeof source.attemptId === 'string' && source.attemptId.trim()
+    ? source.attemptId.trim()
+    : (keyParts[1] || '');
+  if (!jobId) return null;
+  const createdAt = Number.isInteger(source.createdAt) && source.createdAt > 0
+    ? source.createdAt
+    : nowTs;
+  const updatedAt = Number.isInteger(source.updatedAt) && source.updatedAt > 0
+    ? source.updatedAt
+    : createdAt;
+  const expiresAt = Number.isInteger(source.expiresAt) && source.expiresAt > updatedAt
+    ? source.expiresAt
+    : (updatedAt + ISKRA_REMOTE_JOB_SUPPRESSION_TTL_MS);
+  if (expiresAt <= nowTs) return null;
+  return {
+    key: buildRemoteJobSuppressionKey(jobId, attemptId),
+    jobId,
+    attemptId,
+    runId: typeof source.runId === 'string' ? source.runId.trim() : '',
+    title: typeof source.title === 'string' ? source.title.trim() : '',
+    promptHash: typeof source.promptHash === 'string' ? source.promptHash.trim() : '',
+    reason: typeof source.reason === 'string' ? source.reason.trim() : '',
+    error: typeof source.error === 'string' ? source.error.trim() : '',
+    payload: cloneRemoteJobSuppressionValue(source.payload),
+    createdAt,
+    updatedAt,
+    expiresAt,
+    lastReportAttemptAt: Number.isInteger(source.lastReportAttemptAt) && source.lastReportAttemptAt > 0
+      ? source.lastReportAttemptAt
+      : 0,
+    lastReportSuccessAt: Number.isInteger(source.lastReportSuccessAt) && source.lastReportSuccessAt > 0
+      ? source.lastReportSuccessAt
+      : 0,
+    lastReportError: typeof source.lastReportError === 'string' ? source.lastReportError.trim() : ''
+  };
+}
+
+function sanitizeRemoteJobSuppressions(rawEntries = null, nowTs = Date.now()) {
+  const source = rawEntries && typeof rawEntries === 'object' ? rawEntries : {};
+  const entries = [];
+  for (const [key, value] of Object.entries(source)) {
+    const entry = sanitizeRemoteJobSuppressionEntry(key, value, nowTs);
+    if (entry) {
+      entries.push(entry);
+    }
+  }
+  entries.sort((left, right) => {
+    const leftUpdatedAt = Number.isInteger(left?.updatedAt) ? left.updatedAt : 0;
+    const rightUpdatedAt = Number.isInteger(right?.updatedAt) ? right.updatedAt : 0;
+    if (leftUpdatedAt !== rightUpdatedAt) return leftUpdatedAt - rightUpdatedAt;
+    return left.key.localeCompare(right.key);
+  });
+  const trimmedEntries = entries.length > ISKRA_REMOTE_JOB_SUPPRESSION_MAX_ITEMS
+    ? entries.slice(entries.length - ISKRA_REMOTE_JOB_SUPPRESSION_MAX_ITEMS)
+    : entries;
+  return new Map(trimmedEntries.map((entry) => [entry.key, entry]));
+}
+
+async function persistRemoteJobSuppressions() {
+  const storagePayload = {};
+  for (const [key, entry] of remoteJobSuppressions.entries()) {
+    storagePayload[key] = {
+      jobId: entry.jobId,
+      attemptId: entry.attemptId,
+      runId: entry.runId,
+      title: entry.title,
+      promptHash: entry.promptHash,
+      reason: entry.reason,
+      error: entry.error,
+      payload: cloneRemoteJobSuppressionValue(entry.payload),
+      createdAt: entry.createdAt,
+      updatedAt: entry.updatedAt,
+      expiresAt: entry.expiresAt,
+      lastReportAttemptAt: entry.lastReportAttemptAt,
+      lastReportSuccessAt: entry.lastReportSuccessAt,
+      lastReportError: entry.lastReportError
+    };
+  }
+  await chrome.storage.local.set({
+    [ISKRA_REMOTE_JOB_SUPPRESSIONS_STORAGE_KEY]: storagePayload
+  });
+  return storagePayload;
+}
+
+async function ensureRemoteJobSuppressionsReady() {
+  if (!remoteJobSuppressionsReady) {
+    remoteJobSuppressionsReady = (async () => {
+      try {
+        const stored = await chrome.storage.local.get([ISKRA_REMOTE_JOB_SUPPRESSIONS_STORAGE_KEY]);
+        remoteJobSuppressions = sanitizeRemoteJobSuppressions(
+          stored?.[ISKRA_REMOTE_JOB_SUPPRESSIONS_STORAGE_KEY]
+        );
+      } catch (error) {
+        console.warn('[remote-runner] Failed to read remote job suppressions:', error?.message || String(error));
+        remoteJobSuppressions = new Map();
+      }
+      return remoteJobSuppressions;
+    })();
+  }
+  return remoteJobSuppressionsReady;
+}
+
+function withRemoteJobSuppressionMutationLock(task) {
+  const taskFn = typeof task === 'function' ? task : null;
+  if (!taskFn) {
+    return Promise.reject(new Error('remote_job_suppression_task_required'));
+  }
+  const next = remoteJobSuppressionMutationQueue.then(
+    () => taskFn(),
+    () => taskFn()
+  );
+  remoteJobSuppressionMutationQueue = next.catch(() => {});
+  return next;
+}
+
+async function rememberRemoteJobSuppression(remoteJob, details = {}) {
+  const source = remoteJob && typeof remoteJob === 'object' ? remoteJob : {};
+  const remote = source?.remote && typeof source.remote === 'object' ? source.remote : {};
+  const jobId = typeof source.jobId === 'string' && source.jobId.trim()
+    ? source.jobId.trim()
+    : (typeof remote.remoteJobId === 'string' ? remote.remoteJobId.trim() : '');
+  const attemptId = typeof source.attemptId === 'string' && source.attemptId.trim()
+    ? source.attemptId.trim()
+    : (typeof remote.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '');
+  const key = buildRemoteJobSuppressionKey(jobId, attemptId);
+  if (!key) return null;
+  await ensureRemoteJobSuppressionsReady();
+  return withRemoteJobSuppressionMutationLock(async () => {
+    const now = Date.now();
+    const nextEntries = new Map(remoteJobSuppressions);
+    const previous = nextEntries.get(key) || null;
+    const nextEntry = sanitizeRemoteJobSuppressionEntry(key, {
+      ...(previous && typeof previous === 'object' ? previous : {}),
+      jobId,
+      attemptId,
+      runId: typeof details?.runId === 'string' && details.runId.trim()
+        ? details.runId.trim()
+        : (typeof source?.runId === 'string' ? source.runId.trim() : ''),
+      title: typeof details?.title === 'string' && details.title.trim()
+        ? details.title.trim()
+        : (typeof source?.title === 'string' ? source.title.trim() : ''),
+      promptHash: typeof details?.promptHash === 'string' && details.promptHash.trim()
+        ? details.promptHash.trim()
+        : (typeof source?.promptHash === 'string' ? source.promptHash.trim() : ''),
+      reason: typeof details?.reason === 'string'
+        ? details.reason
+        : (typeof previous?.reason === 'string' ? previous.reason : ''),
+      error: typeof details?.error === 'string'
+        ? details.error
+        : (typeof previous?.error === 'string' ? previous.error : ''),
+      payload: Object.prototype.hasOwnProperty.call(details, 'payload')
+        ? cloneRemoteJobSuppressionValue(details?.payload)
+        : cloneRemoteJobSuppressionValue(previous?.payload),
+      createdAt: Number.isInteger(previous?.createdAt) ? previous.createdAt : now,
+      updatedAt: now,
+      expiresAt: now + ISKRA_REMOTE_JOB_SUPPRESSION_TTL_MS,
+      lastReportAttemptAt: Number.isInteger(details?.lastReportAttemptAt)
+        ? details.lastReportAttemptAt
+        : (Number.isInteger(previous?.lastReportAttemptAt) ? previous.lastReportAttemptAt : 0),
+      lastReportSuccessAt: Number.isInteger(details?.lastReportSuccessAt)
+        ? details.lastReportSuccessAt
+        : (Number.isInteger(previous?.lastReportSuccessAt) ? previous.lastReportSuccessAt : 0),
+      lastReportError: typeof details?.lastReportError === 'string'
+        ? details.lastReportError
+        : (typeof previous?.lastReportError === 'string' ? previous.lastReportError : '')
+    }, now);
+    if (!nextEntry) {
+      nextEntries.delete(key);
+    } else {
+      nextEntries.set(key, nextEntry);
+    }
+    remoteJobSuppressions = sanitizeRemoteJobSuppressions(Object.fromEntries(nextEntries), now);
+    await persistRemoteJobSuppressions();
+    return remoteJobSuppressions.get(key) || null;
+  });
+}
+
+async function forgetRemoteJobSuppression(remoteJob) {
+  const source = remoteJob && typeof remoteJob === 'object' ? remoteJob : {};
+  const remote = source?.remote && typeof source.remote === 'object' ? source.remote : {};
+  const key = buildRemoteJobSuppressionKey(
+    typeof source.jobId === 'string' && source.jobId.trim()
+      ? source.jobId.trim()
+      : (typeof remote.remoteJobId === 'string' ? remote.remoteJobId.trim() : ''),
+    typeof source.attemptId === 'string' && source.attemptId.trim()
+      ? source.attemptId.trim()
+      : (typeof remote.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '')
+  );
+  if (!key) return false;
+  await ensureRemoteJobSuppressionsReady();
+  return withRemoteJobSuppressionMutationLock(async () => {
+    if (!remoteJobSuppressions.has(key)) return false;
+    const nextEntries = new Map(remoteJobSuppressions);
+    nextEntries.delete(key);
+    remoteJobSuppressions = sanitizeRemoteJobSuppressions(Object.fromEntries(nextEntries));
+    await persistRemoteJobSuppressions();
+    return true;
+  });
+}
+
+async function getRemoteJobSuppression(remoteJob) {
+  const source = remoteJob && typeof remoteJob === 'object' ? remoteJob : {};
+  const remote = source?.remote && typeof source.remote === 'object' ? source.remote : {};
+  const key = buildRemoteJobSuppressionKey(
+    typeof source.jobId === 'string' && source.jobId.trim()
+      ? source.jobId.trim()
+      : (typeof remote.remoteJobId === 'string' ? remote.remoteJobId.trim() : ''),
+    typeof source.attemptId === 'string' && source.attemptId.trim()
+      ? source.attemptId.trim()
+      : (typeof remote.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '')
+  );
+  if (!key) return null;
+  await ensureRemoteJobSuppressionsReady();
+  const entry = remoteJobSuppressions.get(key) || null;
+  if (!entry) return null;
+  const now = Date.now();
+  if (Number.isInteger(entry.expiresAt) && entry.expiresAt > now) {
+    return entry;
+  }
+  void forgetRemoteJobSuppression(remoteJob).catch(() => {});
+  return null;
+}
+
+function shouldRetrySuppressedRemoteJobFailureReport(entry, nowTs = Date.now()) {
+  if (!entry || typeof entry !== 'object') return false;
+  const lastAttemptAt = Number.isInteger(entry.lastReportAttemptAt) ? entry.lastReportAttemptAt : 0;
+  return lastAttemptAt <= 0 || (nowTs - lastAttemptAt) >= ISKRA_REMOTE_JOB_SUPPRESSION_REPORT_RETRY_MS;
+}
+
+async function retrySuppressedRemoteJobFailure(remoteJob, suppressionEntry, options = {}) {
+  const source = remoteJob && typeof remoteJob === 'object' ? remoteJob : {};
+  const suppression = suppressionEntry && typeof suppressionEntry === 'object'
+    ? suppressionEntry
+    : await getRemoteJobSuppression(source);
+  if (!suppression) {
+    return { success: false, skipped: true, reason: 'remote_job_suppression_missing' };
+  }
+  if (!suppression.payload || typeof suppression.payload !== 'object') {
+    return { success: false, skipped: true, reason: 'remote_job_suppression_missing_payload' };
+  }
+  if (!shouldRetrySuppressedRemoteJobFailureReport(suppression)) {
+    return { success: true, skipped: true, reason: 'remote_job_suppression_retry_deferred' };
+  }
+  const remote = source?.remote && typeof source.remote === 'object' ? source.remote : {};
+  const jobId = typeof source.jobId === 'string' && source.jobId.trim()
+    ? source.jobId.trim()
+    : suppression.jobId;
+  const attemptId = typeof source.attemptId === 'string' && source.attemptId.trim()
+    ? source.attemptId.trim()
+    : (typeof remote.remoteAttemptId === 'string' && remote.remoteAttemptId.trim()
+      ? remote.remoteAttemptId.trim()
+      : suppression.attemptId);
+  if (!jobId || !attemptId) {
+    return { success: false, skipped: true, reason: 'remote_job_suppression_invalid_identity' };
+  }
+  const attemptedAt = Date.now();
+  await rememberRemoteJobSuppression(source, {
+    ...suppression,
+    lastReportAttemptAt: attemptedAt,
+    lastReportError: ''
+  });
+  try {
+    const eventResult = await reportRemoteJobEvent(
+      jobId,
+      'failed',
+      attemptId,
+      suppression.payload,
+      suppression.error || ''
+    );
+    if (eventResult?.success === true) {
+      await rememberRemoteJobSuppression(source, {
+        ...suppression,
+        lastReportAttemptAt: attemptedAt,
+        lastReportSuccessAt: Date.now(),
+        lastReportError: ''
+      });
+      return { success: true, skipped: false, reason: 'remote_job_suppression_reported' };
+    }
+    const reportError = eventResult?.error || 'remote_job_failed_report_rejected';
+    await rememberRemoteJobSuppression(source, {
+      ...suppression,
+      lastReportAttemptAt: attemptedAt,
+      lastReportError: reportError
+    });
+    return { success: false, skipped: true, reason: reportError };
+  } catch (error) {
+    const reportError = error?.message || String(error);
+    await rememberRemoteJobSuppression(source, {
+      ...suppression,
+      lastReportAttemptAt: attemptedAt,
+      lastReportError: reportError
+    });
+    return { success: false, skipped: true, reason: reportError };
+  }
 }
 
 function sanitizeAnalysisQueueState(rawState) {
@@ -1520,6 +2193,7 @@ async function collectAnalysisQueueActiveProcesses(options = {}) {
 }
 
 async function getAnalysisQueueStatusSnapshot() {
+  const paused = await getAnalysisQueuePaused();
   const [snapshot] = await Promise.all([
     getAnalysisQueueSnapshot(),
     ensureProcessRegistryReady()
@@ -1531,6 +2205,7 @@ async function getAnalysisQueueStatusSnapshot() {
   const startingSlots = Math.max(0, reservedSlots - liveSlots);
   return {
     success: true,
+    paused,
     version: analysisQueueVersion,
     maxConcurrent: snapshot.maxConcurrent,
     activeSlots,
@@ -1647,6 +2322,7 @@ async function getRemoteExecutionConfigSnapshot(options = {}) {
     selectedRunnerId,
     runnerEnabled,
     runnerName,
+    queuePaused,
     identity,
     localState,
     promptsReady
@@ -1655,6 +2331,7 @@ async function getRemoteExecutionConfigSnapshot(options = {}) {
     getStoredSelectedRemoteRunnerId(),
     getStoredRemoteRunnerEnabled(),
     getStoredRemoteRunnerName(),
+    getAnalysisQueuePaused(),
     identityPromise,
     localStatePromise,
     promptsReadyPromise
@@ -1681,6 +2358,7 @@ async function getRemoteExecutionConfigSnapshot(options = {}) {
     selectedRunnerId,
     runnerEnabled,
     runnerName: runnerName || identity?.runnerName || '',
+    queuePaused,
     runnerId: typeof identity?.runnerId === 'string' ? identity.runnerId : '',
     controllerId: typeof identity?.controllerId === 'string' ? identity.controllerId : '',
     promptsLoaded: promptsReady === true,
@@ -2292,7 +2970,17 @@ async function enqueueClaimedRemoteJob(job) {
 }
 
 async function recoverAssignedRemoteJob(options = {}) {
-  const identity = await getConfiguredRemoteRunnerIdentity();
+  const [runnerEnabled, queuePaused, identity] = await Promise.all([
+    getStoredRemoteRunnerEnabled(),
+    getAnalysisQueuePaused(),
+    getConfiguredRemoteRunnerIdentity()
+  ]);
+  if (!runnerEnabled) {
+    return { success: true, skipped: true, reason: 'runner_disabled' };
+  }
+  if (queuePaused) {
+    return { success: true, skipped: true, reason: 'queue_paused' };
+  }
   const localState = await getRemoteRunnerLocalState();
   if (localState?.queuedRemoteJob || localState?.activeRemoteProcess) {
     return {
@@ -2350,6 +3038,41 @@ async function recoverAssignedRemoteJob(options = {}) {
       skipped: true,
       reason: remoteStatus ? `remote_job_${remoteStatus}` : 'remote_job_not_recoverable'
     };
+  }
+  const suppression = await getRemoteJobSuppression(remoteJob);
+  if (suppression) {
+    const retryResult = await retrySuppressedRemoteJobFailure(remoteJob, suppression, {
+      origin: typeof options?.origin === 'string' ? options.origin : 'recovery'
+    }).catch((error) => ({
+      success: false,
+      skipped: true,
+      reason: error?.message || String(error)
+    }));
+    if (retryResult?.success !== true && retryResult?.reason) {
+      console.warn('[remote-runner] suppressed remote job retry failed:', {
+        runnerId: identity.runnerId,
+        jobId: remoteJob.jobId,
+        attemptId: remoteJob.attemptId,
+        reason: retryResult.reason
+      });
+    }
+    return {
+      success: true,
+      skipped: true,
+      suppressed: true,
+      reason: 'remote_job_suppressed',
+      job: remoteJob
+    };
+  }
+  const [stillRunnerEnabled, stillQueuePaused] = await Promise.all([
+    getStoredRemoteRunnerEnabled(),
+    getAnalysisQueuePaused()
+  ]);
+  if (!stillRunnerEnabled) {
+    return { success: true, skipped: true, reason: 'runner_disabled' };
+  }
+  if (stillQueuePaused) {
+    return { success: true, skipped: true, reason: 'queue_paused' };
   }
 
   try {
@@ -2415,13 +3138,17 @@ async function sendRemoteRunnerHeartbeat(options = {}) {
 }
 
 async function pollAndClaimRemoteJob(options = {}) {
-  const [runnerEnabled, identity, localState] = await Promise.all([
+  const [runnerEnabled, identity, localState, queuePaused] = await Promise.all([
     getStoredRemoteRunnerEnabled(),
     getConfiguredRemoteRunnerIdentity(),
-    getRemoteRunnerLocalState()
+    getRemoteRunnerLocalState(),
+    getAnalysisQueuePaused()
   ]);
   if (!runnerEnabled) {
     return { success: true, skipped: true, reason: 'runner_disabled' };
+  }
+  if (queuePaused) {
+    return { success: true, skipped: true, reason: 'queue_paused' };
   }
   if (localState?.localBusy === true || localState?.queuedRemoteJob) {
     return {
@@ -2429,6 +3156,9 @@ async function pollAndClaimRemoteJob(options = {}) {
       skipped: true,
       reason: localState?.queuedRemoteJob ? 'remote_job_already_present' : 'local_busy'
     };
+  }
+  if (await getAnalysisQueuePaused()) {
+    return { success: true, skipped: true, reason: 'queue_paused' };
   }
 
   const claimResult = await claimRemoteJobViaApi(identity.runnerId);
@@ -2538,6 +3268,9 @@ async function runRemoteRunnerCycle(reason = 'manual') {
       origin: normalizedReason
     });
     if (recoveryResult?.recovered === true) {
+      return recoveryResult;
+    }
+    if (recoveryResult?.reason && recoveryResult.reason !== 'no_assigned_remote_job') {
       return recoveryResult;
     }
 
@@ -2755,6 +3488,45 @@ async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, option
   const items = Array.isArray(batch?.items) ? batch.items : [];
   if (items.length === 0) {
     return { success: false, error: 'empty_prepared_batch', submittedCount: 0 };
+  }
+
+  const statusResult = await getRemoteRunnerStatusViaApi(safeRunnerId, {
+    timeoutMs: options?.timeoutMs,
+    retryCount: options?.retryCount
+  });
+  if (!statusResult?.success) {
+    return {
+      success: false,
+      error: statusResult?.error || 'remote_runner_status_failed',
+      runnerId: safeRunnerId,
+      submittedCount: 0,
+      failedCount: items.length,
+      skippedCount: Array.isArray(batch?.skipped) ? batch.skipped.length : 0,
+      totalTabs: items.length + (Array.isArray(batch?.skipped) ? batch.skipped.length : 0),
+      failures: [],
+      skipped: Array.isArray(batch?.skipped) ? batch.skipped : [],
+      jobs: []
+    };
+  }
+
+  const runnerStatus = statusResult?.payload?.runner && typeof statusResult.payload.runner === 'object'
+    ? statusResult.payload.runner
+    : null;
+  const runnerState = typeof runnerStatus?.state === 'string' ? runnerStatus.state.trim().toLowerCase() : '';
+  if (!runnerStatus || runnerStatus.queueable !== true || runnerState !== 'ready') {
+    return {
+      success: false,
+      error: runnerState ? `runner_${runnerState}` : 'runner_blocked',
+      runnerId: safeRunnerId,
+      runnerStatus,
+      submittedCount: 0,
+      failedCount: items.length,
+      skippedCount: Array.isArray(batch?.skipped) ? batch.skipped.length : 0,
+      totalTabs: items.length + (Array.isArray(batch?.skipped) ? batch.skipped.length : 0),
+      failures: [],
+      skipped: Array.isArray(batch?.skipped) ? batch.skipped : [],
+      jobs: []
+    };
   }
 
   const results = [];
@@ -5247,14 +6019,21 @@ function hasProcessReachedFinalStage(process) {
   if (!process || typeof process !== 'object') return false;
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (status !== 'completed' && status !== 'finalizing') return false;
+  const completedResponseText = typeof process?.completedResponseText === 'string'
+    ? process.completedResponseText.trim()
+    : '';
+  const hasCapturedPayload = Number.isInteger(process?.completedResponseCapturedAt)
+    && process.completedResponseCapturedAt > 0;
+  const saveConfirmed = process?.completedResponseSaved === true
+    || process?.persistenceStatus?.saveOk === true
+    || process?.finalStagePersistence?.success === true;
+  if (completedResponseText.length > 0 || hasCapturedPayload || saveConfirmed) {
+    return true;
+  }
   const stage = resolveProcessStageSnapshot(process);
   const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : 0;
-  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : 0;
-  const stageIndex = Number.isInteger(stage?.stageIndex) ? stage.stageIndex : null;
-  if (totalPrompts <= 0) return true;
-  if (currentPrompt < totalPrompts) return false;
-  if (stageIndex !== null && stageIndex < (totalPrompts - 1)) return false;
-  return true;
+  if (totalPrompts <= 0) return false;
+  return false;
 }
 
 function buildProcessProblemLogEntry(runId, process, options = {}) {
@@ -6088,6 +6867,9 @@ async function upsertProcess(runId, patch = {}) {
   scheduleCompletedProcessPersistenceRetry(next, {
     origin: 'process_upsert'
   });
+  scheduleProcessWindowCloseRetry(next, {
+    origin: 'process_upsert'
+  });
   if (next.queueManaged === true || existing?.queueManaged === true || analysisQueueState?.waitingJobs?.length || analysisQueueState?.activeJobs?.length) {
     requestAnalysisQueueReconcile('process_upsert');
   }
@@ -6515,6 +7297,99 @@ function buildProcessCopyTrace(process, fallbackRunId = '') {
   return buildCopyTrace(runId, knownResponseIds[0] || '');
 }
 
+async function findStoredCompletedResponseForProcess(process, options = {}) {
+  if (!process || typeof process !== 'object') return null;
+  if (typeof readCanonicalResponsesFromStorage !== 'function') return null;
+
+  let storedResponses = [];
+  try {
+    const responses = await readCanonicalResponsesFromStorage();
+    storedResponses = Array.isArray(responses) ? responses : [];
+  } catch (error) {
+    return null;
+  }
+  if (storedResponses.length === 0) return null;
+
+  const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  const processAnalysisType = typeof process?.analysisType === 'string'
+    ? process.analysisType.trim()
+    : '';
+  const knownResponseIds = collectKnownProcessResponseIds(process, runId);
+  const normalizeConversationUrl = (value) => {
+    const raw = typeof value === 'string' ? value.trim() : '';
+    if (!raw) return '';
+    if (typeof normalizeChatConversationUrl === 'function') {
+      try {
+        return normalizeChatConversationUrl(raw) || '';
+      } catch (error) {
+        return raw;
+      }
+    }
+    return raw;
+  };
+  const processConversationUrls = Array.from(
+    new Set(
+      [
+        ...(Array.isArray(process?.conversationUrls) ? process.conversationUrls : []),
+        typeof process?.chatUrl === 'string' ? process.chatUrl : '',
+        typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+      ]
+        .map((value) => normalizeConversationUrl(value))
+        .filter(Boolean)
+    )
+  );
+
+  let bestMatch = null;
+  let bestScore = -1;
+  let bestTimestamp = -1;
+
+  storedResponses.forEach((response) => {
+    if (!response || typeof response !== 'object') return;
+    const responseText = typeof response?.text === 'string' ? response.text.trim() : '';
+    if (!responseText) return;
+
+    const responseId = typeof response?.responseId === 'string' ? response.responseId.trim() : '';
+    const responseRunId = typeof response?.runId === 'string' ? response.runId.trim() : '';
+    const responseAnalysisType = typeof response?.analysisType === 'string'
+      ? response.analysisType.trim()
+      : '';
+    const responseConversationUrl = normalizeConversationUrl(
+      typeof response?.conversationUrl === 'string' ? response.conversationUrl : ''
+    );
+
+    let score = 0;
+    if (responseId && knownResponseIds.has(responseId)) score += 100;
+    if (runId && responseRunId && responseRunId === runId) score += 60;
+    if (
+      processConversationUrls.length > 0
+      && responseConversationUrl
+      && processConversationUrls.includes(responseConversationUrl)
+    ) {
+      score += 20;
+    }
+    if (processAnalysisType && responseAnalysisType && responseAnalysisType === processAnalysisType) {
+      score += 5;
+    }
+    if (score <= 0) return;
+
+    const responseTimestamp = Number.isInteger(response?.timestamp) ? response.timestamp : 0;
+    if (score > bestScore || (score === bestScore && responseTimestamp > bestTimestamp)) {
+      bestScore = score;
+      bestTimestamp = responseTimestamp;
+      bestMatch = {
+        responseText,
+        responseId,
+        runId: responseRunId,
+        conversationUrl: responseConversationUrl,
+        timestamp: responseTimestamp,
+        score
+      };
+    }
+  });
+
+  return bestMatch;
+}
+
 function createDeliveredDispatchSnapshot(previousDispatch = {}, responseId = '', details = {}) {
   const prev = previousDispatch && typeof previousDispatch === 'object'
     ? previousDispatch
@@ -6693,15 +7568,7 @@ function getProcessQueueDeliveryState(process) {
     : '';
   const queueSkipped = dispatch?.queueSkipped === true;
   const flushSkipped = dispatch?.flushSkipped === true;
-  const confirmed = state === 'dispatch_confirmed'
-    || (
-      saveOk === true
-      && sent > 0
-      && failed === 0
-      && pending === 0
-      && !queueSkipped
-      && !flushSkipped
-    );
+  const confirmed = saveOk === true && isExplicitlyVerifiedDispatch(dispatch);
 
   return {
     saveOk,
@@ -6738,27 +7605,23 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
       return {
         action: 'release',
         closeWindow: true,
-        reason: 'dispatch_confirmed'
+        reason: 'dispatch_confirmed',
+        slotReleaseReason: 'dispatch_confirmed'
       };
     }
     if (delivery.saveOk !== true) {
       return {
         action: 'release',
-        closeWindow: true,
-        reason: 'local_save_failed'
-      };
-    }
-    if (delivery.queueSkipped === true || delivery.flushSkipped === true) {
-      return {
-        action: 'release',
-        closeWindow: true,
-        reason: 'dispatch_skipped'
+        closeWindow: false,
+        reason: 'local_save_failed',
+        slotReleaseReason: 'final_stage_save_failed'
       };
     }
     return {
       action: 'release',
       closeWindow: true,
-      reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending'
+      reason: 'dispatch_pending',
+      slotReleaseReason: 'final_stage_local_saved'
     };
   }
 
@@ -6804,8 +7667,8 @@ async function markTrackedProcessStoppedForClosedTab(tabId, removeInfo = null) {
     const refreshedProcess = processRegistry.get(process.id) || process;
     const delivery = getProcessQueueDeliveryState(refreshedProcess);
     await upsertProcess(process.id, {
-      lifecycleStatus: delivery.confirmed === true ? 'completed' : 'finalizing',
-      status: delivery.confirmed === true ? 'completed' : 'finalizing',
+      lifecycleStatus: 'completed',
+      status: 'completed',
       phase: delivery.confirmed === true ? 'verify_remote' : 'dispatch_remote',
       actionRequired: 'none',
       statusCode: delivery.confirmed === true ? 'dispatch.confirmed' : 'dispatch.verify_pending',
@@ -6871,17 +7734,77 @@ async function buildStaleQueueReleasePatch(process, now = Date.now()) {
   };
 }
 
-async function closeProcessWindowAfterQueueSuccess(process) {
-  if (!process || typeof process !== 'object') return false;
+async function inspectProcessWindowContext(process) {
+  if (!process || typeof process !== 'object') {
+    return {
+      exists: false,
+      missingKnown: true,
+      hasOnlyProcessTab: false,
+      reason: 'invalid_process'
+    };
+  }
+  const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
+  const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
+
+  if (processTabId !== null) {
+    const tab = await getTabByIdSafe(processTabId);
+    if (tab && Number.isInteger(tab.id)) {
+      return {
+        exists: true,
+        missingKnown: false,
+        hasOnlyProcessTab: false,
+        reason: 'tab_present'
+      };
+    }
+  }
+
+  if (processWindowId !== null) {
+    const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
+    if (tabsInWindow?.ok) {
+      const validTabs = Array.isArray(tabsInWindow?.tabs)
+        ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
+        : [];
+      return {
+        exists: validTabs.length > 0,
+        missingKnown: true,
+        hasOnlyProcessTab: validTabs.length === 1
+          && processTabId !== null
+          && validTabs[0].id === processTabId,
+        reason: validTabs.length > 0 ? 'window_present' : 'window_empty'
+      };
+    }
+    return {
+      exists: true,
+      missingKnown: false,
+      hasOnlyProcessTab: false,
+      reason: tabsInWindow?.reason || 'window_query_failed'
+    };
+  }
+
+  return {
+    exists: false,
+    missingKnown: true,
+    hasOnlyProcessTab: false,
+    reason: 'missing_window_context'
+  };
+}
+
+async function attemptProcessWindowClose(process) {
+  if (!process || typeof process !== 'object') {
+    return { closed: false, reason: 'invalid_process', closeMode: '' };
+  }
   const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
   let tabClosed = false;
 
   if (processTabId !== null) {
     tabClosed = await removeTabSafe(processTabId);
+    if (tabClosed) {
+      return { closed: true, reason: 'tab_closed', closeMode: 'tab' };
+    }
   }
 
-  if (!tabClosed && processWindowId !== null) {
+  if (processWindowId !== null) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
     const validTabs = Array.isArray(tabsInWindow?.tabs)
       ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
@@ -6890,12 +7813,25 @@ async function closeProcessWindowAfterQueueSuccess(process) {
       && processTabId !== null
       && validTabs[0].id === processTabId;
     if (hasOnlyProcessTab) {
-      await removeWindowSafe(processWindowId);
-      return true;
+      const windowClosed = await removeWindowSafe(processWindowId);
+      return {
+        closed: windowClosed,
+        reason: windowClosed ? 'window_closed' : 'window_remove_failed',
+        closeMode: windowClosed ? 'window' : ''
+      };
     }
+    return {
+      closed: false,
+      reason: validTabs.length > 0 ? 'window_contains_other_tabs' : 'tab_remove_failed',
+      closeMode: ''
+    };
   }
 
-  return tabClosed;
+  return {
+    closed: false,
+    reason: processTabId !== null ? 'tab_remove_failed' : 'missing_window_context',
+    closeMode: ''
+  };
 }
 
 function getCompletedProcessPersistenceRetryDelayMs(attemptCount = 0) {
@@ -6905,6 +7841,255 @@ function getCompletedProcessPersistenceRetryDelayMs(attemptCount = 0) {
   }
   const scaledDelay = COMPLETED_PROCESS_PERSISTENCE_RETRY.initialDelayMs * Math.pow(2, Math.min(attempts, 8));
   return Math.min(COMPLETED_PROCESS_PERSISTENCE_RETRY.maxDelayMs, scaledDelay);
+}
+
+function getProcessWindowCloseRetryDelayMs(attemptCount = 0) {
+  const attempts = Number.isInteger(attemptCount) && attemptCount > 0 ? attemptCount : 0;
+  if (attempts <= 0) {
+    return PROCESS_WINDOW_CLOSE_RETRY.initialDelayMs;
+  }
+  const scaledDelay = PROCESS_WINDOW_CLOSE_RETRY.initialDelayMs * Math.pow(2, Math.min(attempts, 6));
+  return Math.min(PROCESS_WINDOW_CLOSE_RETRY.maxDelayMs, scaledDelay);
+}
+
+function clearProcessWindowCloseRetry(runId = '', options = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) return false;
+  const timerId = processWindowCloseRetryTimersByRunId.get(normalizedRunId);
+  if (timerId) {
+    clearTimeout(timerId);
+  }
+  processWindowCloseRetryTimersByRunId.delete(normalizedRunId);
+  if (options.keepAttempts !== true) {
+    processWindowCloseRetryAttemptCountByRunId.delete(normalizedRunId);
+  }
+  if (options.keepInFlight !== true) {
+    processWindowCloseRetryInFlight.delete(normalizedRunId);
+  }
+  return true;
+}
+
+function resolveProcessWindowCloseRetryPlan(process) {
+  if (!process || typeof process !== 'object') {
+    return { needed: false, reason: 'invalid_process', delivery: null };
+  }
+  const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing') {
+    return { needed: false, reason: 'status_not_closeable', delivery: getProcessQueueDeliveryState(process) };
+  }
+  if (!hasProcessReachedFinalStage(process)) {
+    return { needed: false, reason: 'not_final_stage', delivery: getProcessQueueDeliveryState(process) };
+  }
+
+  const delivery = getProcessQueueDeliveryState(process);
+  if (delivery.saveOk !== true) {
+    return { needed: false, reason: 'save_not_confirmed', delivery };
+  }
+
+  const windowClose = normalizeProcessWindowCloseState(process.windowClose);
+  if (windowClose?.state === 'closed') {
+    return { needed: false, reason: 'already_closed', delivery };
+  }
+  if (windowClose?.state === 'failed') {
+    return { needed: false, reason: 'close_retry_exhausted', delivery };
+  }
+
+  const hasWindowContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+  if (!hasWindowContext) {
+    return { needed: false, reason: 'missing_window_context', delivery };
+  }
+
+  return {
+    needed: true,
+    reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed',
+    delivery
+  };
+}
+
+function scheduleProcessWindowCloseRetriesForSnapshot(records = [], origin = 'registry_ready') {
+  const snapshot = Array.isArray(records) ? records : [];
+  snapshot.forEach((process, index) => {
+    scheduleProcessWindowCloseRetry(process, {
+      origin,
+      force: true,
+      delayMs: Math.min(10000, Math.max(0, index) * 250)
+    });
+  });
+}
+
+function scheduleProcessWindowCloseRetry(processOrRunId, options = {}) {
+  const process = processOrRunId && typeof processOrRunId === 'object'
+    ? processOrRunId
+    : null;
+  const normalizedRunId = typeof processOrRunId === 'string' && processOrRunId.trim()
+    ? processOrRunId.trim()
+    : (typeof process?.id === 'string' ? process.id.trim() : '');
+  if (!normalizedRunId) return false;
+
+  const currentProcess = process || processRegistry.get(normalizedRunId) || null;
+  const plan = resolveProcessWindowCloseRetryPlan(currentProcess);
+  if (!plan.needed) {
+    clearProcessWindowCloseRetry(normalizedRunId);
+    return false;
+  }
+
+  if (processWindowCloseRetryInFlight.has(normalizedRunId) && options.allowWhileInFlight !== true) {
+    return true;
+  }
+
+  const hasTimer = processWindowCloseRetryTimersByRunId.has(normalizedRunId);
+  if (hasTimer && options.force !== true) {
+    return true;
+  }
+
+  clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });
+  const attemptCount = processWindowCloseRetryAttemptCountByRunId.get(normalizedRunId) || 0;
+  const delayMs = Number.isInteger(options?.delayMs)
+    ? Math.max(0, options.delayMs)
+    : getProcessWindowCloseRetryDelayMs(attemptCount);
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'schedule_process_window_close_retry';
+  const timerId = setTimeout(() => {
+    processWindowCloseRetryTimersByRunId.delete(normalizedRunId);
+    void runProcessWindowCloseRetry(normalizedRunId, { origin });
+  }, delayMs);
+  processWindowCloseRetryTimersByRunId.set(normalizedRunId, timerId);
+  return true;
+}
+
+async function runProcessWindowCloseRetry(runId = '', options = {}) {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId) {
+    return { success: false, reason: 'missing_run_id' };
+  }
+  if (processWindowCloseRetryInFlight.has(normalizedRunId)) {
+    return { success: false, skipped: true, reason: 'retry_in_flight' };
+  }
+
+  processWindowCloseRetryInFlight.add(normalizedRunId);
+  try {
+    await ensureProcessRegistryReady();
+    let process = processRegistry.get(normalizedRunId) || null;
+    if (!process || typeof process !== 'object') {
+      clearProcessWindowCloseRetry(normalizedRunId);
+      return { success: false, reason: 'missing_process' };
+    }
+
+    const plan = resolveProcessWindowCloseRetryPlan(process);
+    if (!plan.needed) {
+      clearProcessWindowCloseRetry(normalizedRunId);
+      return { success: true, skipped: true, reason: plan.reason };
+    }
+
+    const now = Date.now();
+    const currentAttemptCount = (processWindowCloseRetryAttemptCountByRunId.get(normalizedRunId) || 0) + 1;
+    processWindowCloseRetryAttemptCountByRunId.set(normalizedRunId, currentAttemptCount);
+    const inspectResult = await inspectProcessWindowContext(process);
+    if (inspectResult.exists === false && inspectResult.missingKnown === true) {
+      await upsertProcess(normalizedRunId, {
+        windowClose: {
+          state: 'closed',
+          requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
+          lastAttemptAt: now,
+          attemptCount: currentAttemptCount,
+          closedAt: now,
+          lastError: '',
+          lastReason: inspectResult.reason || 'window_missing'
+        },
+        timestamp: now
+      });
+      clearProcessWindowCloseRetry(normalizedRunId);
+      return { success: true, closed: true, reason: inspectResult.reason || 'window_missing' };
+    }
+
+    const closeResult = await attemptProcessWindowClose(process);
+    if (closeResult.closed) {
+      await upsertProcess(normalizedRunId, {
+        windowClose: {
+          state: 'closed',
+          requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
+          lastAttemptAt: now,
+          attemptCount: currentAttemptCount,
+          closedAt: now,
+          lastError: '',
+          lastReason: closeResult.reason || closeResult.closeMode || 'closed'
+        },
+        timestamp: now
+      });
+      clearProcessWindowCloseRetry(normalizedRunId);
+      return { success: true, closed: true, reason: closeResult.reason || 'closed' };
+    }
+
+    const windowCloseState = {
+      state: currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'failed' : 'retrying',
+      requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
+      lastAttemptAt: now,
+      attemptCount: currentAttemptCount,
+      closedAt: Number.isInteger(process?.windowClose?.closedAt) ? process.windowClose.closedAt : undefined,
+      lastError: closeResult.reason || 'close_failed',
+      lastReason: typeof options?.origin === 'string' && options.origin.trim()
+        ? options.origin.trim()
+        : 'process_window_close_retry'
+    };
+    await upsertProcess(normalizedRunId, {
+      windowClose: windowCloseState,
+      timestamp: now
+    });
+
+    if (currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts) {
+      clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });
+      return { success: false, closed: false, reason: 'window_close_retry_exhausted' };
+    }
+
+    scheduleProcessWindowCloseRetry(normalizedRunId, {
+      origin: windowCloseState.lastReason,
+      force: true,
+      allowWhileInFlight: true
+    });
+    return { success: false, closed: false, reason: closeResult.reason || 'close_failed' };
+  } finally {
+    processWindowCloseRetryInFlight.delete(normalizedRunId);
+  }
+}
+
+async function closeProcessWindowAfterQueueSuccess(process, options = {}) {
+  if (!process || typeof process !== 'object') return false;
+  const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  const plan = resolveProcessWindowCloseRetryPlan(process);
+  if (!plan.needed) {
+    if (runId) clearProcessWindowCloseRetry(runId);
+    return false;
+  }
+
+  const now = Date.now();
+  if (runId) {
+    await upsertProcess(runId, {
+      windowClose: {
+        state: 'requested',
+        requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
+        lastAttemptAt: now,
+        attemptCount: Number.isInteger(process?.windowClose?.attemptCount) ? process.windowClose.attemptCount : 0,
+        lastError: '',
+        lastReason: typeof options?.origin === 'string' && options.origin.trim()
+          ? options.origin.trim()
+          : 'close_process_window_after_queue_success'
+      },
+      timestamp: now
+    });
+  }
+
+  if (!runId) {
+    const directResult = await attemptProcessWindowClose(process);
+    return directResult.closed === true;
+  }
+
+  const result = await runProcessWindowCloseRetry(runId, {
+    origin: typeof options?.origin === 'string' && options.origin.trim()
+      ? options.origin.trim()
+      : 'close_process_window_after_queue_success'
+  });
+  return result?.closed === true;
 }
 
 function clearCompletedProcessPersistenceRetry(runId = '', options = {}) {
@@ -6930,17 +8115,22 @@ function resolveCompletedProcessPersistenceRetryPlan(process) {
   }
 
   const status = normalizeProcessStatus(process.status || '');
-  if (status !== 'completed') {
-    return { needed: false, mode: '', reason: 'status_not_completed', delivery: getProcessQueueDeliveryState(process) };
-  }
-
   const delivery = getProcessQueueDeliveryState(process);
+  const finality = getCompletedProcessFinalityState(process);
+  const acceptsLegacyFinalizing = status === 'finalizing' && hasProcessReachedFinalStage(process) && delivery.saveOk === true;
+  if (status !== 'completed' && !acceptsLegacyFinalizing) {
+    return { needed: false, mode: '', reason: 'status_not_completed', delivery };
+  }
   if (delivery.confirmed === true) {
     return { needed: false, mode: '', reason: 'already_confirmed', delivery };
   }
 
   const dispatch = getProcessPersistenceDispatchSnapshot(process);
   const hasResponsePayload = extractAssistantTextFromProcess(process).length > 0;
+  const hasFinalStageEvidence = finality.ready || hasResponsePayload || delivery.saveOk === true;
+  if (!hasFinalStageEvidence) {
+    return { needed: false, mode: '', reason: 'not_final_stage', delivery };
+  }
 
   if (delivery.saveOk === true) {
     const queueSkipReason = typeof dispatch?.queueSkipReason === 'string' ? dispatch.queueSkipReason.trim() : '';
@@ -7520,51 +8710,86 @@ async function cancelQueuedAnalysisJobs(matchFn, options = {}) {
   const reason = typeof options?.reason === 'string' && options.reason.trim()
     ? options.reason.trim()
     : 'queue_cancelled';
+  const completedCancelledJobs = [];
+  const requeueJobs = [];
   for (const job of cancelledJobs) {
-    await upsertProcess(job.runId, {
-      status: 'cancelled',
-      statusText,
-      reason,
-      needsAction: false,
-      queueManaged: true,
-      queueJobId: job.jobId,
-      queueState: 'cancelled',
-      slotReserved: false,
-      slotReleasedAt: now,
-      slotReleaseReason: reason,
-      finishedAt: now,
-      timestamp: now
-    });
-    if (job?.remote?.remoteJobId && job?.remote?.remoteAttemptId) {
-      const failure = buildRemoteJobFailureDetails(
-        job,
-        processRegistry.get(job.runId) || null,
-        null,
+    try {
+      await upsertProcess(job.runId, {
+        status: 'cancelled',
         statusText,
-        reason
-      );
-      await reportRemoteJobEvent(
-        job.remote.remoteJobId,
-        'failed',
-        job.remote.remoteAttemptId,
-        failure.payload,
-        failure.error
-      ).catch((error) => {
-        console.warn('[remote-runner] failed to report queued cancellation:', {
-          jobId: job.remote.remoteJobId,
-          attemptId: job.remote.remoteAttemptId,
-          error: error?.message || String(error)
-        });
+        reason,
+        needsAction: false,
+        queueManaged: true,
+        queueJobId: job.jobId,
+        queueState: 'cancelled',
+        slotReserved: false,
+        slotReleasedAt: now,
+        slotReleaseReason: reason,
+        finishedAt: now,
+        timestamp: now
       });
+      if (job?.remote?.remoteJobId && job?.remote?.remoteAttemptId) {
+        const failure = buildRemoteJobFailureDetails(
+          job,
+          processRegistry.get(job.runId) || null,
+          null,
+          statusText,
+          reason
+        );
+        await rememberRemoteJobSuppression(job, {
+          runId: job.runId,
+          title: typeof job?.title === 'string' ? job.title : '',
+          promptHash: typeof job?.promptHash === 'string' ? job.promptHash : '',
+          reason,
+          error: failure.error,
+          payload: failure.payload
+        }).catch((error) => {
+          console.warn('[remote-runner] failed to remember queued cancellation suppression:', {
+            jobId: job.remote.remoteJobId,
+            attemptId: job.remote.remoteAttemptId,
+            error: error?.message || String(error)
+          });
+        });
+        await reportRemoteJobEvent(
+          job.remote.remoteJobId,
+          'failed',
+          job.remote.remoteAttemptId,
+          failure.payload,
+          failure.error
+        ).catch((error) => {
+          console.warn('[remote-runner] failed to report queued cancellation:', {
+            jobId: job.remote.remoteJobId,
+            attemptId: job.remote.remoteAttemptId,
+            error: error?.message || String(error)
+          });
+        });
+      }
+      completedCancelledJobs.push(job);
+    } catch (error) {
+      console.warn('[analysis-queue] queued cancellation failed, restoring job:', {
+        jobId: typeof job?.jobId === 'string' ? job.jobId : '',
+        runId: typeof job?.runId === 'string' ? job.runId : '',
+        error: error?.message || String(error)
+      });
+      requeueJobs.push(job);
     }
+  }
+  if (requeueJobs.length > 0) {
+    await withAnalysisQueueMutationLock(async () => {
+      const state = cloneAnalysisQueueState();
+      state.waitingJobs.push(...requeueJobs);
+      sortAnalysisQueueWaitingJobs(state.waitingJobs);
+      await persistAnalysisQueueState(state);
+    });
   }
 
   await reconcileAnalysisQueueState('cancel_waiting_jobs');
   const queueSnapshot = await getAnalysisQueueStatusSnapshot();
   return {
-    success: true,
-    cancelledCount: cancelledJobs.length,
-    jobs: cancelledJobs,
+    success: requeueJobs.length === 0,
+    cancelledCount: completedCancelledJobs.length,
+    jobs: completedCancelledJobs,
+    requeuedCount: requeueJobs.length,
     queueSize: queueSnapshot.queueSize,
     activeSlots: queueSnapshot.activeSlots
   };
@@ -8005,6 +9230,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
 
   try {
     await ensureAnalysisQueueReady();
+    await ensureAnalysisQueuePauseReady();
     await ensureProcessRegistryReady();
 
     while (true) {
@@ -8033,6 +9259,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
       await withAnalysisQueueMutationLock(async () => {
         let state = cloneAnalysisQueueState();
         const nextActiveJobsByContext = new Map();
+        const queuePaused = await getAnalysisQueuePaused();
 
         for (const activeJob of state.activeJobs) {
           const process = processRegistry.get(activeJob.runId) || null;
@@ -8152,8 +9379,17 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         });
         let reservedSlots = occupiedSlots.length;
         sortAnalysisQueueWaitingJobs(state.waitingJobs);
+        let manualPdfReservedSlots = state.activeJobs.filter((job) => job?.sourceKind === 'manual_pdf').length;
         while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
-          const waitingJob = state.waitingJobs.shift();
+          if (queuePaused || await getAnalysisQueuePaused()) {
+            break;
+          }
+          const waitingIndex = state.waitingJobs.findIndex((job) => {
+            if (job?.sourceKind !== 'manual_pdf') return true;
+            return manualPdfReservedSlots < MANUAL_PDF_QUEUE_MAX_CONCURRENCY;
+          });
+          if (waitingIndex < 0) break;
+          const [waitingJob] = state.waitingJobs.splice(waitingIndex, 1);
           const activatedJob = sanitizeAnalysisQueueJob({
             ...waitingJob,
             startedAt: now,
@@ -8164,12 +9400,52 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           state.activeJobs.push(activatedJob);
           startJobs.push(activatedJob);
           reservedSlots += 1;
+          if (activatedJob.sourceKind === 'manual_pdf') {
+            manualPdfReservedSlots += 1;
+          }
         }
 
         await persistAnalysisQueueState(state);
       });
 
       const followUpProcessPatches = Array.from(followUpProcessPatchesByRunId.values());
+      if (startJobs.length > 0 && await getAnalysisQueuePaused()) {
+        const activatedJobIds = new Set(
+          startJobs
+            .map((job) => (typeof job?.jobId === 'string' ? job.jobId.trim() : ''))
+            .filter(Boolean)
+        );
+        if (activatedJobIds.size > 0) {
+          await withAnalysisQueueMutationLock(async () => {
+            const state = cloneAnalysisQueueState();
+            const requeuedJobs = [];
+            const remainingActiveJobs = [];
+            for (const activeJob of state.activeJobs) {
+              const activeJobId = typeof activeJob?.jobId === 'string' ? activeJob.jobId.trim() : '';
+              if (activeJobId && activatedJobIds.has(activeJobId)) {
+                const requeuedJob = sanitizeAnalysisQueueJob({
+                  ...activeJob,
+                  startedAt: null,
+                  slotReservedAt: null,
+                  dispatchDeadlineAt: null
+                });
+                if (requeuedJob) {
+                  requeuedJobs.push(requeuedJob);
+                }
+                continue;
+              }
+              remainingActiveJobs.push(activeJob);
+            }
+            if (requeuedJobs.length > 0) {
+              state.activeJobs = remainingActiveJobs;
+              state.waitingJobs.push(...requeuedJobs);
+              sortAnalysisQueueWaitingJobs(state.waitingJobs);
+              await persistAnalysisQueueState(state);
+            }
+          });
+        }
+        startJobs = [];
+      }
 
       for (const update of followUpProcessPatches) {
         await upsertProcess(update.runId, update.patch);
@@ -8186,7 +9462,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             queueState: releaseQueueState,
             slotReserved: false,
             slotReleasedAt: now,
-            slotReleaseReason: release.reason,
+            slotReleaseReason: typeof release.slotReleaseReason === 'string' && release.slotReleaseReason.trim()
+              ? release.slotReleaseReason.trim()
+              : release.reason,
             timestamp: now
           };
           if (release.reason === 'dispatch_pending') {
@@ -8352,14 +9630,23 @@ function getCompletedProcessFinalityState(process) {
     ? process.completedResponseText.trim()
     : '';
   const hasCompletedPayload = completedResponseText.length > 0;
+  const hasCapturedPayload = Number.isInteger(process?.completedResponseCapturedAt)
+    && process.completedResponseCapturedAt > 0;
+  const saveConfirmed = process?.completedResponseSaved === true
+    || process?.persistenceStatus?.saveOk === true
+    || process?.finalStagePersistence?.success === true;
   const promptComplete = totalPrompts > 0 && currentPrompt >= totalPrompts;
+  const finalStageReached = hasCompletedPayload || hasCapturedPayload || saveConfirmed;
   return {
     currentPrompt,
     totalPrompts,
     completedResponseText,
     hasCompletedPayload,
+    hasCapturedPayload,
+    saveConfirmed,
     promptComplete,
-    ready: hasCompletedPayload && promptComplete
+    finalStageReached,
+    ready: finalStageReached
   };
 }
 
@@ -8374,16 +9661,22 @@ async function resolveCompletedProcessFinalResponseText(process, options = {}) {
 
   const force = options?.force === true;
   const finality = getCompletedProcessFinalityState(process);
+  let responseText = finality.completedResponseText;
+  const storageMatch = responseText
+    ? null
+    : await findStoredCompletedResponseForProcess(process, options);
+  if (!responseText && storageMatch && typeof storageMatch.responseText === 'string') {
+    responseText = storageMatch.responseText.trim();
+  }
   if (!force) {
-    if (!finality.hasCompletedPayload) {
+    if (!responseText) {
       return { success: false, reason: 'completed_response_missing', finality };
     }
-    if (!finality.promptComplete) {
+    if (!finality.finalStageReached && !storageMatch) {
       return { success: false, reason: 'not_final_stage', finality };
     }
   }
 
-  let responseText = finality.completedResponseText;
   if (!responseText && force) {
     responseText = extractAssistantTextFromProcess(process);
   }
@@ -8410,7 +9703,16 @@ async function resolveCompletedProcessFinalResponseText(process, options = {}) {
     responseText,
     finality,
     contractKind: contract?.kind || 'invalid',
-    contract
+    contract,
+    resolutionSource: storageMatch ? 'canonical_storage' : 'process_payload',
+    storageResponseId: typeof storageMatch?.responseId === 'string' ? storageMatch.responseId : '',
+    processPatch: storageMatch
+      ? {
+        completedResponseText: responseText,
+        completedResponseCapturedAt: Date.now(),
+        completedResponseLength: responseText.length
+      }
+      : null
   };
 }
 
@@ -8499,7 +9801,43 @@ async function replayCompletedResponseForProcess(process, options = {}) {
 
   const alreadySaved = process?.completedResponseSaved === true || process?.persistenceStatus?.saveOk === true;
   if (alreadySaved && options?.force !== true) {
-    return { attempted: false, success: true, reason: 'already_saved' };
+    const dispatch = getProcessPersistenceDispatchSnapshot(process);
+    const dispatchSummary = dispatch && typeof dispatch === 'object'
+      ? formatDispatchUiSummary(dispatch)
+      : '';
+    const delivery = getProcessQueueDeliveryState(process);
+    const recoveryPlan = resolveCompletedProcessPersistenceRetryPlan(process);
+    if (delivery?.confirmed === true || recoveryPlan?.reason === 'already_confirmed') {
+      return {
+        attempted: false,
+        success: true,
+        reason: 'already_saved_verified',
+        recoveryMode: 'already_verified',
+        dispatch,
+        dispatchSummary,
+        delivery
+      };
+    }
+    if (recoveryPlan?.needed === true && recoveryPlan?.mode === 'flush') {
+      return {
+        attempted: false,
+        success: true,
+        reason: 'already_saved_retryable',
+        recoveryMode: 'retry_existing_dispatch',
+        dispatch,
+        dispatchSummary,
+        delivery: recoveryPlan.delivery || delivery
+      };
+    }
+    return {
+      attempted: false,
+      success: true,
+      reason: 'already_saved_replay_required',
+      recoveryMode: 'replay_missing_dispatch',
+      dispatch,
+      dispatchSummary,
+      delivery: recoveryPlan?.delivery || delivery
+    };
   }
 
   const runId = typeof process.id === 'string' ? process.id : '';
@@ -8557,7 +9895,14 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     return {
       attempted: true,
       success: false,
-      reason: 'save_response_failed',
+      reason: typeof saveResult?.reason === 'string' && saveResult.reason.trim()
+        ? saveResult.reason.trim()
+        : 'save_response_failed',
+      error: typeof saveResult?.error === 'string' ? saveResult.error : '',
+      stage: typeof saveResult?.stage === 'string' ? saveResult.stage : '',
+      status: Number.isInteger(saveResult?.status) ? saveResult.status : null,
+      requestId: typeof saveResult?.requestId === 'string' ? saveResult.requestId : '',
+      intakeUrl: typeof saveResult?.intakeUrl === 'string' ? saveResult.intakeUrl : '',
       responseId,
       responseLength: responseText.length
     };
@@ -8568,6 +9913,7 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     attempted: true,
     success: true,
     reason: 'saved',
+    recoveryMode: 'replayed',
     responseId,
     responseLength: responseText.length,
     verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
@@ -8605,6 +9951,21 @@ function summarizeFinalStagePersistence(result) {
   const failureIntakeUrl = typeof dispatch?.failureIntakeUrl === 'string' && dispatch.failureIntakeUrl.trim()
     ? dispatch.failureIntakeUrl.trim()
     : '';
+  const verifyState = typeof dispatch?.verifyState === 'string' && dispatch.verifyState.trim()
+    ? dispatch.verifyState.trim()
+    : '';
+  const verifyReason = typeof dispatch?.verifyReason === 'string' && dispatch.verifyReason.trim()
+    ? dispatch.verifyReason.trim()
+    : '';
+  const verifyEventId = typeof dispatch?.verifyEventId === 'string' && dispatch.verifyEventId.trim()
+    ? dispatch.verifyEventId.trim()
+    : '';
+  const materializedRowCount = Number.isInteger(dispatch?.materializedRowCount)
+    ? dispatch.materializedRowCount
+    : null;
+  const expectedMaterializedRowCount = Number.isInteger(dispatch?.expectedMaterializedRowCount)
+    ? dispatch.expectedMaterializedRowCount
+    : null;
   const conversationAnalysis = result?.conversationAnalysis && typeof result.conversationAnalysis === 'object'
     ? result.conversationAnalysis
     : null;
@@ -8646,6 +10007,11 @@ function summarizeFinalStagePersistence(result) {
     failureStatus,
     failureRequestId,
     failureIntakeUrl,
+    verifyState,
+    verifyReason,
+    verifyEventId,
+    materializedRowCount,
+    expectedMaterializedRowCount,
     conversationLogCount,
     hasConversationUrl,
     conversationSnapshotRefreshed,
@@ -8881,6 +10247,29 @@ async function stopSingleProcess(process, options = {}) {
       statusText,
       reason
     );
+    await rememberRemoteJobSuppression(
+      {
+        jobId: process.remote.remoteJobId,
+        runId,
+        title: process?.title || '',
+        promptHash: typeof process?.promptHash === 'string' ? process.promptHash : '',
+        remote: process.remote
+      },
+      {
+        runId,
+        title: process?.title || '',
+        promptHash: typeof process?.promptHash === 'string' ? process.promptHash : '',
+        reason,
+        error: failure.error,
+        payload: failure.payload
+      }
+    ).catch((error) => {
+      console.warn('[remote-runner] failed to remember manual stop suppression:', {
+        jobId: process.remote.remoteJobId,
+        attemptId: process.remote.remoteAttemptId,
+        error: error?.message || String(error)
+      });
+    });
     await reportRemoteJobEvent(
       process.remote.remoteJobId,
       'failed',
@@ -9378,6 +10767,29 @@ async function handleProcessProgressMessage(message, sender) {
   if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
   if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
   if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+  if (typeof message?.responseId === 'string' && message.responseId.trim()) patch.responseId = message.responseId.trim();
+  if (typeof message?.completedResponseText === 'string' && message.completedResponseText.trim()) {
+    patch.completedResponseText = message.completedResponseText;
+  }
+  if (Number.isInteger(message?.completedResponseLength) && message.completedResponseLength >= 0) {
+    patch.completedResponseLength = message.completedResponseLength;
+  }
+  if (typeof message?.completedResponseTruncated === 'boolean') {
+    patch.completedResponseTruncated = message.completedResponseTruncated;
+  }
+  if (Number.isInteger(message?.completedResponseCapturedAt) && message.completedResponseCapturedAt > 0) {
+    patch.completedResponseCapturedAt = message.completedResponseCapturedAt;
+  }
+  if (typeof message?.completedResponseSaved === 'boolean') {
+    patch.completedResponseSaved = message.completedResponseSaved;
+  }
+  if (message?.completedResponseDispatch && typeof message.completedResponseDispatch === 'object') {
+    patch.completedResponseDispatch = message.completedResponseDispatch;
+  }
+  if (typeof message?.completedResponseDispatchSummary === 'string') {
+    patch.completedResponseDispatchSummary = message.completedResponseDispatchSummary;
+  }
+  applyChatGptComputationStatePatch(patch, message);
 
   await ensureProcessRegistryReady();
   const existing = processRegistry.get(runId) || null;
@@ -9420,6 +10832,7 @@ async function handleProcessNeedsActionMessage(message, sender) {
   if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
   if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
   if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+  applyChatGptComputationStatePatch(patch, message);
   await ensureProcessRegistryReady();
   const existing = processRegistry.get(runId) || null;
   const safePatch = applyMonotonicProcessPatch(existing, patch, message);
@@ -9454,6 +10867,7 @@ async function handleProcessActionResolvedMessage(message, sender) {
   if (typeof message?.title === 'string' && message.title.trim()) patch.title = message.title.trim();
   if (Number.isInteger(message?.tabId)) patch.tabId = message.tabId;
   if (Number.isInteger(message?.windowId)) patch.windowId = message.windowId;
+  applyChatGptComputationStatePatch(patch, message);
   await upsertProcess(runId, patch);
   return true;
 }
@@ -10543,6 +11957,29 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       executionPromptOffset = nextPromptOffset;
     }
 
+    if (isInjectRateLimitBlockedResult(result)) {
+      const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
+        currentPrompt: executionPromptOffset,
+        totalPrompts: PROMPTS_COMPANY.length,
+        stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
+        stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+        conversationUrl: normalizeChatConversationUrl(result?.conversationUrl)
+          || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab))
+      });
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType: 'company',
+        ...rateLimitPatch,
+        timestamp: Date.now()
+      });
+      return {
+        success: false,
+        error: 'rate_limit_blocked',
+        needsAction: true,
+        processId
+      };
+    }
+
     if (result?.success) {
       const resultLastResponse = typeof result?.lastResponse === 'string'
         ? result.lastResponse
@@ -10624,7 +12061,11 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         saveError: hasResultLastResponse && !saveResult?.success
           ? (persistedSaveErrorFromInject
             ? persistedSaveErrorFromInject
-            : 'save_response_failed')
+            : ((typeof saveResult?.reason === 'string' && saveResult.reason.trim())
+              ? saveResult.reason.trim()
+              : ((typeof saveResult?.error === 'string' && saveResult.error.trim())
+                ? saveResult.error.trim()
+                : 'save_response_failed')))
           : ''
       });
       await renderFinalCounterStatusOnTab(tabId, {
@@ -10776,13 +12217,47 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   const includeInvestTabs = options?.includeInvestTabs !== false;
   const includeProcessContextFallback = options?.includeProcessContextFallback !== false;
 
+  const tabsRaw = includeInvestTabs ? await chrome.tabs.query({}) : [];
+  const investTabs = tabsRaw
+    .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
+    .sort(compareTabsByWindowAndIndex);
+  const investTabIds = new Set(
+    investTabs
+      .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
+      .filter((tabId) => Number.isInteger(tabId))
+  );
+  const investConversationUrls = new Set(
+    investTabs
+      .map((tab) => normalizeChatConversationUrl(getTabEffectiveUrl(tab)))
+      .filter((url) => typeof url === 'string' && url.trim())
+  );
+
   const processSnapshot = await getProcessSnapshot();
   const processCandidates = processSnapshot
     .filter((process) => {
       if (!process || typeof process !== 'object') return false;
       if (!includeClosedProcesses && isClosedProcessStatus(process?.status)) return false;
       if (isQueuedProcessStatus(process?.status)) return false;
-      return Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+      const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+      const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+      if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return false;
+      if (Number.isInteger(processTabId) && investTabIds.has(processTabId)) return true;
+
+      const processUrls = [
+        typeof process?.chatUrl === 'string' ? process.chatUrl : '',
+        ...(Array.isArray(process?.conversationUrls) ? process.conversationUrls : []),
+        typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+      ];
+      if (processUrls.some((url) => isInvestGptUrl(url))) {
+        return true;
+      }
+
+      const normalizedConversationUrls = normalizeConversationUrlList(processUrls);
+      if (normalizedConversationUrls.some((url) => investConversationUrls.has(url))) {
+        return true;
+      }
+
+      return false;
     })
     .sort(compareProcessesForRestore);
 
@@ -10796,11 +12271,6 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       processByWindowId.set(process.windowId, process);
     }
   });
-
-  const tabsRaw = includeInvestTabs ? await chrome.tabs.query({}) : [];
-  const investTabs = tabsRaw
-    .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
-    .sort(compareTabsByWindowAndIndex);
 
   const targets = [];
   const handledContextKeys = new Set();
@@ -10866,12 +12336,37 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   };
 }
 
-async function getActiveInvestTabIdInCurrentWindow() {
+async function getActiveInvestTabIdInCurrentWindow(contextSnapshot = null) {
   try {
     const activeTabs = await chrome.tabs.query({ active: true, currentWindow: true });
     const activeTab = Array.isArray(activeTabs) && activeTabs.length > 0 ? activeTabs[0] : null;
-    if (Number.isInteger(activeTab?.id) && isInvestGptUrl(getTabEffectiveUrl(activeTab))) {
-      return activeTab.id;
+    if (Number.isInteger(activeTab?.id)) {
+      const activeTabUrl = getTabEffectiveUrl(activeTab);
+      if (isInvestGptUrl(activeTabUrl)) {
+        return activeTab.id;
+      }
+
+      const processByTabId = contextSnapshot?.processByTabId instanceof Map
+        ? contextSnapshot.processByTabId
+        : null;
+      if (processByTabId?.has(activeTab.id)) {
+        return activeTab.id;
+      }
+
+      const normalizedConversationUrl = normalizeChatConversationUrl(activeTabUrl);
+      const processCandidates = Array.isArray(contextSnapshot?.processCandidates)
+        ? contextSnapshot.processCandidates
+        : [];
+      if (normalizedConversationUrl && processCandidates.some((process) => {
+        const processConversationUrls = normalizeConversationUrlList([
+          ...(Array.isArray(process?.conversationUrls) ? process.conversationUrls : []),
+          typeof process?.chatUrl === 'string' ? process.chatUrl : '',
+          typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+        ]);
+        return processConversationUrls.includes(normalizedConversationUrl);
+      })) {
+        return activeTab.id;
+      }
     }
   } catch (error) {
     // Ignore and fall back to access-time ordering.
@@ -10909,24 +12404,6 @@ function findInvestCopyProcessForTab(targetTab, contextSnapshot) {
     }
   }
 
-  const windowId = Number.isInteger(targetTab?.windowId) ? targetTab.windowId : null;
-  if (!Number.isInteger(windowId)) {
-    return null;
-  }
-
-  const sameWindowCandidates = processCandidates.filter((process) => process?.windowId === windowId);
-  if (sameWindowCandidates.length === 1 && sameWindowCandidates[0] && typeof sameWindowCandidates[0] === 'object') {
-    return sameWindowCandidates[0];
-  }
-
-  const processByWindowId = contextSnapshot?.processByWindowId instanceof Map
-    ? contextSnapshot.processByWindowId
-    : new Map();
-  const sameWindowProcess = processByWindowId.get(windowId);
-  if (sameWindowProcess && typeof sameWindowProcess === 'object' && sameWindowCandidates.length <= 1) {
-    return sameWindowProcess;
-  }
-
   return null;
 }
 
@@ -10941,6 +12418,11 @@ function compareInvestCopyTargets(left, right) {
   const rightContract = rightFinality.ready
     ? buildResponseContractValidation(rightFinality.completedResponseText)
     : null;
+  const leftSourcePriority = left?.targetSource === 'live_tab' ? 2 : 1;
+  const rightSourcePriority = right?.targetSource === 'live_tab' ? 2 : 1;
+  if (leftSourcePriority !== rightSourcePriority) {
+    return rightSourcePriority - leftSourcePriority;
+  }
   const leftScore = (leftContract?.valid === true ? 4 : 0)
     + (leftFinality.ready ? 2 : 0)
     + (leftProcess ? 1 : 0);
@@ -10973,6 +12455,7 @@ function buildInvestCopyTargetFromTab(targetTab, contextSnapshot) {
 
   return {
     success: true,
+    targetSource: 'live_tab',
     tabId,
     windowId,
     title: typeof targetTab?.title === 'string' ? targetTab.title : '',
@@ -10983,34 +12466,77 @@ function buildInvestCopyTargetFromTab(targetTab, contextSnapshot) {
   };
 }
 
+function buildInvestCopyTargetFromProcess(process) {
+  if (!process || typeof process !== 'object') {
+    return null;
+  }
+
+  const tabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  const windowId = Number.isInteger(process?.windowId)
+    ? process.windowId
+    : (Number.isInteger(process?.invocationWindowId)
+      ? process.invocationWindowId
+      : (Number.isInteger(process?.sourceWindowId) ? process.sourceWindowId : null));
+  if (!Number.isInteger(tabId) && !Number.isInteger(windowId)) {
+    return null;
+  }
+
+  const directChatUrl = normalizeChatConversationUrl(
+    typeof process?.chatUrl === 'string' ? process.chatUrl : ''
+  );
+  const normalizedConversationUrls = normalizeConversationUrlList(
+    Array.isArray(process?.conversationUrls) ? process.conversationUrls : []
+  );
+  let conversationUrl = directChatUrl;
+  if (!conversationUrl) {
+    for (let index = normalizedConversationUrls.length - 1; index >= 0; index -= 1) {
+      const candidateUrl = normalizedConversationUrls[index];
+      if (typeof candidateUrl === 'string' && candidateUrl.trim()) {
+        conversationUrl = candidateUrl.trim();
+        break;
+      }
+    }
+  }
+  if (!conversationUrl) {
+    conversationUrl = normalizeChatConversationUrl(
+      typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+    );
+  }
+  const fallbackUrl = typeof process?.chatUrl === 'string' && process.chatUrl.trim()
+    ? process.chatUrl.trim()
+    : (typeof process?.sourceUrl === 'string' ? process.sourceUrl.trim() : '');
+  const title = typeof process?.title === 'string' && process.title.trim()
+    ? process.title.trim()
+    : 'ChatGPT Invest';
+  const lastAccessed = Number.isInteger(process?.timestamp)
+    ? process.timestamp
+    : (Number.isInteger(process?.startedAt) ? process.startedAt : 0);
+
+  return {
+    success: true,
+    targetSource: 'process_fallback',
+    tabId,
+    windowId,
+    title,
+    url: conversationUrl || fallbackUrl,
+    conversationUrl,
+    lastAccessed,
+    process
+  };
+}
+
 async function resolveInvestCopyTargets(options = {}) {
   const scope = options?.scope === 'all_open_windows' ? 'all_open_windows' : 'latest';
   const contextSnapshot = await collectCompanyInvestContextSnapshot({
     includeClosedProcesses: options?.includeClosedProcesses === true,
     includeInvestTabs: true,
-    includeProcessContextFallback: false
+    includeProcessContextFallback: options?.includeProcessContextFallback !== false
   });
 
   const investTabs = Array.isArray(contextSnapshot?.investTabs)
     ? [...contextSnapshot.investTabs]
     : [];
-  const openWindowIds = new Set(
-    investTabs
-      .map((tab) => (Number.isInteger(tab?.windowId) ? tab.windowId : null))
-      .filter((windowId) => Number.isInteger(windowId))
-  );
-  if (investTabs.length === 0) {
-    return {
-      success: false,
-      error: 'invest_tab_not_found',
-      scope,
-      investTabCount: 0,
-      windowCount: 0,
-      targets: []
-    };
-  }
-
-  const activeInvestTabId = await getActiveInvestTabIdInCurrentWindow();
+  const activeInvestTabId = await getActiveInvestTabIdInCurrentWindow(contextSnapshot);
   investTabs.sort((left, right) => {
     if (Number.isInteger(activeInvestTabId)) {
       const leftMatches = Number.isInteger(left?.id) && left.id === activeInvestTabId;
@@ -11030,17 +12556,80 @@ async function resolveInvestCopyTargets(options = {}) {
       }
       return target;
     })
-    .filter(Boolean)
-    .sort(compareInvestCopyTargets);
+    .filter(Boolean);
+
+  const processFallbackTargets = (Array.isArray(contextSnapshot?.processCandidates)
+    ? contextSnapshot.processCandidates
+    : [])
+    .map((process) => {
+      const target = buildInvestCopyTargetFromProcess(process);
+      if (target && Number.isInteger(activeInvestTabId) && target.tabId === activeInvestTabId) {
+        target.isActive = true;
+      }
+      return target;
+    })
+    .filter(Boolean);
+
+  const dedupeSeen = new Set();
+  const dedupedCandidateTargets = [...candidateTargets, ...processFallbackTargets]
+    .sort(compareInvestCopyTargets)
+    .filter((target) => {
+      const dedupeKeys = [
+        Number.isInteger(target?.tabId) ? `tab:${target.tabId}` : '',
+        typeof target?.conversationUrl === 'string' && target.conversationUrl.trim()
+          ? `conversation:${target.conversationUrl.trim()}`
+          : '',
+        typeof target?.process?.id === 'string' && target.process.id.trim()
+          ? `process:${target.process.id.trim()}`
+          : ''
+      ].filter(Boolean);
+      const isDuplicate = dedupeKeys.some((key) => dedupeSeen.has(key));
+      if (isDuplicate) {
+        return false;
+      }
+      dedupeKeys.forEach((key) => dedupeSeen.add(key));
+      return true;
+    });
+
+  const openWindowIds = new Set(
+    dedupedCandidateTargets
+      .map((target) => (Number.isInteger(target?.windowId) ? target.windowId : null))
+      .filter((windowId) => Number.isInteger(windowId))
+  );
+  if (dedupedCandidateTargets.length === 0) {
+    return {
+      success: false,
+      error: 'invest_tab_not_found',
+      scope,
+      investTabCount: investTabs.length,
+      windowCount: openWindowIds.size,
+      targets: []
+    };
+  }
 
   const targets = [];
   if (scope === 'all_open_windows') {
     const groupedByWindow = new Map();
-    candidateTargets.forEach((target) => {
+    dedupedCandidateTargets.forEach((target) => {
       const windowId = Number.isInteger(target?.windowId) ? target.windowId : null;
-      if (!Number.isInteger(windowId)) return;
+      if (!Number.isInteger(windowId)) {
+        targets.push(target);
+        return;
+      }
       const existing = groupedByWindow.get(windowId);
-      if (!existing || compareInvestCopyTargets(target, existing) < 0) {
+      if (!existing) {
+        groupedByWindow.set(windowId, target);
+        return;
+      }
+      const existingIsLiveTab = existing?.targetSource === 'live_tab';
+      const targetIsLiveTab = target?.targetSource === 'live_tab';
+      if (existingIsLiveTab !== targetIsLiveTab) {
+        if (targetIsLiveTab) {
+          groupedByWindow.set(windowId, target);
+        }
+        return;
+      }
+      if (compareInvestCopyTargets(target, existing) < 0) {
         groupedByWindow.set(windowId, target);
       }
     });
@@ -11048,8 +12637,8 @@ async function resolveInvestCopyTargets(options = {}) {
       targets.push(target);
     });
     targets.sort(compareInvestCopyTargets);
-  } else if (candidateTargets[0]) {
-    targets.push(candidateTargets[0]);
+  } else if (dedupedCandidateTargets[0]) {
+    targets.push(dedupedCandidateTargets[0]);
   }
 
   if (targets.length === 0) {
@@ -11160,7 +12749,10 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
       return {
         success: true,
         responseText: strictResolvedResponse.responseText,
-        resolutionMode: 'process_strict'
+        resolutionMode: 'process_strict',
+        processPatch: strictResolvedResponse?.processPatch && typeof strictResolvedResponse.processPatch === 'object'
+          ? strictResolvedResponse.processPatch
+          : null
       };
     }
 
@@ -11260,7 +12852,7 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
     processId: typeof process?.id === 'string' ? process.id : ''
   });
 
-  if (!Number.isInteger(tabId)) {
+  if (!Number.isInteger(tabId) && (!process || typeof process !== 'object')) {
     const failureResult = {
       success: false,
       error: 'invest_tab_context_missing',
@@ -11336,15 +12928,27 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
   const persistence = {
     attempted: false,
     success: false,
+    localSaveOk: false,
     mode: '',
     reason: '',
     copyTrace: '',
     dispatchSummary: '',
-    conversationLogCount: null
+    conversationLogCount: null,
+    dispatch: null,
+    acceptedByIntake: false,
+    verifiedInDb: false,
+    terminalFailure: false,
+    verifyState: ''
   };
 
   try {
     if (process && typeof process === 'object') {
+      const processId = typeof process?.id === 'string' && process.id.trim()
+        ? process.id.trim()
+        : '';
+      const tabReadTimeoutMs = Number.isInteger(options?.tabReadTimeoutMs)
+        ? options.tabReadTimeoutMs
+        : 2200;
       const processPatch = {};
       if (conversationUrl) processPatch.chatUrl = conversationUrl;
       if (Number.isInteger(tabId)) processPatch.tabId = tabId;
@@ -11352,34 +12956,103 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
       if (resolvedResponse?.processPatch && typeof resolvedResponse.processPatch === 'object') {
         Object.assign(processPatch, resolvedResponse.processPatch);
       }
-      if (Object.keys(processPatch).length > 0 && typeof process?.id === 'string' && process.id.trim()) {
-        await upsertProcess(process.id.trim(), processPatch);
+      if (Object.keys(processPatch).length > 0 && processId) {
+        await upsertProcess(processId, processPatch);
       }
 
-      const replayResult = await ensureCompletedProcessResponsePersisted(
-        {
-          ...process,
-          ...processPatch
-        },
-        {
-          force: resolvedResponse?.resolutionMode === 'process_dom_contract',
+      let latestProcess = processId
+        ? (processRegistry.get(processId) || { ...process, ...processPatch })
+        : { ...process, ...processPatch };
+      let persistenceResult = await replayCompletedResponseForProcess(latestProcess, {
+        force: resolvedResponse?.resolutionMode === 'process_dom_contract',
+        allowDomFallback: false,
+        tabId,
+        tabReadTimeoutMs
+      });
+      let persistenceMode = typeof persistenceResult?.recoveryMode === 'string'
+        ? persistenceResult.recoveryMode
+        : '';
+      if (persistenceResult?.success === true && persistenceResult?.recoveryMode === 'retry_existing_dispatch') {
+        if (processId) {
+          const retryResult = await runCompletedProcessPersistenceRetry(processId, {
+            origin: `${origin}:manual_copy`
+          });
+          latestProcess = processRegistry.get(processId) || latestProcess;
+          const retryDispatch = getProcessPersistenceDispatchSnapshot(latestProcess)
+            || (persistenceResult?.dispatch && typeof persistenceResult.dispatch === 'object' ? persistenceResult.dispatch : null);
+          persistenceResult = {
+            attempted: true,
+            success: retryResult?.success === true,
+            reason: typeof retryResult?.reason === 'string' && retryResult.reason.trim()
+              ? retryResult.reason.trim()
+              : (retryResult?.confirmed === true
+                ? 'dispatch_retry_confirmed'
+                : (retryResult?.pending === true ? 'dispatch_retry_pending' : 'dispatch_retry_settled')),
+            recoveryMode: 'retry_existing_dispatch',
+            dispatch: retryDispatch,
+            dispatchSummary: retryDispatch ? formatDispatchUiSummary(retryDispatch) : '',
+            delivery: retryResult?.delivery || getProcessQueueDeliveryState(latestProcess)
+          };
+          persistenceMode = 'retry_existing_dispatch';
+        } else {
+          persistenceResult = await ensureCompletedProcessResponsePersisted(latestProcess, {
+            force: true,
+            allowDomFallback: false,
+            tabId,
+            tabReadTimeoutMs,
+            origin
+          });
+          latestProcess = processId ? (processRegistry.get(processId) || latestProcess) : latestProcess;
+          persistenceMode = 'replay_missing_dispatch';
+        }
+      } else if (persistenceResult?.success === true && persistenceResult?.recoveryMode === 'replay_missing_dispatch') {
+        persistenceResult = await ensureCompletedProcessResponsePersisted(latestProcess, {
+          force: true,
           allowDomFallback: false,
           tabId,
+          tabReadTimeoutMs,
           origin
-        }
-      );
+        });
+        latestProcess = processId ? (processRegistry.get(processId) || latestProcess) : latestProcess;
+        persistenceMode = 'replay_missing_dispatch';
+      } else {
+        latestProcess = processId ? (processRegistry.get(processId) || latestProcess) : latestProcess;
+      }
 
       persistence.attempted = true;
-      persistence.success = replayResult?.success === true;
-      persistence.mode = 'process_replay';
-      persistence.reason = typeof replayResult?.reason === 'string' ? replayResult.reason : '';
-      persistence.copyTrace = typeof replayResult?.copyTrace === 'string' ? replayResult.copyTrace : '';
-      persistence.dispatchSummary = typeof replayResult?.dispatchSummary === 'string'
-        ? replayResult.dispatchSummary
-        : '';
-      persistence.conversationLogCount = Number.isInteger(replayResult?.conversationAnalysis?.conversationLogCount)
-        ? replayResult.conversationAnalysis.conversationLogCount
+      persistence.success = persistenceResult?.success === true;
+      persistence.localSaveOk = latestProcess?.completedResponseSaved === true
+        || latestProcess?.persistenceStatus?.saveOk === true
+        || persistenceResult?.success === true;
+      persistence.mode = persistenceMode === 'already_verified'
+        ? 'already_verified'
+        : (persistenceMode === 'retry_existing_dispatch'
+          ? 'retry_existing_dispatch'
+          : (persistenceMode === 'replay_missing_dispatch'
+            ? 'replay_missing_dispatch'
+            : 'process_replay'));
+      persistence.reason = typeof persistenceResult?.reason === 'string' ? persistenceResult.reason : '';
+      persistence.copyTrace = typeof persistenceResult?.copyTrace === 'string' && persistenceResult.copyTrace.trim()
+        ? persistenceResult.copyTrace.trim()
+        : (typeof latestProcess?.completedResponseSaveTrace === 'string' ? latestProcess.completedResponseSaveTrace.trim() : '');
+      const persistenceDispatch = persistenceResult?.dispatch && typeof persistenceResult.dispatch === 'object'
+        ? persistenceResult.dispatch
+        : getProcessPersistenceDispatchSnapshot(latestProcess || process);
+      persistence.dispatch = persistenceDispatch && typeof persistenceDispatch === 'object'
+        ? persistenceDispatch
         : null;
+      persistence.dispatchSummary = persistence.dispatch
+        ? formatDispatchUiSummary(persistence.dispatch)
+        : (typeof persistenceResult?.dispatchSummary === 'string' ? persistenceResult.dispatchSummary : '');
+      persistence.conversationLogCount = Number.isInteger(persistenceResult?.conversationAnalysis?.conversationLogCount)
+        ? persistenceResult.conversationAnalysis.conversationLogCount
+        : null;
+      persistence.acceptedByIntake = isAcceptedWatchlistDispatch(persistence.dispatch);
+      persistence.verifiedInDb = isExplicitlyVerifiedDispatch(persistence.dispatch);
+      persistence.terminalFailure = isTerminalWatchlistDispatchFailure(persistence.dispatch);
+      persistence.verifyState = typeof persistence.dispatch?.verifyState === 'string'
+        ? persistence.dispatch.verifyState.trim()
+        : '';
     } else {
       const directSaveResult = await saveResponse(
         responseText,
@@ -11402,19 +13075,36 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
 
       persistence.attempted = true;
       persistence.success = directSaveResult?.success === true;
+      persistence.localSaveOk = directSaveResult?.success === true;
       persistence.mode = 'direct_save';
-      persistence.reason = persistence.success === true ? 'saved' : 'save_failed';
+      persistence.reason = persistence.success === true
+        ? 'saved'
+        : (typeof directSaveResult?.reason === 'string' && directSaveResult.reason.trim()
+          ? directSaveResult.reason.trim()
+          : (typeof directSaveResult?.error === 'string' && directSaveResult.error.trim()
+            ? directSaveResult.error.trim()
+            : 'save_failed'));
       persistence.copyTrace = typeof directSaveResult?.copyTrace === 'string' ? directSaveResult.copyTrace : '';
-      persistence.dispatchSummary = directSaveResult?.dispatch && typeof directSaveResult.dispatch === 'object'
-        ? formatDispatchUiSummary(directSaveResult.dispatch)
+      persistence.dispatch = directSaveResult?.dispatch && typeof directSaveResult.dispatch === 'object'
+        ? directSaveResult.dispatch
+        : null;
+      persistence.dispatchSummary = persistence.dispatch
+        ? formatDispatchUiSummary(persistence.dispatch)
         : '';
       persistence.conversationLogCount = Number.isInteger(directSaveResult?.conversationAnalysis?.conversationLogCount)
         ? directSaveResult.conversationAnalysis.conversationLogCount
         : null;
+      persistence.acceptedByIntake = isAcceptedWatchlistDispatch(persistence.dispatch);
+      persistence.verifiedInDb = isExplicitlyVerifiedDispatch(persistence.dispatch);
+      persistence.terminalFailure = isTerminalWatchlistDispatchFailure(persistence.dispatch);
+      persistence.verifyState = typeof persistence.dispatch?.verifyState === 'string'
+        ? persistence.dispatch.verifyState.trim()
+        : '';
     }
   } catch (error) {
     persistence.attempted = true;
     persistence.success = false;
+    persistence.localSaveOk = false;
     persistence.mode = process && typeof process === 'object' ? 'process_replay' : 'direct_save';
     persistence.reason = error?.message || String(error);
   }
@@ -11631,6 +13321,18 @@ async function copyLatestInvestFinalResponse(options = {}) {
   const persistenceSuccessCount = successfulResults.filter(
     (row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true
   ).length;
+  const localSaveSuccessCount = successfulResults.filter(
+    (row) => row?.persistence?.localSaveOk === true || row?.persistence?.success === true
+  ).length;
+  const intakeAcceptedCount = successfulResults.filter(
+    (row) => row?.persistence?.acceptedByIntake === true
+  ).length;
+  const verifiedDbCount = successfulResults.filter(
+    (row) => row?.persistence?.verifiedInDb === true
+  ).length;
+  const terminalFailureCount = successfulResults.filter(
+    (row) => row?.persistence?.terminalFailure === true
+  ).length;
   const summaryReason = successfulResults.length <= 0
     ? (
       typeof failedResults[0]?.error === 'string' && failedResults[0].error.trim()
@@ -11643,7 +13345,10 @@ async function copyLatestInvestFinalResponse(options = {}) {
   const summaryDispatch = [
     `copied=${successfulResults.length}/${results.length}`,
     `failed=${failedResults.length}`,
-    persistenceAttemptedCount > 0 ? `save=${persistenceSuccessCount}/${persistenceAttemptedCount}` : '',
+    persistenceAttemptedCount > 0 ? `save=${localSaveSuccessCount}/${persistenceAttemptedCount}` : '',
+    `accepted=${intakeAcceptedCount}`,
+    `verified=${verifiedDbCount}`,
+    `terminal=${terminalFailureCount}`,
     `urls=${conversationUrlCount}`
   ].filter(Boolean).join(', ');
 
@@ -11685,6 +13390,10 @@ async function copyLatestInvestFinalResponse(options = {}) {
     windowCount: resolvedTargets.windowCount,
     persistenceAttemptedCount,
     persistenceSuccessCount,
+    localSaveSuccessCount,
+    intakeAcceptedCount,
+    verifiedDbCount,
+    terminalFailureCount,
     conversationUrlCount,
     textLength: combinedText.length
   });
@@ -11701,6 +13410,10 @@ async function copyLatestInvestFinalResponse(options = {}) {
     conversationUrlCount,
     persistenceAttemptedCount,
     persistenceSuccessCount,
+    localSaveSuccessCount,
+    intakeAcceptedCount,
+    verifiedDbCount,
+    terminalFailureCount,
     text: combinedText,
     textLength: combinedText.length,
     title: successfulResults.length === 1
@@ -13571,18 +15284,41 @@ function isInvestGptUrl(url) {
   const compactUrl = url.trim();
   if (!compactUrl) return false;
 
+  // GPT ids rotate, but the stable routing suffix is the Invest slug.
+  const matchesInvestPath = (pathname) => {
+    const normalizedPath = typeof pathname === 'string'
+      ? pathname.replace(/\/+$/, '').toLowerCase()
+      : '';
+    if (!normalizedPath) return false;
+
+    const primaryPathBase = typeof INVEST_GPT_PATH_BASE === 'string'
+      ? INVEST_GPT_PATH_BASE.replace(/\/+$/, '').toLowerCase()
+      : '';
+    if (primaryPathBase) {
+      if (normalizedPath === primaryPathBase) return true;
+      if (normalizedPath.startsWith(`${primaryPathBase}/`)) return true;
+    }
+
+    return /^\/g\/[^/]*-inwestycje(?:\/|$)/i.test(normalizedPath);
+  };
+
   try {
     const parsed = new URL(compactUrl);
     if (!['http:', 'https:'].includes(parsed.protocol)) return false;
     if (!CHAT_GPT_HOSTS.has(parsed.hostname.toLowerCase())) return false;
-    const normalizedPath = (parsed.pathname || '').replace(/\/+$/, '');
-    if (!normalizedPath) return false;
-    if (normalizedPath === INVEST_GPT_PATH_BASE) return true;
-    return normalizedPath.startsWith(`${INVEST_GPT_PATH_BASE}/`);
+    return matchesInvestPath(parsed.pathname || '');
   } catch (error) {
-    if (!compactUrl.startsWith(INVEST_GPT_URL_BASE)) return false;
-    if (compactUrl.length === INVEST_GPT_URL_BASE.length) return true;
-    const separator = compactUrl.charAt(INVEST_GPT_URL_BASE.length);
+    if (/^https?:\/\/(?:www\.)?(?:chatgpt\.com|chat\.openai\.com)\/g\/[^/?#]*-inwestycje(?:[/?#]|$)/i.test(compactUrl)) {
+      return true;
+    }
+
+    const normalizedBase = typeof INVEST_GPT_URL_BASE === 'string'
+      ? INVEST_GPT_URL_BASE.toLowerCase()
+      : '';
+    const normalizedUrl = compactUrl.toLowerCase();
+    if (!normalizedBase || !normalizedUrl.startsWith(normalizedBase)) return false;
+    if (normalizedUrl.length === normalizedBase.length) return true;
+    const separator = normalizedUrl.charAt(normalizedBase.length);
     return separator === '/' || separator === '?' || separator === '#';
   }
 }
@@ -16348,6 +18084,94 @@ function formatDispatchUiSummary(dispatchOutcome) {
   return 'Dispatch: brak wysylki';
 }
 
+function isExplicitlyVerifiedDispatch(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object' ? dispatchOutcome : null;
+  const state = typeof dispatch?.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
+  const verifyState = normalizeWatchlistVerifyState(dispatch?.verifyState);
+  return state === 'dispatch_confirmed' || verifyState === 'verified';
+}
+
+function isAcceptedWatchlistDispatch(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object' ? dispatchOutcome : null;
+  if (!dispatch) return false;
+  const accepted = Number.isInteger(dispatch.accepted) ? dispatch.accepted : 0;
+  const sent = Number.isInteger(dispatch.sent) ? dispatch.sent : 0;
+  const verifyState = normalizeWatchlistVerifyState(dispatch.verifyState);
+  return accepted > 0
+    || sent > 0
+    || verifyState === 'http_accepted'
+    || isWatchlistVerificationPendingState(verifyState)
+    || isWatchlistVerificationTerminalState(verifyState)
+    || verifyState === 'verified';
+}
+
+function isTerminalWatchlistDispatchFailure(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object' ? dispatchOutcome : null;
+  if (!dispatch) return false;
+  const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
+  const verifyState = normalizeWatchlistVerifyState(dispatch.verifyState);
+  return failed > 0
+    || dispatch.queueSkipped === true
+    || isWatchlistVerificationTerminalState(verifyState);
+}
+
+function formatVerifyDbUiSummary(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object'
+    ? dispatchOutcome
+    : null;
+  if (!dispatch) return 'Verify DB: brak danych';
+
+  const verifyState = normalizeWatchlistVerifyState(dispatch.verifyState);
+  const verifyReason = typeof dispatch?.verifyReason === 'string' && dispatch.verifyReason.trim()
+    ? dispatch.verifyReason.trim()
+    : verifyState;
+  const accepted = Number.isInteger(dispatch.accepted) ? dispatch.accepted : 0;
+  const sent = Number.isInteger(dispatch.sent) ? dispatch.sent : 0;
+  const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
+  const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
+  const pending = Number.isInteger(dispatch.pending) ? dispatch.pending : (deferred + remaining);
+  const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
+  const eventId = normalizeWatchlistEventId(dispatch.verifyEventId);
+  const materializedRowCount = Number.isInteger(dispatch.materializedRowCount) ? dispatch.materializedRowCount : null;
+  const expectedMaterializedRowCount = Number.isInteger(dispatch.expectedMaterializedRowCount)
+    ? dispatch.expectedMaterializedRowCount
+    : null;
+  const diagParts = [];
+  if (eventId) diagParts.push(`eventId=${eventId}`);
+  if (materializedRowCount !== null) diagParts.push(`rows=${materializedRowCount}`);
+  if (expectedMaterializedRowCount !== null) diagParts.push(`rowsExpected=${expectedMaterializedRowCount}`);
+  const diagSuffix = diagParts.length > 0 ? `, ${diagParts.join(', ')}` : '';
+
+  if (verifyState === 'verified') {
+    return `Verify DB: OK${diagSuffix}`;
+  }
+  if (isWatchlistVerificationTerminalState(verifyState)) {
+    return `Verify DB: FAIL (${verifyReason || verifyState || 'terminal'})${diagSuffix}`;
+  }
+  if (verifyState === 'http_accepted') {
+    return `Verify DB: intake accepted, oczekiwanie na materializacje${diagSuffix}`;
+  }
+  if (isWatchlistVerificationPendingState(verifyState)) {
+    return `Verify DB: pending (${verifyReason || verifyState || 'pending'})${diagSuffix}`;
+  }
+  if (accepted > 0 || sent > 0 || pending > 0) {
+    return `Verify DB: oczekiwanie (accepted=${accepted}, sent=${sent}, pending=${pending}, failed=${failed})${diagSuffix}`;
+  }
+  if (dispatch.queueSkipped === true) {
+    const queueSkipReason = typeof dispatch.queueSkipReason === 'string' && dispatch.queueSkipReason.trim()
+      ? dispatch.queueSkipReason.trim()
+      : 'queue_skipped';
+    return `Verify DB: nieuruchomione (${queueSkipReason})${diagSuffix}`;
+  }
+  if (dispatch.flushSkipped === true) {
+    const flushSkipReason = typeof dispatch.flushSkipReason === 'string' && dispatch.flushSkipReason.trim()
+      ? dispatch.flushSkipReason.trim()
+      : 'flush_skipped';
+    return `Verify DB: oczekiwanie na flush (${flushSkipReason})${diagSuffix}`;
+  }
+  return 'Verify DB: brak potwierdzenia';
+}
+
 function normalizePersistenceBridgeError(rawError = '') {
   const normalized = typeof rawError === 'string'
     ? rawError.trim()
@@ -16440,8 +18264,16 @@ function buildPersistenceUiSummary(options = {}) {
     ? saveResult.emergencyLocalSave
     : null;
   const emergencyLocalSaveOk = emergencyLocalSave?.success === true;
-  const saveErrorRaw = typeof options?.saveError === 'string' ? options.saveError : '';
+  const saveErrorRaw = typeof options?.saveError === 'string' && options.saveError.trim()
+    ? options.saveError
+    : (typeof saveResult?.reason === 'string' && saveResult.reason.trim()
+      ? saveResult.reason
+      : (typeof saveResult?.error === 'string' ? saveResult.error : ''));
   const saveError = saveErrorRaw.trim();
+  const saveFailureStage = typeof saveResult?.stage === 'string' ? saveResult.stage.trim() : '';
+  const saveFailureStatus = Number.isInteger(saveResult?.status) ? saveResult.status : null;
+  const saveFailureRequestId = typeof saveResult?.requestId === 'string' ? saveResult.requestId.trim() : '';
+  const saveFailureIntakeUrl = typeof saveResult?.intakeUrl === 'string' ? saveResult.intakeUrl.trim() : '';
   const bridgeErrorRaw = typeof options?.bridgeError === 'string' ? options.bridgeError : '';
   const bridgeError = normalizePersistenceBridgeError(bridgeErrorRaw);
   const bridgeSummary = bridgeError
@@ -16461,8 +18293,9 @@ function buildPersistenceUiSummary(options = {}) {
 
   if (!hasResponse) {
     const logLines = [
-      'Baza: pominieto (pusta odpowiedz)',
-      'Dispatch: pominieto'
+      'Lokalny zapis: pominieto (pusta odpowiedz)',
+      'Dispatch: pominieto',
+      'Verify DB: pominieto'
     ];
     return {
       saveOk: false,
@@ -16486,11 +18319,21 @@ function buildPersistenceUiSummary(options = {}) {
   const saveOk = !!saveResult?.success || emergencyLocalSaveOk;
   if (!saveOk) {
     const normalizedSaveError = saveError || 'save_failed';
-    const storageSummary = `Baza: BLAD zapisu (${truncateDispatchLogText(normalizedSaveError, 140)})`;
+    const failureDiagnosticParts = [];
+    if (saveFailureStage) failureDiagnosticParts.push(`etap=${saveFailureStage}`);
+    if (saveFailureStatus !== null) failureDiagnosticParts.push(`http=${saveFailureStatus}`);
+    if (saveFailureRequestId) failureDiagnosticParts.push(`requestId=${truncateDispatchLogText(saveFailureRequestId, 80)}`);
+    if (saveFailureIntakeUrl) failureDiagnosticParts.push(`url=${truncateDispatchLogText(saveFailureIntakeUrl, 100)}`);
+    const failureDiagnosticSuffix = failureDiagnosticParts.length > 0
+      ? ` | ${failureDiagnosticParts.join(', ')}`
+      : '';
+    const localSaveSummary = `Lokalny zapis: BLAD (${truncateDispatchLogText(normalizedSaveError, 140)})${failureDiagnosticSuffix}`;
+    const verifySummary = 'Verify DB: pominieto';
     const logLines = [
-      storageSummary,
+      localSaveSummary,
       ...(bridgeSummary ? [bridgeSummary] : []),
       dispatchSummary,
+      verifySummary,
       ...(conversationSummaryLine ? [conversationSummaryLine] : []),
       ...dispatchFlowUiLines
     ];
@@ -16501,7 +18344,7 @@ function buildPersistenceUiSummary(options = {}) {
       lifecycleStatus: 'failed',
       phase: 'save_local',
       statusCode: 'storage.save_failed',
-      statusText: `Zakonczono | ${storageSummary}${bridgeStatusChunk} | ${dispatchSummary}`,
+      statusText: `Zakonczono | ${localSaveSummary}${bridgeStatusChunk} | ${dispatchSummary} | ${verifySummary}`,
       reason: 'save_failed',
       tone: 'error',
       logLines,
@@ -16517,24 +18360,26 @@ function buildPersistenceUiSummary(options = {}) {
   const verifiedCount = Number.isInteger(saveResult?.verifiedCount)
     ? saveResult.verifiedCount
     : (Number.isInteger(emergencyLocalSave?.responseCount) ? emergencyLocalSave.responseCount : null);
-  const storageSummary = emergencyLocalSaveOk
+  const localSaveSummary = emergencyLocalSaveOk
     ? (
       verifiedCount === null
-        ? 'Baza: OK (fallback local)'
-        : `Baza: OK (fallback local, records=${verifiedCount})`
+        ? 'Lokalny zapis: OK (fallback local)'
+        : `Lokalny zapis: OK (fallback local, records=${verifiedCount})`
     )
     : (
       verifiedCount === null
-        ? 'Baza: OK'
-        : `Baza: OK (records=${verifiedCount})`
+        ? 'Lokalny zapis: OK'
+        : `Lokalny zapis: OK (records=${verifiedCount})`
     );
+  const verifySummary = formatVerifyDbUiSummary(dispatch);
   const copyTrace = typeof saveResult?.copyTrace === 'string' && saveResult.copyTrace.trim()
     ? saveResult.copyTrace.trim()
     : '';
   const logLines = [
-    storageSummary,
+    localSaveSummary,
     ...(bridgeSummary ? [bridgeSummary] : []),
     dispatchSummary,
+    verifySummary,
     ...(conversationSummaryLine ? [conversationSummaryLine] : []),
     ...dispatchFlowUiLines
   ];
@@ -16550,44 +18395,39 @@ function buildPersistenceUiSummary(options = {}) {
     || (Number.isInteger(dispatch?.accepted) && dispatch.accepted > 0 && (!Number.isInteger(dispatch?.sent) || dispatch.sent === 0))
     || (Number.isInteger(dispatch?.remaining) && dispatch.remaining > 0)
     || (Number.isInteger(dispatch?.deferred) && dispatch.deferred > 0)
+    || isWatchlistVerificationTerminalState(dispatch?.verifyState)
     || !!bridgeSummary
   ) ? 'warn' : 'success';
   const bridgeStatusChunk = bridgeSummary ? ` | ${bridgeSummary}` : '';
   const dispatchState = typeof dispatch?.state === 'string' ? dispatch.state.trim() : '';
   const failedDispatch = (Number.isInteger(dispatch?.failed) && dispatch.failed > 0)
     || dispatchState === 'dispatch_failed'
-    || dispatch?.queueSkipped === true;
+    || dispatch?.queueSkipped === true
+    || isWatchlistVerificationTerminalState(dispatch?.verifyState);
   const pendingDispatch = dispatchState === 'dispatch_pending'
     || dispatchState === 'dispatch_queued_no_flush_result'
     || dispatch?.flushSkipped === true
     || (Number.isInteger(dispatch?.deferred) && dispatch.deferred > 0)
     || (Number.isInteger(dispatch?.remaining) && dispatch.remaining > 0)
-    || (Number.isInteger(dispatch?.accepted) && dispatch.accepted > 0 && (!Number.isInteger(dispatch?.sent) || dispatch.sent === 0));
-  const confirmedDispatch = dispatchState === 'dispatch_confirmed'
-    || (
-      Number.isInteger(dispatch?.sent) && dispatch.sent > 0
-      && (!Number.isInteger(dispatch?.failed) || dispatch.failed === 0)
-      && (!Number.isInteger(dispatch?.remaining) || dispatch.remaining === 0)
-      && (!Number.isInteger(dispatch?.deferred) || dispatch.deferred === 0)
-      && dispatch?.queueSkipped !== true
-      && dispatch?.flushSkipped !== true
-    );
-  const lifecycleStatus = failedDispatch
-    ? 'failed'
-    : (confirmedDispatch ? 'completed' : 'finalizing');
+    || (Number.isInteger(dispatch?.accepted) && dispatch.accepted > 0 && (!Number.isInteger(dispatch?.sent) || dispatch.sent === 0))
+    || (Number.isInteger(dispatch?.sent) && dispatch.sent > 0 && !isExplicitlyVerifiedDispatch(dispatch));
+  const confirmedDispatch = isExplicitlyVerifiedDispatch(dispatch);
+  const lifecycleStatus = 'completed';
   const phase = confirmedDispatch
     ? 'verify_remote'
-    : (pendingDispatch ? 'dispatch_remote' : 'save_local');
-  const statusCode = failedDispatch
-    ? (dispatch?.queueSkipped === true ? 'dispatch.skipped' : 'dispatch.failed')
-    : (confirmedDispatch ? 'dispatch.confirmed' : (phase === 'dispatch_remote' ? 'dispatch.pending' : 'storage.saved_local'));
+    : 'dispatch_remote';
+  const statusCode = confirmedDispatch
+    ? 'dispatch.confirmed'
+    : (failedDispatch
+      ? (dispatch?.queueSkipped === true ? 'dispatch.skipped' : 'dispatch.failed')
+      : (pendingDispatch ? 'dispatch.verify_pending' : 'storage.saved_local'));
   return {
     saveOk: true,
     hasResponse: true,
     lifecycleStatus,
     phase,
     statusCode,
-    statusText: `Zakonczono | ${storageSummary}${bridgeStatusChunk} | ${dispatchSummary}`,
+    statusText: `Zakonczono | ${localSaveSummary}${bridgeStatusChunk} | ${dispatchSummary} | ${verifySummary}`,
     reason: '',
     tone,
     logLines,
@@ -17029,6 +18869,19 @@ function serializeStructuredWatchlistKpiScorecard(rawKpi) {
 }
 
 function sanitizeStructuredWatchlistRecord(rawRecord) {
+  const shapeUtils = (
+    (typeof WatchlistDispatchShapeUtils === 'object' && WatchlistDispatchShapeUtils)
+    || (
+      typeof globalThis !== 'undefined'
+      && globalThis
+      && typeof globalThis.WatchlistDispatchShapeUtils === 'object'
+      ? globalThis.WatchlistDispatchShapeUtils
+      : null
+    )
+  );
+  if (shapeUtils && typeof shapeUtils.normalizeStructuredWatchlistRecord === 'function') {
+    return shapeUtils.normalizeStructuredWatchlistRecord(rawRecord);
+  }
   if (!rawRecord || typeof rawRecord !== 'object' || Array.isArray(rawRecord)) return null;
   const fields = normalizeStructuredWatchlistObject(rawRecord.fields);
   if (!fields) return null;
@@ -17125,6 +18978,19 @@ function buildResponseContractValidation(rawText) {
     ? DecisionContractUtils.validateDecisionContractText(rawText)
     : null;
   const status = typeof validation?.status === 'string' ? validation.status : '';
+  const structuredValidationPayload = validation?.structuredPayload
+    && typeof validation.structuredPayload === 'object'
+    && !Array.isArray(validation.structuredPayload)
+    ? validation.structuredPayload
+    : null;
+  if (structuredValidationPayload) {
+    return {
+      valid: validation?.currentContractPassed === true || status === 'legacy',
+      kind: 'economist.response.v2',
+      structuredResponse: structuredValidationPayload,
+      validation
+    };
+  }
   return {
     valid: validation?.currentContractPassed === true || status === 'legacy',
     kind: validation?.currentContractPassed === true || status === 'legacy' ? 'stage12' : 'invalid',
@@ -17211,7 +19077,6 @@ function mapDispatchDecisionRecord(record) {
 function normalizeWatchlistDispatchPayload(response) {
   if (!response || typeof response !== 'object') return null;
   const text = typeof response.text === 'string' ? response.text : '';
-  if (!text.trim()) return null;
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
@@ -17227,8 +19092,69 @@ function normalizeWatchlistDispatchPayload(response) {
           .filter((record) => !!record)
     )
     : [];
+  if (!text.trim() && directStructuredRecords.length === 0) return null;
   const extractedStructuredPayload = typeof DecisionContractUtils.extractStructuredDecisionPayload === 'function'
     ? DecisionContractUtils.extractStructuredDecisionPayload(text)
+    : null;
+  const extractedStructuredPayloadFromText = extractStructuredWatchlistResponseFromText(text);
+  const chooseRicherStructuredPayload = (leftPayload, rightPayload) => {
+    const countNonEmptyEntries = (value) => {
+      if (Array.isArray(value)) {
+        return value.reduce((sum, item) => sum + countNonEmptyEntries(item), 0);
+      }
+      if (value && typeof value === 'object') {
+        return Object.values(value).reduce((sum, item) => sum + countNonEmptyEntries(item), 0);
+      }
+      if (typeof value === 'string') {
+        return normalizeStructuredWatchlistValue(value) ? 1 : 0;
+      }
+      return value == null ? 0 : 1;
+    };
+    const scoreRecord = (record) => {
+      if (!record || typeof record !== 'object') return 0;
+      const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+      const taxonomy = record.taxonomy && typeof record.taxonomy === 'object' ? record.taxonomy : {};
+      const opportunity = record.opportunity && typeof record.opportunity === 'object' ? record.opportunity : {};
+      const character = record.character && typeof record.character === 'object' ? record.character : {};
+      const extras = record.extras && typeof record.extras === 'object' ? record.extras : {};
+      const kpiItems = Array.isArray(record?.kpi?.items) ? record.kpi.items.filter((item) => item && typeof item === 'object') : [];
+      let score = 0;
+      [
+        'spolka',
+        'teza_inwestycyjna',
+        'material_zrodlowy_podcast',
+        'bear_scenario_total',
+        'base_scenario_total',
+        'bull_scenario_total',
+        'voi_falsy_kluczowe_ryzyka'
+      ].forEach((key) => {
+        if (normalizeStructuredWatchlistValue(fields[key])) {
+          score += 4;
+        }
+      });
+      score += countNonEmptyEntries(fields);
+      score += countNonEmptyEntries(taxonomy);
+      score += countNonEmptyEntries(opportunity) * 2;
+      score += countNonEmptyEntries(character) * 2;
+      score += countNonEmptyEntries(extras);
+      score += countNonEmptyEntries(kpiItems) * 2;
+      return score;
+    };
+    const scorePayload = (payload) => (
+      Array.isArray(payload?.records)
+        ? payload.records.reduce((sum, record) => sum + scoreRecord(record), 0)
+        : 0
+    );
+    return scorePayload(rightPayload) > scorePayload(leftPayload) ? rightPayload : leftPayload;
+  };
+  const normalizedExtractedStructuredPayload = extractedStructuredPayload?.records?.length
+    ? {
+      schema: 'economist.response.v2',
+      schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
+      records: typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
+        ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(extractedStructuredPayload.records)
+        : extractedStructuredPayload.records
+    }
     : null;
   const structuredPayload = directStructuredRecords.length > 0
     ? {
@@ -17236,16 +19162,9 @@ function normalizeWatchlistDispatchPayload(response) {
       schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
       records: directStructuredRecords
     }
-    : (
-      extractedStructuredPayload?.records?.length
-        ? {
-          schema: 'economist.response.v2',
-          schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
-          records: typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
-            ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(extractedStructuredPayload.records)
-            : extractedStructuredPayload.records
-        }
-        : extractStructuredWatchlistResponseFromText(text)
+    : chooseRicherStructuredPayload(
+      normalizedExtractedStructuredPayload,
+      extractedStructuredPayloadFromText
     );
   const decisionRecords = Array.isArray(validation?.records) ? validation.records : extractDecisionRecordsFromText(text);
   const decisionRecord = validation?.primaryRecord
@@ -17253,8 +19172,15 @@ function normalizeWatchlistDispatchPayload(response) {
     || decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
     || decisionRecords[decisionRecords.length - 1]
     || null;
+  const structuredDispatchText = structuredPayload?.records?.length
+    ? JSON.stringify({
+      schema: 'economist.response.v2',
+      ...(structuredPayload.schemaVersion ? { schema_version: structuredPayload.schemaVersion } : {}),
+      records: structuredPayload.records
+    })
+    : '';
   const dispatchText = structuredPayload
-    ? text.trim()
+    ? (text.trim() || structuredDispatchText)
     : (
       typeof validation?.canonicalText === 'string' && validation.canonicalText.trim()
         ? validation.canonicalText
@@ -17290,14 +19216,35 @@ function normalizeWatchlistDispatchPayload(response) {
       ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(structuredPayload.records)
       : structuredPayload.records;
   }
-  if (decisionRecord) {
-    payload.decisionRecord = mapDispatchDecisionRecord(decisionRecord);
-    payload.decisionRecordCount = decisionRecords.length;
-    payload.decisionRecords = typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
-      ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(decisionRecords)
-      : decisionRecords
-        .map((record) => mapDispatchDecisionRecord(record))
-        .filter((record) => !!record);
+  const compatibilityDecisionRecordSource = decisionRecords.length > 0
+    ? decisionRecords
+    : (
+      structuredPayload?.records?.length
+        ? extractDecisionRecordsFromText(dispatchText)
+        : []
+    );
+  const compatibilityDecisionRecords = Array.isArray(compatibilityDecisionRecordSource)
+    ? (
+      typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
+        ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(compatibilityDecisionRecordSource)
+        : compatibilityDecisionRecordSource
+          .map((record) => mapDispatchDecisionRecord(record))
+          .filter((record) => !!record)
+    )
+    : [];
+  const compatibilityPrimaryRecord = decisionRecord
+    ? mapDispatchDecisionRecord(decisionRecord)
+    : (
+      compatibilityDecisionRecords.find((record) => record?.decisionRole === 'PRIMARY')
+      || compatibilityDecisionRecords[0]
+      || null
+    );
+  if (compatibilityPrimaryRecord) {
+    payload.decisionRecord = compatibilityPrimaryRecord;
+  }
+  if (compatibilityDecisionRecords.length > 0) {
+    payload.decisionRecordCount = compatibilityDecisionRecords.length;
+    payload.decisionRecords = compatibilityDecisionRecords;
   } else if (structuredPayload?.records?.length) {
     payload.decisionRecordCount = structuredPayload.records.length;
   }
@@ -17320,15 +19267,15 @@ function normalizeWatchlistDispatchPayload(response) {
   } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
     payload.conversationLogCount = response.conversationLogCount;
   }
+  applyChatGptComputationStatePatch(payload, response);
   return payload;
 }
 
 function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (!rawPayload || typeof rawPayload !== 'object') return null;
   const rawText = typeof rawPayload.text === 'string' ? rawPayload.text : '';
-  if (!rawText.trim()) return null;
-
   const hasStructuredRecords = Array.isArray(rawPayload.records) && rawPayload.records.length > 0;
+  if (!rawText.trim() && !hasStructuredRecords) return null;
   const schema = trimProblemLogText(
     rawPayload.schema || (hasStructuredRecords ? 'economist.response.v2' : 'economist.response.v1'),
     80
@@ -17341,6 +19288,56 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const analysisType = trimProblemLogText(rawPayload.analysisType || '', 80);
   const sourceMeta = normalizeResponseSourceMeta(rawPayload, source);
   const structuredResponse = (() => {
+    const chooseRicherStructuredPayload = (leftPayload, rightPayload) => {
+      const countNonEmptyEntries = (value) => {
+        if (Array.isArray(value)) {
+          return value.reduce((sum, item) => sum + countNonEmptyEntries(item), 0);
+        }
+        if (value && typeof value === 'object') {
+          return Object.values(value).reduce((sum, item) => sum + countNonEmptyEntries(item), 0);
+        }
+        if (typeof value === 'string') {
+          return normalizeStructuredWatchlistValue(value) ? 1 : 0;
+        }
+        return value == null ? 0 : 1;
+      };
+      const scoreRecord = (record) => {
+        if (!record || typeof record !== 'object') return 0;
+        const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+        const taxonomy = record.taxonomy && typeof record.taxonomy === 'object' ? record.taxonomy : {};
+        const opportunity = record.opportunity && typeof record.opportunity === 'object' ? record.opportunity : {};
+        const character = record.character && typeof record.character === 'object' ? record.character : {};
+        const extras = record.extras && typeof record.extras === 'object' ? record.extras : {};
+        const kpiItems = Array.isArray(record?.kpi?.items) ? record.kpi.items.filter((item) => item && typeof item === 'object') : [];
+        let score = 0;
+        [
+          'spolka',
+          'teza_inwestycyjna',
+          'material_zrodlowy_podcast',
+          'bear_scenario_total',
+          'base_scenario_total',
+          'bull_scenario_total',
+          'voi_falsy_kluczowe_ryzyka'
+        ].forEach((key) => {
+          if (normalizeStructuredWatchlistValue(fields[key])) {
+            score += 4;
+          }
+        });
+        score += countNonEmptyEntries(fields);
+        score += countNonEmptyEntries(taxonomy);
+        score += countNonEmptyEntries(opportunity) * 2;
+        score += countNonEmptyEntries(character) * 2;
+        score += countNonEmptyEntries(extras);
+        score += countNonEmptyEntries(kpiItems) * 2;
+        return score;
+      };
+      const scorePayload = (payload) => (
+        Array.isArray(payload?.records)
+          ? payload.records.reduce((sum, record) => sum + scoreRecord(record), 0)
+          : 0
+      );
+      return scorePayload(rightPayload) > scorePayload(leftPayload) ? rightPayload : leftPayload;
+    };
     if (schema !== 'economist.response.v2' && !hasStructuredRecords) {
       return null;
     }
@@ -17360,11 +19357,21 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
         records
       };
     }
-    return extractStructuredWatchlistResponseFromText(rawText);
+    return chooseRicherStructuredPayload(
+      null,
+      extractStructuredWatchlistResponseFromText(rawText)
+    );
   })();
   if (schema === 'economist.response.v2' && !structuredResponse) {
     return null;
   }
+  const structuredDispatchText = structuredResponse?.records?.length
+    ? JSON.stringify({
+      schema: 'economist.response.v2',
+      ...(structuredResponse.schemaVersion ? { schema_version: structuredResponse.schemaVersion } : {}),
+      records: structuredResponse.records
+    })
+    : '';
   const payload = {
     schema: structuredResponse ? 'economist.response.v2' : schema,
     responseId,
@@ -17372,7 +19379,7 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     supportId: typeof rawPayload.supportId === 'string' && rawPayload.supportId.trim()
       ? rawPayload.supportId.trim()
       : null,
-    text: rawText,
+    text: rawText || structuredDispatchText,
     source,
     analysisType,
     timestamp: rawPayload.timestamp ?? Date.now()
@@ -17412,27 +19419,56 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (rawPayload.stage && typeof rawPayload.stage === 'object' && !Array.isArray(rawPayload.stage)) {
     payload.stage = rawPayload.stage;
   }
+  const compatibilityDecisionRecordSource = Array.isArray(rawPayload.decisionRecords) && rawPayload.decisionRecords.length > 0
+    ? rawPayload.decisionRecords
+    : (
+      structuredResponse?.records?.length
+        ? extractDecisionRecordsFromText(rawText || structuredDispatchText)
+        : []
+    );
+  const compatibilityDecisionRecords = Array.isArray(compatibilityDecisionRecordSource)
+    ? (
+      typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
+        ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(compatibilityDecisionRecordSource)
+        : compatibilityDecisionRecordSource
+          .map((record) => mapDispatchDecisionRecord(record))
+          .filter((record) => !!record)
+    )
+    : [];
+  const compatibilityPrimaryRecord = rawPayload.decisionRecord && typeof rawPayload.decisionRecord === 'object' && !Array.isArray(rawPayload.decisionRecord)
+    ? mapDispatchDecisionRecord(rawPayload.decisionRecord)
+    : (
+      compatibilityDecisionRecords.find((record) => record?.decisionRole === 'PRIMARY')
+      || compatibilityDecisionRecords[0]
+      || null
+    );
   if (structuredResponse) {
     payload.records = structuredResponse.records;
-    payload.decisionRecordCount = structuredResponse.records.length;
+    payload.decisionRecordCount = compatibilityDecisionRecords.length > 0
+      ? compatibilityDecisionRecords.length
+      : structuredResponse.records.length;
+    if (compatibilityPrimaryRecord) {
+      payload.decisionRecord = compatibilityPrimaryRecord;
+    }
+    if (compatibilityDecisionRecords.length > 0) {
+      payload.decisionRecords = compatibilityDecisionRecords;
+    }
+    applyChatGptComputationStatePatch(payload, rawPayload);
     return payload;
   }
-  if (rawPayload.decisionRecord && typeof rawPayload.decisionRecord === 'object' && !Array.isArray(rawPayload.decisionRecord)) {
-    payload.decisionRecord = mapDispatchDecisionRecord(rawPayload.decisionRecord);
+  if (compatibilityPrimaryRecord) {
+    payload.decisionRecord = compatibilityPrimaryRecord;
   }
-  if (Number.isInteger(rawPayload.decisionRecordCount) && rawPayload.decisionRecordCount >= 0) {
+  if (compatibilityDecisionRecords.length > 0) {
+    payload.decisionRecordCount = compatibilityDecisionRecords.length;
+    payload.decisionRecords = compatibilityDecisionRecords;
+  } else if (Number.isInteger(rawPayload.decisionRecordCount) && rawPayload.decisionRecordCount >= 0) {
     payload.decisionRecordCount = rawPayload.decisionRecordCount;
-  }
-  if (Array.isArray(rawPayload.decisionRecords)) {
-    payload.decisionRecords = typeof WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords === 'function'
-      ? WatchlistDispatchShapeUtils.normalizeWatchlistDecisionRecords(rawPayload.decisionRecords)
-      : rawPayload.decisionRecords
-        .map((record) => mapDispatchDecisionRecord(record))
-        .filter((record) => !!record);
   }
   if (rawPayload.decisionContract && typeof rawPayload.decisionContract === 'object' && !Array.isArray(rawPayload.decisionContract)) {
     payload.decisionContract = rawPayload.decisionContract;
   }
+  applyChatGptComputationStatePatch(payload, rawPayload);
   return payload;
 }
 
@@ -17797,7 +19833,8 @@ function isWatchlistVerificationTerminalState(state) {
     || normalized === 'mismatch'
     || normalized === 'ingest_failed'
     || normalized === 'ingest_quarantined'
-    || normalized === 'materialization_unavailable';
+    || normalized === 'materialization_unavailable'
+    || normalized === 'expected_records_missing';
 }
 
 function getWatchlistVerifyRetryDelayMs(verifyAttemptCount = 0) {
@@ -21644,6 +23681,9 @@ async function saveResponse(
       newResponse.conversationLogs = conversationLogs;
       newResponse.conversationLogCount = conversationLogs.length;
     }
+    if (normalizedRunId) {
+      applyChatGptComputationStatePatch(newResponse, processRegistry.get(normalizedRunId) || null);
+    }
     
     const saveMaxAttempts = 4;
     const saveRetryDelayMs = 650;
@@ -21880,9 +23920,9 @@ async function saveResponse(
 
     const pipelineDispatchState = (() => {
       if (dispatchOutcome.queueSkipped) return 'dispatch_skipped';
+      if (isExplicitlyVerifiedDispatch(dispatchOutcome)) return 'dispatch_confirmed';
       if (dispatchOutcome.failed > 0) return 'dispatch_failed';
-      if (dispatchOutcome.sent > 0 && dispatchOutcome.failed === 0) return 'dispatch_confirmed';
-      if (dispatchOutcome.accepted > 0 && dispatchOutcome.sent === 0) return 'dispatch_pending';
+      if (dispatchOutcome.accepted > 0 || dispatchOutcome.sent > 0) return 'dispatch_pending';
       if (dispatchOutcome.flushSkipped || dispatchOutcome.deferred > 0 || dispatchOutcome.remaining > 0) {
         return 'dispatch_pending';
       }
@@ -21904,9 +23944,7 @@ async function saveResponse(
       ? 'error'
       : (pipelineDispatchState === 'dispatch_confirmed' ? 'info' : 'warn');
     const completedStage12Snapshot = buildCompletedStage12Snapshot(responseText, normalizedSourceMeta.sourceTitle || source);
-    const persistenceLifecycleStatus = pipelineDispatchState === 'dispatch_confirmed'
-      ? 'completed'
-      : (pipelineDispatchState === 'dispatch_failed' || dispatchOutcome.queueSkipped === true ? 'failed' : 'finalizing');
+    const persistenceLifecycleStatus = 'completed';
     const persistencePhase = pipelineDispatchState === 'dispatch_confirmed'
       ? 'verify_remote'
       : 'dispatch_remote';
@@ -22010,7 +24048,29 @@ async function saveResponse(
     console.error('Error:', error);
     console.error('Stack:', error.stack);
     console.error(`${'!'.repeat(80)}\n`);
-    return null;
+    return {
+      success: false,
+      reason: typeof error?.reason === 'string' && error.reason.trim()
+        ? error.reason.trim()
+        : 'save_response_failed',
+      error: error?.message || String(error),
+      stage: typeof error?.stage === 'string' && error.stage.trim()
+        ? error.stage.trim()
+        : '',
+      status: Number.isInteger(error?.status) ? error.status : null,
+      requestId: typeof error?.requestId === 'string' && error.requestId.trim()
+        ? error.requestId.trim()
+        : '',
+      intakeUrl: typeof error?.intakeUrl === 'string' && error.intakeUrl.trim()
+        ? error.intakeUrl.trim()
+        : '',
+      dispatch: error?.dispatch && typeof error.dispatch === 'object' ? error.dispatch : null,
+      dispatchProcessLog: [],
+      conversationAnalysis: null,
+      lifecycleStatus: 'failed',
+      phase: 'save_local',
+      statusCode: 'storage.save_failed'
+    };
   }
 }
 
@@ -22042,6 +24102,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
             saveResult: saveResult
               ? {
                 success: !!saveResult.success,
+                reason: typeof saveResult.reason === 'string' ? saveResult.reason : '',
+                error: typeof saveResult.error === 'string' ? saveResult.error : '',
+                stage: typeof saveResult.stage === 'string' ? saveResult.stage : '',
+                status: Number.isInteger(saveResult.status) ? saveResult.status : null,
+                requestId: typeof saveResult.requestId === 'string' ? saveResult.requestId : '',
+                intakeUrl: typeof saveResult.intakeUrl === 'string' ? saveResult.intakeUrl : '',
                 copyTrace: typeof saveResult.copyTrace === 'string' ? saveResult.copyTrace : '',
                 verifiedCount: Number.isInteger(saveResult.verifiedCount) ? saveResult.verifiedCount : null,
                 response: saveResult.response && typeof saveResult.response === 'object'
@@ -22148,6 +24214,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         selectedRunnerId: '',
         runnerEnabled: false,
         runnerName: '',
+        queuePaused: false,
         runnerId: '',
         controllerId: '',
         promptsLoaded: false,
@@ -22564,6 +24631,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     })().catch((error) => {
       sendResponse({
         success: false,
+        paused: false,
         maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
         activeSlots: 0,
         reservedSlots: 0,
@@ -22575,6 +24643,41 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         liveActiveJobs: 0,
         totalJobs: 0,
         error: error?.message || 'analysis_queue_status_failed'
+      });
+    });
+    return true;
+  } else if (message.type === 'SET_ANALYSIS_QUEUE_PAUSED') {
+    (async () => {
+      const nextPaused = Boolean(message?.paused);
+      await setAnalysisQueuePaused(nextPaused);
+      const status = await getAnalysisQueueStatusSnapshot();
+      reportAdminActionEvent('set_analysis_queue_paused', {
+        level: status?.success === true ? 'info' : 'warn',
+        status: status?.success === true ? 'completed' : 'failed',
+        reason: nextPaused ? 'analysis_queue_paused' : 'analysis_queue_resumed',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        details: {
+          paused: nextPaused
+        },
+        error: status?.success === true ? '' : (status?.error || '')
+      });
+      sendResponse(status);
+    })().catch((error) => {
+      console.warn('[analysis-queue] set paused failed:', error);
+      reportAdminActionEvent('set_analysis_queue_paused', {
+        level: 'error',
+        status: 'failed',
+        reason: 'analysis_queue_pause_exception',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        details: {
+          paused: Boolean(message?.paused)
+        },
+        error: error?.message || String(error)
+      });
+      sendResponse({
+        success: false,
+        paused: Boolean(message?.paused),
+        error: error?.message || 'analysis_queue_pause_failed'
       });
     });
     return true;
@@ -24162,6 +26265,37 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     const MAX_COMPLETED_RESPONSE_CHARS = 180000;
     let completedResponsePatch = {};
     let persistencePatch = null;
+    if (isInjectRateLimitBlockedResult(result)) {
+      const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
+        currentPrompt: executionPromptOffset,
+        totalPrompts: processTotalPrompts,
+        stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
+        stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+        conversationUrl
+      });
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType,
+        ...rateLimitPatch,
+        ...(injectMetrics ? { injectMetrics } : {}),
+        timestamp: Date.now()
+      });
+      await renderFinalCounterStatusOnTab(chatTabId, {
+        heading: 'Wymaga akcji',
+        tone: 'warning',
+        lines: [
+          'ChatGPT zwrocil limit/restriction.',
+          'Otworz karte ChatGPT i wznow pozniej przez repeat/resume.'
+        ],
+        autoCloseMs: 0
+      });
+      return {
+        success: false,
+        title,
+        reason: 'limit_or_restriction',
+        error: 'rate_limit_blocked'
+      };
+    }
 
     if (typeof result?.lastResponse === 'string') {
       const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
@@ -24225,12 +26359,22 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           ? ''
           : (persistedSaveErrorFromInject
             ? persistedSaveErrorFromInject
-            : 'save_response_failed')
+            : ((typeof saveResult?.reason === 'string' && saveResult.reason.trim())
+              ? saveResult.reason.trim()
+              : ((typeof saveResult?.error === 'string' && saveResult.error.trim())
+                ? saveResult.error.trim()
+                : 'save_response_failed')))
       });
       const finalStagePersistenceSummary = summarizeFinalStagePersistence({
         attempted: true,
         success: saveResult?.success === true,
-        reason: saveResult?.success === true ? 'saved' : 'save_response_failed',
+        reason: saveResult?.success === true
+          ? 'saved'
+          : ((typeof saveResult?.reason === 'string' && saveResult.reason.trim())
+            ? saveResult.reason.trim()
+            : ((typeof saveResult?.error === 'string' && saveResult.error.trim())
+              ? saveResult.error.trim()
+              : 'save_response_failed')),
         responseId: saveResult?.response?.responseId || providedResponseId || '',
         copyTrace: typeof saveResult?.copyTrace === 'string' ? saveResult.copyTrace : '',
         dispatchSummary: persistenceSummary.dispatchSummary,
@@ -24305,9 +26449,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       finalPhase = 'response_wait';
       finalError = result?.error || '';
       if (finalError === 'pdf_attach_failed') {
+        const pdfAttachError = typeof injectMetrics?.pdfAttachError === 'string'
+          ? injectMetrics.pdfAttachError.trim()
+          : '';
         finalStatusCode = 'chat.pdf_attach_failed';
-        finalStatusText = 'pdf_attach_failed';
+        finalStatusText = pdfAttachError
+          ? `pdf_attach_failed (${pdfAttachError})`
+          : 'pdf_attach_failed';
         finalReason = 'pdf_attach_failed';
+        finalError = pdfAttachError || 'pdf_attach_failed';
       } else {
         finalStatusCode = 'process.inject_failed';
         finalStatusText = 'Blad procesu';
@@ -24866,6 +27016,37 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       const MAX_COMPLETED_RESPONSE_CHARS = 180000;
       let completedResponsePatch = {};
       let persistencePatch = null;
+      if (isInjectRateLimitBlockedResult(result)) {
+        const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
+          currentPrompt: executionPromptOffset,
+          totalPrompts: processTotalPrompts,
+          stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
+          stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+          conversationUrl
+        });
+        await upsertProcess(processId, {
+          title: processTitle,
+          analysisType,
+          ...rateLimitPatch,
+          ...(injectMetrics ? { injectMetrics } : {}),
+          timestamp: Date.now()
+        });
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: 'Wymaga akcji',
+          tone: 'warning',
+          lines: [
+            'ChatGPT zwrocil limit/restriction.',
+            'Otworz karte ChatGPT i wznow pozniej przez repeat/resume.'
+          ],
+          autoCloseMs: 0
+        });
+        return {
+          success: false,
+          title,
+          reason: 'limit_or_restriction',
+          error: 'rate_limit_blocked'
+        };
+      }
 
       if (typeof result?.lastResponse === 'string') {
         const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
@@ -24946,7 +27127,11 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             ? ''
             : (persistedSaveErrorFromInject
               ? persistedSaveErrorFromInject
-              : 'save_response_failed')
+              : ((typeof saveResult?.reason === 'string' && saveResult.reason.trim())
+                ? saveResult.reason.trim()
+                : ((typeof saveResult?.error === 'string' && saveResult.error.trim())
+                  ? saveResult.error.trim()
+                  : 'save_response_failed')))
         });
         finalStatus = persistenceSummary.lifecycleStatus || 'completed';
         finalPhase = persistenceSummary.phase || 'verify_remote';
@@ -25051,9 +27236,15 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         finalPhase = 'response_wait';
         finalError = result?.error || '';
         if (finalError === 'pdf_attach_failed') {
+          const pdfAttachError = typeof injectMetrics?.pdfAttachError === 'string'
+            ? injectMetrics.pdfAttachError.trim()
+            : '';
           finalStatusCode = 'chat.pdf_attach_failed';
-          finalStatusText = 'pdf_attach_failed';
+          finalStatusText = pdfAttachError
+            ? `pdf_attach_failed (${pdfAttachError})`
+            : 'pdf_attach_failed';
           finalReason = 'pdf_attach_failed';
+          finalError = pdfAttachError || 'pdf_attach_failed';
         } else {
           finalStatusCode = 'process.inject_failed';
           finalStatusText = 'Blad procesu';
@@ -26191,6 +28382,22 @@ async function injectToChat(
       return (text || '').replace(/\s+/g, ' ').trim();
     }
 
+    // executeScript serializes only this injected function body, so any UI
+    // classifier used here must stay local instead of referencing background
+    // helpers from the service worker scope.
+    function normalizeInjectedChatGptUiText(value) {
+      return String(value ?? '')
+        .replace(/\s+/g, ' ')
+        .trim()
+        .toLowerCase();
+    }
+
+    function isInjectedChatGptLimitOrRestrictionText(text) {
+      const lowered = normalizeInjectedChatGptUiText(text);
+      if (!lowered) return false;
+      return /\blimit\s*:/.test(lowered);
+    }
+
     function normalizeDataGapStageId(value) {
       const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
       if (!raw) return '';
@@ -26656,6 +28863,12 @@ async function injectToChat(
       if (conversationUrl) {
         responseRecord.conversationUrl = conversationUrl;
       }
+      applyChatGptComputationStatePatch(
+        responseRecord,
+        typeof detectChatGptComputationState === 'function'
+          ? detectChatGptComputationState({ forceRefresh: true })
+          : null
+      );
       let responseStored = false;
       let responseCount = 0;
       let savedResponse = responseRecord;
@@ -26699,27 +28912,33 @@ async function injectToChat(
       if (!dispatchPayload) {
         return { success: false, reason: 'dispatch_payload_invalid' };
       }
-
-      const snapshot = await chrome.storage.local.get(['watchlist_dispatch_outbox']);
-      const storedOutbox = Array.isArray(snapshot?.watchlist_dispatch_outbox) ? snapshot.watchlist_dispatch_outbox : [];
-
+      const enqueueTrace = buildCopyTrace(normalizedRunId, normalizedResponseId);
       let outboxQueued = false;
-      const nextOutbox = storedOutbox.slice();
-      const outboxExists = nextOutbox.some((item) => item?.payload?.responseId === normalizedResponseId);
-      if (!outboxExists) {
-        nextOutbox.push({
-          payload: dispatchPayload,
-          queuedAt: timestamp,
-          attemptCount: 0,
-          nextAttemptAt: 0,
-          lastError: ''
+      let queueSize = 0;
+      if (typeof enqueueWatchlistDispatchPayload === 'function') {
+        const enqueueResult = await enqueueWatchlistDispatchPayload(dispatchPayload, enqueueTrace);
+        outboxQueued = enqueueResult?.queued === true;
+        queueSize = Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : 0;
+      } else {
+        const snapshot = await chrome.storage.local.get(['watchlist_dispatch_outbox']);
+        const storedOutbox = Array.isArray(snapshot?.watchlist_dispatch_outbox) ? snapshot.watchlist_dispatch_outbox : [];
+        const nextOutbox = storedOutbox.slice();
+        const outboxExists = nextOutbox.some((item) => item?.payload?.responseId === normalizedResponseId);
+        if (!outboxExists) {
+          nextOutbox.push({
+            payload: dispatchPayload,
+            queuedAt: timestamp,
+            attemptCount: 0,
+            nextAttemptAt: 0,
+            lastError: ''
+          });
+          outboxQueued = true;
+        }
+        await chrome.storage.local.set({
+          watchlist_dispatch_outbox: nextOutbox
         });
-        outboxQueued = true;
+        queueSize = nextOutbox.length;
       }
-
-      await chrome.storage.local.set({
-        watchlist_dispatch_outbox: nextOutbox
-      });
 
       return {
         success: true,
@@ -26727,7 +28946,7 @@ async function injectToChat(
         responseStored,
         outboxQueued,
         responseCount,
-        queueSize: nextOutbox.length
+        queueSize
       };
     }
 
@@ -27904,6 +30123,175 @@ async function injectToChat(
         || null;
     }
 
+    let generationBlockerState = null;
+
+    function buildGenerationBlockerState(raw = {}) {
+      const blockerText = compactText(raw?.text || '');
+      return {
+        actionRequired: 'rate_limit',
+        statusCode: 'chat.rate_limited',
+        reason: 'limit_or_restriction',
+        error: 'rate_limit_blocked',
+        needsAction: true,
+        blockerText,
+        source: typeof raw?.source === 'string' && raw.source.trim()
+          ? raw.source.trim()
+          : 'dom',
+        statusText: typeof raw?.statusText === 'string' && raw.statusText.trim()
+          ? raw.statusText.trim()
+          : 'Wymaga akcji: limit/restriction w ChatGPT.',
+        conversationUrl: typeof location?.href === 'string' ? location.href : ''
+      };
+    }
+
+    function rememberGenerationBlockerState(blocker) {
+      if (!blocker || typeof blocker !== 'object') {
+        return generationBlockerState;
+      }
+      generationBlockerState = {
+        ...(generationBlockerState && typeof generationBlockerState === 'object' ? generationBlockerState : {}),
+        ...blocker
+      };
+      return generationBlockerState;
+    }
+
+    function detectGenerationBlockerStateFromText(text, source = 'text') {
+      const blockerText = compactText(text || '');
+      if (!blockerText || !isInjectedChatGptLimitOrRestrictionText(blockerText)) {
+        return null;
+      }
+      return buildGenerationBlockerState({ text: blockerText, source });
+    }
+
+    function captureGenerationBlockerState(extraText = '', extraSource = 'text') {
+      const blockerFromText = detectGenerationBlockerStateFromText(extraText, extraSource);
+      if (blockerFromText) {
+        return rememberGenerationBlockerState(blockerFromText);
+      }
+
+      if (generationBlockerState) {
+        return generationBlockerState;
+      }
+
+      const state = getLastTurnState();
+      const textCandidates = [];
+      const seenTexts = new Set();
+      const appendCandidate = (text, source) => {
+        const normalizedText = compactText(text || '');
+        if (!normalizedText) return;
+        const signature = `${source}::${normalizedText}`;
+        if (seenTexts.has(signature)) return;
+        seenTexts.add(signature);
+        textCandidates.push({ text: normalizedText, source });
+      };
+
+      appendCandidate(state.lastAssistantText, 'last_assistant_text');
+      appendCandidate(state.lastAssistantTurnText, 'last_assistant_turn');
+      appendCandidate(state.lastAlertText, 'last_alert_text');
+
+      const scopedContainers = [state.lastAssistant, state.lastAssistantContainer].filter(Boolean);
+      for (const container of scopedContainers) {
+        const scopedCandidates = [
+          ...container.querySelectorAll('[role="alert"]'),
+          ...container.querySelectorAll('[role="status"]'),
+          ...container.querySelectorAll('[class*="error"]'),
+          ...container.querySelectorAll('[class*="text"]')
+        ];
+        scopedCandidates.forEach((node) => {
+          appendCandidate(node?.textContent || '', 'scoped_candidate');
+        });
+      }
+
+      const globalAlerts = [
+        ...document.querySelectorAll('[role="alert"]'),
+        ...document.querySelectorAll('[role="status"]')
+      ];
+      globalAlerts.slice(-6).forEach((node) => {
+        appendCandidate(node?.textContent || '', 'global_alert');
+      });
+
+      for (const candidate of textCandidates) {
+        const blocker = detectGenerationBlockerStateFromText(candidate.text, candidate.source);
+        if (blocker) {
+          return rememberGenerationBlockerState(blocker);
+        }
+      }
+
+      return null;
+    }
+
+    function buildGenerationBlockedResult(context = {}) {
+      const blocker = rememberGenerationBlockerState(
+        context?.blocker && typeof context.blocker === 'object'
+          ? context.blocker
+          : detectGenerationBlockerStateFromText(context?.blockerText || '', context?.source || 'context')
+      ) || buildGenerationBlockerState({
+        text: context?.blockerText || '',
+        source: context?.source || 'context'
+      });
+      const currentPrompt = Number.isInteger(context?.currentPrompt)
+        ? context.currentPrompt
+        : promptOffset;
+      const totalPrompts = Number.isInteger(context?.totalPrompts)
+        ? context.totalPrompts
+        : totalPromptsForRun;
+      const stageIndex = Number.isInteger(context?.stageIndex)
+        ? context.stageIndex
+        : (currentPrompt > 0 ? currentPrompt - 1 : null);
+      const stageName = typeof context?.stageName === 'string' && context.stageName.trim()
+        ? context.stageName.trim()
+        : (
+          Number.isInteger(stageIndex)
+            ? `Prompt ${stageIndex + 1}`
+            : (currentPrompt > 0 ? `Prompt ${currentPrompt}` : 'Start')
+        );
+      const phase = typeof context?.phase === 'string' && context.phase.trim()
+        ? context.phase.trim()
+        : 'response_wait';
+      const statusText = typeof context?.statusText === 'string' && context.statusText.trim()
+        ? context.statusText.trim()
+        : (blocker?.statusText || 'Wymaga akcji: limit/restriction w ChatGPT.');
+
+      notifyProcess('PROCESS_NEEDS_ACTION', {
+        status: 'running',
+        lifecycleStatus: 'running',
+        currentPrompt,
+        totalPrompts,
+        stageIndex,
+        stageName,
+        phase,
+        actionRequired: 'rate_limit',
+        statusCode: 'chat.rate_limited',
+        statusText,
+        reason: 'limit_or_restriction',
+        error: 'rate_limit_blocked',
+        needsAction: true
+      });
+
+      if (typeof stopSwKeepalive === 'function') {
+        stopSwKeepalive();
+      }
+
+      return {
+        success: false,
+        lastResponse: '',
+        error: 'rate_limit_blocked',
+        actionRequired: 'rate_limit',
+        statusCode: 'chat.rate_limited',
+        reason: 'limit_or_restriction',
+        needsAction: true,
+        currentPrompt,
+        totalPrompts,
+        stageIndex,
+        stageName,
+        phase,
+        statusText,
+        blockerText: typeof blocker?.blockerText === 'string' ? blocker.blockerText : '',
+        conversationUrl: typeof location?.href === 'string' ? location.href : '',
+        metrics: buildMetricsSnapshot({ completed: false, reason: 'rate_limit_blocked', failedAtPrompt: currentPrompt })
+      };
+    }
+
     function isHardGenerationErrorText(text) {
       const lowered = compactText(text || '').toLowerCase();
       if (!lowered) return false;
@@ -28078,6 +30466,10 @@ async function injectToChat(
       const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
       const promptFragment = getPromptProbeFragment(promptText);
 
+      if (captureGenerationBlockerState()) {
+        return 'blocked';
+      }
+
       if (hasHardGenerationErrorMessage()) {
         return 'no_response_or_error';
       }
@@ -28110,6 +30502,33 @@ async function injectToChat(
           title: articleTitle || '',
           ...payload
         };
+        const shouldAttachComputationState = (
+          type === 'PROCESS_PROGRESS'
+          || type === 'PROCESS_NEEDS_ACTION'
+          || type === 'PROCESS_ACTION_RESOLVED'
+        );
+        if (shouldAttachComputationState) {
+          const computationState = detectChatGptComputationState({
+            forceRefresh: outboundPayload.forceChatGptComputationRefresh === true
+              || outboundPayload.reason === 'set_thinking_effort'
+              || outboundPayload.reason === 'thinking_effort_set'
+          });
+          for (const [key, value] of Object.entries(computationState || {})) {
+            const hasExplicitValue = typeof outboundPayload[key] === 'string'
+              ? outboundPayload[key].trim().length > 0
+              : Number.isInteger(outboundPayload[key]);
+            if (!hasExplicitValue && value) {
+              outboundPayload[key] = value;
+            }
+          }
+          if (
+            requestedComposerThinkingEffort
+            && !(typeof outboundPayload.composerThinkingEffort === 'string' && outboundPayload.composerThinkingEffort.trim())
+          ) {
+            outboundPayload.composerThinkingEffort = requestedComposerThinkingEffort;
+          }
+        }
+        delete outboundPayload.forceChatGptComputationRefresh;
         const currentConversationUrl = typeof location?.href === 'string' ? location.href : '';
         if (currentConversationUrl) {
           if (!(typeof outboundPayload.chatUrl === 'string' && outboundPayload.chatUrl.trim())) {
@@ -28163,6 +30582,148 @@ async function injectToChat(
       const escaped = normalizedWord.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
       const regex = new RegExp(`\\b${escaped}\\b`, 'i');
       return regex.test(normalizedText);
+    }
+
+    function getElementReadableText(element) {
+      if (!(element instanceof HTMLElement)) return '';
+      const parts = [
+        element.innerText || '',
+        element.textContent || '',
+        element.getAttribute('aria-label') || '',
+        element.getAttribute('title') || '',
+        element.getAttribute('data-value') || '',
+        element.getAttribute('value') || ''
+      ];
+      return compactText(parts.join(' '));
+    }
+
+    function inferChatGptModeKindFromText(text) {
+      if (containsWord(text, 'thinking')) return 'thinking';
+      if (containsWord(text, 'instant')) return 'instant';
+      if (containsWord(text, 'auto')) return 'auto';
+      return '';
+    }
+
+    function inferChatGptPlanHintFromText(text) {
+      return containsWord(text, 'pro') ? 'pro' : '';
+    }
+
+    function humanizeChatGptModeKind(modeKind) {
+      if (modeKind === 'thinking') return 'Thinking';
+      if (modeKind === 'instant') return 'Instant';
+      if (modeKind === 'auto') return 'Auto';
+      return '';
+    }
+
+    function humanizeThinkingEffort(effort) {
+      if (effort === 'light') return 'Light';
+      if (effort === 'standard') return 'Standard';
+      if (effort === 'extended') return 'Extended';
+      if (effort === 'heavy') return 'Heavy';
+      return '';
+    }
+
+    function getCheckedVisibleModelModeMenuItem() {
+      const items = getVisibleModelModeMenuItems();
+      for (const item of items) {
+        if (isMenuItemChecked(item)) return item;
+      }
+      return null;
+    }
+
+    function getCheckedThinkingEffortMenuItem() {
+      const items = getVisibleThinkingEffortMenuItems();
+      for (const item of items) {
+        if (String(item.getAttribute('aria-checked') || '').toLowerCase() === 'true') {
+          return item;
+        }
+      }
+      return null;
+    }
+
+    function detectThinkingEffortState() {
+      const checkedItem = getCheckedThinkingEffortMenuItem();
+      const checkedLabel = getElementReadableText(checkedItem);
+      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+        if (matchesThinkingEffortLabel(checkedLabel, effort)) {
+          return {
+            effort,
+            label: checkedLabel || humanizeThinkingEffort(effort)
+          };
+        }
+      }
+
+      const pillButton = findThinkingEffortPillButton();
+      const pillLabel = getElementReadableText(pillButton);
+      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+        if (matchesThinkingEffortLabel(pillLabel, effort)) {
+          return {
+            effort,
+            label: pillLabel || humanizeThinkingEffort(effort)
+          };
+        }
+      }
+
+      return { effort: '', label: '' };
+    }
+
+    let lastChatGptComputationState = null;
+    let lastChatGptComputationStateAt = 0;
+
+    function detectChatGptComputationState(options = {}) {
+      const forceRefresh = options?.forceRefresh === true;
+      const maxAgeMs = Number.isInteger(options?.maxAgeMs) && options.maxAgeMs >= 0
+        ? options.maxAgeMs
+        : 1500;
+      const nowTs = Date.now();
+      if (!forceRefresh && lastChatGptComputationState && (nowTs - lastChatGptComputationStateAt) <= maxAgeMs) {
+        return { ...lastChatGptComputationState };
+      }
+
+      const switcher = findModelSwitcherButton();
+      const modelSwitcherLabel = getElementReadableText(switcher);
+      const checkedModeItem = getCheckedVisibleModelModeMenuItem();
+      const explicitModeLabel = getElementReadableText(checkedModeItem);
+      const planHint = inferChatGptPlanHintFromText(`${modelSwitcherLabel} ${explicitModeLabel}`);
+      const thinkingEffortState = detectThinkingEffortState();
+
+      let modeKind = inferChatGptModeKindFromText(explicitModeLabel || modelSwitcherLabel);
+      if (!modeKind && (thinkingEffortState.effort || findThinkingEffortPillButton())) {
+        modeKind = 'thinking';
+      }
+
+      const modeLabel = explicitModeLabel || humanizeChatGptModeKind(modeKind);
+      const effortLabel = thinkingEffortState.label || humanizeThinkingEffort(thinkingEffortState.effort);
+      const summaryParts = [];
+      const seenSummaryParts = new Set();
+      const addSummaryPart = (value) => {
+        const readable = compactText(typeof value === 'string' ? value : '');
+        if (!readable) return;
+        const normalized = readable.toLowerCase();
+        if (seenSummaryParts.has(normalized)) return;
+        seenSummaryParts.add(normalized);
+        summaryParts.push(readable);
+      };
+
+      addSummaryPart(modelSwitcherLabel);
+      if (!modelSwitcherLabel && planHint === 'pro') addSummaryPart('Pro');
+      if (modeLabel) addSummaryPart(modeLabel);
+      if (effortLabel) addSummaryPart(`Thinking ${effortLabel}`);
+
+      const snapshot = {
+        chatGptModeKind: modeKind,
+        chatGptModeLabel: modeLabel,
+        chatGptPlanHint: planHint,
+        chatGptModelSwitcherLabel: modelSwitcherLabel,
+        chatGptThinkingEffortDetected: thinkingEffortState.effort,
+        chatGptThinkingEffortLabel: effortLabel,
+        chatGptComputationLabel: summaryParts.join(' | '),
+        chatGptComputationDetectedAt: nowTs
+      };
+
+      lastChatGptComputationState = snapshot;
+      lastChatGptComputationStateAt = nowTs;
+      return { ...snapshot };
     }
 
     function getThinkingEffortKeywords(effort) {
@@ -29489,6 +32050,10 @@ async function injectToChat(
 
     while (true) {
       if (shouldStopNow()) return false;
+      if (captureGenerationBlockerState()) {
+        console.warn('[FAZA 1] Wykryto limit/restriction w ChatGPT.');
+        return false;
+      }
       if (hasHardGenerationErrorMessage()) {
         console.error('[FAZA 1] Wykryto hard error na ostatnim turnie.');
         return false;
@@ -29545,6 +32110,10 @@ async function injectToChat(
 
     while (true) {
       if (shouldStopNow()) return false;
+      if (captureGenerationBlockerState()) {
+        console.warn('[FAZA 2] Wykryto limit/restriction w ChatGPT.');
+        return false;
+      }
       if (hasHardGenerationErrorMessage()) {
         console.error('[FAZA 2] Wykryto hard error na ostatnim turnie.');
         return false;
@@ -29669,6 +32238,14 @@ async function injectToChat(
     console.log("🔍 Sprawdzam połączenie z ChatGPT...");
     
     try {
+      const initialBlocker = captureGenerationBlockerState();
+      if (initialBlocker) {
+        return {
+          healthy: false,
+          blocked: true,
+          error: initialBlocker.blockerText || initialBlocker.statusText || 'Wymaga akcji: limit/restriction w ChatGPT.'
+        };
+      }
       // Sprawdź czy są błędy w konsoli (HTTP2, 404, itp.)
       const hasConnectionErrors = await checkForConnectionErrors();
       if (hasConnectionErrors) {
@@ -29706,6 +32283,15 @@ async function injectToChat(
             return { healthy: false, error: `Błąd na stronie: ${text.substring(0, 100)}` };
           }
         }
+      }
+
+      const finalBlocker = captureGenerationBlockerState();
+      if (finalBlocker) {
+        return {
+          healthy: false,
+          blocked: true,
+          error: finalBlocker.blockerText || finalBlocker.statusText || 'Wymaga akcji: limit/restriction w ChatGPT.'
+        };
       }
       
       return { healthy: true, error: null };
@@ -30185,6 +32771,10 @@ async function injectToChat(
     
     while (true) {
       if (shouldStopNow()) return false;
+      if (captureGenerationBlockerState()) {
+        console.warn('⚠️ Wykryto limit/restriction podczas czekania na gotowość interfejsu.');
+        return false;
+      }
       // Sprawdź wszystkie elementy interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
                      document.querySelector('div[contenteditable="true"]');
@@ -30508,6 +33098,10 @@ async function injectToChat(
     const interfaceReady = await waitForInterfaceReady(maxWaitForReady, counter, promptIndex, promptTotal);
     
     if (!interfaceReady) {
+      if (captureGenerationBlockerState()) {
+        console.warn('⚠️ Przerywam sendPrompt - wykryto limit/restriction podczas oczekiwania na gotowość interfejsu.');
+        return false;
+      }
       console.error(`❌ Interface nie stał się gotowy po ${Math.round(maxWaitForReady/1000)}s`);
       return false;
     }
@@ -30517,6 +33111,10 @@ async function injectToChat(
     // KROK 1.5: Sprawdź czy ChatGPT działa (brak błędów połączenia)
     const connectionCheck = await checkChatGPTConnection();
     if (!connectionCheck.healthy) {
+      if (connectionCheck.blocked || captureGenerationBlockerState()) {
+        console.warn('⚠️ Przerywam sendPrompt - ChatGPT zwrocil limit/restriction.');
+        return false;
+      }
       console.error(`❌ ChatGPT nie działa: ${connectionCheck.error}`);
       return false;
     }
@@ -30600,6 +33198,10 @@ async function injectToChat(
     
     while (Date.now() - startTime < maxWait) {
       if (shouldStopNow()) return false;
+      if (captureGenerationBlockerState()) {
+        console.warn('⚠️ Przerywam szukanie edytora - wykryto limit/restriction w ChatGPT.');
+        return false;
+      }
       const candidates = collectEditorCandidates();
       editor = candidates.find((node) => isUsableEditorCandidate(node))
         || candidates.find((node) => isVisibleEditorCandidate(node))
@@ -30739,6 +33341,10 @@ async function injectToChat(
     
     while (waitTime < maxButtonWait) {
       if (shouldStopNow()) return false;
+      if (captureGenerationBlockerState()) {
+        console.warn('⚠️ Przerywam oczekiwanie na Send - wykryto limit/restriction w ChatGPT.');
+        return false;
+      }
       submitButton = document.querySelector('[data-testid="send-button"]') ||
                      document.querySelector('#composer-submit-button') ||
                      document.querySelector('button[aria-label="Send"]') ||
@@ -30783,6 +33389,10 @@ async function injectToChat(
     
     while (verifyTime < maxVerifyWait) {
       if (shouldStopNow()) return false;
+      if (captureGenerationBlockerState()) {
+        console.warn('⚠️ Przerywam weryfikacje wysylki - wykryto limit/restriction w ChatGPT.');
+        return false;
+      }
       // Po wysłaniu prompta ChatGPT powinien:
       // 1. Pokazać stopButton (zacząć generować) - NAJBARDZIEJ PEWNY wskaźnik
       // 2. LUB wyczyścić/disabled editor + disabled sendButton + nowa wiadomość w DOM
@@ -30883,6 +33493,10 @@ async function injectToChat(
       attempt += 1;
       const sent = await sendPrompt(promptText, maxWaitForReady, counter, promptIndex, promptTotal);
       if (sent) return true;
+      if (captureGenerationBlockerState()) {
+        console.warn(`[send] Przerywam retry promptu ${promptIndex || '?'}/${promptTotal || '?'} - wykryto limit/restriction.`);
+        break;
+      }
 
       if (allowInferSent && promptSnapshotBeforeSend) {
         const inferredSent = await detectPromptSentDespiteFailure(promptSnapshotBeforeSend, promptText, 5000);
@@ -31019,6 +33633,17 @@ async function injectToChat(
           return forceStopResult();
         }
         if (!payloadSent) {
+          const payloadSendBlocker = captureGenerationBlockerState();
+          if (payloadSendBlocker) {
+            updateCounter(counter, promptOffset, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+            return buildGenerationBlockedResult({
+              blocker: payloadSendBlocker,
+              currentPrompt: promptOffset,
+              totalPrompts: totalPromptsForRun,
+              stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+              phase: 'payload_send'
+            });
+          }
           notifyProcess('PROCESS_PROGRESS', {
             status: 'failed',
             currentPrompt: promptOffset,
@@ -31039,9 +33664,22 @@ async function injectToChat(
         }
 
         updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedz...');
-        await waitForResponse(responseWaitMs);
+        const payloadResponseCompleted = await waitForResponse(responseWaitMs);
         if (shouldStopNow()) {
           return forceStopResult();
+        }
+        if (!payloadResponseCompleted) {
+          const payloadResponseBlocker = captureGenerationBlockerState();
+          if (payloadResponseBlocker) {
+            updateCounter(counter, promptOffset, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+            return buildGenerationBlockedResult({
+              blocker: payloadResponseBlocker,
+              currentPrompt: promptOffset,
+              totalPrompts: totalPromptsForRun,
+              stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+              phase: 'response_wait'
+            });
+          }
         }
         console.log('Artykul przetworzony');
 
@@ -31077,6 +33715,17 @@ async function injectToChat(
         }
         
         if (!resumeInterfaceReady) {
+          const resumeInterfaceBlocker = captureGenerationBlockerState();
+          if (resumeInterfaceBlocker) {
+            updateCounter(counter, promptOffset, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+            return buildGenerationBlockedResult({
+              blocker: resumeInterfaceBlocker,
+              currentPrompt: promptOffset,
+              totalPrompts: totalPromptsForRun,
+              stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+              phase: 'prompt_send'
+            });
+          }
           console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
           updateCounter(counter, promptOffset, totalPromptsForRun, '❌ Interface nie gotowy');
           await new Promise(resolve => setTimeout(resolve, 5000));
@@ -31248,6 +33897,17 @@ async function injectToChat(
             console.error(`❌ Nie udało się wysłać prompta ${i + 1}/${promptChain.length}`);
             console.log(`⏸️ Błąd wysyłania - czekam na interwencję użytkownika`);
             updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd wysyłania`);
+            const sendBlocker = captureGenerationBlockerState();
+            if (sendBlocker) {
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+              return buildGenerationBlockedResult({
+                blocker: sendBlocker,
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                phase: 'prompt_send'
+              });
+            }
             const sentDespiteFailure = await detectPromptSentDespiteFailure(promptSnapshotBeforeSend, prompt, 7000);
             if (sentDespiteFailure) {
               console.warn(`⚠️ sendPrompt zwrócił false, ale DOM pokazuje że prompt prawdopodobnie został wysłany - kontynuuję bez auto-reload`);
@@ -31297,8 +33957,19 @@ async function injectToChat(
               if (shouldStopNow()) {
                 return forceStopResult();
               }
-            
+             
               if (!retried) {
+                const retryBlocker = captureGenerationBlockerState();
+                if (retryBlocker) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                  return buildGenerationBlockedResult({
+                    blocker: retryBlocker,
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    phase: 'prompt_send'
+                  });
+                }
                 console.error(`❌ Ponowna próba nieudana - przerywam chain`);
                 updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `❌ Błąd krytyczny`);
                 await new Promise(resolve => setTimeout(resolve, 10000));
@@ -31348,6 +34019,17 @@ async function injectToChat(
               console.error(`❌ Timeout przy promptcie ${i + 1}/${promptChain.length}`);
               console.log(`⏸️ ChatGPT nie odpowiedział w czasie - czekam na interwencję użytkownika`);
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Timeout - czekam...');
+              const timeoutBlocker = captureGenerationBlockerState();
+              if (timeoutBlocker) {
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                return buildGenerationBlockedResult({
+                  blocker: timeoutBlocker,
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  phase: 'response_wait'
+                });
+              }
               const timeoutOutcome = await classifyTimeoutOutcome(promptSnapshotBeforeSend, prompt);
               if (timeoutOutcome === 'response_ready') {
                 console.warn(`⚠️ Timeout heurystyki, ale wykryto odpowiedź - pomijam auto-reload dla prompta ${absoluteCurrentPrompt}`);
@@ -31360,7 +34042,17 @@ async function injectToChat(
                 await new Promise((resolve) => setTimeout(resolve, 1500));
                 continue;
               }
-              
+              if (timeoutOutcome === 'blocked') {
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                return buildGenerationBlockedResult({
+                  blocker: captureGenerationBlockerState(),
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  phase: 'response_wait'
+                });
+              }
+               
               const autoRecoveryHandoff = maybeTriggerAutoRecovery(
                 'timeout',
                 i,
@@ -31401,6 +34093,17 @@ async function injectToChat(
             }
             console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
             responseText = await getLastResponseText();
+            const validationBlocker = captureGenerationBlockerState(responseText, 'validation_text');
+            if (validationBlocker) {
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+              return buildGenerationBlockedResult({
+                blocker: validationBlocker,
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                phase: 'capture_validate'
+              });
+            }
             const dataGapDirective = parseDataGapDirectiveResponse(responseText);
             const isValid = validateResponse(responseText);
             
@@ -31697,6 +34400,11 @@ async function injectToChat(
             }
           }
         }
+        const finalProgressCapturedAt = Date.now();
+        const finalProgressResponseTruncated = lastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+        const finalProgressResponseText = finalProgressResponseTruncated
+          ? lastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+          : lastResponse;
         notifyProcess('PROCESS_PROGRESS', {
           status: 'finalizing',
           lifecycleStatus: 'finalizing',
@@ -31708,6 +34416,14 @@ async function injectToChat(
           actionRequired: 'none',
           statusCode: 'storage.saving_local',
           statusText: 'Prompt chain zakonczony - trwa zapis do bazy',
+          ...(typeof responseId === 'string' && responseId.trim()
+            ? { responseId: responseId.trim() }
+            : {}),
+          completedResponseText: finalProgressResponseText,
+          completedResponseLength: lastResponse.length,
+          completedResponseTruncated: finalProgressResponseTruncated,
+          completedResponseCapturedAt: finalProgressCapturedAt,
+          completedResponseSaved: persistedViaMessage === true && persistedSaveResult?.success === true,
           needsAction: false
         });
 

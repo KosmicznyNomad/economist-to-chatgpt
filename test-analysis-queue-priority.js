@@ -271,6 +271,28 @@ function buildPriorityContext() {
     upserts: [],
     closedRuns: [],
     sanitizeManualPdfAttachmentContext: () => null,
+    sanitizePromptChainSnapshot: (value) => Array.isArray(value)
+      ? value.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
+      : [],
+    sanitizeRemoteAnalysisQueueJobMetadata: (value) => {
+      if (!value || typeof value !== 'object') return null;
+      const remoteJobId = typeof value.remoteJobId === 'string'
+        ? value.remoteJobId.trim()
+        : (typeof value.jobId === 'string' ? value.jobId.trim() : '');
+      if (!remoteJobId) return null;
+      return {
+        remoteJobId,
+        remoteAttemptId: typeof value.remoteAttemptId === 'string'
+          ? value.remoteAttemptId.trim()
+          : (typeof value.attemptId === 'string' ? value.attemptId.trim() : ''),
+        remoteRunnerId: typeof value.remoteRunnerId === 'string'
+          ? value.remoteRunnerId.trim()
+          : '',
+        controllerId: typeof value.controllerId === 'string' ? value.controllerId.trim() : '',
+        batchId: typeof value.batchId === 'string' ? value.batchId.trim() : '',
+        submissionId: typeof value.submissionId === 'string' ? value.submissionId.trim() : ''
+      };
+    },
     ensureAnalysisQueueReady: async () => context.analysisQueueState,
     ensureProcessRegistryReady: async () => context.processRegistry,
     withAnalysisQueueMutationLock: async (task) => task(),
@@ -296,7 +318,10 @@ function buildPriorityContext() {
       return true;
     },
     reportAnalysisQueueEvent: async () => true,
+    ensureAnalysisQueuePauseReady: async () => false,
+    getAnalysisQueuePaused: async () => false,
     requestAnalysisQueueReconcile: () => {},
+    requestRemoteRunnerCycle: () => {},
     buildStaleQueueReleasePatch: async () => null,
     runQueuedAnalysisJob: (job, reason) => {
       context.startedJobs.push({ runId: job.runId, jobId: job.jobId, reason });
@@ -315,6 +340,8 @@ function buildPriorityContext() {
     'isClosedProcessStatus',
     'resolveProcessStageSnapshot',
     'hasProcessReachedFinalStage',
+    'normalizeWatchlistVerifyState',
+    'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'getAnalysisQueueCompletionTimestamp',

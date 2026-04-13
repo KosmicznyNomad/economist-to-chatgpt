@@ -124,6 +124,75 @@ function makeCurrent16Line(role, company) {
   ].join('; ');
 }
 
+function makeStructuredV2Record(overrides = {}) {
+  const base = {
+    decision_role: 'PRIMARY',
+    fields: {
+      data_decyzji: '2026-04-12',
+      status_decyzji: 'WATCH',
+      spolka: 'Camtek (CAMT:NASDAQ)',
+      material_zrodlowy_podcast: 'SemiAnalysis Rubin Ultra',
+      teza_inwestycyjna: 'Camtek thesis',
+      bear_scenario_total: 'Bear_TOTAL: 34.40',
+      base_scenario_total: 'Base_TOTAL: 44.64',
+      bull_scenario_total: 'Bull_TOTAL: 57.04',
+      voi_falsy_kluczowe_ryzyka: 'VOI: orders'
+    },
+    taxonomy: {
+      sector: 'Technologia',
+      company_family: 'Polprzewodniki',
+      company_type: 'Metrologia',
+      revenue_model: 'Sprzet i software',
+      region: 'USA',
+      currency: 'USD'
+    },
+    opportunity: {
+      value_chain_position: 'Tool-of-record'
+    },
+    character: {
+      quality_state: 'ELITE'
+    },
+    kpi: {
+      schema_id: 'core10',
+      items: [
+        { key: 'FQ', value: 9 }
+      ]
+    },
+    extras: {
+      record_version: 'watchlist.v2_enhanced'
+    }
+  };
+  return {
+    ...base,
+    ...overrides,
+    fields: {
+      ...base.fields,
+      ...(overrides.fields || {})
+    },
+    taxonomy: {
+      ...base.taxonomy,
+      ...(overrides.taxonomy || {})
+    },
+    opportunity: {
+      ...base.opportunity,
+      ...(overrides.opportunity || {})
+    },
+    character: {
+      ...base.character,
+      ...(overrides.character || {})
+    },
+    kpi: {
+      ...base.kpi,
+      ...(overrides.kpi || {}),
+      items: Array.isArray(overrides?.kpi?.items) ? overrides.kpi.items : base.kpi.items
+    },
+    extras: {
+      ...base.extras,
+      ...(overrides.extras || {})
+    }
+  };
+}
+
 const context = {
   console,
   DecisionContractUtils,
@@ -154,6 +223,11 @@ const context = {
 
 vm.createContext(context);
 [
+  'normalizeComposerThinkingEffort',
+  'normalizeChatGptMonitoringLabel',
+  'normalizeChatGptModeKind',
+  'normalizeChatGptPlanHint',
+  'applyChatGptComputationStatePatch',
   'normalizeStructuredWatchlistValue',
   'normalizeStructuredWatchlistObject',
   'serializeStructuredWatchlistKpiScorecard',
@@ -370,20 +444,28 @@ function testStructuredV2PayloadPreservesRecords() {
   assert.strictEqual(payload.schema, 'economist.response.v2');
   assert.strictEqual(payload.decisionRecordCount, 2);
   assert.strictEqual(payload.records.length, 2);
+  assert.strictEqual(payload.decisionRecords.length, 2);
   assert.strictEqual(payload.records[0].decision_role, 'PRIMARY');
   assert.strictEqual(payload.records[0].fields.spolka, 'Alpha Corp (ALP:NASDAQ)');
   assert.strictEqual(payload.records[0].kpi.items.length, 10);
   assert.strictEqual(payload.records[0].opportunity.value_chain_position, 'Platforma');
   assert.strictEqual(payload.records[1].character.primary_kill_risk, 'procurement delay');
+  assert.strictEqual(payload.decisionRecords[0].valueChainPosition, 'Platforma');
+  assert.strictEqual(payload.decisionRecords[0].entryConditionType, 'Already met');
+  assert.strictEqual(payload.decisionRecords[1].qualityState, 'MIXED');
+  assert.strictEqual(payload.decisionRecords[1].primaryKillRisk, 'procurement delay');
 
   const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
   assert.strictEqual(outbound.schema, 'economist.response.v2');
   assert.strictEqual(outbound.decisionRecordCount, 2);
   assert.strictEqual(outbound.records.length, 2);
+  assert.strictEqual(outbound.decisionRecords.length, 2);
   assert.strictEqual(outbound.records[1].decision_role, 'SECONDARY');
   assert.strictEqual(outbound.records[1].fields.spolka, 'Beta Corp (BET:NASDAQ)');
   assert.strictEqual(outbound.records[0].opportunity.entry_condition_type, 'Already met');
   assert.strictEqual(outbound.records[1].character.quality_state, 'MIXED');
+  assert.strictEqual(outbound.decisionRecords[0].valueChainPosition, 'Platforma');
+  assert.strictEqual(outbound.decisionRecords[1].qualityState, 'MIXED');
 }
 
 function testStructuredJsonDispatchPayload() {
@@ -464,10 +546,200 @@ function testStructuredJsonDispatchPayload() {
 
   assert.strictEqual(payload.schema, 'economist.response.v2');
   assert.strictEqual(payload.records.length, 2);
+  assert.strictEqual(payload.decisionRecords.length, 2);
   assert.strictEqual(payload.records[0].decision_role, 'PRIMARY');
   assert.strictEqual(payload.records[1].decision_role, 'SECONDARY');
   assert.strictEqual(payload.records[0].opportunity.value_chain_position, 'Platforma');
   assert.strictEqual(payload.records[1].character.proof_class, 'AWARDED');
+  assert.strictEqual(payload.decisionRecords[0].valueChainPosition, 'Platforma');
+  assert.strictEqual(payload.decisionRecords[1].proofClass, 'AWARDED');
+}
+
+function testStructuredJsonDispatchPayloadBackfillsAliasFields() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'SECONDARY',
+        fields: {
+          nazwa: 'AT&S',
+          ticker: 'ATS.VI',
+          gielda: 'WBAG',
+          decyzja: 'WATCH',
+          rola_na_watchliscie: 'SECONDARY',
+          material_zrodlowy_podcast: 'SemiAnalysis Rubin Ultra',
+          teza_inwestycyjna: 'Secondary thesis',
+          bear_scenario_total: 'Bear_TOTAL: 57.68',
+          base_scenario_total: 'Base_TOTAL: 74.06',
+          bull_scenario_total: 'Bull_TOTAL: 94.75',
+          voi_falsy_kluczowe_ryzyka: 'VOI: Kulim'
+        },
+        taxonomy: {
+          sector: 'Przemysl',
+          companyFamily: 'Infrastruktura polprzewodnikowa i substraty',
+          companyType: 'Producent substratow IC',
+          revenueModel: 'Kontrakty B2B',
+          region: 'Austria',
+          currency: 'EUR'
+        },
+        opportunity: {
+          value_chain_position: 'Dostawca substratow',
+          invoice_issuer: 'AT&S Austria Technologie & Systemtechnik AG',
+          entry_condition_type: 'DURATION'
+        },
+        character: {
+          quality_state: 'MIXED',
+          market_expectation_state: 'Rynek dyskontuje duration',
+          primary_kill_risk: 'Kulim ramp'
+        },
+        kpi: {
+          schema_id: 'core10',
+          items: [
+            { key: 'fq', score: '5' }
+          ]
+        },
+        extras: {
+          record_version: 'watchlist.v2_enhanced'
+        }
+      }
+    ]
+  });
+
+  const payload = context.normalizeWatchlistDispatchPayload({
+    text,
+    source: 'SemiAnalysis Rubin Ultra',
+    analysisType: 'company',
+    responseId: 'resp-v2-alias-structured',
+    runId: 'run-v2-alias-structured',
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'economist.response.v2');
+  assert.strictEqual(payload.records.length, 1);
+  assert.strictEqual(payload.decisionRecords.length, 1);
+  assert.strictEqual(payload.records[0].decision_role, 'SECONDARY');
+  assert.strictEqual(payload.records[0].fields.spolka, 'AT&S (ATS:VIE)');
+  assert.strictEqual(payload.records[0].fields.status_decyzji, 'WATCH');
+  assert.strictEqual(payload.records[0].opportunity.invoice_issuer, 'AT&S Austria Technologie & Systemtechnik AG');
+  assert.strictEqual(payload.records[0].character.market_expectation_state, 'Rynek dyskontuje duration');
+  assert.strictEqual(payload.records[0].kpi.items[0].value, 5);
+  assert.strictEqual(payload.decisionRecords[0].valueChainPosition, 'Dostawca substratow');
+  assert.strictEqual(payload.decisionRecords[0].qualityState, 'MIXED');
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'economist.response.v2');
+  assert.strictEqual(outbound.records.length, 1);
+  assert.strictEqual(outbound.decisionRecords.length, 1);
+  assert.strictEqual(outbound.records[0].fields.spolka, 'AT&S (ATS:VIE)');
+  assert.strictEqual(outbound.records[0].opportunity.invoice_issuer, 'AT&S Austria Technologie & Systemtechnik AG');
+  assert.strictEqual(outbound.records[0].kpi.items[0].value, 5);
+  assert.strictEqual(outbound.decisionRecords[0].entryConditionType, 'DURATION');
+}
+
+function testStructuredV2DispatchWithoutTextSynthesizesPayloadText() {
+  const payload = context.normalizeWatchlistDispatchPayload({
+    text: '',
+    schema: 'economist.response.v2',
+    records: [
+      makeStructuredV2Record()
+    ],
+    source: 'SemiAnalysis Rubin Ultra',
+    analysisType: 'company',
+    responseId: 'resp-v2-no-text',
+    runId: 'run-v2-no-text',
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'economist.response.v2');
+  assert.strictEqual(payload.records.length, 1);
+  assert.strictEqual(payload.decisionRecords.length, 1);
+  assert.ok(payload.text.includes('"schema":"economist.response.v2"'));
+  assert.ok(payload.text.includes('"spolka":"Camtek (CAMT:NASDAQ)"'));
+  assert.strictEqual(payload.decisionRecords[0].company, 'Camtek (CAMT:NASDAQ)');
+  assert.strictEqual(payload.decisionRecords[0].qualityState, 'ELITE');
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'economist.response.v2');
+  assert.strictEqual(outbound.records.length, 1);
+  assert.strictEqual(outbound.decisionRecords.length, 1);
+  assert.ok(outbound.text.includes('"schema":"economist.response.v2"'));
+  assert.strictEqual(outbound.decisionRecords[0].company, 'Camtek (CAMT:NASDAQ)');
+}
+
+function testOutboundStructuredV2WithoutTextAcceptsDirectRecords() {
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload({
+    schema: 'economist.response.v2',
+    text: '',
+    records: [
+      makeStructuredV2Record({
+        decision_role: 'SECONDARY',
+        fields: {
+          spolka: 'AT&S (ATS:VIE)',
+          status_decyzji: 'WATCH'
+        }
+      })
+    ],
+    source: 'SemiAnalysis Rubin Ultra',
+    analysisType: 'company',
+    responseId: 'resp-outbound-v2-no-text',
+    runId: 'run-outbound-v2-no-text',
+    conversationUrl: ' https://chatgpt.com/c/abc ',
+    conversationLogs: [{ role: 'assistant', content: 'structured payload' }],
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(outbound.schema, 'economist.response.v2');
+  assert.strictEqual(outbound.records.length, 1);
+  assert.strictEqual(outbound.decisionRecords.length, 1);
+  assert.strictEqual(outbound.records[0].decision_role, 'SECONDARY');
+  assert.strictEqual(outbound.conversationUrl, 'https://chatgpt.com/c/abc');
+  assert.strictEqual(outbound.conversationLogCount, 1);
+  assert.ok(outbound.text.includes('"spolka":"AT&S (ATS:VIE)"'));
+  assert.strictEqual(outbound.decisionRecords[0].company, 'AT&S (ATS:VIE)');
+}
+
+function testDispatchPayloadPreservesChatGptComputationTelemetry() {
+  const payload = context.normalizeWatchlistDispatchPayload({
+    schema: 'economist.response.v2',
+    text: '',
+    records: [makeStructuredV2Record()],
+    source: 'SemiAnalysis Rubin Ultra',
+    analysisType: 'company',
+    responseId: 'resp-chatgpt-telemetry',
+    runId: 'run-chatgpt-telemetry',
+    timestamp: 1_710_000_000_000,
+    composerThinkingEffort: ' HEAVY ',
+    chatGptModeKind: 'Thinking',
+    chatGptPlanHint: ' Pro ',
+    chatGptModeLabel: ' Thinking ',
+    chatGptModelSwitcherLabel: ' ChatGPT Pro ',
+    chatGptThinkingEffortDetected: ' HEAVY ',
+    chatGptThinkingEffortLabel: ' Heavy ',
+    chatGptComputationLabel: ' ChatGPT Pro | Thinking | Heavy ',
+    chatGptComputationDetectedAt: 1_710_000_123_456
+  });
+
+  assert.strictEqual(payload.schema, 'economist.response.v2');
+  assert.strictEqual(payload.composerThinkingEffort, 'heavy');
+  assert.strictEqual(payload.chatGptModeKind, 'thinking');
+  assert.strictEqual(payload.chatGptPlanHint, 'pro');
+  assert.strictEqual(payload.chatGptModeLabel, 'Thinking');
+  assert.strictEqual(payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
+  assert.strictEqual(payload.chatGptThinkingEffortDetected, 'heavy');
+  assert.strictEqual(payload.chatGptThinkingEffortLabel, 'Heavy');
+  assert.strictEqual(payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
+  assert.strictEqual(payload.chatGptComputationDetectedAt, 1_710_000_123_456);
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.composerThinkingEffort, 'heavy');
+  assert.strictEqual(outbound.chatGptModeKind, 'thinking');
+  assert.strictEqual(outbound.chatGptPlanHint, 'pro');
+  assert.strictEqual(outbound.chatGptModeLabel, 'Thinking');
+  assert.strictEqual(outbound.chatGptModelSwitcherLabel, 'ChatGPT Pro');
+  assert.strictEqual(outbound.chatGptThinkingEffortDetected, 'heavy');
+  assert.strictEqual(outbound.chatGptThinkingEffortLabel, 'Heavy');
+  assert.strictEqual(outbound.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
+  assert.strictEqual(outbound.chatGptComputationDetectedAt, 1_710_000_123_456);
 }
 
 function main() {
@@ -476,6 +748,10 @@ function main() {
   testFallbackMapperPreservesKpiScorecard();
   testStructuredV2PayloadPreservesRecords();
   testStructuredJsonDispatchPayload();
+  testStructuredJsonDispatchPayloadBackfillsAliasFields();
+  testStructuredV2DispatchWithoutTextSynthesizesPayloadText();
+  testOutboundStructuredV2WithoutTextAcceptsDirectRecords();
+  testDispatchPayloadPreservesChatGptComputationTelemetry();
   console.log('test-watchlist-dispatch-decision-contract.js: ok');
 }
 

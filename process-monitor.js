@@ -122,6 +122,7 @@ const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
   invalid_response: 'Za krotka odpowiedz',
+  limit_or_restriction: 'Limit/restriction w ChatGPT',
   missing_assistant_reply: 'Brak odpowiedzi asystenta',
   textarea_not_found: 'Nie znaleziono pola wpisywania',
   execute_script_failed: 'Blad executeScript',
@@ -359,6 +360,63 @@ function shortenText(value, maxLength = 180) {
   if (!text) return '';
   if (text.length <= maxLength) return text;
   return `${text.slice(0, maxLength)}...`;
+}
+
+function humanizeChatGptModeKind(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'thinking') return 'Thinking';
+  if (normalized === 'instant') return 'Instant';
+  if (normalized === 'auto') return 'Auto';
+  return '';
+}
+
+function humanizeThinkingEffort(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === 'light') return 'Light';
+  if (normalized === 'standard') return 'Standard';
+  if (normalized === 'extended') return 'Extended';
+  if (normalized === 'heavy') return 'Heavy';
+  return '';
+}
+
+function formatChatGptComputationSummary(process) {
+  if (!process || typeof process !== 'object') return '';
+  const explicitLabel = typeof process.chatGptComputationLabel === 'string'
+    ? process.chatGptComputationLabel.trim()
+    : '';
+  const modelLabel = typeof process.chatGptModelSwitcherLabel === 'string'
+    ? process.chatGptModelSwitcherLabel.trim()
+    : '';
+  const modeLabelRaw = typeof process.chatGptModeLabel === 'string'
+    ? process.chatGptModeLabel.trim()
+    : '';
+  const modeLabel = modeLabelRaw || humanizeChatGptModeKind(process.chatGptModeKind);
+  const detectedEffort = humanizeThinkingEffort(process.chatGptThinkingEffortDetected);
+  const detectedEffortLabelRaw = typeof process.chatGptThinkingEffortLabel === 'string'
+    ? process.chatGptThinkingEffortLabel.trim()
+    : '';
+  const detectedEffortLabel = detectedEffortLabelRaw || detectedEffort;
+  const requestedEffort = humanizeThinkingEffort(process.composerThinkingEffort);
+  const planHint = typeof process.chatGptPlanHint === 'string'
+    ? process.chatGptPlanHint.trim().toLowerCase()
+    : '';
+
+  const parts = [];
+  if (modelLabel) parts.push(`Model ${modelLabel}`);
+  if (!modelLabel && planHint === 'pro') parts.push('Plan Pro');
+  if (modeLabel) parts.push(`Tryb ${modeLabel}`);
+  if (detectedEffortLabel) {
+    let effortPart = `Thinking ${detectedEffortLabel}`;
+    if (requestedEffort && requestedEffort !== detectedEffort) {
+      effortPart += ` (req ${requestedEffort})`;
+    }
+    parts.push(effortPart);
+  } else if (requestedEffort) {
+    parts.push(`Thinking req ${requestedEffort}`);
+  }
+
+  if (parts.length > 0) return parts.join(' | ');
+  return explicitLabel;
 }
 
 function getPersistenceLogLines(process, maxLines = 4) {
@@ -1819,9 +1877,14 @@ function updateProcessCard(entry, process, isSelected) {
   }
 
   refs.timingMeta.textContent = `Start: ${formatClock(startedAt)} | Ostatni: ${formatClock(updatedAt)}`;
-  refs.locationMeta.textContent = lifecycleStatus === 'queued' && tabLabel === '-' && windowLabel === '-'
+  const locationBase = lifecycleStatus === 'queued' && tabLabel === '-' && windowLabel === '-'
     ? 'Oczekuje na wolny slot'
     : `Tab ${tabLabel} | Okno ${windowLabel}`;
+  const chatGptComputationMeta = formatChatGptComputationSummary(process);
+  refs.locationMeta.textContent = chatGptComputationMeta
+    ? `${locationBase} | ${shortenText(chatGptComputationMeta, 120)}`
+    : locationBase;
+  refs.locationMeta.title = chatGptComputationMeta || '';
 
   const reasonText = buildProcessReasonLine(process);
 
@@ -1834,8 +1897,9 @@ function updateProcessCard(entry, process, isSelected) {
   }
 
   const needsAction = actionRequired !== 'none';
-  refs.actions.style.display = needsAction ? 'flex' : 'none';
-  if (!needsAction) {
+  const decisionActionsVisible = actionRequired === 'continue_button';
+  refs.actions.style.display = decisionActionsVisible ? 'flex' : 'none';
+  if (!decisionActionsVisible) {
     refs.waitBtn.disabled = false;
     refs.skipBtn.disabled = false;
   }
@@ -1843,7 +1907,11 @@ function updateProcessCard(entry, process, isSelected) {
   if (needsAction) {
     refs.hint.textContent = actionRequired === 'continue_button'
       ? 'Kliknij Continue w ChatGPT albo wybierz akcje.'
-      : 'Wybierz akcje lub otworz okno ChatGPT.';
+      : (
+        actionRequired === 'rate_limit'
+          ? 'Otworz ChatGPT i wznow pozniej przez repeat/resume.'
+          : 'Otworz okno ChatGPT i wykonaj wymagana akcje.'
+      );
     refs.hint.style.display = 'block';
   } else {
     refs.hint.textContent = '';
@@ -2967,10 +3035,18 @@ function renderDetails() {
   priorityMeta.className = 'details-subtitle';
   const priorityModel = getProcessPriorityModel(selected);
   priorityMeta.textContent = `Priorytet: ${priorityModel.code} ${priorityModel.label} (score=${priorityModel.score})`;
+  const chatGptComputationMeta = formatChatGptComputationSummary(selected);
 
   header.appendChild(titleWrap);
   header.appendChild(metaWrap);
   header.appendChild(priorityMeta);
+
+  if (chatGptComputationMeta) {
+    const computationLine = document.createElement('div');
+    computationLine.className = 'details-subtitle';
+    computationLine.textContent = `ChatGPT: ${chatGptComputationMeta}`;
+    header.appendChild(computationLine);
+  }
 
   const dbBadgeModel = getDatabaseBadgeModel(selected);
   if (dbBadgeModel.visible && dbBadgeModel.detailText) {
