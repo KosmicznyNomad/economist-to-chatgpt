@@ -207,6 +207,18 @@ const context = {
       stageIndex: Number.isInteger(stageIndex) ? stageIndex : null
     };
   },
+  normalizeComposerThinkingEffort(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeChatGptModeKind(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeChatGptPlanHint(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeChatGptMonitoringLabel(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
   normalizeChatConversationUrl(value) {
     return typeof value === 'string' ? value.trim() : '';
   },
@@ -242,6 +254,7 @@ vm.createContext(context);
   'buildOperatorStatusText',
   'normalizeProcessStatus',
   'isClosedProcessStatus',
+  'normalizeProcessWindowCloseState',
   'normalizeProcessRecord',
   'applyQueuePositionsToProcesses'
 ].forEach((functionName) => {
@@ -299,10 +312,47 @@ function testApplyQueuePositionsToProcessesAddsAndClearsPositions() {
   assert.strictEqual('queuePosition' in applied[1], false);
 }
 
+function testNormalizeProcessRecordNormalizesPerformanceTelemetry() {
+  const normalized = context.normalizeProcessRecord({
+    id: 'run-4',
+    status: 'running',
+    phase: 'response_wait',
+    currentPrompt: 2,
+    timestamp: 5000,
+    performanceTelemetry: {
+      phaseTotalsMs: {
+        prompt_send: 1800,
+        bogus_phase: 999
+      },
+      promptTimings: {
+        count: 2,
+        firstAt: 1200,
+        lastAt: 4200,
+        lastPromptNumber: 2,
+        gapCount: 1,
+        totalGapMs: 3000,
+        maxGapMs: 3000,
+        lastGapMs: 3000
+      },
+      phaseTransitionCount: 4
+    }
+  });
+
+  assert(normalized?.performanceTelemetry);
+  assert.deepStrictEqual(normalized.performanceTelemetry.phaseTotalsMs, {
+    prompt_send: 1800
+  });
+  assert.strictEqual(normalized.performanceTelemetry.promptTimings.count, 2);
+  assert.strictEqual(normalized.performanceTelemetry.promptTimings.gapCount, 1);
+  assert.strictEqual(normalized.performanceTelemetry.promptTimings.lastPromptNumber, 2);
+  assert.strictEqual(normalized.performanceTelemetry.phaseTransitionCount, 4);
+}
+
 function main() {
   testNormalizeProcessRecordBackfillsLegacyFields();
   testNormalizeProcessRecordPreservesOpenActionRequired();
   testApplyQueuePositionsToProcessesAddsAndClearsPositions();
+  testNormalizeProcessRecordNormalizesPerformanceTelemetry();
   console.log('test-process-snapshot-normalization.js passed');
 }
 

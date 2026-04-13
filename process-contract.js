@@ -34,6 +34,26 @@
     'login_needed',
     'rate_limit'
   ]);
+  const PERFORMANCE_PHASE_STALL_THRESHOLDS_MS = Object.freeze({
+    queue_wait: 5 * 60 * 1000,
+    slot_reserved: 60 * 1000,
+    chat_open: 90 * 1000,
+    editor_ready: 90 * 1000,
+    payload_send: 2 * 60 * 1000,
+    prompt_send: 2 * 60 * 1000,
+    response_wait: 15 * 60 * 1000,
+    capture_validate: 60 * 1000,
+    save_local: 30 * 1000,
+    dispatch_remote: 60 * 1000,
+    verify_remote: 2 * 60 * 1000
+  });
+  const PERFORMANCE_STALE_ACTIVITY_FLOOR_MS = 2 * 60 * 1000;
+  const PERFORMANCE_PROMPT_GAP_WARN_MS = 60 * 1000;
+  const PERFORMANCE_PROMPT_GAP_ERROR_MS = 4 * 60 * 1000;
+  const PERFORMANCE_FINALIZATION_WARN_MS = 20 * 1000;
+  const PERFORMANCE_FINALIZATION_ERROR_MS = 60 * 1000;
+  const PERFORMANCE_WINDOW_CLOSE_WARN_MS = 15 * 1000;
+  const PERFORMANCE_WINDOW_CLOSE_ERROR_MS = 45 * 1000;
 
   const LIFECYCLE_SET = new Set(LIFECYCLE_STATUSES);
   const PHASE_SET = new Set(PHASES);
@@ -43,6 +63,19 @@
   function normalizeText(value, fallback = '') {
     const normalized = typeof value === 'string' ? value.trim() : '';
     return normalized || fallback;
+  }
+
+  function normalizePositiveInteger(value, fallback = null) {
+    return Number.isInteger(value) && value > 0 ? value : fallback;
+  }
+
+  function normalizeNonNegativeInteger(value, fallback = 0) {
+    return Number.isInteger(value) && value >= 0 ? value : fallback;
+  }
+
+  function clampDurationMs(value) {
+    if (!Number.isFinite(value)) return 0;
+    return Math.max(0, Math.round(value));
   }
 
   function normalizeCodeToken(value) {
@@ -347,6 +380,369 @@
     return progressLabel ? `${progressLabel}. W trakcie.` : 'Proces w trakcie.';
   }
 
+  function normalizePerformancePhaseTotals(rawTotals) {
+    const totals = rawTotals && typeof rawTotals === 'object' ? rawTotals : {};
+    const normalized = {};
+    for (const phase of PHASES) {
+      const value = clampDurationMs(totals?.[phase]);
+      if (value > 0) normalized[phase] = value;
+    }
+    return normalized;
+  }
+
+  function normalizePromptTimingTelemetry(rawPromptTimings) {
+    const promptTimings = rawPromptTimings && typeof rawPromptTimings === 'object'
+      ? rawPromptTimings
+      : {};
+    const count = normalizeNonNegativeInteger(promptTimings.count, 0);
+    const gapCount = normalizeNonNegativeInteger(promptTimings.gapCount, 0);
+    const totalGapMs = clampDurationMs(promptTimings.totalGapMs);
+    const maxGapMs = clampDurationMs(promptTimings.maxGapMs);
+    const lastGapMs = clampDurationMs(promptTimings.lastGapMs);
+    const firstAt = normalizePositiveInteger(promptTimings.firstAt);
+    const lastAt = normalizePositiveInteger(promptTimings.lastAt);
+    const lastPromptNumber = normalizePositiveInteger(promptTimings.lastPromptNumber);
+    const normalized = {
+      count,
+      gapCount,
+      totalGapMs,
+      maxGapMs: Math.max(maxGapMs, lastGapMs),
+      lastGapMs
+    };
+    if (firstAt !== null) normalized.firstAt = firstAt;
+    if (lastAt !== null) normalized.lastAt = lastAt;
+    if (lastPromptNumber !== null) normalized.lastPromptNumber = lastPromptNumber;
+    return normalized;
+  }
+
+  function normalizeProcessPerformanceTelemetry(rawTelemetry) {
+    if (!rawTelemetry || typeof rawTelemetry !== 'object' || Array.isArray(rawTelemetry)) {
+      return null;
+    }
+    const phaseTotalsMs = normalizePerformancePhaseTotals(rawTelemetry.phaseTotalsMs);
+    const promptTimings = normalizePromptTimingTelemetry(rawTelemetry.promptTimings);
+    const phaseTransitionCount = normalizeNonNegativeInteger(rawTelemetry.phaseTransitionCount, 0);
+    const lastPhaseChangeAt = normalizePositiveInteger(rawTelemetry.lastPhaseChangeAt);
+    const normalized = {
+      phaseTotalsMs,
+      promptTimings,
+      phaseTransitionCount
+    };
+    if (lastPhaseChangeAt !== null) normalized.lastPhaseChangeAt = lastPhaseChangeAt;
+    return normalized;
+  }
+
+  function clonePerformanceTelemetry(rawTelemetry) {
+    const normalized = normalizeProcessPerformanceTelemetry(rawTelemetry);
+    if (!normalized) {
+      return {
+        phaseTotalsMs: {},
+        promptTimings: {
+          count: 0,
+          gapCount: 0,
+          totalGapMs: 0,
+          maxGapMs: 0,
+          lastGapMs: 0
+        },
+        phaseTransitionCount: 0
+      };
+    }
+    return {
+      phaseTotalsMs: { ...normalized.phaseTotalsMs },
+      promptTimings: { ...normalized.promptTimings },
+      phaseTransitionCount: normalized.phaseTransitionCount,
+      ...(Number.isInteger(normalized.lastPhaseChangeAt) ? { lastPhaseChangeAt: normalized.lastPhaseChangeAt } : {})
+    };
+  }
+
+  function mergeProcessPerformanceTelemetry(existingProcess = {}, patch = {}, options = {}) {
+    const existing = existingProcess && typeof existingProcess === 'object' ? existingProcess : {};
+    const nextPatch = patch && typeof patch === 'object' ? patch : {};
+    const nowTs = normalizePositiveInteger(options?.nowTs, Date.now());
+    const existingLifecycleStatus = normalizeLifecycleStatus(
+      existing.lifecycleStatus || existing.status,
+      'starting'
+    );
+    const nextLifecycleStatus = normalizeLifecycleStatus(
+      options?.nextLifecycleStatus || nextPatch.lifecycleStatus || nextPatch.status || existingLifecycleStatus,
+      existingLifecycleStatus
+    );
+    const previousPhase = normalizePhase(
+      options?.previousPhase || existing.phase || '',
+      defaultPhaseForLifecycle(existingLifecycleStatus)
+    );
+    const nextPhase = normalizePhase(
+      options?.nextPhase || nextPatch.phase || '',
+      previousPhase || defaultPhaseForLifecycle(nextLifecycleStatus)
+    );
+    const telemetry = clonePerformanceTelemetry(nextPatch.performanceTelemetry || existing.performanceTelemetry);
+    const previousClosed = isClosedLifecycleStatus(existingLifecycleStatus);
+    const nextClosed = isClosedLifecycleStatus(nextLifecycleStatus);
+    const previousPhaseStartedAt = normalizePositiveInteger(
+      existing.phaseStartedAt,
+      normalizePositiveInteger(existing.lastActivityAt, nowTs)
+    );
+
+    if (!previousClosed && previousPhase && (previousPhase !== nextPhase || nextClosed)) {
+      const phaseElapsedMs = clampDurationMs(nowTs - previousPhaseStartedAt);
+      if (phaseElapsedMs > 0) {
+        telemetry.phaseTotalsMs[previousPhase] = clampDurationMs(
+          normalizeNonNegativeInteger(telemetry.phaseTotalsMs?.[previousPhase], 0) + phaseElapsedMs
+        );
+      }
+      if (previousPhase !== nextPhase) {
+        telemetry.phaseTransitionCount = normalizeNonNegativeInteger(telemetry.phaseTransitionCount, 0) + 1;
+        telemetry.lastPhaseChangeAt = nowTs;
+      }
+    }
+
+    const promptTimings = normalizePromptTimingTelemetry(telemetry.promptTimings);
+    const nextPromptNumber = normalizePositiveInteger(
+      nextPatch.currentPrompt,
+      normalizePositiveInteger(existing.currentPrompt)
+    );
+    const promptStartDetected = (
+      nextPhase === 'prompt_send'
+      && nextPromptNumber !== null
+      && (
+        previousPhase !== 'prompt_send'
+        || nextPromptNumber !== normalizePositiveInteger(existing.currentPrompt)
+      )
+    );
+
+    if (promptStartDetected) {
+      const previousPromptNumber = normalizePositiveInteger(promptTimings.lastPromptNumber);
+      const previousPromptAt = normalizePositiveInteger(promptTimings.lastAt);
+      if (previousPromptAt !== null && previousPromptNumber !== null && previousPromptNumber !== nextPromptNumber) {
+        const gapMs = clampDurationMs(nowTs - previousPromptAt);
+        if (gapMs > 0) {
+          promptTimings.gapCount = normalizeNonNegativeInteger(promptTimings.gapCount, 0) + 1;
+          promptTimings.totalGapMs = clampDurationMs(
+            normalizeNonNegativeInteger(promptTimings.totalGapMs, 0) + gapMs
+          );
+          promptTimings.maxGapMs = Math.max(normalizeNonNegativeInteger(promptTimings.maxGapMs, 0), gapMs);
+          promptTimings.lastGapMs = gapMs;
+        }
+      }
+      if (normalizePositiveInteger(promptTimings.firstAt) === null) {
+        promptTimings.firstAt = nowTs;
+      }
+      if (previousPromptNumber !== nextPromptNumber) {
+        promptTimings.count = normalizeNonNegativeInteger(promptTimings.count, 0) + 1;
+      }
+      promptTimings.lastAt = nowTs;
+      promptTimings.lastPromptNumber = nextPromptNumber;
+    }
+
+    telemetry.promptTimings = promptTimings;
+    return telemetry;
+  }
+
+  function buildLivePhaseTotals(process = {}, telemetry = null, options = {}) {
+    const nowTs = normalizePositiveInteger(options?.nowTs, Date.now());
+    const totals = {
+      ...(telemetry?.phaseTotalsMs && typeof telemetry.phaseTotalsMs === 'object'
+        ? telemetry.phaseTotalsMs
+        : {})
+    };
+    const lifecycleStatus = normalizeLifecycleStatus(
+      process.lifecycleStatus || process.status,
+      'running'
+    );
+    const phase = normalizePhase(process.phase || '', defaultPhaseForLifecycle(lifecycleStatus));
+    if (isClosedLifecycleStatus(lifecycleStatus) || !phase) return totals;
+    const phaseStartedAt = normalizePositiveInteger(process.phaseStartedAt);
+    if (phaseStartedAt === null) return totals;
+    const livePhaseMs = clampDurationMs(nowTs - phaseStartedAt);
+    if (livePhaseMs <= 0) return totals;
+    totals[phase] = clampDurationMs(normalizeNonNegativeInteger(totals?.[phase], 0) + livePhaseMs);
+    return totals;
+  }
+
+  function buildProcessPerformanceProblems(process = {}, snapshot = {}, options = {}) {
+    const nowTs = normalizePositiveInteger(options?.nowTs, Date.now());
+    const lifecycleStatus = normalizeLifecycleStatus(
+      process.lifecycleStatus || process.status,
+      'running'
+    );
+    const phase = normalizePhase(process.phase || '', defaultPhaseForLifecycle(lifecycleStatus));
+    const actionRequired = normalizeActionRequired(
+      process.actionRequired || '',
+      deriveActionRequiredFromLegacy(process)
+    );
+    const problems = [];
+    const addProblem = (severity, code, label, valueMs = null) => {
+      problems.push({ severity, code, label, ...(Number.isInteger(valueMs) ? { valueMs } : {}) });
+    };
+
+    const phaseThresholdMs = normalizePositiveInteger(PERFORMANCE_PHASE_STALL_THRESHOLDS_MS?.[phase]);
+    if (
+      !isClosedLifecycleStatus(lifecycleStatus)
+      && phase
+      && phaseThresholdMs !== null
+      && Number.isInteger(snapshot.phaseElapsedMs)
+      && snapshot.phaseElapsedMs >= phaseThresholdMs
+    ) {
+      addProblem(
+        snapshot.phaseElapsedMs >= (phaseThresholdMs * 2) ? 'error' : 'warn',
+        'phase_slow',
+        `Faza ${phase} trwa zbyt dlugo`,
+        snapshot.phaseElapsedMs
+      );
+    }
+
+    const staleThresholdMs = Math.max(
+      PERFORMANCE_STALE_ACTIVITY_FLOOR_MS,
+      Math.round((phaseThresholdMs || PERFORMANCE_STALE_ACTIVITY_FLOOR_MS) / 2)
+    );
+    if (
+      !isClosedLifecycleStatus(lifecycleStatus)
+      && actionRequired === 'none'
+      && Number.isInteger(snapshot.lastActivityAgeMs)
+      && snapshot.lastActivityAgeMs >= staleThresholdMs
+    ) {
+      addProblem(
+        snapshot.lastActivityAgeMs >= (staleThresholdMs * 2) ? 'error' : 'warn',
+        'stale_activity',
+        'Brak aktywnosci procesu',
+        snapshot.lastActivityAgeMs
+      );
+    }
+
+    if (Number.isInteger(snapshot.promptGapMaxMs) && snapshot.promptGapMaxMs >= PERFORMANCE_PROMPT_GAP_WARN_MS) {
+      addProblem(
+        snapshot.promptGapMaxMs >= PERFORMANCE_PROMPT_GAP_ERROR_MS ? 'error' : 'warn',
+        'prompt_gap',
+        'Duzy odstep miedzy promptami',
+        snapshot.promptGapMaxMs
+      );
+    }
+
+    if (
+      Number.isInteger(snapshot.captureToPersistenceMs)
+      && snapshot.captureToPersistenceMs >= PERFORMANCE_FINALIZATION_WARN_MS
+    ) {
+      addProblem(
+        snapshot.captureToPersistenceMs >= PERFORMANCE_FINALIZATION_ERROR_MS ? 'error' : 'warn',
+        'finalization_slow',
+        'Finalizacja i wysylka danych sa opoznione',
+        snapshot.captureToPersistenceMs
+      );
+    }
+
+    if (
+      Number.isInteger(snapshot.windowCloseMs)
+      && snapshot.windowClosePending === true
+      && snapshot.windowCloseMs >= PERFORMANCE_WINDOW_CLOSE_WARN_MS
+    ) {
+      addProblem(
+        snapshot.windowCloseMs >= PERFORMANCE_WINDOW_CLOSE_ERROR_MS ? 'error' : 'warn',
+        'window_close_slow',
+        'Domkniecie okna procesu jest opoznione',
+        snapshot.windowCloseMs
+      );
+    }
+
+    const injectMetrics = process?.injectMetrics && typeof process.injectMetrics === 'object'
+      ? process.injectMetrics
+      : null;
+    const sendFailures = normalizeNonNegativeInteger(injectMetrics?.sendFailures, 0)
+      + normalizeNonNegativeInteger(injectMetrics?.sendHardFail, 0);
+    const responseTimeouts = normalizeNonNegativeInteger(injectMetrics?.responseTimeouts, 0);
+    const invalidResponses = normalizeNonNegativeInteger(injectMetrics?.responseInvalid, 0);
+
+    if (sendFailures > 0) {
+      addProblem('warn', 'send_failures', `Wystapily problemy z wysylaniem (${sendFailures})`);
+    }
+    if (responseTimeouts > 0) {
+      addProblem('warn', 'response_timeouts', `Wystapily timeouty odpowiedzi (${responseTimeouts})`);
+    }
+    if (invalidResponses > 0) {
+      addProblem('warn', 'invalid_responses', `Wystapily niepoprawne odpowiedzi (${invalidResponses})`);
+    }
+    if (actionRequired === 'rate_limit') {
+      addProblem('error', 'rate_limit', 'ChatGPT zwrocil limit lub restriction');
+    }
+
+    return problems;
+  }
+
+  function buildProcessPerformanceSnapshot(process = {}, options = {}) {
+    const nowTs = normalizePositiveInteger(options?.nowTs, Date.now());
+    const lifecycleStatus = normalizeLifecycleStatus(
+      process.lifecycleStatus || process.status,
+      'running'
+    );
+    const phase = normalizePhase(process.phase || '', defaultPhaseForLifecycle(lifecycleStatus));
+    const telemetry = clonePerformanceTelemetry(process.performanceTelemetry);
+    const phaseTotalsMs = buildLivePhaseTotals(process, telemetry, { nowTs });
+    const startedAt = normalizePositiveInteger(process.startedAt);
+    const finishedAt = normalizePositiveInteger(process.finishedAt);
+    const phaseStartedAt = normalizePositiveInteger(process.phaseStartedAt);
+    const lastActivityAt = normalizePositiveInteger(
+      process.lastActivityAt,
+      normalizePositiveInteger(process.timestamp)
+    );
+    const runtimeEndAt = finishedAt !== null && isClosedLifecycleStatus(lifecycleStatus)
+      ? finishedAt
+      : nowTs;
+    const runtimeMs = startedAt !== null ? clampDurationMs(runtimeEndAt - startedAt) : null;
+    const phaseElapsedMs = (
+      !isClosedLifecycleStatus(lifecycleStatus)
+      && phaseStartedAt !== null
+      && phase
+    )
+      ? clampDurationMs(nowTs - phaseStartedAt)
+      : null;
+    const lastActivityAgeMs = lastActivityAt !== null ? clampDurationMs(nowTs - lastActivityAt) : null;
+    const promptTimings = normalizePromptTimingTelemetry(telemetry.promptTimings);
+    const promptGapAvgMs = promptTimings.gapCount > 0
+      ? Math.round(promptTimings.totalGapMs / promptTimings.gapCount)
+      : null;
+    const timeSinceLastPromptMs = normalizePositiveInteger(promptTimings.lastAt) !== null
+      ? clampDurationMs(nowTs - promptTimings.lastAt)
+      : null;
+
+    const completedResponseCapturedAt = normalizePositiveInteger(process.completedResponseCapturedAt);
+    const persistenceUpdatedAt = normalizePositiveInteger(process?.persistenceStatus?.updatedAt);
+    const captureToPersistenceMs = completedResponseCapturedAt !== null
+      ? clampDurationMs((persistenceUpdatedAt || runtimeEndAt) - completedResponseCapturedAt)
+      : null;
+    const windowCloseRequestedAt = normalizePositiveInteger(process?.windowClose?.requestedAt);
+    const windowCloseClosedAt = normalizePositiveInteger(process?.windowClose?.closedAt);
+    const windowClosePending = windowCloseRequestedAt !== null && windowCloseClosedAt === null;
+    const windowCloseMs = windowCloseRequestedAt !== null
+      ? clampDurationMs((windowCloseClosedAt || nowTs) - windowCloseRequestedAt)
+      : null;
+
+    const snapshot = {
+      lifecycleStatus,
+      phase,
+      runtimeMs,
+      phaseElapsedMs,
+      lastActivityAgeMs,
+      phaseTotalsMs,
+      phaseTransitionCount: normalizeNonNegativeInteger(telemetry.phaseTransitionCount, 0),
+      promptCount: normalizeNonNegativeInteger(promptTimings.count, 0),
+      promptGapCount: normalizeNonNegativeInteger(promptTimings.gapCount, 0),
+      promptGapAvgMs,
+      promptGapMaxMs: normalizeNonNegativeInteger(promptTimings.maxGapMs, 0) || null,
+      promptLastGapMs: normalizeNonNegativeInteger(promptTimings.lastGapMs, 0) || null,
+      timeSinceLastPromptMs,
+      captureToPersistenceMs,
+      windowCloseMs,
+      windowClosePending
+    };
+    const problems = buildProcessPerformanceProblems(process, snapshot, { nowTs });
+    return {
+      ...snapshot,
+      problems,
+      highestSeverity: problems.some((entry) => entry?.severity === 'error')
+        ? 'error'
+        : (problems.some((entry) => entry?.severity === 'warn') ? 'warn' : 'ok')
+    };
+  }
+
   function getProcessContract(process = {}) {
     const lifecycleStatus = normalizeLifecycleStatus(
       process.lifecycleStatus || process.status,
@@ -383,7 +779,9 @@
     ACTION_REQUIRED_VALUES,
     LIFECYCLE_STATUSES,
     PHASES,
+    PERFORMANCE_PHASE_STALL_THRESHOLDS_MS,
     buildOperatorStatusText,
+    buildProcessPerformanceSnapshot,
     buildStageProgressLabel,
     defaultPhaseForLifecycle,
     deriveActionRequiredFromLegacy,
@@ -394,9 +792,11 @@
     isFailedLifecycleStatus,
     legacyStatusFromLifecycleStatus,
     lifecycleStatusFromLegacyStatus,
+    mergeProcessPerformanceTelemetry,
     normalizeActionRequired,
     normalizeCodeToken,
     normalizeLifecycleStatus,
-    normalizePhase
+    normalizePhase,
+    normalizeProcessPerformanceTelemetry
   };
 });

@@ -41,6 +41,9 @@ let marketSuggestionItems = [];
 let marketSuggestionActiveIndex = -1;
 let companySortMode = 'latest';
 let lastLoadedResponses = [];
+let scheduledResponsesReloadTimer = null;
+let responsesReloadInFlight = false;
+let responsesReloadQueued = false;
 
 // Clipboard copy counters (in-memory per tab open).
 const clipboardCounters = {
@@ -651,6 +654,37 @@ async function readResponsesFromStorage() {
 setupCompanyInteractions();
 setupMarketInteractions();
 loadResponses();
+
+function scheduleLoadResponses(reason = 'manual', delayMs = 0) {
+  if (scheduledResponsesReloadTimer !== null) {
+    clearTimeout(scheduledResponsesReloadTimer);
+    scheduledResponsesReloadTimer = null;
+  }
+  const nextDelayMs = Number.isInteger(delayMs) && delayMs >= 0 ? delayMs : 0;
+  scheduledResponsesReloadTimer = setTimeout(() => {
+    scheduledResponsesReloadTimer = null;
+    void runScheduledLoadResponses(reason);
+  }, nextDelayMs);
+}
+
+async function runScheduledLoadResponses(reason = 'manual') {
+  if (responsesReloadInFlight) {
+    responsesReloadQueued = true;
+    return;
+  }
+  responsesReloadInFlight = true;
+  try {
+    await loadResponses();
+  } catch (error) {
+    console.warn('[responses.js] Scheduled reload failed:', reason, error);
+  } finally {
+    responsesReloadInFlight = false;
+    if (responsesReloadQueued) {
+      responsesReloadQueued = false;
+      scheduleLoadResponses('queued_follow_up', 120);
+    }
+  }
+}
 
 // Obsługa przycisku "Wyczyść wszystkie"
 if (clearBtn) {
@@ -1950,7 +1984,23 @@ chrome.storage.onChanged.addListener((changes, namespace) => {
     console.log('[responses.js] Responses changed, reloading...');
     console.log(`   Old length: ${changes[RESPONSE_STORAGE_KEY].oldValue?.length || 0}`);
     console.log(`   New length: ${changes[RESPONSE_STORAGE_KEY].newValue?.length || 0}`);
-    loadResponses();
+    scheduleLoadResponses('storage_changed', 100);
   }
 });
+
+if (typeof document?.addEventListener === 'function') {
+  document.addEventListener('visibilitychange', () => {
+    if (!document.hidden) {
+      scheduleLoadResponses('visibility_change', 0);
+    }
+  });
+}
+
+if (typeof window?.addEventListener === 'function') {
+  ['focus', 'pageshow', 'online'].forEach((eventName) => {
+    window.addEventListener(eventName, () => {
+      scheduleLoadResponses(eventName, 0);
+    });
+  });
+}
 
