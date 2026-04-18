@@ -1,4 +1,4 @@
-﻿const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
+const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
 const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const CHAT_GPT_HOSTS = new Set([
@@ -34871,8 +34871,6 @@ function waitForTabComplete(tabId) {
     });
   });
 }
-
-
 
 
 
