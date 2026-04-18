@@ -224,7 +224,8 @@ async function testHeartbeatUsesRealProgressTimestamp() {
     PROCESS_MONITOR_HEARTBEAT: {
       touchIntervalMs: 30_000,
       staleTtlMs: 90_000,
-      staleWarnCooldownMs: 60_000
+      staleWarnCooldownMs: 60_000,
+      autoStopNoContextTtlMs: 24 * 60 * 60 * 1000
     },
     processMonitorHeartbeatSweepInProgress: false,
     processStaleWarnLastEmitTsByRunId: new Map(),
@@ -240,6 +241,11 @@ async function testHeartbeatUsesRealProgressTimestamp() {
     pruneProcessRecords: (items) => items,
     isClosedProcessStatus: (status) => status === 'completed' || status === 'failed' || status === 'stopped',
     isQueuedProcessStatus: (status) => status === 'queued',
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    shouldAttemptStaleFinalPromptRecovery: () => false,
     shouldEmitProcessStaleWarning: () => true,
     appendProcessHeartbeatStaleWarning: async (...args) => {
       warnings.push(args);
@@ -277,7 +283,8 @@ async function testHeartbeatStillFlagsOldProgressWhenRecordWasTouched() {
     PROCESS_MONITOR_HEARTBEAT: {
       touchIntervalMs: 30_000,
       staleTtlMs: 90_000,
-      staleWarnCooldownMs: 60_000
+      staleWarnCooldownMs: 60_000,
+      autoStopNoContextTtlMs: 24 * 60 * 60 * 1000
     },
     processMonitorHeartbeatSweepInProgress: false,
     processStaleWarnLastEmitTsByRunId: new Map(),
@@ -293,6 +300,11 @@ async function testHeartbeatStillFlagsOldProgressWhenRecordWasTouched() {
     pruneProcessRecords: (items) => items,
     isClosedProcessStatus: (status) => status === 'completed' || status === 'failed' || status === 'stopped',
     isQueuedProcessStatus: (status) => status === 'queued',
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    shouldAttemptStaleFinalPromptRecovery: () => false,
     shouldEmitProcessStaleWarning: () => true,
     appendProcessHeartbeatStaleWarning: async (...args) => {
       warnings.push(args);
@@ -315,6 +327,70 @@ async function testHeartbeatStillFlagsOldProgressWhenRecordWasTouched() {
   assert.strictEqual(result.staleDetected, 1);
   assert.strictEqual(warnings.length, 1);
   assert.strictEqual(touches.length, 0);
+}
+
+async function testHeartbeatAutoStopsLongStaleProcessWithoutLocalContext() {
+  const nowTs = 1_773_918_200_000;
+  const warnings = [];
+  const upserts = [];
+  const context = {
+    console,
+    Math,
+    Number,
+    Date: createFixedDate(nowTs),
+    PROCESS_MONITOR_HEARTBEAT: {
+      touchIntervalMs: 30_000,
+      staleTtlMs: 90_000,
+      staleWarnCooldownMs: 60_000,
+      autoStopNoContextTtlMs: 60_000
+    },
+    processMonitorHeartbeatSweepInProgress: false,
+    processStaleWarnLastEmitTsByRunId: new Map(),
+    processRegistry: new Map([
+      ['run-zombie', {
+        id: 'run-zombie',
+        status: 'running',
+        lifecycleStatus: 'running',
+        timestamp: nowTs - 2 * 60_000,
+        lastProgressAt: nowTs - 2 * 60_000
+      }]
+    ]),
+    ensureProcessRegistryReady: async () => {},
+    pruneProcessRecords: (items) => items,
+    isClosedProcessStatus: (status) => status === 'completed' || status === 'failed' || status === 'stopped',
+    isQueuedProcessStatus: (status) => status === 'queued',
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    shouldAttemptStaleFinalPromptRecovery: () => false,
+    shouldEmitProcessStaleWarning: () => true,
+    appendProcessHeartbeatStaleWarning: async (...args) => {
+      warnings.push(args);
+      return true;
+    },
+    getAnalysisQueueProcessActivityState: async () => ({ active: false, live: false, recent: false }),
+    upsertProcess: async (runId, patch) => {
+      upserts.push({ runId, patch });
+      return { id: runId, ...patch };
+    },
+    pruneProcessStaleWarnMap: () => {}
+  };
+
+  vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'getProcessLastActivityTimestamp'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'getProcessLastProgressTimestamp'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'runProcessMonitorHeartbeatSweep'), context);
+
+  const result = await context.runProcessMonitorHeartbeatSweep('test');
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.staleDetected, 1);
+  assert.strictEqual(result.autoStopped, 1);
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(upserts.length, 1);
+  assert.strictEqual(upserts[0].runId, 'run-zombie');
+  assert.strictEqual(upserts[0].patch.status, 'stopped');
+  assert.strictEqual(upserts[0].patch.reason, 'heartbeat_stale_no_context');
 }
 
 function testCompanyAuditFrontierSkipsFuturePrompts() {
@@ -370,6 +446,7 @@ function testCompanyAuditFrontierSkipsFuturePrompts() {
 async function main() {
   await testHeartbeatUsesRealProgressTimestamp();
   await testHeartbeatStillFlagsOldProgressWhenRecordWasTouched();
+  await testHeartbeatAutoStopsLongStaleProcessWithoutLocalContext();
   testCompanyAuditFrontierSkipsFuturePrompts();
   console.log('test-process-safety-fixes: ok');
 }

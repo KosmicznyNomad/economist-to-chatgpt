@@ -2,7 +2,6 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const ProcessContractUtils = require('./process-contract.js');
 
 const backgroundPath = path.join(__dirname, 'background.js');
 const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
@@ -14,7 +13,7 @@ function extractFunctionSource(source, functionName) {
     throw new Error(`Function not found: ${functionName}`);
   }
   const startIndex = match.index;
-  const paramsStart = source.indexOf('(', match.index);
+  const paramsStart = source.indexOf('(', startIndex);
   if (paramsStart < 0) {
     throw new Error(`Function params not found: ${functionName}`);
   }
@@ -197,17 +196,29 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-async function main() {
-  const timers = [];
-  const clearedTimers = [];
-  const createCalls = [];
-  const clearCalls = [];
-  const auditLogs = [];
-  let removeAttempt = 0;
+function createFixedDate(nowTs) {
+  return class FixedDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) {
+        super(nowTs);
+        return;
+      }
+      super(...args);
+    }
 
+    static now() {
+      return nowTs;
+    }
+  };
+}
+
+async function main() {
+  const saved = [];
+  const auditLogs = [];
+  const nowTs = 1_773_918_300_000;
   const context = vm.createContext({
     console,
-    Date,
+    Date: createFixedDate(nowTs),
     Math,
     Number,
     String,
@@ -215,147 +226,87 @@ async function main() {
     JSON,
     Map,
     Set,
-    ProcessContractUtils,
-    PROCESS_WINDOW_CLOSE_RETRY: {
-      initialDelayMs: 1500,
-      maxDelayMs: 60 * 1000,
-      maxAttempts: 24,
-      alarmName: 'completed-process-window-close-retry'
+    PROCESS_MONITOR_HEARTBEAT: {
+      finalPromptRecoveryTtlMs: 10 * 60 * 1000,
+      finalPromptRecoveryCooldownMs: 15 * 60 * 1000
     },
-    processRegistry: new Map(),
-    processWindowCloseRetryTimersByRunId: new Map(),
-    processWindowCloseRetryAttemptCountByRunId: new Map(),
-    processWindowCloseRetryDueAtByRunId: new Map(),
-    processWindowCloseRetryInFlight: new Set(),
-    chrome: {
-      alarms: {
-        create(name, info) {
-          createCalls.push({ name, info });
-        }
-      }
+    finalPromptRecoveryInFlight: new Set(),
+    finalPromptRecoveryLastAttemptAtByRunId: new Map(),
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
     },
-    clearAlarmSafe: async (alarmName) => {
-      clearCalls.push(alarmName);
-      return true;
+    normalizeProcessPhase(value, fallback = '') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
     },
-    normalizeWatchlistVerifyState(value) {
-      return typeof value === 'string' ? value.trim().toLowerCase() : '';
+    hasProcessReachedFinalStage: () => false,
+    textFingerprint(value = '') {
+      return value.length.toString(16).padStart(8, '0');
     },
-    ensureProcessRegistryReady: async () => {},
-    getTabByIdSafe: async () => ({ id: 11, windowId: 22 }),
-    queryTabsInWindowSafe: async () => ({ ok: true, tabs: [{ id: 11 }], reason: '' }),
-    removeTabSafe: async () => {
-      removeAttempt += 1;
-      return removeAttempt >= 2;
+    buildResponseContractValidation() {
+      return { valid: true, kind: 'current' };
     },
-    removeWindowSafe: async () => false,
-    upsertProcess: async (runId, patch) => {
-      const current = context.processRegistry.get(runId) || { id: runId };
-      const next = {
-        ...current,
-        ...patch,
-        windowClose: patch?.windowClose ? { ...(current.windowClose || {}), ...patch.windowClose } : current.windowClose
-      };
-      context.processRegistry.set(runId, next);
-      return next;
+    extractLastAssistantResponseFromTab: async () => '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}',
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' && value.trim() ? value.trim() : '';
+    },
+    resolveSupportedSourceNameFromUrl() {
+      return 'The Economist';
     },
     emitWatchlistDispatchProcessLog(level, code, message, details) {
       auditLogs.push({ level, code, message, details });
     },
-    setTimeout(callback, delayMs) {
-      const id = timers.length + 1;
-      timers.push({ id, callback, delayMs });
-      return id;
-    },
-    clearTimeout(id) {
-      clearedTimers.push(id);
+    saveResponse: async (...args) => {
+      saved.push(args);
+      return { success: true };
     }
   });
 
   [
-    'normalizeProcessLifecycleStatus',
-    'normalizeProcessStatus',
-    'resolveProcessStageSnapshot',
-    'hasProcessReachedFinalStage',
-    'isExplicitlyVerifiedDispatch',
-    'getProcessPersistenceDispatchSnapshot',
-    'getProcessQueueDeliveryState',
-    'normalizeProcessWindowCloseState',
-    'inspectProcessWindowContext',
-    'attemptProcessWindowClose',
-    'getProcessWindowCloseRetryDelayMs',
-    'computeProcessRetryAlarmAt',
-    'syncProcessWindowCloseRetryAlarm',
-    'clearProcessWindowCloseRetry',
-    'resolveProcessWindowCloseRetryPlan',
-    'scheduleProcessWindowCloseRetriesForSnapshot',
-    'scheduleProcessWindowCloseRetry',
-    'runProcessWindowCloseRetry',
-    'closeProcessWindowAfterQueueSuccess'
+    'getProcessLastActivityTimestamp',
+    'getProcessLastProgressTimestamp',
+    'shouldAttemptStaleFinalPromptRecovery',
+    'attemptStaleFinalPromptRecovery'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
     });
   });
 
-  context.processRegistry.set('run-close', {
-    id: 'run-close',
-    status: 'completed',
-    lifecycleStatus: 'completed',
+  const process = {
+    id: 'run-final',
+    status: 'running',
+    lifecycleStatus: 'running',
+    phase: 'prompt_send',
     currentPrompt: 12,
     totalPrompts: 12,
     stageIndex: 11,
-    tabId: 11,
-    windowId: 22,
-    persistenceStatus: {
-      saveOk: true,
-      dispatch: {
-        state: 'dispatch_pending',
-        accepted: 1,
-        sent: 1,
-        failed: 0,
-        deferred: 0,
-        remaining: 0,
-        verifyState: 'http_accepted'
-      }
-    }
-  });
+    tabId: 55,
+    title: 'Alpha Corp',
+    analysisType: 'company',
+    sourceUrl: 'https://www.economist.com/test',
+    chatUrl: 'https://chatgpt.com/c/test',
+    lastProgressAt: nowTs - (11 * 60 * 1000)
+  };
 
-  const firstClose = await context.closeProcessWindowAfterQueueSuccess(context.processRegistry.get('run-close'), {
-    origin: 'test-first-close'
-  });
+  assert.strictEqual(context.shouldAttemptStaleFinalPromptRecovery(process, nowTs), true);
+  const result = await context.attemptStaleFinalPromptRecovery(process, 'test', nowTs);
 
-  assert.strictEqual(firstClose, false);
-  assert.strictEqual(removeAttempt, 1);
-  assert.strictEqual(timers.length, 1);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'retrying');
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.attemptCount, 1);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.nextAttemptAt > 0, true);
-  assert.strictEqual(createCalls[0].name, 'completed-process-window-close-retry');
-
-  const retryClose = await context.runProcessWindowCloseRetry('run-close', {
-    origin: 'test-retry'
-  });
-
-  assert.strictEqual(retryClose.closed, true);
-  assert.strictEqual(removeAttempt, 2);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'closed');
-  assert.ok(Number.isInteger(context.processRegistry.get('run-close').windowClose.closedAt));
-  assert(context.processRegistry.get('run-close').windowClose.nextAttemptAt === 0);
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(saved.length, 1);
+  assert.strictEqual(saved[0][0], '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}');
+  assert.strictEqual(saved[0][3], 'run-final');
+  assert.strictEqual(saved[0][4], 'run-final_p12_00000054');
+  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_recovery');
+  assert.strictEqual(saved[0][5].selected_response_prompt, 12);
+  assert.strictEqual(saved[0][6], 'https://chatgpt.com/c/test');
   assert(
-    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'retrying'),
-    'Should log pending window-close retries.'
-  );
-  assert(
-    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'closed'),
-    'Should log successful window-close completion.'
-  );
-  assert(
-    clearCalls.includes('completed-process-window-close-retry'),
-    'Successful completion should clear the durable window-close retry alarm.'
+    auditLogs.some((entry) => entry.code === 'stale_final_prompt_recovered'),
+    'Expected recovery audit log.'
   );
 
-  console.log('test-process-window-close-retry.js: ok');
+  console.log('test-stale-final-prompt-recovery.js: ok');
 }
 
 main().catch((error) => {

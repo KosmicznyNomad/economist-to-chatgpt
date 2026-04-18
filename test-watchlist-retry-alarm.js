@@ -2,7 +2,6 @@ const assert = require('assert');
 const fs = require('fs');
 const path = require('path');
 const vm = require('vm');
-const ProcessContractUtils = require('./process-contract.js');
 
 const backgroundPath = path.join(__dirname, 'background.js');
 const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
@@ -14,7 +13,7 @@ function extractFunctionSource(source, functionName) {
     throw new Error(`Function not found: ${functionName}`);
   }
   const startIndex = match.index;
-  const paramsStart = source.indexOf('(', match.index);
+  const paramsStart = source.indexOf('(', startIndex);
   if (paramsStart < 0) {
     throw new Error(`Function params not found: ${functionName}`);
   }
@@ -197,40 +196,30 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-async function main() {
-  const timers = [];
-  const clearedTimers = [];
+function loadContext() {
   const createCalls = [];
   const clearCalls = [];
-  const auditLogs = [];
-  let removeAttempt = 0;
-
-  const context = vm.createContext({
+  const setCalls = [];
+  const context = {
     console,
     Date,
-    Math,
-    Number,
-    String,
-    Array,
-    JSON,
-    Map,
-    Set,
-    ProcessContractUtils,
-    PROCESS_WINDOW_CLOSE_RETRY: {
-      initialDelayMs: 1500,
-      maxDelayMs: 60 * 1000,
-      maxAttempts: 24,
-      alarmName: 'completed-process-window-close-retry'
+    WATCHLIST_DISPATCH: {
+      enabled: true,
+      outboxStorageKey: 'watchlist_dispatch_outbox',
+      retryAlarmName: 'watchlist-dispatch-retry',
+      retryAlarmImmediateDelayMs: 1500
     },
-    processRegistry: new Map(),
-    processWindowCloseRetryTimersByRunId: new Map(),
-    processWindowCloseRetryAttemptCountByRunId: new Map(),
-    processWindowCloseRetryDueAtByRunId: new Map(),
-    processWindowCloseRetryInFlight: new Set(),
     chrome: {
       alarms: {
-        create(name, info) {
+        create: (name, info) => {
           createCalls.push({ name, info });
+        }
+      },
+      storage: {
+        local: {
+          set: async (payload) => {
+            setCalls.push(payload);
+          }
         }
       }
     },
@@ -238,124 +227,103 @@ async function main() {
       clearCalls.push(alarmName);
       return true;
     },
-    normalizeWatchlistVerifyState(value) {
-      return typeof value === 'string' ? value.trim().toLowerCase() : '';
-    },
-    ensureProcessRegistryReady: async () => {},
-    getTabByIdSafe: async () => ({ id: 11, windowId: 22 }),
-    queryTabsInWindowSafe: async () => ({ ok: true, tabs: [{ id: 11 }], reason: '' }),
-    removeTabSafe: async () => {
-      removeAttempt += 1;
-      return removeAttempt >= 2;
-    },
-    removeWindowSafe: async () => false,
-    upsertProcess: async (runId, patch) => {
-      const current = context.processRegistry.get(runId) || { id: runId };
-      const next = {
-        ...current,
-        ...patch,
-        windowClose: patch?.windowClose ? { ...(current.windowClose || {}), ...patch.windowClose } : current.windowClose
-      };
-      context.processRegistry.set(runId, next);
-      return next;
-    },
-    emitWatchlistDispatchProcessLog(level, code, message, details) {
-      auditLogs.push({ level, code, message, details });
-    },
-    setTimeout(callback, delayMs) {
-      const id = timers.length + 1;
-      timers.push({ id, callback, delayMs });
-      return id;
-    },
-    clearTimeout(id) {
-      clearedTimers.push(id);
-    }
-  });
+    sanitizeWatchlistOutbox: (items) => (Array.isArray(items) ? items : [])
+  };
 
+  vm.createContext(context);
   [
-    'normalizeProcessLifecycleStatus',
-    'normalizeProcessStatus',
-    'resolveProcessStageSnapshot',
-    'hasProcessReachedFinalStage',
-    'isExplicitlyVerifiedDispatch',
-    'getProcessPersistenceDispatchSnapshot',
-    'getProcessQueueDeliveryState',
-    'normalizeProcessWindowCloseState',
-    'inspectProcessWindowContext',
-    'attemptProcessWindowClose',
-    'getProcessWindowCloseRetryDelayMs',
-    'computeProcessRetryAlarmAt',
-    'syncProcessWindowCloseRetryAlarm',
-    'clearProcessWindowCloseRetry',
-    'resolveProcessWindowCloseRetryPlan',
-    'scheduleProcessWindowCloseRetriesForSnapshot',
-    'scheduleProcessWindowCloseRetry',
-    'runProcessWindowCloseRetry',
-    'closeProcessWindowAfterQueueSuccess'
+    'computeWatchlistDispatchRetryAlarmAt',
+    'syncWatchlistDispatchRetryAlarm',
+    'writeWatchlistOutbox'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
     });
   });
 
-  context.processRegistry.set('run-close', {
-    id: 'run-close',
-    status: 'completed',
-    lifecycleStatus: 'completed',
-    currentPrompt: 12,
-    totalPrompts: 12,
-    stageIndex: 11,
-    tabId: 11,
-    windowId: 22,
-    persistenceStatus: {
-      saveOk: true,
-      dispatch: {
-        state: 'dispatch_pending',
-        accepted: 1,
-        sent: 1,
-        failed: 0,
-        deferred: 0,
-        remaining: 0,
-        verifyState: 'http_accepted'
-      }
+  context.__createCalls = createCalls;
+  context.__clearCalls = clearCalls;
+  context.__setCalls = setCalls;
+  return context;
+}
+
+async function testReadyItemsScheduleImmediateRetry() {
+  const context = loadContext();
+  const now = 1_700_000_000_000;
+  const when = context.computeWatchlistDispatchRetryAlarmAt([
+    {
+      payload: { responseId: 'resp-ready' },
+      nextAttemptAt: now - 250
     }
-  });
+  ], now);
+  assert.strictEqual(when, now + 1500);
+}
 
-  const firstClose = await context.closeProcessWindowAfterQueueSuccess(context.processRegistry.get('run-close'), {
-    origin: 'test-first-close'
-  });
+async function testFutureRetryUsesEarliestNextAttempt() {
+  const context = loadContext();
+  const now = 1_700_000_000_000;
+  const expectedWhen = now + 45_000;
+  const result = await context.syncWatchlistDispatchRetryAlarm([
+    {
+      payload: { responseId: 'resp-future-a' },
+      nextAttemptAt: now + 60_000
+    },
+    {
+      payload: { responseId: 'resp-future-b' },
+      nextAttemptAt: expectedWhen
+    }
+  ], now);
 
-  assert.strictEqual(firstClose, false);
-  assert.strictEqual(removeAttempt, 1);
-  assert.strictEqual(timers.length, 1);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'retrying');
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.attemptCount, 1);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.nextAttemptAt > 0, true);
-  assert.strictEqual(createCalls[0].name, 'completed-process-window-close-retry');
+  assert.strictEqual(result.scheduled, true);
+  assert.strictEqual(result.when, expectedWhen);
+  assert.strictEqual(context.__createCalls.length, 1);
+  assert.strictEqual(context.__createCalls[0].name, 'watchlist-dispatch-retry');
+  assert.strictEqual(context.__createCalls[0].info.when, expectedWhen);
+  assert.strictEqual(context.__clearCalls.length, 0);
+}
 
-  const retryClose = await context.runProcessWindowCloseRetry('run-close', {
-    origin: 'test-retry'
-  });
+async function testVerifiedItemsClearRetryAlarm() {
+  const context = loadContext();
+  const now = 1_700_000_000_000;
+  const result = await context.syncWatchlistDispatchRetryAlarm([
+    {
+      payload: { responseId: 'resp-verified' },
+      nextAttemptAt: now - 1000,
+      verifiedAt: now - 100
+    }
+  ], now);
 
-  assert.strictEqual(retryClose.closed, true);
-  assert.strictEqual(removeAttempt, 2);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'closed');
-  assert.ok(Number.isInteger(context.processRegistry.get('run-close').windowClose.closedAt));
-  assert(context.processRegistry.get('run-close').windowClose.nextAttemptAt === 0);
-  assert(
-    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'retrying'),
-    'Should log pending window-close retries.'
-  );
-  assert(
-    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'closed'),
-    'Should log successful window-close completion.'
-  );
-  assert(
-    clearCalls.includes('completed-process-window-close-retry'),
-    'Successful completion should clear the durable window-close retry alarm.'
-  );
+  assert.strictEqual(result.scheduled, false);
+  assert.strictEqual(result.reason, 'no_retry_needed');
+  assert.deepStrictEqual(context.__createCalls, []);
+  assert.deepStrictEqual(context.__clearCalls, ['watchlist-dispatch-retry']);
+}
 
-  console.log('test-process-window-close-retry.js: ok');
+async function testWriteWatchlistOutboxPersistsAndSchedulesRetry() {
+  const context = loadContext();
+  const now = Date.now();
+  const items = [
+    {
+      payload: { responseId: 'resp-write' },
+      nextAttemptAt: now + 30_000
+    }
+  ];
+
+  const result = await context.writeWatchlistOutbox(items);
+  assert.strictEqual(result, items);
+  assert.strictEqual(context.__setCalls.length, 1);
+  assert.strictEqual(context.__setCalls[0].watchlist_dispatch_outbox, items);
+  assert.strictEqual(context.__createCalls.length, 1);
+  assert.strictEqual(context.__createCalls[0].name, 'watchlist-dispatch-retry');
+  assert.strictEqual(context.__createCalls[0].info.when, items[0].nextAttemptAt);
+}
+
+async function main() {
+  await testReadyItemsScheduleImmediateRetry();
+  await testFutureRetryUsesEarliestNextAttempt();
+  await testVerifiedItemsClearRetryAlarm();
+  await testWriteWatchlistOutboxPersistsAndSchedulesRetry();
+  console.log('watchlist retry alarm test: ok');
 }
 
 main().catch((error) => {

@@ -112,6 +112,8 @@ const WATCHLIST_DISPATCH = {
   historyStorageKey: "watchlist_dispatch_history",
   historyMaxItems: 200,
   alarmName: "watchlist-dispatch-flush",
+  retryAlarmName: "watchlist-dispatch-retry",
+  retryAlarmImmediateDelayMs: 1000,
   alarmPeriodMinutes: 2
 };
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
@@ -157,17 +159,22 @@ const PROCESS_MONITOR_HEARTBEAT = {
   touchIntervalMs: PROCESS_STREAM_HEARTBEAT_MS,
   // Treat runs as stale when no progress update arrives within TTL.
   staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
-  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2
+  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2,
+  autoStopNoContextTtlMs: 24 * 60 * 60 * 1000,
+  finalPromptRecoveryTtlMs: 10 * 60 * 1000,
+  finalPromptRecoveryCooldownMs: 15 * 60 * 1000
 };
 const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   initialDelayMs: 2000,
   maxDelayMs: 5 * 60 * 1000,
-  maxAttempts: 96
+  maxAttempts: 96,
+  alarmName: 'completed-process-persistence-retry'
 };
 const PROCESS_WINDOW_CLOSE_RETRY = {
   initialDelayMs: 1500,
   maxDelayMs: 60 * 1000,
-  maxAttempts: 24
+  maxAttempts: 24,
+  alarmName: 'completed-process-window-close-retry'
 };
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
@@ -245,10 +252,14 @@ const processLogLastEmitTsByRunId = new Map();
 const processStaleWarnLastEmitTsByRunId = new Map();
 const completedProcessPersistenceRetryTimersByRunId = new Map();
 const completedProcessPersistenceRetryAttemptCountByRunId = new Map();
+const completedProcessPersistenceRetryDueAtByRunId = new Map();
 const completedProcessPersistenceRetryInFlight = new Set();
 const processWindowCloseRetryTimersByRunId = new Map();
 const processWindowCloseRetryAttemptCountByRunId = new Map();
+const processWindowCloseRetryDueAtByRunId = new Map();
 const processWindowCloseRetryInFlight = new Set();
+const finalPromptRecoveryInFlight = new Set();
+const finalPromptRecoveryLastAttemptAtByRunId = new Map();
 const manualPdfQueueBatches = new Map();
 const problemLogConsoleErrorDedup = new Map();
 let problemLogConsoleCaptureInstalled = false;
@@ -647,6 +658,29 @@ function normalizePromptCounters(status, currentPrompt, totalPrompts, stageIndex
   return { currentPrompt: current, totalPrompts: total };
 }
 
+function buildPendingPromptSnapshotFromStartIndex(startIndex, totalPrompts) {
+  if (!Number.isInteger(startIndex) || startIndex < 0) {
+    return {
+      currentPrompt: 0,
+      stageIndex: null,
+      stageName: 'Start'
+    };
+  }
+
+  const safeTotalPrompts = Number.isInteger(totalPrompts) && totalPrompts > 0
+    ? totalPrompts
+    : 0;
+  const nextPrompt = safeTotalPrompts > 0
+    ? Math.min(startIndex + 1, safeTotalPrompts)
+    : (startIndex + 1);
+
+  return {
+    currentPrompt: nextPrompt,
+    stageIndex: nextPrompt > 0 ? (nextPrompt - 1) : null,
+    stageName: nextPrompt > 0 ? `Prompt ${nextPrompt}` : 'Start'
+  };
+}
+
 function normalizeAutoRecoveryState(rawState) {
   if (!rawState || typeof rawState !== 'object') return null;
 
@@ -697,6 +731,9 @@ function normalizeProcessWindowCloseState(rawState) {
   }
   if (Number.isInteger(rawState.closedAt) && rawState.closedAt > 0) {
     normalized.closedAt = rawState.closedAt;
+  }
+  if (Number.isInteger(rawState.nextAttemptAt) && rawState.nextAttemptAt > 0) {
+    normalized.nextAttemptAt = rawState.nextAttemptAt;
   }
   if (typeof rawState.lastError === 'string' && rawState.lastError.trim()) {
     normalized.lastError = rawState.lastError.trim();
@@ -1428,11 +1465,15 @@ async function ensureProcessRegistryReady() {
         completedProcessPersistenceRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
         completedProcessPersistenceRetryTimersByRunId.clear();
         completedProcessPersistenceRetryAttemptCountByRunId.clear();
+        completedProcessPersistenceRetryDueAtByRunId.clear();
         completedProcessPersistenceRetryInFlight.clear();
         processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
         processWindowCloseRetryTimersByRunId.clear();
         processWindowCloseRetryAttemptCountByRunId.clear();
+        processWindowCloseRetryDueAtByRunId.clear();
         processWindowCloseRetryInFlight.clear();
+        finalPromptRecoveryInFlight.clear();
+        finalPromptRecoveryLastAttemptAtByRunId.clear();
       }
     })();
   }
@@ -1470,6 +1511,7 @@ function shouldFlushProcessUpdateImmediately(existingProcess = null, nextProcess
     || 'completedResponseCapturedAt' in candidatePatch
     || 'completedResponseSaved' in candidatePatch
     || 'persistenceStatus' in candidatePatch
+    || 'finalStagePersistence' in candidatePatch
     || 'windowClose' in candidatePatch
   ) {
     return true;
@@ -3930,6 +3972,140 @@ async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowT
   return !!entry;
 }
 
+function shouldAttemptStaleFinalPromptRecovery(process, nowTs = Date.now()) {
+  if (!process || typeof process !== 'object') return false;
+  const runId = typeof process.id === 'string' ? process.id.trim() : '';
+  if (!runId) return false;
+  if (finalPromptRecoveryInFlight.has(runId)) return false;
+  const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (status !== 'running') return false;
+  if (hasProcessReachedFinalStage(process)) return false;
+  if (process?.needsAction === true) return false;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  if (totalPrompts <= 0 || currentPrompt < totalPrompts) return false;
+  if (!Number.isInteger(process?.tabId)) return false;
+  const phase = normalizeProcessPhase(process?.phase, '');
+  if (phase && phase !== 'prompt_send' && phase !== 'response_wait' && phase !== 'capture_validate') {
+    return false;
+  }
+  const recoveryTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryTtlMs)
+    && PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryTtlMs > 0
+    ? PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryTtlMs
+    : (10 * 60 * 1000);
+  const lastProgressAt = getProcessLastProgressTimestamp(process);
+  if (lastProgressAt <= 0 || (nowTs - lastProgressAt) < recoveryTtlMs) return false;
+  const cooldownMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryCooldownMs)
+    && PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryCooldownMs > 0
+    ? PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryCooldownMs
+    : recoveryTtlMs;
+  const lastAttemptAt = finalPromptRecoveryLastAttemptAtByRunId.get(runId) || 0;
+  if (lastAttemptAt > 0 && (nowTs - lastAttemptAt) < cooldownMs) return false;
+  return true;
+}
+
+async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', nowTs = Date.now()) {
+  if (!process || typeof process !== 'object') {
+    return { success: false, reason: 'invalid_process' };
+  }
+  const runId = typeof process.id === 'string' ? process.id.trim() : '';
+  if (!runId) {
+    return { success: false, reason: 'missing_run_id' };
+  }
+  if (finalPromptRecoveryInFlight.has(runId)) {
+    return { success: false, skipped: true, reason: 'recovery_in_flight' };
+  }
+  const tabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  if (tabId === null) {
+    return { success: false, reason: 'missing_tab_id' };
+  }
+  finalPromptRecoveryInFlight.add(runId);
+  finalPromptRecoveryLastAttemptAtByRunId.set(runId, nowTs);
+  try {
+    const responseText = await extractLastAssistantResponseFromTab(tabId, 2600);
+    const normalizedResponseText = typeof responseText === 'string' ? responseText.trim() : '';
+    if (!normalizedResponseText) {
+      return { success: false, reason: 'missing_response_text' };
+    }
+    const contract = buildResponseContractValidation(normalizedResponseText);
+    if (contract?.valid !== true) {
+      return {
+        success: false,
+        reason: 'invalid_final_response_contract',
+        contractKind: contract?.kind || 'invalid'
+      };
+    }
+
+    const promptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
+      ? process.currentPrompt
+      : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+    const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'run';
+    const responseId = `${safeRunId}_p${promptNumber > 0 ? promptNumber : 0}_${textFingerprint(normalizedResponseText)}`;
+    const stageMeta = {};
+    if (promptNumber > 0) {
+      stageMeta.selected_response_prompt = promptNumber;
+      stageMeta.selected_response_stage_index = promptNumber - 1;
+    }
+    stageMeta.selected_response_reason = 'stale_final_prompt_recovery';
+    const source = typeof process?.title === 'string' && process.title.trim()
+      ? process.title.trim()
+      : 'Stale final prompt recovery';
+    const normalizedChatUrl = normalizeChatConversationUrl(process?.chatUrl)
+      || normalizeChatConversationUrl(process?.sourceUrl)
+      || null;
+    const saveResult = await saveResponse(
+      normalizedResponseText,
+      source,
+      typeof process?.analysisType === 'string' && process.analysisType.trim()
+        ? process.analysisType.trim()
+        : 'company',
+      runId,
+      responseId,
+      stageMeta,
+      normalizedChatUrl,
+      {
+        sourceTitle: source,
+        sourceName: resolveSupportedSourceNameFromUrl(typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''),
+        sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+      }
+    );
+    if (saveResult?.success !== true) {
+      return {
+        success: false,
+        reason: typeof saveResult?.reason === 'string' && saveResult.reason.trim()
+          ? saveResult.reason.trim()
+          : 'save_response_failed',
+        error: typeof saveResult?.error === 'string' ? saveResult.error : ''
+      };
+    }
+    if (typeof emitWatchlistDispatchProcessLog === 'function') {
+      emitWatchlistDispatchProcessLog('info', 'stale_final_prompt_recovered', 'Recovered final prompt output after stale stall', {
+        runId,
+        origin,
+        tabId,
+        responseId,
+        promptNumber,
+        contractKind: contract?.kind || 'invalid'
+      });
+    }
+    return {
+      success: true,
+      runId,
+      responseId,
+      promptNumber,
+      contractKind: contract?.kind || 'invalid'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      reason: 'stale_final_prompt_recovery_failed',
+      error: error?.message || String(error)
+    };
+  } finally {
+    finalPromptRecoveryInFlight.delete(runId);
+  }
+}
+
 async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
   if (processMonitorHeartbeatSweepInProgress) {
     return { success: false, skipped: true, reason: 'heartbeat_sweep_in_progress' };
@@ -3949,11 +4125,15 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
     let staleLogged = 0;
     let touched = 0;
     let fresh = 0;
+    let autoStopped = 0;
+    let finalPromptRecoveryAttempted = 0;
+    let finalPromptRecoverySucceeded = 0;
 
     for (const process of active) {
       const runId = typeof process?.id === 'string' ? process.id : '';
       if (!runId) continue;
 
+      const lifecycleStatus = normalizeProcessLifecycleStatus(process?.lifecycleStatus || process?.status, 'running');
       const lastProgressAt = getProcessLastProgressTimestamp(process);
       const progressAgeMs = lastProgressAt > 0
         ? Math.max(0, nowTs - lastProgressAt)
@@ -3961,12 +4141,48 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       const processTs = Number.isInteger(process.timestamp) ? process.timestamp : 0;
       const recordAgeMs = processTs > 0 ? Math.max(0, nowTs - processTs) : Number.MAX_SAFE_INTEGER;
 
+      if (typeof shouldAttemptStaleFinalPromptRecovery === 'function' && shouldAttemptStaleFinalPromptRecovery(process, nowTs)) {
+        finalPromptRecoveryAttempted += 1;
+        const recoveryResult = await attemptStaleFinalPromptRecovery(process, origin, nowTs);
+        if (recoveryResult?.success === true) {
+          finalPromptRecoverySucceeded += 1;
+          continue;
+        }
+      }
+
       if (progressAgeMs >= PROCESS_MONITOR_HEARTBEAT.staleTtlMs) {
         staleDetected += 1;
         if (shouldEmitProcessStaleWarning(runId, nowTs)) {
           const appended = await appendProcessHeartbeatStaleWarning(process, progressAgeMs, origin, nowTs);
           if (appended) staleLogged += 1;
         }
+        const autoStopNoContextTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs)
+          && PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs > 0
+          ? PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs
+          : (24 * 60 * 60 * 1000);
+        if (
+          (lifecycleStatus === 'running' || lifecycleStatus === 'starting')
+          && progressAgeMs >= autoStopNoContextTtlMs
+          && typeof getAnalysisQueueProcessActivityState === 'function'
+        ) {
+          const processActivity = await getAnalysisQueueProcessActivityState(process, nowTs).catch(() => null);
+          if (processActivity?.active !== true) {
+            const stoppedRecord = await upsertProcess(runId, {
+              lifecycleStatus: 'stopped',
+              status: 'stopped',
+              actionRequired: 'none',
+              needsAction: false,
+              reason: 'heartbeat_stale_no_context',
+              statusCode: 'process.heartbeat_stale_no_context',
+              statusText: 'Brak postepu i lokalnego kontekstu - proces zatrzymany przez sweep',
+              autoRecovery: null,
+              finishedAt: nowTs,
+              timestamp: nowTs
+            });
+            if (stoppedRecord) autoStopped += 1;
+          }
+        }
+        continue;
       } else {
         processStaleWarnLastEmitTsByRunId.delete(runId);
       }
@@ -3988,7 +4204,10 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       touched,
       fresh,
       staleDetected,
-      staleLogged
+      staleLogged,
+      autoStopped,
+      finalPromptRecoveryAttempted,
+      finalPromptRecoverySucceeded
     };
   } catch (error) {
     console.warn('[monitor] process heartbeat sweep failed:', error);
@@ -7124,6 +7343,8 @@ async function upsertProcess(runId, patch = {}) {
   } else if (isClosedProcessStatus(next.status)) {
     processLogLastEmitTsByRunId.delete(runId);
     processStaleWarnLastEmitTsByRunId.delete(runId);
+    finalPromptRecoveryLastAttemptAtByRunId.delete(runId);
+    finalPromptRecoveryInFlight.delete(runId);
   }
   processRegistry.set(runId, next);
   logger.event({
@@ -8139,12 +8360,14 @@ function clearProcessWindowCloseRetry(runId = '', options = {}) {
     clearTimeout(timerId);
   }
   processWindowCloseRetryTimersByRunId.delete(normalizedRunId);
+  processWindowCloseRetryDueAtByRunId.delete(normalizedRunId);
   if (options.keepAttempts !== true) {
     processWindowCloseRetryAttemptCountByRunId.delete(normalizedRunId);
   }
   if (options.keepInFlight !== true) {
     processWindowCloseRetryInFlight.delete(normalizedRunId);
   }
+  void syncProcessWindowCloseRetryAlarm();
   return true;
 }
 
@@ -8187,11 +8410,10 @@ function resolveProcessWindowCloseRetryPlan(process) {
 
 function scheduleProcessWindowCloseRetriesForSnapshot(records = [], origin = 'registry_ready') {
   const snapshot = Array.isArray(records) ? records : [];
-  snapshot.forEach((process, index) => {
+  snapshot.forEach((process) => {
     scheduleProcessWindowCloseRetry(process, {
       origin,
-      force: true,
-      delayMs: Math.min(10000, Math.max(0, index) * 250)
+      force: true
     });
   });
 }
@@ -8222,18 +8444,38 @@ function scheduleProcessWindowCloseRetry(processOrRunId, options = {}) {
   }
 
   clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });
-  const attemptCount = processWindowCloseRetryAttemptCountByRunId.get(normalizedRunId) || 0;
+  const persistedAttemptCount = Number.isInteger(currentProcess?.windowClose?.attemptCount)
+    ? Math.max(0, currentProcess.windowClose.attemptCount)
+    : 0;
+  const attemptCount = Math.max(
+    processWindowCloseRetryAttemptCountByRunId.get(normalizedRunId) || 0,
+    persistedAttemptCount
+  );
+  const now = Date.now();
+  const persistedNextAttemptAt = Number.isInteger(currentProcess?.windowClose?.nextAttemptAt)
+    ? currentProcess.windowClose.nextAttemptAt
+    : 0;
   const delayMs = Number.isInteger(options?.delayMs)
     ? Math.max(0, options.delayMs)
-    : getProcessWindowCloseRetryDelayMs(attemptCount);
+    : (
+      options.force !== true
+      && persistedNextAttemptAt > now
+        ? Math.max(0, persistedNextAttemptAt - now)
+        : getProcessWindowCloseRetryDelayMs(attemptCount)
+    );
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
     : 'schedule_process_window_close_retry';
+  const dueAt = now + delayMs;
   const timerId = setTimeout(() => {
     processWindowCloseRetryTimersByRunId.delete(normalizedRunId);
+    processWindowCloseRetryDueAtByRunId.delete(normalizedRunId);
+    void syncProcessWindowCloseRetryAlarm();
     void runProcessWindowCloseRetry(normalizedRunId, { origin });
   }, delayMs);
   processWindowCloseRetryTimersByRunId.set(normalizedRunId, timerId);
+  processWindowCloseRetryDueAtByRunId.set(normalizedRunId, dueAt);
+  void syncProcessWindowCloseRetryAlarm(dueAt);
   return true;
 }
 
@@ -8273,6 +8515,7 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
           lastAttemptAt: now,
           attemptCount: currentAttemptCount,
           closedAt: now,
+          nextAttemptAt: 0,
           lastError: '',
           lastReason: inspectResult.reason || 'window_missing'
         },
@@ -8305,6 +8548,7 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
           lastAttemptAt: now,
           attemptCount: currentAttemptCount,
           closedAt: now,
+          nextAttemptAt: 0,
           lastError: '',
           lastReason: closeResult.reason || closeResult.closeMode || 'closed'
         },
@@ -8329,12 +8573,16 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
       return { success: true, closed: true, reason: closeResult.reason || 'closed' };
     }
 
+    const nextRetryAt = currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+      ? 0
+      : (now + getProcessWindowCloseRetryDelayMs(currentAttemptCount));
     const windowCloseState = {
       state: currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'failed' : 'retrying',
       requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
       lastAttemptAt: now,
       attemptCount: currentAttemptCount,
       closedAt: Number.isInteger(process?.windowClose?.closedAt) ? process.windowClose.closedAt : undefined,
+      nextAttemptAt: nextRetryAt,
       lastError: closeResult.reason || 'close_failed',
       lastReason: typeof options?.origin === 'string' && options.origin.trim()
         ? options.origin.trim()
@@ -8398,6 +8646,7 @@ async function closeProcessWindowAfterQueueSuccess(process, options = {}) {
         requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
         lastAttemptAt: now,
         attemptCount: Number.isInteger(process?.windowClose?.attemptCount) ? process.windowClose.attemptCount : 0,
+        nextAttemptAt: now,
         lastError: '',
         lastReason: typeof options?.origin === 'string' && options.origin.trim()
           ? options.origin.trim()
@@ -8428,12 +8677,14 @@ function clearCompletedProcessPersistenceRetry(runId = '', options = {}) {
     clearTimeout(timerId);
   }
   completedProcessPersistenceRetryTimersByRunId.delete(normalizedRunId);
+  completedProcessPersistenceRetryDueAtByRunId.delete(normalizedRunId);
   if (options.keepAttempts !== true) {
     completedProcessPersistenceRetryAttemptCountByRunId.delete(normalizedRunId);
   }
   if (options.keepInFlight !== true) {
     completedProcessPersistenceRetryInFlight.delete(normalizedRunId);
   }
+  void syncCompletedProcessPersistenceRetryAlarm();
   return true;
 }
 
@@ -8499,11 +8750,10 @@ function resolveCompletedProcessPersistenceRetryPlan(process) {
 
 function scheduleCompletedProcessPersistenceRetriesForSnapshot(records = [], origin = 'registry_ready') {
   const snapshot = Array.isArray(records) ? records : [];
-  snapshot.forEach((process, index) => {
+  snapshot.forEach((process) => {
     scheduleCompletedProcessPersistenceRetry(process, {
       origin,
-      force: true,
-      delayMs: Math.min(15000, Math.max(0, index) * 350)
+      force: true
     });
   });
 }
@@ -8554,8 +8804,11 @@ function scheduleCompletedProcessPersistenceRetry(processOrRunId, options = {}) 
     status: typeof currentProcess?.status === 'string' ? currentProcess.status : '',
     confirmed: plan.delivery?.confirmed === true
   });
+  const dueAt = Date.now() + delayMs;
   const timerId = setTimeout(() => {
     completedProcessPersistenceRetryTimersByRunId.delete(normalizedRunId);
+    completedProcessPersistenceRetryDueAtByRunId.delete(normalizedRunId);
+    void syncCompletedProcessPersistenceRetryAlarm();
     void runCompletedProcessPersistenceRetry(normalizedRunId, {
       origin,
       scheduledMode: plan.mode,
@@ -8563,6 +8816,8 @@ function scheduleCompletedProcessPersistenceRetry(processOrRunId, options = {}) 
     });
   }, delayMs);
   completedProcessPersistenceRetryTimersByRunId.set(normalizedRunId, timerId);
+  completedProcessPersistenceRetryDueAtByRunId.set(normalizedRunId, dueAt);
+  void syncCompletedProcessPersistenceRetryAlarm(dueAt);
   return true;
 }
 
@@ -8832,6 +9087,86 @@ async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
   }
 }
 
+async function runDueCompletedProcessPersistenceRetries(origin = 'alarm') {
+  await ensureProcessRegistryReady();
+  const nowTs = Date.now();
+  const dueRunIds = new Set();
+  for (const [runId, dueAt] of completedProcessPersistenceRetryDueAtByRunId.entries()) {
+    if (Number.isInteger(dueAt) && dueAt <= nowTs) {
+      dueRunIds.add(runId);
+    }
+  }
+  if (dueRunIds.size === 0) {
+    for (const process of pruneProcessRecords(Array.from(processRegistry.values()))) {
+      const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+      if (!runId) continue;
+      const plan = resolveCompletedProcessPersistenceRetryPlan(process);
+      if (plan.needed === true) {
+        dueRunIds.add(runId);
+      }
+    }
+  }
+  let attempted = 0;
+  for (const runId of dueRunIds) {
+    clearCompletedProcessPersistenceRetry(runId, { keepAttempts: true });
+    const result = await runCompletedProcessPersistenceRetry(runId, {
+      origin: `${origin}_alarm`
+    }).catch((error) => ({
+      success: false,
+      reason: error?.message || String(error)
+    }));
+    if (result && result.skipped !== true) {
+      attempted += 1;
+    }
+  }
+  await syncCompletedProcessPersistenceRetryAlarm(nowTs).catch(() => {});
+  return {
+    success: true,
+    attempted,
+    due: dueRunIds.size
+  };
+}
+
+async function runDueProcessWindowCloseRetries(origin = 'alarm') {
+  await ensureProcessRegistryReady();
+  const nowTs = Date.now();
+  const dueRunIds = new Set();
+  for (const [runId, dueAt] of processWindowCloseRetryDueAtByRunId.entries()) {
+    if (Number.isInteger(dueAt) && dueAt <= nowTs) {
+      dueRunIds.add(runId);
+    }
+  }
+  if (dueRunIds.size === 0) {
+    for (const process of pruneProcessRecords(Array.from(processRegistry.values()))) {
+      const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+      if (!runId) continue;
+      const plan = resolveProcessWindowCloseRetryPlan(process);
+      if (plan.needed === true) {
+        dueRunIds.add(runId);
+      }
+    }
+  }
+  let attempted = 0;
+  for (const runId of dueRunIds) {
+    clearProcessWindowCloseRetry(runId, { keepAttempts: true });
+    const result = await runProcessWindowCloseRetry(runId, {
+      origin: `${origin}_alarm`
+    }).catch((error) => ({
+      success: false,
+      reason: error?.message || String(error)
+    }));
+    if (result && result.skipped !== true) {
+      attempted += 1;
+    }
+  }
+  await syncProcessWindowCloseRetryAlarm(nowTs).catch(() => {});
+  return {
+    success: true,
+    attempted,
+    due: dueRunIds.size
+  };
+}
+
 function generateAnalysisQueueRunId(prefix = 'analysis') {
   const safePrefix = typeof prefix === 'string' && prefix.trim()
     ? prefix.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -8879,9 +9214,10 @@ function buildQueuedProcessPatchForJob(job) {
     patch.sourceUrl = sourceUrl;
   } else {
     const startIndex = Number.isInteger(safeJob.resumeStartIndex) ? safeJob.resumeStartIndex : 0;
-    patch.currentPrompt = Math.max(0, startIndex);
-    patch.stageIndex = startIndex > 0 ? (startIndex - 1) : null;
-    patch.stageName = startIndex > 0 ? `Prompt ${startIndex}` : 'Start';
+    const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(startIndex, totalPrompts);
+    patch.currentPrompt = pendingPrompt.currentPrompt;
+    patch.stageIndex = pendingPrompt.stageIndex;
+    patch.stageName = pendingPrompt.stageName;
     patch.tabId = safeJob.resumeTargetTabId;
     if (Number.isInteger(safeJob.resumeTargetWindowId)) {
       patch.windowId = safeJob.resumeTargetWindowId;
@@ -12107,6 +12443,10 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     ? options.queueJobId.trim()
     : '';
   const queueManaged = !!queueJobId;
+  const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+    effectiveStartIndex,
+    PROMPTS_COMPANY.length
+  );
 
   await upsertProcess(processId, {
     title: processTitle,
@@ -12115,10 +12455,10 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     statusText: composerThinkingEffort
       ? `Auto-resume przygotowanie (${composerThinkingEffort})`
       : 'Auto-resume przygotowanie',
-    currentPrompt: effectiveStartIndex,
+    currentPrompt: pendingPrompt.currentPrompt,
     totalPrompts: PROMPTS_COMPANY.length,
-    stageIndex: effectiveStartIndex > 0 ? (effectiveStartIndex - 1) : null,
-    stageName: effectiveStartIndex > 0 ? `Prompt ${effectiveStartIndex}` : 'Start',
+    stageIndex: pendingPrompt.stageIndex,
+    stageName: pendingPrompt.stageName,
     needsAction: false,
     startedAt: Date.now(),
     timestamp: Date.now(),
@@ -12286,11 +12626,15 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     }
 
     if (isInjectRateLimitBlockedResult(result)) {
+      const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+        executionPromptOffset,
+        PROMPTS_COMPANY.length
+      );
       const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-        currentPrompt: executionPromptOffset,
+        currentPrompt: pendingPrompt.currentPrompt,
         totalPrompts: PROMPTS_COMPANY.length,
-        stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
-        stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+        stageIndex: pendingPrompt.stageIndex,
+        stageName: pendingPrompt.stageName,
         conversationUrl: normalizeChatConversationUrl(result?.conversationUrl)
           || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab))
       });
@@ -20245,6 +20589,7 @@ async function writeWatchlistOutbox(items) {
   const storageKey = WATCHLIST_DISPATCH.outboxStorageKey;
   const normalized = sanitizeWatchlistOutbox(items);
   await chrome.storage.local.set({ [storageKey]: normalized });
+  await syncWatchlistDispatchRetryAlarm(normalized);
   return normalized;
 }
 
@@ -23122,6 +23467,160 @@ function clearAlarmSafe(alarmName) {
   });
 }
 
+function computeWatchlistDispatchRetryAlarmAt(items, nowTs = Date.now()) {
+  const source = Array.isArray(items) ? items : [];
+  const now = Number.isInteger(nowTs) && nowTs > 0 ? nowTs : Date.now();
+  const immediateDelayMs = Number.isInteger(WATCHLIST_DISPATCH.retryAlarmImmediateDelayMs)
+    && WATCHLIST_DISPATCH.retryAlarmImmediateDelayMs > 0
+    ? WATCHLIST_DISPATCH.retryAlarmImmediateDelayMs
+    : 1000;
+  let earliestFutureAttemptAt = 0;
+
+  for (const item of source) {
+    if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
+      continue;
+    }
+    if (Number.isInteger(item.verifiedAt) && item.verifiedAt > 0) {
+      continue;
+    }
+    const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
+    if (nextAttemptAt <= now) {
+      return now + immediateDelayMs;
+    }
+    if (earliestFutureAttemptAt <= 0 || nextAttemptAt < earliestFutureAttemptAt) {
+      earliestFutureAttemptAt = nextAttemptAt;
+    }
+  }
+
+  return earliestFutureAttemptAt > 0 ? earliestFutureAttemptAt : null;
+}
+
+async function syncWatchlistDispatchRetryAlarm(items, nowTs = Date.now()) {
+  const retryAlarmName = typeof WATCHLIST_DISPATCH.retryAlarmName === 'string'
+    ? WATCHLIST_DISPATCH.retryAlarmName.trim()
+    : '';
+  if (!retryAlarmName) {
+    return { scheduled: false, reason: 'missing_retry_alarm_name' };
+  }
+
+  if (!WATCHLIST_DISPATCH.enabled) {
+    await clearAlarmSafe(retryAlarmName);
+    return { scheduled: false, reason: 'dispatch_disabled' };
+  }
+
+  const nextRetryAt = computeWatchlistDispatchRetryAlarmAt(items, nowTs);
+  if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
+    await clearAlarmSafe(retryAlarmName);
+    return { scheduled: false, reason: 'no_retry_needed' };
+  }
+
+  if (!chrome?.alarms?.create) {
+    return {
+      scheduled: false,
+      reason: 'alarms_unavailable',
+      when: nextRetryAt
+    };
+  }
+
+  try {
+    chrome.alarms.create(retryAlarmName, { when: nextRetryAt });
+    return {
+      scheduled: true,
+      reason: 'retry_scheduled',
+      when: nextRetryAt
+    };
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:retry-alarm-failed]', {
+      alarmName: retryAlarmName,
+      nextRetryAt,
+      error: error?.message || String(error)
+    });
+    return {
+      scheduled: false,
+      reason: 'alarm_create_failed',
+      when: nextRetryAt,
+      error: error?.message || String(error)
+    };
+  }
+}
+
+async function refreshWatchlistDispatchRetryAlarmFromStorage(nowTs = Date.now()) {
+  const outbox = await readWatchlistOutbox();
+  return syncWatchlistDispatchRetryAlarm(outbox, nowTs);
+}
+
+function computeProcessRetryAlarmAt(dueAtByRunId, nowTs = Date.now()) {
+  const source = dueAtByRunId instanceof Map ? dueAtByRunId : new Map();
+  const now = Number.isInteger(nowTs) && nowTs > 0 ? nowTs : Date.now();
+  let earliestDueAt = 0;
+  for (const dueAt of source.values()) {
+    if (!Number.isInteger(dueAt) || dueAt <= 0) continue;
+    const normalizedDueAt = dueAt <= now ? (now + 1000) : dueAt;
+    if (earliestDueAt <= 0 || normalizedDueAt < earliestDueAt) {
+      earliestDueAt = normalizedDueAt;
+    }
+  }
+  return earliestDueAt > 0 ? earliestDueAt : null;
+}
+
+async function syncCompletedProcessPersistenceRetryAlarm(nowTs = Date.now()) {
+  const alarmName = typeof COMPLETED_PROCESS_PERSISTENCE_RETRY.alarmName === 'string'
+    ? COMPLETED_PROCESS_PERSISTENCE_RETRY.alarmName.trim()
+    : '';
+  if (!alarmName) {
+    return { scheduled: false, reason: 'missing_alarm_name' };
+  }
+  const nextRetryAt = computeProcessRetryAlarmAt(completedProcessPersistenceRetryDueAtByRunId, nowTs);
+  if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
+    await clearAlarmSafe(alarmName);
+    return { scheduled: false, reason: 'no_retry_needed' };
+  }
+  if (!chrome?.alarms?.create) {
+    return { scheduled: false, reason: 'alarms_unavailable', when: nextRetryAt };
+  }
+  try {
+    chrome.alarms.create(alarmName, { when: nextRetryAt });
+    return { scheduled: true, reason: 'retry_scheduled', when: nextRetryAt };
+  } catch (error) {
+    console.warn('[monitor] completed persistence retry alarm failed:', error?.message || String(error));
+    return {
+      scheduled: false,
+      reason: 'alarm_create_failed',
+      when: nextRetryAt,
+      error: error?.message || String(error)
+    };
+  }
+}
+
+async function syncProcessWindowCloseRetryAlarm(nowTs = Date.now()) {
+  const alarmName = typeof PROCESS_WINDOW_CLOSE_RETRY.alarmName === 'string'
+    ? PROCESS_WINDOW_CLOSE_RETRY.alarmName.trim()
+    : '';
+  if (!alarmName) {
+    return { scheduled: false, reason: 'missing_alarm_name' };
+  }
+  const nextRetryAt = computeProcessRetryAlarmAt(processWindowCloseRetryDueAtByRunId, nowTs);
+  if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
+    await clearAlarmSafe(alarmName);
+    return { scheduled: false, reason: 'no_retry_needed' };
+  }
+  if (!chrome?.alarms?.create) {
+    return { scheduled: false, reason: 'alarms_unavailable', when: nextRetryAt };
+  }
+  try {
+    chrome.alarms.create(alarmName, { when: nextRetryAt });
+    return { scheduled: true, reason: 'retry_scheduled', when: nextRetryAt };
+  } catch (error) {
+    console.warn('[monitor] process window close retry alarm failed:', error?.message || String(error));
+    return {
+      scheduled: false,
+      reason: 'alarm_create_failed',
+      when: nextRetryAt,
+      error: error?.message || String(error)
+    };
+  }
+}
+
 async function readAutoRestoreWindowsLastCycle() {
   try {
     const key = AUTO_RESTORE_WINDOWS.lastCycleStorageKey;
@@ -23610,6 +24109,9 @@ markRunningUnfinishedResumeBatchInterruptedOnBoot().catch((error) => {
   console.warn('[unfinished-resume] initial state recovery failed:', error?.message || String(error));
 });
 ensureWatchlistDispatchAlarm();
+refreshWatchlistDispatchRetryAlarmFromStorage().catch((error) => {
+  console.warn('[copy-flow] [dispatch:retry-alarm-sync-failed] reason=service_worker_boot', error);
+});
 ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
@@ -23860,12 +24362,34 @@ if (chrome?.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (!alarm || typeof alarm.name !== 'string') return;
 
-    if (alarm.name === WATCHLIST_DISPATCH.alarmName) {
-      logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
-      flushWatchlistDispatchOutbox('alarm').catch((error) => {
-        console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
+    if (alarm.name === WATCHLIST_DISPATCH.alarmName || alarm.name === WATCHLIST_DISPATCH.retryAlarmName) {
+      const alarmReason = alarm.name === WATCHLIST_DISPATCH.retryAlarmName ? 'retry_alarm' : 'alarm';
+      const alarmContext = alarm.name === WATCHLIST_DISPATCH.retryAlarmName
+        ? 'retry_alarm:before_flush'
+        : 'alarm:before_flush';
+      logWatchlistDispatchStatusSnapshot(alarmContext, false, { alarmName: alarm.name }).catch(() => {});
+      flushWatchlistDispatchOutbox(alarmReason).catch((error) => {
+        console.warn(`[copy-flow] [dispatch:flush-error] reason=${alarmReason}`, error);
       });
-      requestAnalysisQueueReconcile('watchlist_dispatch_alarm');
+      requestAnalysisQueueReconcile(
+        alarm.name === WATCHLIST_DISPATCH.retryAlarmName
+          ? 'watchlist_dispatch_retry_alarm'
+          : 'watchlist_dispatch_alarm'
+      );
+      return;
+    }
+
+    if (alarm.name === COMPLETED_PROCESS_PERSISTENCE_RETRY.alarmName) {
+      runDueCompletedProcessPersistenceRetries('completed_process_persistence').catch((error) => {
+        console.warn('[monitor] completed persistence retry alarm failed:', error?.message || String(error));
+      });
+      return;
+    }
+
+    if (alarm.name === PROCESS_WINDOW_CLOSE_RETRY.alarmName) {
+      runDueProcessWindowCloseRetries('process_window_close').catch((error) => {
+        console.warn('[monitor] process window close retry alarm failed:', error?.message || String(error));
+      });
       return;
     }
 
@@ -26594,11 +27118,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     let completedResponsePatch = {};
     let persistencePatch = null;
     if (isInjectRateLimitBlockedResult(result)) {
+      const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+        executionPromptOffset,
+        processTotalPrompts
+      );
       const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-        currentPrompt: executionPromptOffset,
+        currentPrompt: pendingPrompt.currentPrompt,
         totalPrompts: processTotalPrompts,
-        stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
-        stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+        stageIndex: pendingPrompt.stageIndex,
+        stageName: pendingPrompt.stageName,
         conversationUrl
       });
       await upsertProcess(processId, {
@@ -27345,11 +27873,15 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       let completedResponsePatch = {};
       let persistencePatch = null;
       if (isInjectRateLimitBlockedResult(result)) {
+        const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+          executionPromptOffset,
+          processTotalPrompts
+        );
         const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-          currentPrompt: executionPromptOffset,
+          currentPrompt: pendingPrompt.currentPrompt,
           totalPrompts: processTotalPrompts,
-          stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
-          stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+          stageIndex: pendingPrompt.stageIndex,
+          stageName: pendingPrompt.stageName,
           conversationUrl
         });
         await upsertProcess(processId, {
@@ -28982,6 +29514,15 @@ async function injectToChat(
     const payloadTextForMode = typeof payload === 'string' ? payload : '';
     const isResumeModeFromPayload = payloadTextForMode.trim() === ''
       || payloadTextForMode.includes('Resume from stage');
+    const preChainCurrentPrompt = isResumeModeFromPayload
+      ? (
+        Number.isInteger(totalPromptsForRun) && totalPromptsForRun > 0
+          ? Math.min(promptOffset + 1, totalPromptsForRun)
+          : (promptOffset + 1)
+      )
+      : promptOffset;
+    const preChainStageIndex = preChainCurrentPrompt > 0 ? (preChainCurrentPrompt - 1) : null;
+    const preChainStageName = preChainCurrentPrompt > 0 ? `Prompt ${preChainCurrentPrompt}` : 'Start';
     const baselineCompletedStages = Number.isInteger(promptOffset) && promptOffset > 0
       ? Math.min(
         promptOffset,
@@ -31535,13 +32076,13 @@ async function injectToChat(
 
       updateCounter(
         counterRef,
-        promptOffset,
+        preChainCurrentPrompt,
         totalPromptsForRun,
         `Ustawiam thinking: ${requestedComposerThinkingEffort}...`
       );
       notifyProcess('PROCESS_PROGRESS', {
         status: 'running',
-        currentPrompt: promptOffset,
+        currentPrompt: preChainCurrentPrompt,
         totalPrompts: totalPromptsForRun,
         statusText: `Ustawiam thinking: ${requestedComposerThinkingEffort}`,
         reason: 'set_thinking_effort',
@@ -31557,7 +32098,7 @@ async function injectToChat(
         composerThinkingEffortApplied = true;
         notifyProcess('PROCESS_PROGRESS', {
           status: 'running',
-          currentPrompt: promptOffset,
+          currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
           statusText: `Thinking ustawiony: ${requestedComposerThinkingEffort}`,
           reason: 'thinking_effort_set',
@@ -33865,7 +34406,7 @@ async function injectToChat(
   let stage0Response = '';
   notifyProcess('PROCESS_PROGRESS', {
     status: 'running',
-    currentPrompt: promptOffset,
+    currentPrompt: preChainCurrentPrompt,
     totalPrompts: totalPromptsForRun,
     statusText: 'Inicjalizacja procesu',
     needsAction: false
@@ -33905,10 +34446,10 @@ async function injectToChat(
       if (!thinkingEffortResult?.success) {
         const effortLabel = requestedComposerThinkingEffort || 'unknown';
         const effortError = thinkingEffortResult?.error || 'thinking_effort_not_set';
-        updateCounter(counter, promptOffset, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
         notifyProcess('PROCESS_PROGRESS', {
           status: 'failed',
-          currentPrompt: promptOffset,
+          currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
           statusText: `Nie ustawiono trybu thinking (${effortLabel})`,
           reason: 'thinking_effort_not_set',
@@ -34030,14 +34571,14 @@ async function injectToChat(
         }
       } else {
         // Resume mode - zacznij od razu od prompt chain
-        updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Resume from stage...');
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '🔄 Resume from stage...');
         console.log("⏭️ Pomijam payload - zaczynam od prompt chain");
         
         // NOWE: Dodatkowe czekanie na gotowość interfejsu w trybie resume
         console.log("🔍 Sprawdzam gotowość interfejsu przed rozpoczęciem resume chain...");
-        updateCounter(counter, promptOffset, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
         
-        const resumeInterfaceReady = await waitForInterfaceReady(interfaceReadyWaitMs, counter, promptOffset, totalPromptsForRun);
+        const resumeInterfaceReady = await waitForInterfaceReady(interfaceReadyWaitMs, counter, preChainCurrentPrompt, totalPromptsForRun);
         if (shouldStopNow()) {
           return forceStopResult();
         }
@@ -34045,21 +34586,21 @@ async function injectToChat(
         if (!resumeInterfaceReady) {
           const resumeInterfaceBlocker = captureGenerationBlockerState();
           if (resumeInterfaceBlocker) {
-            updateCounter(counter, promptOffset, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+            updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
             return buildGenerationBlockedResult({
               blocker: resumeInterfaceBlocker,
-              currentPrompt: promptOffset,
+              currentPrompt: preChainCurrentPrompt,
               totalPrompts: totalPromptsForRun,
-              stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+              stageIndex: preChainStageIndex,
               phase: 'prompt_send'
             });
           }
           console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
-          updateCounter(counter, promptOffset, totalPromptsForRun, '❌ Interface nie gotowy');
+          updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '❌ Interface nie gotowy');
           await new Promise(resolve => setTimeout(resolve, 5000));
           notifyProcess('PROCESS_PROGRESS', {
             status: 'failed',
-            currentPrompt: promptOffset,
+            currentPrompt: preChainCurrentPrompt,
             totalPrompts: totalPromptsForRun,
             statusText: 'Interface nie gotowy (resume)',
             reason: 'resume_interface_not_ready',
@@ -34074,7 +34615,7 @@ async function injectToChat(
         }
         
         console.log("✅ Interface gotowy - rozpoczynam resume chain");
-        updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Rozpoczynam chain...');
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '🔄 Rozpoczynam chain...');
         await new Promise(resolve => setTimeout(resolve, 1000)); // Krótka stabilizacja
       }
       
