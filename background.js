@@ -29590,6 +29590,10 @@ async function injectToChat(
       : '';
     const persistFinalResponseViaMessage = persistenceContext?.persistFinalResponseViaMessage === true
       || persistenceMode === 'runtime_message';
+    const DEFAULT_WAIT_FOR_RESPONSE_MS_INJECT = 14400000;
+    const MAX_COMPLETED_RESPONSE_CHARS = 180000;
+    const PAGE_EMERGENCY_RESPONSE_STORAGE_KEY = 'iskra_page_pending_responses_v1';
+    const PAGE_EMERGENCY_RESPONSE_MAX_ITEMS = 12;
     const persistenceTimeoutMs = Number.isInteger(persistenceContext?.saveTimeoutMs) && persistenceContext.saveTimeoutMs > 0
       ? Math.max(1000, Math.min(persistenceContext.saveTimeoutMs, 60000))
       : 18000;
@@ -29599,7 +29603,7 @@ async function injectToChat(
     // Keep interface-ready wait aligned with response wait; long "thinking" must not fail early.
     const interfaceReadyWaitMs = Number.isFinite(responseWaitMs) && responseWaitMs > 0
       ? Math.max(15000, responseWaitMs)
-      : WAIT_FOR_RESPONSE_MS;
+      : DEFAULT_WAIT_FOR_RESPONSE_MS_INJECT;
     const manualPdfAttachment = (() => {
       const ctx = manualPdfAttachmentContext && typeof manualPdfAttachmentContext === 'object'
         ? manualPdfAttachmentContext
@@ -29677,6 +29681,184 @@ async function injectToChat(
       if (lowered.includes('could not establish connection')) return 'runtime_unavailable';
       if (lowered.includes('runtime.lasterror')) return 'runtime_unavailable';
       return normalized;
+    }
+
+    function getPageEmergencyResponseStorage() {
+      try {
+        if (globalThis?.localStorage) return globalThis.localStorage;
+      } catch (_) {
+        // Ignore page-storage lookup failures.
+      }
+      try {
+        if (window?.localStorage) return window.localStorage;
+      } catch (_) {
+        // Ignore page-storage lookup failures.
+      }
+      return null;
+    }
+
+    function readPageEmergencyResponseQueue() {
+      const storage = getPageEmergencyResponseStorage();
+      if (!storage?.getItem) return [];
+      try {
+        const raw = storage.getItem(PAGE_EMERGENCY_RESPONSE_STORAGE_KEY);
+        if (!raw) return [];
+        const parsed = JSON.parse(raw);
+        if (!Array.isArray(parsed)) return [];
+        return parsed
+          .filter((item) => item && typeof item === 'object')
+          .map((item) => ({
+            responseId: typeof item.responseId === 'string' ? item.responseId.trim() : '',
+            text: typeof item.text === 'string' ? item.text : '',
+            source: typeof item.source === 'string' ? item.source : '',
+            sourceTitle: typeof item.sourceTitle === 'string' ? item.sourceTitle : '',
+            sourceName: typeof item.sourceName === 'string' ? item.sourceName : '',
+            sourceUrl: typeof item.sourceUrl === 'string' ? item.sourceUrl : '',
+            analysisType: typeof item.analysisType === 'string' ? item.analysisType : '',
+            runId: typeof item.runId === 'string' ? item.runId : '',
+            conversationUrl: typeof item.conversationUrl === 'string' ? item.conversationUrl : '',
+            stage: item.stage && typeof item.stage === 'object' && !Array.isArray(item.stage)
+              ? item.stage
+              : null,
+            savedAt: Number.isInteger(item.savedAt) ? item.savedAt : 0,
+            lastError: typeof item.lastError === 'string' ? item.lastError : '',
+            attempts: Number.isInteger(item.attempts) ? item.attempts : 0
+          }))
+          .filter((item) => item.responseId && item.text);
+      } catch (_) {
+        return [];
+      }
+    }
+
+    function writePageEmergencyResponseQueue(items) {
+      const storage = getPageEmergencyResponseStorage();
+      if (!storage?.setItem || !storage?.removeItem) return false;
+      try {
+        const normalized = (Array.isArray(items) ? items : [])
+          .filter((item) => item && typeof item === 'object' && typeof item.responseId === 'string' && item.responseId.trim())
+          .slice(0, PAGE_EMERGENCY_RESPONSE_MAX_ITEMS);
+        if (normalized.length <= 0) {
+          storage.removeItem(PAGE_EMERGENCY_RESPONSE_STORAGE_KEY);
+        } else {
+          storage.setItem(PAGE_EMERGENCY_RESPONSE_STORAGE_KEY, JSON.stringify(normalized));
+        }
+        return true;
+      } catch (_) {
+        return false;
+      }
+    }
+
+    function clearPageEmergencyResponse(responseId = '') {
+      const normalizedResponseId = typeof responseId === 'string' ? responseId.trim() : '';
+      if (!normalizedResponseId) return { success: false, reason: 'missing_response_id' };
+      const current = readPageEmergencyResponseQueue();
+      const next = current.filter((item) => item.responseId !== normalizedResponseId);
+      const wrote = writePageEmergencyResponseQueue(next);
+      return {
+        success: wrote,
+        responseId: normalizedResponseId,
+        remaining: wrote ? next.length : current.length,
+        reason: wrote ? '' : 'page_storage_write_failed'
+      };
+    }
+
+    function stagePageEmergencyResponse(responseText, responseId, stageMeta = null, options = {}) {
+      const normalizedText = typeof responseText === 'string' ? responseText : '';
+      if (!normalizedText.trim()) {
+        return { success: false, reason: 'empty_response' };
+      }
+      const promptFromStage = Number.isInteger(stageMeta?.selected_response_prompt)
+        ? stageMeta.selected_response_prompt
+        : null;
+      const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
+        ? responseId.trim()
+        : buildInjectedResponseId(normalizedText, promptFromStage);
+      const normalizedRunId = typeof runId === 'string' && runId.trim()
+        ? runId.trim()
+        : '';
+      const timestamp = Date.now();
+      const source = sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : '');
+      const record = {
+        responseId: normalizedResponseId,
+        text: normalizedText.slice(0, MAX_COMPLETED_RESPONSE_CHARS),
+        source,
+        sourceTitle: sourceTitleForSave || source,
+        sourceName: sourceNameForSave || '',
+        sourceUrl: sourceUrlForSave || '',
+        analysisType: typeof analysisType === 'string' ? analysisType : '',
+        runId: normalizedRunId,
+        conversationUrl: typeof location?.href === 'string' ? location.href : '',
+        stage: stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
+          ? stageMeta
+          : null,
+        savedAt: timestamp,
+        lastError: typeof options?.lastError === 'string' ? options.lastError.trim() : '',
+        attempts: Number.isInteger(options?.attempts) ? options.attempts : 0
+      };
+      applyChatGptComputationStatePatch(
+        record,
+        typeof detectChatGptComputationState === 'function'
+          ? detectChatGptComputationState({ forceRefresh: true })
+          : null
+      );
+      const current = readPageEmergencyResponseQueue().filter((item) => item.responseId !== normalizedResponseId);
+      current.unshift(record);
+      const next = current.slice(0, PAGE_EMERGENCY_RESPONSE_MAX_ITEMS);
+      const wrote = writePageEmergencyResponseQueue(next);
+      return {
+        success: wrote,
+        responseId: normalizedResponseId,
+        queueSize: wrote ? next.length : current.length,
+        reason: wrote ? '' : 'page_storage_write_failed'
+      };
+    }
+
+    async function replayPageEmergencyResponses(origin = 'inject_start') {
+      const pending = readPageEmergencyResponseQueue();
+      if (!pending.length) {
+        return { attempted: false, replayed: 0, failed: 0, remaining: 0 };
+      }
+      let replayed = 0;
+      let failed = 0;
+      const keep = [];
+      for (const item of pending) {
+        const attempt = await sendRuntimeMessageWithTimeout({
+          type: 'SAVE_RESPONSE',
+          text: item.text,
+          source: item.source || item.sourceTitle || '',
+          sourceTitle: item.sourceTitle || item.source || '',
+          sourceName: item.sourceName || '',
+          sourceUrl: item.sourceUrl || '',
+          analysisType: item.analysisType || analysisType,
+          runId: item.runId || '',
+          responseId: item.responseId || '',
+          stage: item.stage && typeof item.stage === 'object' ? item.stage : null,
+          conversationUrl: item.conversationUrl || (typeof location?.href === 'string' ? location.href : '')
+        }, persistenceTimeoutMs);
+        const runtimeResponse = attempt?.response && typeof attempt.response === 'object'
+          ? attempt.response
+          : null;
+        if (attempt?.ok === true && runtimeResponse?.success === true) {
+          replayed += 1;
+          continue;
+        }
+        failed += 1;
+        keep.push({
+          ...item,
+          attempts: (Number.isInteger(item.attempts) ? item.attempts : 0) + 1,
+          lastError: normalizeRuntimeBridgeError(
+            attempt?.error
+              || runtimeResponse?.error
+              || 'save_response_failed'
+          )
+        });
+      }
+      writePageEmergencyResponseQueue(keep);
+      if (replayed > 0 || failed > 0) {
+        const method = failed > 0 ? 'warn' : 'log';
+        console[method](`[copy-flow] [page-emergency:replay] origin=${origin} replayed=${replayed} failed=${failed} remaining=${keep.length}`);
+      }
+      return { attempted: true, origin, replayed, failed, remaining: keep.length };
     }
 
     async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null) {
@@ -30501,6 +30683,16 @@ async function injectToChat(
       if (Number.isInteger(selectedPrompt)) {
         stageMeta.selected_response_reason = 'last_prompt';
       }
+      const promptFromStage = Number.isInteger(stageMeta?.selected_response_prompt)
+        ? stageMeta.selected_response_prompt
+        : null;
+      const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
+        ? responseId.trim()
+        : buildInjectedResponseId(normalizedText, promptFromStage);
+      const pageEmergencySave = stagePageEmergencyResponse(normalizedText, normalizedResponseId, stageMeta, {
+        lastError: '',
+        attempts: 0
+      });
 
       const messagePayload = {
         type: 'SAVE_RESPONSE',
@@ -30511,7 +30703,7 @@ async function injectToChat(
         sourceUrl: sourceUrlForSave || '',
         analysisType,
         runId: typeof runId === 'string' ? runId : '',
-        responseId: typeof responseId === 'string' ? responseId : '',
+        responseId: normalizedResponseId,
         stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
         conversationUrl: typeof location?.href === 'string' ? location.href : ''
       };
@@ -30524,7 +30716,7 @@ async function injectToChat(
           try {
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
-              responseId,
+              normalizedResponseId,
               stageMeta
             );
           } catch (error) {
@@ -30540,9 +30732,13 @@ async function injectToChat(
           saveResult: emergencyLocalSave
             ? {
               success: false,
-              emergencyLocalSave
+              emergencyLocalSave,
+              emergencyPageSave: pageEmergencySave
             }
-            : null
+            : {
+              success: false,
+              emergencyPageSave: pageEmergencySave
+            }
         };
       }
 
@@ -30558,7 +30754,7 @@ async function injectToChat(
           try {
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
-              responseId,
+              normalizedResponseId,
               stageMeta
             );
           } catch (error) {
@@ -30574,11 +30770,20 @@ async function injectToChat(
           saveResult: emergencyLocalSave
             ? {
               success: false,
-              emergencyLocalSave
+              emergencyLocalSave,
+              emergencyPageSave: pageEmergencySave
             }
-            : (runtimeResponse?.saveResult || null)
+            : {
+              ...(runtimeResponse?.saveResult && typeof runtimeResponse.saveResult === 'object'
+                ? runtimeResponse.saveResult
+                : {}),
+              success: false,
+              emergencyPageSave: pageEmergencySave
+            }
         };
       }
+
+      clearPageEmergencyResponse(normalizedResponseId);
 
       return {
         ok: true,
@@ -34667,6 +34872,10 @@ async function injectToChat(
         }
         startSwKeepalive();
         _swKeepaliveCleanup = stopSwKeepalive;
+        const pageEmergencyReplayResult = await replayPageEmergencyResponses('inject_start');
+        if (pageEmergencyReplayResult?.attempted) {
+          console.log('[copy-flow] [capture:page-emergency-replay]', pageEmergencyReplayResult);
+        }
 
         delete window._lastResponseToSave;
         let canonicalPromptLookup = {
@@ -35208,7 +35417,6 @@ async function injectToChat(
         }
         
         // Sukces - pętla zakończona bez break
-        stopSwKeepalive();
         console.log(`\n🎉 ZAKOŃCZONO PROMPT CHAIN - wykonano wszystkie ${promptChain.length} promptów`);
         
         // Usuń licznik z animacją sukcesu
@@ -35261,14 +35469,21 @@ async function injectToChat(
             const emergencyLocalSave = persistedSaveResult?.emergencyLocalSave && typeof persistedSaveResult.emergencyLocalSave === 'object'
               ? persistedSaveResult.emergencyLocalSave
               : null;
+            const emergencyPageSave = persistedSaveResult?.emergencyPageSave && typeof persistedSaveResult.emergencyPageSave === 'object'
+              ? persistedSaveResult.emergencyPageSave
+              : null;
             console.warn(
-              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}${emergencyLocalSave ? ` emergencyLocal=${emergencyLocalSave.success === true ? 'ok' : 'failed'}` : ''}`
+              `[copy-flow] [capture:tab-save:failed] prompt=${selectedPrompt} responseId=${responseId} error=${persistedSaveError}${emergencyLocalSave ? ` emergencyLocal=${emergencyLocalSave.success === true ? 'ok' : 'failed'}` : ''}${emergencyPageSave ? ` emergencyPage=${emergencyPageSave.success === true ? 'ok' : 'failed'}` : ''}`
             );
             if (emergencyLocalSave) {
               console.warn('[copy-flow] [capture:tab-save:emergency-local]', emergencyLocalSave);
             }
+            if (emergencyPageSave) {
+              console.warn('[copy-flow] [capture:tab-save:emergency-page]', emergencyPageSave);
+            }
           }
         }
+        stopSwKeepalive();
         const finalProgressCapturedAt = Date.now();
         const finalProgressResponseTruncated = lastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
         const finalProgressResponseText = finalProgressResponseTruncated
