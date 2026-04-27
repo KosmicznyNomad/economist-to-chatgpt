@@ -329,6 +329,15 @@ function buildPriorityContext() {
   };
 
   const functionNames = [
+    'sanitizeManualTextSourceId',
+    'sanitizeManualTextSourceRecord',
+    'buildManualTextSourceRecord',
+    'sanitizeManualTextSourceRecords',
+    'collectManualTextSourceIdsFromJobs',
+    'pruneManualTextSourcesForJobs',
+    'generateManualTextSourceId',
+    'mergeManualTextSourceRecords',
+    'compactManualTextSnapshotsForQueueState',
     'sanitizeAnalysisQueueTabSnapshot',
     'sanitizeAnalysisQueueJob',
     'getAnalysisQueueJobPriority',

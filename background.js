@@ -1626,6 +1626,152 @@ function sanitizeManualPdfAttachmentContext(rawAttachment) {
   };
 }
 
+function sanitizeManualTextSourceId(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function generateManualTextSourceId(prefix = 'manual-source') {
+  const safePrefix = typeof prefix === 'string' && prefix.trim()
+    ? prefix.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+    : 'manual-source';
+  return `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeManualTextSourceRecord(rawSource) {
+  if (!rawSource || typeof rawSource !== 'object') return null;
+  const id = sanitizeManualTextSourceId(rawSource.id || rawSource.sourceId || rawSource.manualTextSourceId);
+  const text = typeof rawSource.text === 'string'
+    ? rawSource.text
+    : (typeof rawSource.manualText === 'string' ? rawSource.manualText : '');
+  if (!id || !text.trim()) return null;
+  return {
+    id,
+    title: typeof rawSource.title === 'string' && rawSource.title.trim() ? rawSource.title.trim() : 'Recznie wklejony artykul',
+    text,
+    createdAt: Number.isInteger(rawSource.createdAt) ? rawSource.createdAt : Date.now(),
+    length: text.length
+  };
+}
+
+function buildManualTextSourceRecord(id, text, title) {
+  return sanitizeManualTextSourceRecord({
+    id,
+    title,
+    text,
+    createdAt: Date.now()
+  });
+}
+
+function sanitizeManualTextSourceRecords(rawSources) {
+  const sourceList = Array.isArray(rawSources)
+    ? rawSources
+    : (rawSources && typeof rawSources === 'object' ? Object.values(rawSources) : []);
+  const byId = new Map();
+  sourceList.forEach((rawSource) => {
+    const source = sanitizeManualTextSourceRecord(rawSource);
+    if (source) byId.set(source.id, source);
+  });
+  return Array.from(byId.values());
+}
+
+function collectManualTextSourceIdsFromJobs(jobs = []) {
+  const ids = new Set();
+  (Array.isArray(jobs) ? jobs : []).forEach((job) => {
+    const sourceId = sanitizeManualTextSourceId(job?.tabSnapshot?.manualTextSourceId);
+    if (sourceId) ids.add(sourceId);
+  });
+  return ids;
+}
+
+function pruneManualTextSourcesForJobs(rawSources, waitingJobs = [], activeJobs = []) {
+  const usedIds = collectManualTextSourceIdsFromJobs([...(Array.isArray(waitingJobs) ? waitingJobs : []), ...(Array.isArray(activeJobs) ? activeJobs : [])]);
+  if (usedIds.size === 0) return [];
+  return sanitizeManualTextSourceRecords(rawSources).filter((source) => usedIds.has(source.id));
+}
+
+function mergeManualTextSourceRecords(existingSources, nextSources) {
+  const byId = new Map();
+  sanitizeManualTextSourceRecords(existingSources).forEach((source) => byId.set(source.id, source));
+  sanitizeManualTextSourceRecords(nextSources).forEach((source) => byId.set(source.id, source));
+  return Array.from(byId.values());
+}
+
+function compactManualTextSnapshotsForQueueState(waitingJobs = [], activeJobs = [], rawSources = []) {
+  const sourceRecords = sanitizeManualTextSourceRecords(rawSources);
+  const sourceById = new Map();
+  const sourceIdByText = new Map();
+  sourceRecords.forEach((source) => {
+    sourceById.set(source.id, source);
+    if (typeof source.text === 'string' && !sourceIdByText.has(source.text)) {
+      sourceIdByText.set(source.text, source.id);
+    }
+  });
+
+  const addedSources = [];
+  const compactJob = (job) => {
+    if (!job || typeof job !== 'object') return job;
+    const tabSnapshot = job.tabSnapshot && typeof job.tabSnapshot === 'object'
+      ? job.tabSnapshot
+      : null;
+    const manualText = typeof tabSnapshot?.manualText === 'string' ? tabSnapshot.manualText : '';
+    if (!manualText) return job;
+
+    let sourceId = sanitizeManualTextSourceId(tabSnapshot.manualTextSourceId);
+    if (!sourceId) {
+      sourceId = sourceIdByText.get(manualText) || generateManualTextSourceId('manual-text-migrated');
+    }
+    const existingSource = sourceById.get(sourceId);
+    if (!existingSource || existingSource.text !== manualText) {
+      const sourceRecord = buildManualTextSourceRecord(
+        sourceId,
+        manualText,
+        typeof tabSnapshot.title === 'string' && tabSnapshot.title.trim()
+          ? tabSnapshot.title.trim()
+          : job.title
+      );
+      if (sourceRecord) {
+        sourceById.set(sourceId, sourceRecord);
+        if (!sourceIdByText.has(manualText)) {
+          sourceIdByText.set(manualText, sourceId);
+        }
+        addedSources.push(sourceRecord);
+      }
+    }
+
+    const { manualText: _manualText, ...tabWithoutManualText } = tabSnapshot;
+    return {
+      ...job,
+      tabSnapshot: {
+        ...tabWithoutManualText,
+        manualTextSourceId: sourceId
+      }
+    };
+  };
+
+  const compactWaitingJobs = (Array.isArray(waitingJobs) ? waitingJobs : []).map(compactJob);
+  const compactActiveJobs = (Array.isArray(activeJobs) ? activeJobs : []).map(compactJob);
+  return {
+    waitingJobs: compactWaitingJobs,
+    activeJobs: compactActiveJobs,
+    manualTextSources: pruneManualTextSourcesForJobs(
+      mergeManualTextSourceRecords(sourceRecords, addedSources),
+      compactWaitingJobs,
+      compactActiveJobs
+    )
+  };
+}
+
+async function resolveManualTextSourceText(sourceId) {
+  const normalizedSourceId = sanitizeManualTextSourceId(sourceId);
+  if (!normalizedSourceId) return '';
+  await ensureAnalysisQueueReady().catch(() => null);
+  const sources = Array.isArray(analysisQueueState?.manualTextSources)
+    ? analysisQueueState.manualTextSources
+    : [];
+  const source = sources.find((item) => item?.id === normalizedSourceId);
+  return typeof source?.text === 'string' ? source.text : '';
+}
+
 function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   if (!rawTab || typeof rawTab !== 'object') return null;
   const title = typeof rawTab.title === 'string' && rawTab.title.trim()
@@ -1639,6 +1785,8 @@ function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   };
   if (Number.isInteger(rawTab.windowId)) snapshot.windowId = rawTab.windowId;
   if (Number.isInteger(rawTab.index)) snapshot.index = rawTab.index;
+  const manualTextSourceId = sanitizeManualTextSourceId(rawTab.manualTextSourceId);
+  if (manualTextSourceId) snapshot.manualTextSourceId = manualTextSourceId;
   if (typeof rawTab.manualText === 'string') snapshot.manualText = rawTab.manualText;
   const manualPdfAttachment = sanitizeManualPdfAttachmentContext(rawTab.manualPdfAttachment);
   if (manualPdfAttachment) {
@@ -1790,6 +1938,7 @@ function createEmptyAnalysisQueueState() {
   return {
     waitingJobs: [],
     activeJobs: [],
+    manualTextSources: [],
     maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
     lastSequence: 0
   };
@@ -2169,8 +2318,8 @@ function sanitizeAnalysisQueueState(rawState) {
   const source = rawState && typeof rawState === 'object'
     ? rawState
     : {};
-  const waitingJobs = [];
-  const activeJobs = [];
+  let waitingJobs = [];
+  let activeJobs = [];
   const seenJobIds = new Set();
 
   const appendJob = (target, rawJob) => {
@@ -2184,7 +2333,15 @@ function sanitizeAnalysisQueueState(rawState) {
   const activeSource = Array.isArray(source.activeJobs) ? source.activeJobs : [];
   waitingSource.forEach((job) => appendJob(waitingJobs, job));
   activeSource.forEach((job) => appendJob(activeJobs, job));
+  const compactedManualSources = compactManualTextSnapshotsForQueueState(
+    waitingJobs,
+    activeJobs,
+    source.manualTextSources
+  );
+  waitingJobs = compactedManualSources.waitingJobs;
+  activeJobs = compactedManualSources.activeJobs;
   sortAnalysisQueueWaitingJobs(waitingJobs);
+  const manualTextSources = compactedManualSources.manualTextSources;
 
   const maxSeenSequence = waitingJobs.concat(activeJobs).reduce((maxValue, job) => {
     const sequence = Number.isInteger(job?.sequence) && job.sequence > 0 ? job.sequence : 0;
@@ -2195,6 +2352,7 @@ function sanitizeAnalysisQueueState(rawState) {
   return {
     waitingJobs,
     activeJobs,
+    manualTextSources,
     maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
     lastSequence: Math.max(storedLastSequence, maxSeenSequence)
   };
@@ -9254,6 +9412,10 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
   persistedSnapshot = await withAnalysisQueueMutationLock(async () => {
     let state = cloneAnalysisQueueState();
     const nextJobs = [];
+    state.manualTextSources = mergeManualTextSourceRecords(
+      state.manualTextSources,
+      options?.manualTextSources
+    );
 
     for (const rawJob of sourceJobs) {
       const sequence = (state.lastSequence || 0) + 1;
@@ -26797,6 +26959,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     if (isManualSource) {
       extractedText = typeof tab?.manualText === 'string' ? tab.manualText : '';
       if (!extractedText) {
+        extractedText = await resolveManualTextSourceText(tab?.manualTextSourceId);
+      }
+      if (!extractedText) {
         await upsertProcess(processId, {
           title: processTitle,
           analysisType,
@@ -27440,6 +27605,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     });
 
     return enqueueAnalysisJobs(jobs, {
+      manualTextSources: options?.manualTextSources,
       reason: typeof options?.reason === 'string' && options.reason.trim()
         ? options.reason.trim()
         : 'process_articles_enqueue'
@@ -28535,6 +28701,8 @@ async function runManualSourceAnalysis(text, title, instances) {
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
   const safeInstances = normalizeManualInstances(instances);
   const timestamp = Date.now();
+  const manualTextSourceId = generateManualTextSourceId('manual-text');
+  const manualTextSource = buildManualTextSourceRecord(manualTextSourceId, safeText, safeTitle);
   const pseudoTabs = [];
 
   for (let i = 0; i < safeInstances; i += 1) {
@@ -28542,11 +28710,12 @@ async function runManualSourceAnalysis(text, title, instances) {
       id: `manual-${timestamp}-${i}`,
       title: safeTitle,
       url: 'manual://source',
-      manualText: safeText
+      manualTextSourceId
     });
   }
 
   return processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+    manualTextSources: manualTextSource ? [manualTextSource] : [],
     sourceKind: 'manual_text',
     reason: 'manual_source_enqueue'
   });
