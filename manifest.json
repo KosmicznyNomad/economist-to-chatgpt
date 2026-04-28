@@ -9,7 +9,8 @@
     "scripting",
     "contextMenus",
     "storage",
-    "alarms"
+    "alarms",
+    "unlimitedStorage"
   ],
   "host_permissions": [
     "https://*.economist.com/*",

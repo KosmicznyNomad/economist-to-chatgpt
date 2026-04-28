@@ -199,110 +199,101 @@ function extractFunctionSource(source, functionName) {
 function buildContext() {
   const context = {
     console,
-    ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
+    Date,
+    Math,
+    PROMPTS_COMPANY: ['prompt'],
+    CHAT_URL: 'https://chat.example',
     captured: null,
-    getAnalysisQueueStatusSnapshot: async () => ({
-      success: true,
-      queuedCount: 0,
-      maxConcurrent: 7,
-      queueSize: 0,
-      activeSlots: 0,
-      reservedSlots: 0,
-      liveSlots: 0,
-      startingSlots: 0
-    }),
-    enqueueAnalysisJobs: async (jobs, options) => {
-      context.captured = { jobs, options };
+    processArticles: async (tabs, promptChain, chatUrl, analysisType, options) => {
+      context.captured = { tabs, promptChain, chatUrl, analysisType, options };
       return {
         success: true,
-        jobs,
-        queuedCount: jobs.length,
-        maxConcurrent: 7,
-        queueSize: jobs.length,
-        activeSlots: 1,
-        reservedSlots: 2,
-        liveSlots: 1,
-        startingSlots: 1
+        queuedCount: tabs.length,
+        queueSize: tabs.length
       };
     }
   };
 
   vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'processArticles'), context, {
-    filename: 'background.js'
+  [
+    'sanitizeManualTextSourceId',
+    'generateManualTextSourceId',
+    'sanitizeManualTextSourceRecord',
+    'buildManualTextSourceRecord',
+    'sanitizeManualTextSourceRecords',
+    'collectManualTextSourceIdsFromJobs',
+    'pruneManualTextSourcesForJobs',
+    'mergeManualTextSourceRecords',
+    'compactManualTextSnapshotsForQueueState',
+    'normalizeManualInstances',
+    'runManualSourceAnalysis'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
   });
   return context;
 }
 
-function toPlainJson(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-async function testReturnsQueueSnapshotForEmptyInput() {
-  const context = buildContext();
-  const result = await context.processArticles([], [], '', 'company');
-  assert.strictEqual(result.maxConcurrent, 7);
-  assert.strictEqual(result.queuedCount, 0);
-  assert.strictEqual(context.captured, null);
-}
-
-async function testBuildsQueueJobsInsteadOfDirectExecution() {
-  const context = buildContext();
-  const tabs = [
-    { id: 1, title: 'Manual text', url: 'manual://source' },
-    { id: 2, title: 'Manual pdf', url: 'manual://pdf', windowId: 9 }
-  ];
-
-  const result = await context.processArticles(tabs, ['p1'], 'https://chat.example', 'company', {
-    invocationWindowId: 44,
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1',
-    manualTextSources: [{ id: 'manual-src-1', text: 'manual source body' }]
-  });
-
-  assert.strictEqual(result.maxConcurrent, 7);
-  assert.strictEqual(result.queuedCount, 2);
-  assert.ok(context.captured, 'enqueueAnalysisJobs should be called');
-  assert.strictEqual(context.captured.options.reason, 'process_articles_enqueue');
-  assert.deepStrictEqual(context.captured.options.manualTextSources, [
-    { id: 'manual-src-1', text: 'manual source body' }
-  ]);
-  assert.strictEqual(context.captured.jobs.length, 2);
-  assert.deepStrictEqual(toPlainJson(context.captured.jobs[0]), {
-    kind: 'article_analysis',
-    analysisType: 'company',
-    title: 'Manual text',
-    sourceKind: 'manual_text',
-    tabSnapshot: tabs[0],
-    invocationWindowId: 44,
-    sourceWindowId: null,
-    sourceUrl: 'manual://source',
-    chatUrl: 'https://chat.example',
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
-  });
-  assert.deepStrictEqual(toPlainJson(context.captured.jobs[1]), {
-    kind: 'article_analysis',
-    analysisType: 'company',
-    title: 'Manual pdf',
-    sourceKind: 'manual_pdf',
-    tabSnapshot: tabs[1],
-    invocationWindowId: 44,
-    sourceWindowId: 9,
-    sourceUrl: 'manual://pdf',
-    chatUrl: 'https://chat.example',
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
-  });
-}
-
 async function main() {
-  await testReturnsQueueSnapshotForEmptyInput();
-  await testBuildsQueueJobsInsteadOfDirectExecution();
-  console.log('processArticles queue api test: ok');
+  const context = buildContext();
+  const sourceText = 'A'.repeat(50000);
+  const result = await context.runManualSourceAnalysis(sourceText, 'Manual large source', 10);
+
+  assert.strictEqual(result.queuedCount, 10);
+  assert.ok(context.captured, 'processArticles should be called');
+  assert.strictEqual(context.captured.tabs.length, 10);
+  assert.strictEqual(context.captured.options.manualTextSources.length, 1);
+  assert.strictEqual(context.captured.options.manualTextSources[0].text, sourceText);
+  assert.ok(context.captured.options.manualTextSources[0].id.startsWith('manual-text-'));
+
+  const sourceId = context.captured.options.manualTextSources[0].id;
+  context.captured.tabs.forEach((tab) => {
+    assert.strictEqual(tab.manualTextSourceId, sourceId);
+    assert.strictEqual(Object.prototype.hasOwnProperty.call(tab, 'manualText'), false);
+  });
+
+  const serializedTabs = JSON.stringify(context.captured.tabs);
+  assert.ok(
+    serializedTabs.length < sourceText.length,
+    'queued tab snapshots should not duplicate the full manual text'
+  );
+
+  const migrated = context.compactManualTextSnapshotsForQueueState([
+    {
+      jobId: 'job-1',
+      runId: 'run-1',
+      title: 'Migrated source 1',
+      tabSnapshot: {
+        id: 'manual-1',
+        title: 'Migrated source 1',
+        url: 'manual://source',
+        manualText: sourceText
+      }
+    },
+    {
+      jobId: 'job-2',
+      runId: 'run-2',
+      title: 'Migrated source 2',
+      tabSnapshot: {
+        id: 'manual-2',
+        title: 'Migrated source 2',
+        url: 'manual://source',
+        manualText: sourceText
+      }
+    }
+  ], [], []);
+
+  assert.strictEqual(migrated.manualTextSources.length, 1);
+  assert.strictEqual(migrated.manualTextSources[0].text, sourceText);
+  assert.strictEqual(migrated.waitingJobs[0].tabSnapshot.manualText, undefined);
+  assert.strictEqual(migrated.waitingJobs[1].tabSnapshot.manualText, undefined);
+  assert.strictEqual(
+    migrated.waitingJobs[0].tabSnapshot.manualTextSourceId,
+    migrated.waitingJobs[1].tabSnapshot.manualTextSourceId
+  );
+
+  console.log('manual source storage dedupe test: ok');
 }
 
 main().catch((error) => {

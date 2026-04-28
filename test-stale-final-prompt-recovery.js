@@ -13,7 +13,7 @@ function extractFunctionSource(source, functionName) {
     throw new Error(`Function not found: ${functionName}`);
   }
   const startIndex = match.index;
-  const paramsStart = source.indexOf('(', match.index);
+  const paramsStart = source.indexOf('(', startIndex);
   if (paramsStart < 0) {
     throw new Error(`Function params not found: ${functionName}`);
   }
@@ -196,113 +196,117 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-function buildContext() {
-  const context = {
-    console,
-    ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
-    captured: null,
-    getAnalysisQueueStatusSnapshot: async () => ({
-      success: true,
-      queuedCount: 0,
-      maxConcurrent: 7,
-      queueSize: 0,
-      activeSlots: 0,
-      reservedSlots: 0,
-      liveSlots: 0,
-      startingSlots: 0
-    }),
-    enqueueAnalysisJobs: async (jobs, options) => {
-      context.captured = { jobs, options };
-      return {
-        success: true,
-        jobs,
-        queuedCount: jobs.length,
-        maxConcurrent: 7,
-        queueSize: jobs.length,
-        activeSlots: 1,
-        reservedSlots: 2,
-        liveSlots: 1,
-        startingSlots: 1
-      };
+function createFixedDate(nowTs) {
+  return class FixedDate extends Date {
+    constructor(...args) {
+      if (args.length === 0) {
+        super(nowTs);
+        return;
+      }
+      super(...args);
+    }
+
+    static now() {
+      return nowTs;
     }
   };
-
-  vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'processArticles'), context, {
-    filename: 'background.js'
-  });
-  return context;
-}
-
-function toPlainJson(value) {
-  return JSON.parse(JSON.stringify(value));
-}
-
-async function testReturnsQueueSnapshotForEmptyInput() {
-  const context = buildContext();
-  const result = await context.processArticles([], [], '', 'company');
-  assert.strictEqual(result.maxConcurrent, 7);
-  assert.strictEqual(result.queuedCount, 0);
-  assert.strictEqual(context.captured, null);
-}
-
-async function testBuildsQueueJobsInsteadOfDirectExecution() {
-  const context = buildContext();
-  const tabs = [
-    { id: 1, title: 'Manual text', url: 'manual://source' },
-    { id: 2, title: 'Manual pdf', url: 'manual://pdf', windowId: 9 }
-  ];
-
-  const result = await context.processArticles(tabs, ['p1'], 'https://chat.example', 'company', {
-    invocationWindowId: 44,
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1',
-    manualTextSources: [{ id: 'manual-src-1', text: 'manual source body' }]
-  });
-
-  assert.strictEqual(result.maxConcurrent, 7);
-  assert.strictEqual(result.queuedCount, 2);
-  assert.ok(context.captured, 'enqueueAnalysisJobs should be called');
-  assert.strictEqual(context.captured.options.reason, 'process_articles_enqueue');
-  assert.deepStrictEqual(context.captured.options.manualTextSources, [
-    { id: 'manual-src-1', text: 'manual source body' }
-  ]);
-  assert.strictEqual(context.captured.jobs.length, 2);
-  assert.deepStrictEqual(toPlainJson(context.captured.jobs[0]), {
-    kind: 'article_analysis',
-    analysisType: 'company',
-    title: 'Manual text',
-    sourceKind: 'manual_text',
-    tabSnapshot: tabs[0],
-    invocationWindowId: 44,
-    sourceWindowId: null,
-    sourceUrl: 'manual://source',
-    chatUrl: 'https://chat.example',
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
-  });
-  assert.deepStrictEqual(toPlainJson(context.captured.jobs[1]), {
-    kind: 'article_analysis',
-    analysisType: 'company',
-    title: 'Manual pdf',
-    sourceKind: 'manual_pdf',
-    tabSnapshot: tabs[1],
-    invocationWindowId: 44,
-    sourceWindowId: 9,
-    sourceUrl: 'manual://pdf',
-    chatUrl: 'https://chat.example',
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
-  });
 }
 
 async function main() {
-  await testReturnsQueueSnapshotForEmptyInput();
-  await testBuildsQueueJobsInsteadOfDirectExecution();
-  console.log('processArticles queue api test: ok');
+  const saved = [];
+  const auditLogs = [];
+  const nowTs = 1_773_918_300_000;
+  const context = vm.createContext({
+    console,
+    Date: createFixedDate(nowTs),
+    Math,
+    Number,
+    String,
+    Array,
+    JSON,
+    Map,
+    Set,
+    PROCESS_MONITOR_HEARTBEAT: {
+      finalPromptRecoveryTtlMs: 10 * 60 * 1000,
+      finalPromptRecoveryCooldownMs: 15 * 60 * 1000
+    },
+    finalPromptRecoveryInFlight: new Set(),
+    finalPromptRecoveryLastAttemptAtByRunId: new Map(),
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    normalizeProcessPhase(value, fallback = '') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    hasProcessReachedFinalStage: () => false,
+    textFingerprint(value = '') {
+      return value.length.toString(16).padStart(8, '0');
+    },
+    buildResponseContractValidation() {
+      return { valid: true, kind: 'current' };
+    },
+    extractLastAssistantResponseFromTab: async () => '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}',
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' && value.trim() ? value.trim() : '';
+    },
+    resolveSupportedSourceNameFromUrl() {
+      return 'The Economist';
+    },
+    emitWatchlistDispatchProcessLog(level, code, message, details) {
+      auditLogs.push({ level, code, message, details });
+    },
+    saveResponse: async (...args) => {
+      saved.push(args);
+      return { success: true };
+    }
+  });
+
+  [
+    'getProcessLastActivityTimestamp',
+    'getProcessLastProgressTimestamp',
+    'shouldAttemptStaleFinalPromptRecovery',
+    'attemptStaleFinalPromptRecovery'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
+  });
+
+  const process = {
+    id: 'run-final',
+    status: 'running',
+    lifecycleStatus: 'running',
+    phase: 'prompt_send',
+    currentPrompt: 12,
+    totalPrompts: 12,
+    stageIndex: 11,
+    tabId: 55,
+    title: 'Alpha Corp',
+    analysisType: 'company',
+    sourceUrl: 'https://www.economist.com/test',
+    chatUrl: 'https://chatgpt.com/c/test',
+    lastProgressAt: nowTs - (11 * 60 * 1000)
+  };
+
+  assert.strictEqual(context.shouldAttemptStaleFinalPromptRecovery(process, nowTs), true);
+  const result = await context.attemptStaleFinalPromptRecovery(process, 'test', nowTs);
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(saved.length, 1);
+  assert.strictEqual(saved[0][0], '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}');
+  assert.strictEqual(saved[0][3], 'run-final');
+  assert.strictEqual(saved[0][4], 'run-final_p12_00000054');
+  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_recovery');
+  assert.strictEqual(saved[0][5].selected_response_prompt, 12);
+  assert.strictEqual(saved[0][6], 'https://chatgpt.com/c/test');
+  assert(
+    auditLogs.some((entry) => entry.code === 'stale_final_prompt_recovered'),
+    'Expected recovery audit log.'
+  );
+
+  console.log('test-stale-final-prompt-recovery.js: ok');
 }
 
 main().catch((error) => {

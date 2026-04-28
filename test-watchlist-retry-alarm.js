@@ -13,7 +13,7 @@ function extractFunctionSource(source, functionName) {
     throw new Error(`Function not found: ${functionName}`);
   }
   const startIndex = match.index;
-  const paramsStart = source.indexOf('(', match.index);
+  const paramsStart = source.indexOf('(', startIndex);
   if (paramsStart < 0) {
     throw new Error(`Function params not found: ${functionName}`);
   }
@@ -196,113 +196,134 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-function buildContext() {
+function loadContext() {
+  const createCalls = [];
+  const clearCalls = [];
+  const setCalls = [];
   const context = {
     console,
-    ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
-    captured: null,
-    getAnalysisQueueStatusSnapshot: async () => ({
-      success: true,
-      queuedCount: 0,
-      maxConcurrent: 7,
-      queueSize: 0,
-      activeSlots: 0,
-      reservedSlots: 0,
-      liveSlots: 0,
-      startingSlots: 0
-    }),
-    enqueueAnalysisJobs: async (jobs, options) => {
-      context.captured = { jobs, options };
-      return {
-        success: true,
-        jobs,
-        queuedCount: jobs.length,
-        maxConcurrent: 7,
-        queueSize: jobs.length,
-        activeSlots: 1,
-        reservedSlots: 2,
-        liveSlots: 1,
-        startingSlots: 1
-      };
-    }
+    Date,
+    WATCHLIST_DISPATCH: {
+      enabled: true,
+      outboxStorageKey: 'watchlist_dispatch_outbox',
+      retryAlarmName: 'watchlist-dispatch-retry',
+      retryAlarmImmediateDelayMs: 1500
+    },
+    chrome: {
+      alarms: {
+        create: (name, info) => {
+          createCalls.push({ name, info });
+        }
+      },
+      storage: {
+        local: {
+          set: async (payload) => {
+            setCalls.push(payload);
+          }
+        }
+      }
+    },
+    clearAlarmSafe: async (alarmName) => {
+      clearCalls.push(alarmName);
+      return true;
+    },
+    sanitizeWatchlistOutbox: (items) => (Array.isArray(items) ? items : [])
   };
 
   vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'processArticles'), context, {
-    filename: 'background.js'
+  [
+    'computeWatchlistDispatchRetryAlarmAt',
+    'syncWatchlistDispatchRetryAlarm',
+    'writeWatchlistOutbox'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
   });
+
+  context.__createCalls = createCalls;
+  context.__clearCalls = clearCalls;
+  context.__setCalls = setCalls;
   return context;
 }
 
-function toPlainJson(value) {
-  return JSON.parse(JSON.stringify(value));
+async function testReadyItemsScheduleImmediateRetry() {
+  const context = loadContext();
+  const now = 1_700_000_000_000;
+  const when = context.computeWatchlistDispatchRetryAlarmAt([
+    {
+      payload: { responseId: 'resp-ready' },
+      nextAttemptAt: now - 250
+    }
+  ], now);
+  assert.strictEqual(when, now + 1500);
 }
 
-async function testReturnsQueueSnapshotForEmptyInput() {
-  const context = buildContext();
-  const result = await context.processArticles([], [], '', 'company');
-  assert.strictEqual(result.maxConcurrent, 7);
-  assert.strictEqual(result.queuedCount, 0);
-  assert.strictEqual(context.captured, null);
+async function testFutureRetryUsesEarliestNextAttempt() {
+  const context = loadContext();
+  const now = 1_700_000_000_000;
+  const expectedWhen = now + 45_000;
+  const result = await context.syncWatchlistDispatchRetryAlarm([
+    {
+      payload: { responseId: 'resp-future-a' },
+      nextAttemptAt: now + 60_000
+    },
+    {
+      payload: { responseId: 'resp-future-b' },
+      nextAttemptAt: expectedWhen
+    }
+  ], now);
+
+  assert.strictEqual(result.scheduled, true);
+  assert.strictEqual(result.when, expectedWhen);
+  assert.strictEqual(context.__createCalls.length, 1);
+  assert.strictEqual(context.__createCalls[0].name, 'watchlist-dispatch-retry');
+  assert.strictEqual(context.__createCalls[0].info.when, expectedWhen);
+  assert.strictEqual(context.__clearCalls.length, 0);
 }
 
-async function testBuildsQueueJobsInsteadOfDirectExecution() {
-  const context = buildContext();
-  const tabs = [
-    { id: 1, title: 'Manual text', url: 'manual://source' },
-    { id: 2, title: 'Manual pdf', url: 'manual://pdf', windowId: 9 }
+async function testVerifiedItemsClearRetryAlarm() {
+  const context = loadContext();
+  const now = 1_700_000_000_000;
+  const result = await context.syncWatchlistDispatchRetryAlarm([
+    {
+      payload: { responseId: 'resp-verified' },
+      nextAttemptAt: now - 1000,
+      verifiedAt: now - 100
+    }
+  ], now);
+
+  assert.strictEqual(result.scheduled, false);
+  assert.strictEqual(result.reason, 'no_retry_needed');
+  assert.deepStrictEqual(context.__createCalls, []);
+  assert.deepStrictEqual(context.__clearCalls, ['watchlist-dispatch-retry']);
+}
+
+async function testWriteWatchlistOutboxPersistsAndSchedulesRetry() {
+  const context = loadContext();
+  const now = Date.now();
+  const items = [
+    {
+      payload: { responseId: 'resp-write' },
+      nextAttemptAt: now + 30_000
+    }
   ];
 
-  const result = await context.processArticles(tabs, ['p1'], 'https://chat.example', 'company', {
-    invocationWindowId: 44,
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1',
-    manualTextSources: [{ id: 'manual-src-1', text: 'manual source body' }]
-  });
-
-  assert.strictEqual(result.maxConcurrent, 7);
-  assert.strictEqual(result.queuedCount, 2);
-  assert.ok(context.captured, 'enqueueAnalysisJobs should be called');
-  assert.strictEqual(context.captured.options.reason, 'process_articles_enqueue');
-  assert.deepStrictEqual(context.captured.options.manualTextSources, [
-    { id: 'manual-src-1', text: 'manual source body' }
-  ]);
-  assert.strictEqual(context.captured.jobs.length, 2);
-  assert.deepStrictEqual(toPlainJson(context.captured.jobs[0]), {
-    kind: 'article_analysis',
-    analysisType: 'company',
-    title: 'Manual text',
-    sourceKind: 'manual_text',
-    tabSnapshot: tabs[0],
-    invocationWindowId: 44,
-    sourceWindowId: null,
-    sourceUrl: 'manual://source',
-    chatUrl: 'https://chat.example',
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
-  });
-  assert.deepStrictEqual(toPlainJson(context.captured.jobs[1]), {
-    kind: 'article_analysis',
-    analysisType: 'company',
-    title: 'Manual pdf',
-    sourceKind: 'manual_pdf',
-    tabSnapshot: tabs[1],
-    invocationWindowId: 44,
-    sourceWindowId: 9,
-    sourceUrl: 'manual://pdf',
-    chatUrl: 'https://chat.example',
-    queueBatchId: 'batch-1',
-    manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
-  });
+  const result = await context.writeWatchlistOutbox(items);
+  assert.strictEqual(result, items);
+  assert.strictEqual(context.__setCalls.length, 1);
+  assert.strictEqual(context.__setCalls[0].watchlist_dispatch_outbox, items);
+  assert.strictEqual(context.__createCalls.length, 1);
+  assert.strictEqual(context.__createCalls[0].name, 'watchlist-dispatch-retry');
+  assert.strictEqual(context.__createCalls[0].info.when, items[0].nextAttemptAt);
 }
 
 async function main() {
-  await testReturnsQueueSnapshotForEmptyInput();
-  await testBuildsQueueJobsInsteadOfDirectExecution();
-  console.log('processArticles queue api test: ok');
+  await testReadyItemsScheduleImmediateRetry();
+  await testFutureRetryUsesEarliestNextAttempt();
+  await testVerifiedItemsClearRetryAlarm();
+  await testWriteWatchlistOutboxPersistsAndSchedulesRetry();
+  console.log('watchlist retry alarm test: ok');
 }
 
 main().catch((error) => {

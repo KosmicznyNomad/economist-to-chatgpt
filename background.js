@@ -112,8 +112,28 @@ const WATCHLIST_DISPATCH = {
   historyStorageKey: "watchlist_dispatch_history",
   historyMaxItems: 200,
   alarmName: "watchlist-dispatch-flush",
+  retryAlarmName: "watchlist-dispatch-retry",
+  retryAlarmImmediateDelayMs: 1000,
   alarmPeriodMinutes: 2
 };
+function computeFinalResponseSaveTimeoutMs() {
+  const sendTimeoutMs = Number.isInteger(WATCHLIST_DISPATCH.timeoutMs) && WATCHLIST_DISPATCH.timeoutMs > 0
+    ? WATCHLIST_DISPATCH.timeoutMs
+    : 20000;
+  const verifyTimeoutMs = WATCHLIST_DISPATCH.verifyEnabled === true
+    && Number.isInteger(WATCHLIST_DISPATCH.verifyTimeoutMs)
+    && WATCHLIST_DISPATCH.verifyTimeoutMs > 0
+    ? WATCHLIST_DISPATCH.verifyTimeoutMs
+    : 0;
+  const flushBudgetMs = Number.isInteger(WATCHLIST_DISPATCH.flushMaxRuntimeMs) && WATCHLIST_DISPATCH.flushMaxRuntimeMs > 0
+    ? WATCHLIST_DISPATCH.flushMaxRuntimeMs
+    : (25 * 1000);
+  const dispatchCandidateCount = WATCHLIST_DISPATCH.enableLocalTunnelFallback === true ? 2 : 1;
+  const localSaveBufferMs = 8000;
+  const pipelineBudgetMs = (sendTimeoutMs * dispatchCandidateCount) + verifyTimeoutMs + localSaveBufferMs;
+  return Math.max(20000, Math.min(60000, Math.max(flushBudgetMs, pipelineBudgetMs)));
+}
+const FINAL_RESPONSE_SAVE_TIMEOUT_MS = computeFinalResponseSaveTimeoutMs();
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
 const ANALYSIS_QUEUE_PAUSED_STORAGE_KEY = 'analysis_queue_paused';
 const ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY = 'iskra_remote_execution_mode';
@@ -157,17 +177,22 @@ const PROCESS_MONITOR_HEARTBEAT = {
   touchIntervalMs: PROCESS_STREAM_HEARTBEAT_MS,
   // Treat runs as stale when no progress update arrives within TTL.
   staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
-  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2
+  staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2,
+  autoStopNoContextTtlMs: 24 * 60 * 60 * 1000,
+  finalPromptRecoveryTtlMs: 10 * 60 * 1000,
+  finalPromptRecoveryCooldownMs: 15 * 60 * 1000
 };
 const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   initialDelayMs: 2000,
   maxDelayMs: 5 * 60 * 1000,
-  maxAttempts: 96
+  maxAttempts: 96,
+  alarmName: 'completed-process-persistence-retry'
 };
 const PROCESS_WINDOW_CLOSE_RETRY = {
   initialDelayMs: 1500,
   maxDelayMs: 60 * 1000,
-  maxAttempts: 24
+  maxAttempts: 24,
+  alarmName: 'completed-process-window-close-retry'
 };
 const PROBLEM_LOG_REMOTE_SCHEMA = 'iskra.problem_log.v1';
 const PROBLEM_LOG_REMOTE_SOURCE = 'problem-log';
@@ -245,10 +270,14 @@ const processLogLastEmitTsByRunId = new Map();
 const processStaleWarnLastEmitTsByRunId = new Map();
 const completedProcessPersistenceRetryTimersByRunId = new Map();
 const completedProcessPersistenceRetryAttemptCountByRunId = new Map();
+const completedProcessPersistenceRetryDueAtByRunId = new Map();
 const completedProcessPersistenceRetryInFlight = new Set();
 const processWindowCloseRetryTimersByRunId = new Map();
 const processWindowCloseRetryAttemptCountByRunId = new Map();
+const processWindowCloseRetryDueAtByRunId = new Map();
 const processWindowCloseRetryInFlight = new Set();
+const finalPromptRecoveryInFlight = new Set();
+const finalPromptRecoveryLastAttemptAtByRunId = new Map();
 const manualPdfQueueBatches = new Map();
 const problemLogConsoleErrorDedup = new Map();
 let problemLogConsoleCaptureInstalled = false;
@@ -647,6 +676,29 @@ function normalizePromptCounters(status, currentPrompt, totalPrompts, stageIndex
   return { currentPrompt: current, totalPrompts: total };
 }
 
+function buildPendingPromptSnapshotFromStartIndex(startIndex, totalPrompts) {
+  if (!Number.isInteger(startIndex) || startIndex < 0) {
+    return {
+      currentPrompt: 0,
+      stageIndex: null,
+      stageName: 'Start'
+    };
+  }
+
+  const safeTotalPrompts = Number.isInteger(totalPrompts) && totalPrompts > 0
+    ? totalPrompts
+    : 0;
+  const nextPrompt = safeTotalPrompts > 0
+    ? Math.min(startIndex + 1, safeTotalPrompts)
+    : (startIndex + 1);
+
+  return {
+    currentPrompt: nextPrompt,
+    stageIndex: nextPrompt > 0 ? (nextPrompt - 1) : null,
+    stageName: nextPrompt > 0 ? `Prompt ${nextPrompt}` : 'Start'
+  };
+}
+
 function normalizeAutoRecoveryState(rawState) {
   if (!rawState || typeof rawState !== 'object') return null;
 
@@ -698,6 +750,9 @@ function normalizeProcessWindowCloseState(rawState) {
   if (Number.isInteger(rawState.closedAt) && rawState.closedAt > 0) {
     normalized.closedAt = rawState.closedAt;
   }
+  if (Number.isInteger(rawState.nextAttemptAt) && rawState.nextAttemptAt > 0) {
+    normalized.nextAttemptAt = rawState.nextAttemptAt;
+  }
   if (typeof rawState.lastError === 'string' && rawState.lastError.trim()) {
     normalized.lastError = rawState.lastError.trim();
   }
@@ -720,6 +775,311 @@ function normalizeProcessWindowCloseState(rawState) {
     normalized.attemptCount = 0;
   }
   return normalized;
+}
+
+function trimProcessAuditText(value, maxLength = 180) {
+  const text = typeof value === 'string' ? value.trim() : '';
+  if (!text) return '';
+  if (!Number.isInteger(maxLength) || maxLength <= 0 || text.length <= maxLength) return text;
+  return `${text.slice(0, Math.max(0, maxLength - 3))}...`;
+}
+
+function getCompletedProcessLocalSaveState(process) {
+  if (!process || typeof process !== 'object') return null;
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  if (typeof persistenceStatus?.saveOk === 'boolean') {
+    return persistenceStatus.saveOk;
+  }
+  if (typeof process?.completedResponseSaved === 'boolean') {
+    return process.completedResponseSaved;
+  }
+  if (typeof finalStagePersistence?.success === 'boolean') {
+    return finalStagePersistence.success;
+  }
+  return null;
+}
+
+function hasCompletedProcessLocalSave(process) {
+  return getCompletedProcessLocalSaveState(process) === true;
+}
+
+function buildProcessCompletionAudit(process) {
+  if (!process || typeof process !== 'object') return null;
+
+  const resolveCompletedLocalSaveState = (candidate) => {
+    if (typeof getCompletedProcessLocalSaveState === 'function') {
+      return getCompletedProcessLocalSaveState(candidate);
+    }
+    if (!candidate || typeof candidate !== 'object') return null;
+    const candidatePersistenceStatus = candidate?.persistenceStatus && typeof candidate.persistenceStatus === 'object'
+      ? candidate.persistenceStatus
+      : null;
+    const candidateFinalStagePersistence = candidate?.finalStagePersistence && typeof candidate.finalStagePersistence === 'object'
+      ? candidate.finalStagePersistence
+      : null;
+    if (typeof candidatePersistenceStatus?.saveOk === 'boolean') {
+      return candidatePersistenceStatus.saveOk;
+    }
+    if (typeof candidate?.completedResponseSaved === 'boolean') {
+      return candidate.completedResponseSaved;
+    }
+    if (typeof candidateFinalStagePersistence?.success === 'boolean') {
+      return candidateFinalStagePersistence.success;
+    }
+    return null;
+  };
+  const hasCompletedLocalSave = (candidate) => resolveCompletedLocalSaveState(candidate) === true;
+
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : {};
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : {};
+  const dispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
+    ? persistenceStatus.dispatch
+    : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
+      ? process.completedResponseDispatch
+      : (finalStagePersistence && typeof finalStagePersistence === 'object' ? finalStagePersistence : {}));
+  const dbVerification = dispatch?.dbVerification && typeof dispatch.dbVerification === 'object'
+    ? dispatch.dbVerification
+    : null;
+  const windowClose = normalizeProcessWindowCloseState(process.windowClose);
+
+  const hasResponseText = typeof process?.completedResponseText === 'string'
+    && process.completedResponseText.trim().length > 0;
+  const responseCapturedAt = Number.isInteger(process?.completedResponseCapturedAt) && process.completedResponseCapturedAt > 0
+    ? process.completedResponseCapturedAt
+    : null;
+  const hasResponse = persistenceStatus?.hasResponse === true
+    || hasResponseText
+    || responseCapturedAt !== null
+    || hasCompletedLocalSave(process);
+
+  const saveOk = resolveCompletedLocalSaveState(process);
+  const saveError = trimProcessAuditText(
+    typeof persistenceStatus?.saveError === 'string'
+      ? persistenceStatus.saveError
+      : (typeof process?.error === 'string' ? process.error : ''),
+    220
+  );
+  const pageEmergencyOnly = persistenceStatus?.pageEmergencyOnly === true
+    || finalStagePersistence?.pageEmergencyOnly === true;
+  const saveUpdatedAt = Number.isInteger(persistenceStatus?.updatedAt) && persistenceStatus.updatedAt > 0
+    ? persistenceStatus.updatedAt
+    : (Number.isInteger(finalStagePersistence?.updatedAt) && finalStagePersistence.updatedAt > 0
+      ? finalStagePersistence.updatedAt
+      : responseCapturedAt);
+  let saveState = 'missing';
+  if (saveOk === true) {
+    saveState = 'saved';
+  } else if (pageEmergencyOnly) {
+    saveState = 'page_emergency_only';
+  } else if (saveOk === false) {
+    saveState = 'failed';
+  } else if (hasResponse) {
+    saveState = saveError ? 'failed' : 'pending';
+  }
+
+  const dispatchStateRaw = typeof dispatch?.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
+  const verifyState = trimProcessAuditText(
+    typeof dispatch?.verifyState === 'string'
+      ? dispatch.verifyState
+      : (typeof dbVerification?.reason === 'string'
+        ? dbVerification.reason
+        : (dbVerification?.found === true ? 'verified' : '')),
+    120
+  );
+  const normalizedVerifyState = typeof verifyState === 'string' ? verifyState.trim().toLowerCase() : '';
+  const verifyEventId = (() => {
+    if (typeof dispatch?.verifyEventId === 'string' && dispatch.verifyEventId.trim()) {
+      return dispatch.verifyEventId.trim();
+    }
+    if (Number.isInteger(dbVerification?.eventId) && dbVerification.eventId > 0) {
+      return String(dbVerification.eventId);
+    }
+    return '';
+  })();
+  const dispatchAccepted = Number.isInteger(dispatch?.accepted) ? dispatch.accepted : 0;
+  const dispatchSent = Number.isInteger(dispatch?.sent) ? dispatch.sent : 0;
+  const dispatchFailed = Number.isInteger(dispatch?.failed) ? dispatch.failed : 0;
+  const dispatchDeferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
+  const dispatchRemaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : 0;
+  const dispatchPending = Number.isInteger(dispatch?.pending) ? dispatch.pending : (dispatchDeferred + dispatchRemaining);
+  const queueSkipped = dispatch?.queueSkipped === true || finalStagePersistence?.queueSkipped === true;
+  const flushSkipped = dispatch?.flushSkipped === true || finalStagePersistence?.flushSkipped === true;
+  const dispatchConfirmed = (saveOk === true)
+    && (dispatchStateRaw === 'dispatch_confirmed' || normalizedVerifyState === 'verified');
+  const dispatchUpdatedAt = Number.isInteger(dispatch?.updatedAt) && dispatch.updatedAt > 0
+    ? dispatch.updatedAt
+    : (Number.isInteger(dbVerification?.checkedAt) && dbVerification.checkedAt > 0
+      ? dbVerification.checkedAt
+      : saveUpdatedAt);
+
+  let dispatchState = dispatchStateRaw;
+  if (!dispatchState) {
+    if (dispatchConfirmed) {
+      dispatchState = 'dispatch_confirmed';
+    } else if (dispatchFailed > 0) {
+      dispatchState = 'dispatch_failed';
+    } else if (dispatchAccepted > 0 || dispatchSent > 0 || dispatchPending > 0 || queueSkipped || flushSkipped) {
+      dispatchState = 'dispatch_pending';
+    } else if (saveOk === true) {
+      dispatchState = 'saved_local';
+    }
+  }
+
+  const hasWindowContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+  const windowCloseState = typeof windowClose?.state === 'string' && windowClose.state.trim()
+    ? windowClose.state.trim()
+    : (hasWindowContext ? 'not_requested' : 'not_available');
+  const windowCloseRequestedAt = Number.isInteger(windowClose?.requestedAt) && windowClose.requestedAt > 0
+    ? windowClose.requestedAt
+    : null;
+  const windowCloseLastAttemptAt = Number.isInteger(windowClose?.lastAttemptAt) && windowClose.lastAttemptAt > 0
+    ? windowClose.lastAttemptAt
+    : null;
+  const windowCloseClosedAt = Number.isInteger(windowClose?.closedAt) && windowClose.closedAt > 0
+    ? windowClose.closedAt
+    : null;
+  const windowCloseAttempts = Number.isInteger(windowClose?.attemptCount) && windowClose.attemptCount >= 0
+    ? windowClose.attemptCount
+    : 0;
+  const windowCloseError = trimProcessAuditText(
+    typeof windowClose?.lastError === 'string' ? windowClose.lastError : '',
+    160
+  );
+  const windowCloseReason = trimProcessAuditText(
+    typeof windowClose?.lastReason === 'string' ? windowClose.lastReason : '',
+    120
+  );
+
+  if (
+    !hasResponse
+    && saveState === 'missing'
+    && !dispatchState
+    && windowCloseState === 'not_available'
+  ) {
+    return null;
+  }
+
+  let overallState = 'final_stage_detected';
+  if (!hasResponse) {
+    overallState = 'response_missing';
+  } else if (saveState === 'page_emergency_only') {
+    overallState = 'page_emergency_only';
+  } else if (saveState === 'failed') {
+    overallState = 'save_failed';
+  } else if (saveState !== 'saved') {
+    overallState = 'save_pending';
+  } else if (dispatchConfirmed) {
+    if (windowCloseState === 'closed') {
+      overallState = 'dispatch_confirmed_window_closed';
+    } else if (windowCloseState === 'failed') {
+      overallState = 'dispatch_confirmed_window_close_failed';
+    } else {
+      overallState = 'dispatch_confirmed';
+    }
+  } else if (dispatchState === 'dispatch_failed') {
+    overallState = 'dispatch_failed';
+  } else if (dispatchState === 'dispatch_skipped') {
+    overallState = 'dispatch_skipped';
+  } else if (dispatchState === 'dispatch_pending' || dispatchState === 'dispatch_queued_no_flush_result') {
+    overallState = 'dispatch_pending';
+  } else if (dispatchState === 'saved_local') {
+    overallState = 'saved_local';
+  }
+
+  const checkpoints = [];
+  if (responseCapturedAt !== null) {
+    checkpoints.push({
+      code: 'response',
+      state: hasResponse ? 'captured' : 'missing',
+      ts: responseCapturedAt,
+      detail: Number.isInteger(process?.completedResponseLength) && process.completedResponseLength > 0
+        ? `len=${process.completedResponseLength}`
+        : ''
+    });
+  }
+  if (saveState !== 'missing' || saveError) {
+    checkpoints.push({
+      code: 'save_local',
+      state: saveState,
+      ts: saveUpdatedAt || responseCapturedAt || Date.now(),
+      detail: saveError
+    });
+  }
+  if (dispatchState) {
+    const dispatchParts = [];
+    if (dispatchAccepted > 0) dispatchParts.push(`accepted=${dispatchAccepted}`);
+    if (dispatchSent > 0) dispatchParts.push(`sent=${dispatchSent}`);
+    if (dispatchPending > 0) dispatchParts.push(`pending=${dispatchPending}`);
+    if (dispatchFailed > 0) dispatchParts.push(`failed=${dispatchFailed}`);
+    if (verifyState) dispatchParts.push(`verify=${verifyState}`);
+    if (verifyEventId) dispatchParts.push(`event=${verifyEventId}`);
+    checkpoints.push({
+      code: 'dispatch',
+      state: dispatchConfirmed ? 'confirmed' : dispatchState,
+      ts: dispatchUpdatedAt || saveUpdatedAt || responseCapturedAt || Date.now(),
+      detail: trimProcessAuditText(dispatchParts.join(', '), 220)
+    });
+  }
+  if (windowCloseState !== 'not_available') {
+    checkpoints.push({
+      code: 'window_close',
+      state: windowCloseState,
+      ts: windowCloseClosedAt || windowCloseLastAttemptAt || windowCloseRequestedAt || saveUpdatedAt || responseCapturedAt || Date.now(),
+      detail: trimProcessAuditText(
+        [windowCloseReason, windowCloseError].filter(Boolean).join(' | '),
+        220
+      )
+    });
+  }
+
+  const updatedAt = [
+    responseCapturedAt,
+    saveUpdatedAt,
+    dispatchUpdatedAt,
+    windowCloseClosedAt,
+    windowCloseLastAttemptAt,
+    windowCloseRequestedAt,
+    Number.isInteger(process?.finishedAt) ? process.finishedAt : null,
+    Number.isInteger(process?.timestamp) ? process.timestamp : null
+  ]
+    .filter((value) => Number.isInteger(value) && value > 0)
+    .reduce((max, value) => Math.max(max, value), 0);
+
+  return {
+    hasResponse,
+    responseCapturedAt,
+    saveState,
+    saveOk: saveOk === true,
+    saveUpdatedAt: Number.isInteger(saveUpdatedAt) ? saveUpdatedAt : null,
+    saveError,
+    dispatchState,
+    dispatchConfirmed,
+    dispatchAccepted,
+    dispatchSent,
+    dispatchFailed,
+    dispatchPending,
+    verifyState,
+    verifyEventId,
+    dispatchUpdatedAt: Number.isInteger(dispatchUpdatedAt) ? dispatchUpdatedAt : null,
+    windowCloseState,
+    windowCloseRequestedAt,
+    windowCloseLastAttemptAt,
+    windowCloseClosedAt,
+    windowCloseAttempts,
+    windowCloseError,
+    overallState,
+    updatedAt: updatedAt || null,
+    checkpoints
+  };
 }
 
 function isFailedProcessStatus(status) {
@@ -1026,6 +1386,12 @@ function normalizeProcessRecord(record) {
   } else {
     delete normalized.windowClose;
   }
+  const normalizedCompletionAudit = buildProcessCompletionAudit(normalized);
+  if (normalizedCompletionAudit) {
+    normalized.completionAudit = normalizedCompletionAudit;
+  } else {
+    delete normalized.completionAudit;
+  }
   const normalizedPerformanceTelemetry = typeof ProcessContractUtils.normalizeProcessPerformanceTelemetry === 'function'
     ? ProcessContractUtils.normalizeProcessPerformanceTelemetry(normalized.performanceTelemetry)
     : null;
@@ -1166,11 +1532,15 @@ async function ensureProcessRegistryReady() {
         completedProcessPersistenceRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
         completedProcessPersistenceRetryTimersByRunId.clear();
         completedProcessPersistenceRetryAttemptCountByRunId.clear();
+        completedProcessPersistenceRetryDueAtByRunId.clear();
         completedProcessPersistenceRetryInFlight.clear();
         processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
         processWindowCloseRetryTimersByRunId.clear();
         processWindowCloseRetryAttemptCountByRunId.clear();
+        processWindowCloseRetryDueAtByRunId.clear();
         processWindowCloseRetryInFlight.clear();
+        finalPromptRecoveryInFlight.clear();
+        finalPromptRecoveryLastAttemptAtByRunId.clear();
       }
     })();
   }
@@ -1208,6 +1578,7 @@ function shouldFlushProcessUpdateImmediately(existingProcess = null, nextProcess
     || 'completedResponseCapturedAt' in candidatePatch
     || 'completedResponseSaved' in candidatePatch
     || 'persistenceStatus' in candidatePatch
+    || 'finalStagePersistence' in candidatePatch
     || 'windowClose' in candidatePatch
   ) {
     return true;
@@ -1322,6 +1693,152 @@ function sanitizeManualPdfAttachmentContext(rawAttachment) {
   };
 }
 
+function sanitizeManualTextSourceId(value) {
+  return typeof value === 'string' ? value.trim() : '';
+}
+
+function generateManualTextSourceId(prefix = 'manual-source') {
+  const safePrefix = typeof prefix === 'string' && prefix.trim()
+    ? prefix.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
+    : 'manual-source';
+  return `${safePrefix}-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
+}
+
+function sanitizeManualTextSourceRecord(rawSource) {
+  if (!rawSource || typeof rawSource !== 'object') return null;
+  const id = sanitizeManualTextSourceId(rawSource.id || rawSource.sourceId || rawSource.manualTextSourceId);
+  const text = typeof rawSource.text === 'string'
+    ? rawSource.text
+    : (typeof rawSource.manualText === 'string' ? rawSource.manualText : '');
+  if (!id || !text.trim()) return null;
+  return {
+    id,
+    title: typeof rawSource.title === 'string' && rawSource.title.trim() ? rawSource.title.trim() : 'Recznie wklejony artykul',
+    text,
+    createdAt: Number.isInteger(rawSource.createdAt) ? rawSource.createdAt : Date.now(),
+    length: text.length
+  };
+}
+
+function buildManualTextSourceRecord(id, text, title) {
+  return sanitizeManualTextSourceRecord({
+    id,
+    title,
+    text,
+    createdAt: Date.now()
+  });
+}
+
+function sanitizeManualTextSourceRecords(rawSources) {
+  const sourceList = Array.isArray(rawSources)
+    ? rawSources
+    : (rawSources && typeof rawSources === 'object' ? Object.values(rawSources) : []);
+  const byId = new Map();
+  sourceList.forEach((rawSource) => {
+    const source = sanitizeManualTextSourceRecord(rawSource);
+    if (source) byId.set(source.id, source);
+  });
+  return Array.from(byId.values());
+}
+
+function collectManualTextSourceIdsFromJobs(jobs = []) {
+  const ids = new Set();
+  (Array.isArray(jobs) ? jobs : []).forEach((job) => {
+    const sourceId = sanitizeManualTextSourceId(job?.tabSnapshot?.manualTextSourceId);
+    if (sourceId) ids.add(sourceId);
+  });
+  return ids;
+}
+
+function pruneManualTextSourcesForJobs(rawSources, waitingJobs = [], activeJobs = []) {
+  const usedIds = collectManualTextSourceIdsFromJobs([...(Array.isArray(waitingJobs) ? waitingJobs : []), ...(Array.isArray(activeJobs) ? activeJobs : [])]);
+  if (usedIds.size === 0) return [];
+  return sanitizeManualTextSourceRecords(rawSources).filter((source) => usedIds.has(source.id));
+}
+
+function mergeManualTextSourceRecords(existingSources, nextSources) {
+  const byId = new Map();
+  sanitizeManualTextSourceRecords(existingSources).forEach((source) => byId.set(source.id, source));
+  sanitizeManualTextSourceRecords(nextSources).forEach((source) => byId.set(source.id, source));
+  return Array.from(byId.values());
+}
+
+function compactManualTextSnapshotsForQueueState(waitingJobs = [], activeJobs = [], rawSources = []) {
+  const sourceRecords = sanitizeManualTextSourceRecords(rawSources);
+  const sourceById = new Map();
+  const sourceIdByText = new Map();
+  sourceRecords.forEach((source) => {
+    sourceById.set(source.id, source);
+    if (typeof source.text === 'string' && !sourceIdByText.has(source.text)) {
+      sourceIdByText.set(source.text, source.id);
+    }
+  });
+
+  const addedSources = [];
+  const compactJob = (job) => {
+    if (!job || typeof job !== 'object') return job;
+    const tabSnapshot = job.tabSnapshot && typeof job.tabSnapshot === 'object'
+      ? job.tabSnapshot
+      : null;
+    const manualText = typeof tabSnapshot?.manualText === 'string' ? tabSnapshot.manualText : '';
+    if (!manualText) return job;
+
+    let sourceId = sanitizeManualTextSourceId(tabSnapshot.manualTextSourceId);
+    if (!sourceId) {
+      sourceId = sourceIdByText.get(manualText) || generateManualTextSourceId('manual-text-migrated');
+    }
+    const existingSource = sourceById.get(sourceId);
+    if (!existingSource || existingSource.text !== manualText) {
+      const sourceRecord = buildManualTextSourceRecord(
+        sourceId,
+        manualText,
+        typeof tabSnapshot.title === 'string' && tabSnapshot.title.trim()
+          ? tabSnapshot.title.trim()
+          : job.title
+      );
+      if (sourceRecord) {
+        sourceById.set(sourceId, sourceRecord);
+        if (!sourceIdByText.has(manualText)) {
+          sourceIdByText.set(manualText, sourceId);
+        }
+        addedSources.push(sourceRecord);
+      }
+    }
+
+    const { manualText: _manualText, ...tabWithoutManualText } = tabSnapshot;
+    return {
+      ...job,
+      tabSnapshot: {
+        ...tabWithoutManualText,
+        manualTextSourceId: sourceId
+      }
+    };
+  };
+
+  const compactWaitingJobs = (Array.isArray(waitingJobs) ? waitingJobs : []).map(compactJob);
+  const compactActiveJobs = (Array.isArray(activeJobs) ? activeJobs : []).map(compactJob);
+  return {
+    waitingJobs: compactWaitingJobs,
+    activeJobs: compactActiveJobs,
+    manualTextSources: pruneManualTextSourcesForJobs(
+      mergeManualTextSourceRecords(sourceRecords, addedSources),
+      compactWaitingJobs,
+      compactActiveJobs
+    )
+  };
+}
+
+async function resolveManualTextSourceText(sourceId) {
+  const normalizedSourceId = sanitizeManualTextSourceId(sourceId);
+  if (!normalizedSourceId) return '';
+  await ensureAnalysisQueueReady().catch(() => null);
+  const sources = Array.isArray(analysisQueueState?.manualTextSources)
+    ? analysisQueueState.manualTextSources
+    : [];
+  const source = sources.find((item) => item?.id === normalizedSourceId);
+  return typeof source?.text === 'string' ? source.text : '';
+}
+
 function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   if (!rawTab || typeof rawTab !== 'object') return null;
   const title = typeof rawTab.title === 'string' && rawTab.title.trim()
@@ -1335,6 +1852,8 @@ function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   };
   if (Number.isInteger(rawTab.windowId)) snapshot.windowId = rawTab.windowId;
   if (Number.isInteger(rawTab.index)) snapshot.index = rawTab.index;
+  const manualTextSourceId = sanitizeManualTextSourceId(rawTab.manualTextSourceId);
+  if (manualTextSourceId) snapshot.manualTextSourceId = manualTextSourceId;
   if (typeof rawTab.manualText === 'string') snapshot.manualText = rawTab.manualText;
   const manualPdfAttachment = sanitizeManualPdfAttachmentContext(rawTab.manualPdfAttachment);
   if (manualPdfAttachment) {
@@ -1486,6 +2005,7 @@ function createEmptyAnalysisQueueState() {
   return {
     waitingJobs: [],
     activeJobs: [],
+    manualTextSources: [],
     maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
     lastSequence: 0
   };
@@ -1865,8 +2385,8 @@ function sanitizeAnalysisQueueState(rawState) {
   const source = rawState && typeof rawState === 'object'
     ? rawState
     : {};
-  const waitingJobs = [];
-  const activeJobs = [];
+  let waitingJobs = [];
+  let activeJobs = [];
   const seenJobIds = new Set();
 
   const appendJob = (target, rawJob) => {
@@ -1880,7 +2400,15 @@ function sanitizeAnalysisQueueState(rawState) {
   const activeSource = Array.isArray(source.activeJobs) ? source.activeJobs : [];
   waitingSource.forEach((job) => appendJob(waitingJobs, job));
   activeSource.forEach((job) => appendJob(activeJobs, job));
+  const compactedManualSources = compactManualTextSnapshotsForQueueState(
+    waitingJobs,
+    activeJobs,
+    source.manualTextSources
+  );
+  waitingJobs = compactedManualSources.waitingJobs;
+  activeJobs = compactedManualSources.activeJobs;
   sortAnalysisQueueWaitingJobs(waitingJobs);
+  const manualTextSources = compactedManualSources.manualTextSources;
 
   const maxSeenSequence = waitingJobs.concat(activeJobs).reduce((maxValue, job) => {
     const sequence = Number.isInteger(job?.sequence) && job.sequence > 0 ? job.sequence : 0;
@@ -1891,6 +2419,7 @@ function sanitizeAnalysisQueueState(rawState) {
   return {
     waitingJobs,
     activeJobs,
+    manualTextSources,
     maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
     lastSequence: Math.max(storedLastSequence, maxSeenSequence)
   };
@@ -3668,6 +4197,140 @@ async function appendProcessHeartbeatStaleWarning(process, staleMs, origin, nowT
   return !!entry;
 }
 
+function shouldAttemptStaleFinalPromptRecovery(process, nowTs = Date.now()) {
+  if (!process || typeof process !== 'object') return false;
+  const runId = typeof process.id === 'string' ? process.id.trim() : '';
+  if (!runId) return false;
+  if (finalPromptRecoveryInFlight.has(runId)) return false;
+  const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (status !== 'running') return false;
+  if (hasProcessReachedFinalStage(process)) return false;
+  if (process?.needsAction === true) return false;
+  const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  if (totalPrompts <= 0 || currentPrompt < totalPrompts) return false;
+  if (!Number.isInteger(process?.tabId)) return false;
+  const phase = normalizeProcessPhase(process?.phase, '');
+  if (phase && phase !== 'prompt_send' && phase !== 'response_wait' && phase !== 'capture_validate') {
+    return false;
+  }
+  const recoveryTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryTtlMs)
+    && PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryTtlMs > 0
+    ? PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryTtlMs
+    : (10 * 60 * 1000);
+  const lastProgressAt = getProcessLastProgressTimestamp(process);
+  if (lastProgressAt <= 0 || (nowTs - lastProgressAt) < recoveryTtlMs) return false;
+  const cooldownMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryCooldownMs)
+    && PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryCooldownMs > 0
+    ? PROCESS_MONITOR_HEARTBEAT.finalPromptRecoveryCooldownMs
+    : recoveryTtlMs;
+  const lastAttemptAt = finalPromptRecoveryLastAttemptAtByRunId.get(runId) || 0;
+  if (lastAttemptAt > 0 && (nowTs - lastAttemptAt) < cooldownMs) return false;
+  return true;
+}
+
+async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', nowTs = Date.now()) {
+  if (!process || typeof process !== 'object') {
+    return { success: false, reason: 'invalid_process' };
+  }
+  const runId = typeof process.id === 'string' ? process.id.trim() : '';
+  if (!runId) {
+    return { success: false, reason: 'missing_run_id' };
+  }
+  if (finalPromptRecoveryInFlight.has(runId)) {
+    return { success: false, skipped: true, reason: 'recovery_in_flight' };
+  }
+  const tabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  if (tabId === null) {
+    return { success: false, reason: 'missing_tab_id' };
+  }
+  finalPromptRecoveryInFlight.add(runId);
+  finalPromptRecoveryLastAttemptAtByRunId.set(runId, nowTs);
+  try {
+    const responseText = await extractLastAssistantResponseFromTab(tabId, 2600);
+    const normalizedResponseText = typeof responseText === 'string' ? responseText.trim() : '';
+    if (!normalizedResponseText) {
+      return { success: false, reason: 'missing_response_text' };
+    }
+    const contract = buildResponseContractValidation(normalizedResponseText);
+    if (contract?.valid !== true) {
+      return {
+        success: false,
+        reason: 'invalid_final_response_contract',
+        contractKind: contract?.kind || 'invalid'
+      };
+    }
+
+    const promptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
+      ? process.currentPrompt
+      : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+    const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'run';
+    const responseId = `${safeRunId}_p${promptNumber > 0 ? promptNumber : 0}_${textFingerprint(normalizedResponseText)}`;
+    const stageMeta = {};
+    if (promptNumber > 0) {
+      stageMeta.selected_response_prompt = promptNumber;
+      stageMeta.selected_response_stage_index = promptNumber - 1;
+    }
+    stageMeta.selected_response_reason = 'stale_final_prompt_recovery';
+    const source = typeof process?.title === 'string' && process.title.trim()
+      ? process.title.trim()
+      : 'Stale final prompt recovery';
+    const normalizedChatUrl = normalizeChatConversationUrl(process?.chatUrl)
+      || normalizeChatConversationUrl(process?.sourceUrl)
+      || null;
+    const saveResult = await saveResponse(
+      normalizedResponseText,
+      source,
+      typeof process?.analysisType === 'string' && process.analysisType.trim()
+        ? process.analysisType.trim()
+        : 'company',
+      runId,
+      responseId,
+      stageMeta,
+      normalizedChatUrl,
+      {
+        sourceTitle: source,
+        sourceName: resolveSupportedSourceNameFromUrl(typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''),
+        sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+      }
+    );
+    if (saveResult?.success !== true) {
+      return {
+        success: false,
+        reason: typeof saveResult?.reason === 'string' && saveResult.reason.trim()
+          ? saveResult.reason.trim()
+          : 'save_response_failed',
+        error: typeof saveResult?.error === 'string' ? saveResult.error : ''
+      };
+    }
+    if (typeof emitWatchlistDispatchProcessLog === 'function') {
+      emitWatchlistDispatchProcessLog('info', 'stale_final_prompt_recovered', 'Recovered final prompt output after stale stall', {
+        runId,
+        origin,
+        tabId,
+        responseId,
+        promptNumber,
+        contractKind: contract?.kind || 'invalid'
+      });
+    }
+    return {
+      success: true,
+      runId,
+      responseId,
+      promptNumber,
+      contractKind: contract?.kind || 'invalid'
+    };
+  } catch (error) {
+    return {
+      success: false,
+      reason: 'stale_final_prompt_recovery_failed',
+      error: error?.message || String(error)
+    };
+  } finally {
+    finalPromptRecoveryInFlight.delete(runId);
+  }
+}
+
 async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
   if (processMonitorHeartbeatSweepInProgress) {
     return { success: false, skipped: true, reason: 'heartbeat_sweep_in_progress' };
@@ -3687,11 +4350,15 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
     let staleLogged = 0;
     let touched = 0;
     let fresh = 0;
+    let autoStopped = 0;
+    let finalPromptRecoveryAttempted = 0;
+    let finalPromptRecoverySucceeded = 0;
 
     for (const process of active) {
       const runId = typeof process?.id === 'string' ? process.id : '';
       if (!runId) continue;
 
+      const lifecycleStatus = normalizeProcessLifecycleStatus(process?.lifecycleStatus || process?.status, 'running');
       const lastProgressAt = getProcessLastProgressTimestamp(process);
       const progressAgeMs = lastProgressAt > 0
         ? Math.max(0, nowTs - lastProgressAt)
@@ -3699,12 +4366,48 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       const processTs = Number.isInteger(process.timestamp) ? process.timestamp : 0;
       const recordAgeMs = processTs > 0 ? Math.max(0, nowTs - processTs) : Number.MAX_SAFE_INTEGER;
 
+      if (typeof shouldAttemptStaleFinalPromptRecovery === 'function' && shouldAttemptStaleFinalPromptRecovery(process, nowTs)) {
+        finalPromptRecoveryAttempted += 1;
+        const recoveryResult = await attemptStaleFinalPromptRecovery(process, origin, nowTs);
+        if (recoveryResult?.success === true) {
+          finalPromptRecoverySucceeded += 1;
+          continue;
+        }
+      }
+
       if (progressAgeMs >= PROCESS_MONITOR_HEARTBEAT.staleTtlMs) {
         staleDetected += 1;
         if (shouldEmitProcessStaleWarning(runId, nowTs)) {
           const appended = await appendProcessHeartbeatStaleWarning(process, progressAgeMs, origin, nowTs);
           if (appended) staleLogged += 1;
         }
+        const autoStopNoContextTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs)
+          && PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs > 0
+          ? PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs
+          : (24 * 60 * 60 * 1000);
+        if (
+          (lifecycleStatus === 'running' || lifecycleStatus === 'starting')
+          && progressAgeMs >= autoStopNoContextTtlMs
+          && typeof getAnalysisQueueProcessActivityState === 'function'
+        ) {
+          const processActivity = await getAnalysisQueueProcessActivityState(process, nowTs).catch(() => null);
+          if (processActivity?.active !== true) {
+            const stoppedRecord = await upsertProcess(runId, {
+              lifecycleStatus: 'stopped',
+              status: 'stopped',
+              actionRequired: 'none',
+              needsAction: false,
+              reason: 'heartbeat_stale_no_context',
+              statusCode: 'process.heartbeat_stale_no_context',
+              statusText: 'Brak postepu i lokalnego kontekstu - proces zatrzymany przez sweep',
+              autoRecovery: null,
+              finishedAt: nowTs,
+              timestamp: nowTs
+            });
+            if (stoppedRecord) autoStopped += 1;
+          }
+        }
+        continue;
       } else {
         processStaleWarnLastEmitTsByRunId.delete(runId);
       }
@@ -3726,7 +4429,10 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
       touched,
       fresh,
       staleDetected,
-      staleLogged
+      staleLogged,
+      autoStopped,
+      finalPromptRecoveryAttempted,
+      finalPromptRecoverySucceeded
     };
   } catch (error) {
     console.warn('[monitor] process heartbeat sweep failed:', error);
@@ -4459,6 +5165,24 @@ async function buildReloadResumeMonitorAutoCloseStatus(state) {
   let blockingTabs = 0;
   let launchRequired = 0;
   let launchConfirmed = 0;
+  let evaluatedItems = 0;
+
+  const applyEvaluation = (evaluation) => {
+    if (!evaluation || typeof evaluation !== 'object') return;
+    evaluatedItems += 1;
+    if (evaluation.matched) matchedTabs += 1;
+    if (evaluation.satisfied) {
+      satisfiedTabs += 1;
+    } else {
+      waitingTabs += 1;
+    }
+    if (evaluation.blocking) blockingTabs += 1;
+    if (evaluation.requiresLaunch) launchRequired += 1;
+    if (evaluation.launchConfirmed) launchConfirmed += 1;
+    if (!evaluation.satisfied && pendingDetails.length < 6) {
+      pendingDetails.push(`${evaluation.detail} [${evaluation.reason}]`);
+    }
+  };
 
   for (const tab of investTabs) {
     const tabId = Number.isInteger(tab?.id) ? tab.id : null;
@@ -4477,22 +5201,19 @@ async function buildReloadResumeMonitorAutoCloseStatus(state) {
     if (rowIdentity) usedRowIds.add(rowIdentity);
 
     const evaluation = evaluateReloadResumeAutoCloseForTab(tab, row, sessionCompleted);
-    if (evaluation.matched) matchedTabs += 1;
-    if (evaluation.satisfied) {
-      satisfiedTabs += 1;
-    } else {
-      waitingTabs += 1;
-    }
-    if (evaluation.blocking) blockingTabs += 1;
-    if (evaluation.requiresLaunch) launchRequired += 1;
-    if (evaluation.launchConfirmed) launchConfirmed += 1;
-    if (!evaluation.satisfied && pendingDetails.length < 6) {
-      pendingDetails.push(`${evaluation.detail} [${evaluation.reason}]`);
-    }
+    applyEvaluation(evaluation);
   }
 
+  rows.forEach((row, index) => {
+    if (!row || typeof row !== 'object') return;
+    const rowIdentity = getReloadResumeMonitorRowIdentity(row, index);
+    if (usedRowIds.has(rowIdentity)) return;
+    usedRowIds.add(rowIdentity);
+    applyEvaluation(evaluateReloadResumeAutoCloseForTab(null, row, sessionCompleted));
+  });
+
   const ready = sessionCompleted
-    && investTabs.length === satisfiedTabs
+    && evaluatedItems === satisfiedTabs
     && waitingTabs === 0
     && blockingTabs === 0;
   let reason = 'waiting_for_confirmation';
@@ -6025,6 +6746,31 @@ function resolveProcessStageSnapshot(process) {
 
 function hasProcessReachedFinalStage(process) {
   if (!process || typeof process !== 'object') return false;
+  const resolveCompletedLocalSaveState = (candidate) => {
+    if (typeof getCompletedProcessLocalSaveState === 'function') {
+      return getCompletedProcessLocalSaveState(candidate);
+    }
+    if (typeof hasCompletedProcessLocalSave === 'function') {
+      return hasCompletedProcessLocalSave(candidate) === true;
+    }
+    if (!candidate || typeof candidate !== 'object') return null;
+    const candidatePersistenceStatus = candidate?.persistenceStatus && typeof candidate.persistenceStatus === 'object'
+      ? candidate.persistenceStatus
+      : null;
+    const candidateFinalStagePersistence = candidate?.finalStagePersistence && typeof candidate.finalStagePersistence === 'object'
+      ? candidate.finalStagePersistence
+      : null;
+    if (typeof candidatePersistenceStatus?.saveOk === 'boolean') {
+      return candidatePersistenceStatus.saveOk;
+    }
+    if (typeof candidate?.completedResponseSaved === 'boolean') {
+      return candidate.completedResponseSaved;
+    }
+    if (typeof candidateFinalStagePersistence?.success === 'boolean') {
+      return candidateFinalStagePersistence.success;
+    }
+    return null;
+  };
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (status !== 'completed' && status !== 'finalizing') return false;
   const completedResponseText = typeof process?.completedResponseText === 'string'
@@ -6032,9 +6778,7 @@ function hasProcessReachedFinalStage(process) {
     : '';
   const hasCapturedPayload = Number.isInteger(process?.completedResponseCapturedAt)
     && process.completedResponseCapturedAt > 0;
-  const saveConfirmed = process?.completedResponseSaved === true
-    || process?.persistenceStatus?.saveOk === true
-    || process?.finalStagePersistence?.success === true;
+  const saveConfirmed = resolveCompletedLocalSaveState(process) === true;
   if (completedResponseText.length > 0 || hasCapturedPayload || saveConfirmed) {
     return true;
   }
@@ -6862,6 +7606,8 @@ async function upsertProcess(runId, patch = {}) {
   } else if (isClosedProcessStatus(next.status)) {
     processLogLastEmitTsByRunId.delete(runId);
     processStaleWarnLastEmitTsByRunId.delete(runId);
+    finalPromptRecoveryLastAttemptAtByRunId.delete(runId);
+    finalPromptRecoveryInFlight.delete(runId);
   }
   processRegistry.set(runId, next);
   logger.event({
@@ -7547,6 +8293,459 @@ async function updateProcessDispatchAfterSendSuccess(runId = '', responseId = ''
   return true;
 }
 
+function extractRunIdFromCopyTrace(copyTrace = '') {
+  const normalized = typeof copyTrace === 'string' ? copyTrace.trim() : '';
+  if (!normalized) return '';
+  const slashIndex = normalized.indexOf('/');
+  if (slashIndex <= 0) return '';
+  return normalized.slice(0, slashIndex).trim();
+}
+
+function buildDispatchProcessLogEntry(stage, status, details = '') {
+  const normalizedStage = typeof stage === 'string' ? stage.trim() : '';
+  const normalizedStatus = typeof status === 'string' ? status.trim() : '';
+  const normalizedDetails = truncateDispatchLogText(typeof details === 'string' ? details : String(details ?? ''), 180);
+  return [normalizedStage || 'stage', normalizedStatus || 'info', normalizedDetails]
+    .filter(Boolean)
+    .join('|');
+}
+
+function mergeDispatchProcessLogs(existingLog, ...extraEntries) {
+  const base = Array.isArray(existingLog)
+    ? existingLog
+        .filter((entry) => typeof entry === 'string' && entry.trim())
+        .map((entry) => truncateDispatchLogText(entry.trim(), 220))
+    : [];
+  const extra = extraEntries
+    .flat()
+    .filter((entry) => typeof entry === 'string' && entry.trim())
+    .map((entry) => truncateDispatchLogText(entry.trim(), 220));
+  return [...base, ...extra].slice(-16);
+}
+
+function resolveSaveResponseDispatchPipelineState(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object'
+    ? dispatchOutcome
+    : {};
+  if (dispatch.queueSkipped === true) return 'dispatch_skipped';
+  if (isExplicitlyVerifiedDispatch(dispatch)) return 'dispatch_confirmed';
+  if (Number.isInteger(dispatch.failed) && dispatch.failed > 0) return 'dispatch_failed';
+  if ((Number.isInteger(dispatch.accepted) && dispatch.accepted > 0)
+    || (Number.isInteger(dispatch.sent) && dispatch.sent > 0)) {
+    return 'dispatch_pending';
+  }
+  if (dispatch.flushSkipped === true
+    || dispatch.flushDeferred === true
+    || (Number.isInteger(dispatch.deferred) && dispatch.deferred > 0)
+    || (Number.isInteger(dispatch.remaining) && dispatch.remaining > 0)) {
+    return 'dispatch_pending';
+  }
+  if (dispatch.queued === true) return 'dispatch_queued_no_flush_result';
+  return 'dispatch_unknown';
+}
+
+function normalizeSaveResponseDispatchOutcome(dispatchOutcome) {
+  const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object'
+    ? dispatchOutcome
+    : {};
+  const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
+  const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
+  const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
+
+  if (!dispatch.failureStage && failed > 0) {
+    dispatch.failureStage = 'send';
+  }
+  if (!dispatch.failureReason && failed > 0) {
+    dispatch.failureReason = 'dispatch_failed';
+  }
+  if (!dispatch.failureStage && dispatch.flushDeferred !== true && (deferred > 0 || remaining > 0)) {
+    dispatch.failureStage = 'flush';
+    dispatch.failureReason = 'pending_retry_window';
+  }
+  dispatch.state = resolveSaveResponseDispatchPipelineState(dispatch);
+  return dispatch;
+}
+
+function resolveSaveResponsePersistenceState(dispatchOutcome) {
+  const pipelineDispatchState = resolveSaveResponseDispatchPipelineState(dispatchOutcome);
+  return {
+    pipelineDispatchState,
+    persistencePhase: pipelineDispatchState === 'dispatch_confirmed'
+      ? 'verify_remote'
+      : 'dispatch_remote',
+    persistenceStatusCode: pipelineDispatchState === 'dispatch_confirmed'
+      ? 'dispatch.confirmed'
+      : (dispatchOutcome?.queueSkipped === true
+        ? 'dispatch.skipped'
+        : (pipelineDispatchState === 'dispatch_failed' ? 'dispatch.failed' : 'dispatch.verify_pending'))
+  };
+}
+
+function mergeSaveResponseDispatchWithFlushResult(baseDispatch, flushResult, conversationAnalysis = null) {
+  const nextDispatch = {
+    ...(baseDispatch && typeof baseDispatch === 'object' ? baseDispatch : {})
+  };
+  const nextConversationAnalysis = conversationAnalysis && typeof conversationAnalysis === 'object'
+    ? {
+        hasConversationUrl: conversationAnalysis.hasConversationUrl === true,
+        conversationLogCount: Number.isInteger(conversationAnalysis.conversationLogCount)
+          ? Math.max(0, conversationAnalysis.conversationLogCount)
+          : 0,
+        snapshotRefreshedBeforeSend: conversationAnalysis.snapshotRefreshedBeforeSend === true,
+        snapshotSource: typeof conversationAnalysis.snapshotSource === 'string'
+          ? conversationAnalysis.snapshotSource.trim()
+          : ''
+      }
+    : {
+        hasConversationUrl: nextDispatch.hasConversationUrl === true,
+        conversationLogCount: Number.isInteger(nextDispatch.conversationLogCount)
+          ? Math.max(0, nextDispatch.conversationLogCount)
+          : 0,
+        snapshotRefreshedBeforeSend: nextDispatch.conversationSnapshotRefreshed === true,
+        snapshotSource: typeof nextDispatch.conversationSnapshotSource === 'string'
+          ? nextDispatch.conversationSnapshotSource.trim()
+          : ''
+      };
+
+  nextDispatch.flushDeferred = false;
+  nextDispatch.flushDeferredReason = '';
+
+  if (flushResult?.skipped) {
+    const flushSkipReason = typeof flushResult?.reason === 'string' && flushResult.reason.trim()
+      ? flushResult.reason.trim()
+      : 'unknown';
+    nextDispatch.flushSkipped = true;
+    nextDispatch.flushSkipReason = flushSkipReason;
+    nextDispatch.flushFollowUpScheduled = flushResult?.followUpScheduled === true;
+    nextDispatch.failureStage = typeof flushResult?.stage === 'string' && flushResult.stage.trim()
+      ? flushResult.stage.trim()
+      : 'flush';
+    nextDispatch.failureReason = flushSkipReason;
+    if (!Number.isInteger(nextDispatch.remaining) || nextDispatch.remaining <= 0) {
+      nextDispatch.remaining = Number.isInteger(nextDispatch.queueSize) && nextDispatch.queueSize > 0
+        ? nextDispatch.queueSize
+        : 1;
+    }
+    return normalizeSaveResponseDispatchOutcome(nextDispatch);
+  }
+
+  nextDispatch.flushSkipped = false;
+  nextDispatch.flushSkipReason = '';
+  nextDispatch.flushFollowUpScheduled = false;
+  nextDispatch.accepted = Number.isInteger(flushResult?.accepted) ? flushResult.accepted : 0;
+  nextDispatch.sent = Number.isInteger(flushResult?.sent) ? flushResult.sent : 0;
+  nextDispatch.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
+  nextDispatch.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
+  nextDispatch.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
+  nextDispatch.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
+  nextDispatch.failureStage = typeof flushResult?.firstFailureStage === 'string'
+    ? flushResult.firstFailureStage.trim()
+    : '';
+  nextDispatch.failureReason = typeof flushResult?.firstFailureReason === 'string'
+    ? flushResult.firstFailureReason.trim()
+    : '';
+  nextDispatch.failureStatus = Number.isInteger(flushResult?.firstFailureStatus)
+    ? flushResult.firstFailureStatus
+    : null;
+  nextDispatch.failureRequestId = typeof flushResult?.firstFailureRequestId === 'string'
+    ? flushResult.firstFailureRequestId.trim()
+    : '';
+  nextDispatch.failureIntakeUrl = typeof flushResult?.firstFailureIntakeUrl === 'string'
+    ? flushResult.firstFailureIntakeUrl.trim()
+    : '';
+  nextDispatch.verifyState = typeof flushResult?.verifyState === 'string'
+    ? flushResult.verifyState.trim()
+    : '';
+  nextDispatch.verifyReason = typeof flushResult?.verifyReason === 'string'
+    ? flushResult.verifyReason.trim()
+    : '';
+  nextDispatch.verifyAttemptCount = Number.isInteger(flushResult?.verifyAttemptCount)
+    ? flushResult.verifyAttemptCount
+    : 0;
+  nextDispatch.verifyEventId = normalizeWatchlistEventId(flushResult?.verifyEventId);
+  nextDispatch.materializedRowCount = Number.isInteger(flushResult?.materializedRowCount)
+    ? flushResult.materializedRowCount
+    : null;
+  nextDispatch.expectedMaterializedRowCount = Number.isInteger(flushResult?.expectedMaterializedRowCount)
+    ? flushResult.expectedMaterializedRowCount
+    : null;
+
+  if (Number.isInteger(flushResult?.conversationLogCount)) {
+    nextConversationAnalysis.conversationLogCount = Math.max(0, flushResult.conversationLogCount);
+  }
+  if (flushResult?.hasConversationUrl === true) {
+    nextConversationAnalysis.hasConversationUrl = true;
+  }
+  if (flushResult?.conversationSnapshotRefreshed === true) {
+    nextConversationAnalysis.snapshotRefreshedBeforeSend = true;
+  }
+  if (typeof flushResult?.conversationSnapshotSource === 'string' && flushResult.conversationSnapshotSource.trim()) {
+    nextConversationAnalysis.snapshotSource = flushResult.conversationSnapshotSource.trim();
+  }
+
+  nextDispatch.conversationLogCount = nextConversationAnalysis.conversationLogCount;
+  nextDispatch.hasConversationUrl = nextConversationAnalysis.hasConversationUrl;
+  nextDispatch.conversationSnapshotRefreshed = nextConversationAnalysis.snapshotRefreshedBeforeSend;
+  nextDispatch.conversationSnapshotSource = nextConversationAnalysis.snapshotSource;
+  return normalizeSaveResponseDispatchOutcome(nextDispatch);
+}
+
+async function updateProcessDispatchAfterFlushOutcome(saveResult, flushDispatch, flushLog) {
+  const dispatch = flushDispatch && typeof flushDispatch === 'object'
+    ? flushDispatch
+    : null;
+  if (!dispatch) return false;
+
+  const normalizedCopyTrace = typeof saveResult?.copyTrace === 'string'
+    ? saveResult.copyTrace.trim()
+    : '';
+  const normalizedRunId = (typeof saveResult?.response?.runId === 'string' && saveResult.response.runId.trim())
+    ? saveResult.response.runId.trim()
+    : extractRunIdFromCopyTrace(normalizedCopyTrace);
+  if (!normalizedRunId) return false;
+
+  const normalizedResponseId = (typeof saveResult?.response?.responseId === 'string' && saveResult.response.responseId.trim())
+    ? saveResult.response.responseId.trim()
+    : extractResponseIdFromCopyTrace(normalizedCopyTrace, normalizedRunId);
+  const process = processRegistry.get(normalizedRunId) || null;
+  if (!process || typeof process !== 'object') return false;
+  if (normalizedResponseId) {
+    const knownResponseIds = collectKnownProcessResponseIds(process, normalizedRunId);
+    if (knownResponseIds.size > 0 && !knownResponseIds.has(normalizedResponseId)) {
+      return false;
+    }
+  }
+
+  const now = Date.now();
+  const previousPersistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : {};
+  const dispatchSummary = formatDispatchUiSummary(dispatch);
+  const nextLog = mergeDispatchProcessLogs(
+    previousPersistenceStatus?.dispatchProcessLog,
+    process?.completedResponseDispatchProcessLog,
+    Array.isArray(flushLog) ? flushLog : []
+  );
+  const persistenceState = resolveSaveResponsePersistenceState(dispatch);
+  const patch = {
+    lifecycleStatus: 'completed',
+    status: 'completed',
+    phase: persistenceState.persistencePhase,
+    actionRequired: 'none',
+    statusCode: persistenceState.persistenceStatusCode,
+    completedResponseSaved: true,
+    completedResponseDispatch: dispatch,
+    completedResponseDispatchSummary: dispatchSummary,
+    completedResponseDispatchProcessLog: nextLog,
+    persistenceStatus: {
+      ...previousPersistenceStatus,
+      hasResponse: true,
+      saveOk: true,
+      saveError: '',
+      copyTrace: normalizedCopyTrace || (typeof previousPersistenceStatus?.copyTrace === 'string'
+        ? previousPersistenceStatus.copyTrace
+        : ''),
+      dispatch,
+      dispatchSummary,
+      dispatchProcessLog: nextLog,
+      updatedAt: now
+    },
+    timestamp: now
+  };
+  if (normalizedCopyTrace) {
+    patch.completedResponseSaveTrace = normalizedCopyTrace;
+  }
+
+  const finalStagePersistenceSummary = summarizeFinalStagePersistence({
+    attempted: true,
+    success: true,
+    reason: 'saved',
+    responseId: normalizedResponseId,
+    copyTrace: normalizedCopyTrace,
+    dispatchSummary,
+    verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
+    dispatch,
+    conversationAnalysis: saveResult?.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+      ? saveResult.conversationAnalysis
+      : null
+  });
+  if (finalStagePersistenceSummary) {
+    patch.finalStagePersistence = {
+      ...finalStagePersistenceSummary,
+      origin: 'runtime_bridge_deferred_flush',
+      updatedAt: now
+    };
+  }
+
+  await upsertProcess(normalizedRunId, patch);
+  if (dispatch.state === 'dispatch_confirmed') {
+    clearCompletedProcessPersistenceRetry(normalizedRunId);
+    await closeCompletedProcessAfterDispatchConfirmed(normalizedRunId, {
+      origin: 'runtime_bridge_deferred_flush'
+    }).catch(() => false);
+  }
+  return true;
+}
+
+function shouldStartDeferredSaveResponseFlush(saveResult) {
+  return !!saveResult?.success
+    && saveResult?.dispatch?.queued === true
+    && saveResult?.dispatch?.queueSkipped !== true
+    && saveResult?.dispatch?.flushDeferred === true;
+}
+
+function buildRuntimeSaveResultPayload(saveResult) {
+  if (!saveResult || typeof saveResult !== 'object') {
+    return null;
+  }
+  return {
+    success: !!saveResult.success,
+    reason: typeof saveResult.reason === 'string' ? saveResult.reason : '',
+    error: typeof saveResult.error === 'string' ? saveResult.error : '',
+    stage: typeof saveResult.stage === 'string' ? saveResult.stage : '',
+    status: Number.isInteger(saveResult.status) ? saveResult.status : null,
+    requestId: typeof saveResult.requestId === 'string' ? saveResult.requestId : '',
+    intakeUrl: typeof saveResult.intakeUrl === 'string' ? saveResult.intakeUrl : '',
+    copyTrace: typeof saveResult.copyTrace === 'string' ? saveResult.copyTrace : '',
+    verifiedCount: Number.isInteger(saveResult.verifiedCount) ? saveResult.verifiedCount : null,
+    response: saveResult.response && typeof saveResult.response === 'object'
+      ? {
+          responseId: typeof saveResult.response.responseId === 'string' ? saveResult.response.responseId : '',
+          runId: typeof saveResult.response.runId === 'string' ? saveResult.response.runId : ''
+        }
+      : null,
+    dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
+      ? saveResult.dispatch
+      : null,
+    dispatchProcessLog: Array.isArray(saveResult.dispatchProcessLog)
+      ? saveResult.dispatchProcessLog
+          .filter((entry) => typeof entry === 'string' && entry.trim())
+          .slice(-16)
+      : [],
+    conversationAnalysis: saveResult.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+      ? {
+          hasConversationUrl: saveResult.conversationAnalysis.hasConversationUrl === true,
+          conversationLogCount: Number.isInteger(saveResult.conversationAnalysis.conversationLogCount)
+            ? Math.max(0, saveResult.conversationAnalysis.conversationLogCount)
+            : null,
+          snapshotRefreshedBeforeSend: saveResult.conversationAnalysis.snapshotRefreshedBeforeSend === true,
+          snapshotSource: typeof saveResult.conversationAnalysis.snapshotSource === 'string'
+            ? saveResult.conversationAnalysis.snapshotSource
+            : ''
+        }
+      : null
+  };
+}
+
+function startDeferredSaveResponseFlush(saveResult) {
+  if (!shouldStartDeferredSaveResponseFlush(saveResult)) {
+    return Promise.resolve({ skipped: true, reason: 'not_deferred' });
+  }
+
+  const baseDispatch = saveResult?.dispatch && typeof saveResult.dispatch === 'object'
+    ? saveResult.dispatch
+    : {};
+  const baseLog = Array.isArray(saveResult?.dispatchProcessLog)
+    ? saveResult.dispatchProcessLog
+    : [];
+  const conversationAnalysis = saveResult?.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
+    ? saveResult.conversationAnalysis
+    : null;
+  const copyTrace = typeof saveResult?.copyTrace === 'string' ? saveResult.copyTrace.trim() : '';
+  const deferredFlushFocus = typeof normalizeWatchlistFlushFocus === 'function'
+    ? normalizeWatchlistFlushFocus({
+        runId: typeof saveResult?.response?.runId === 'string' ? saveResult.response.runId : '',
+        responseId: typeof saveResult?.response?.responseId === 'string' ? saveResult.response.responseId : '',
+        forceMatchingReady: true,
+        prioritizeMatching: true
+      })
+    : null;
+
+  return flushWatchlistDispatchOutbox(
+    'save_response_runtime',
+    deferredFlushFocus ? { focus: deferredFlushFocus } : {}
+  )
+    .then(async (flushResult) => {
+      const mergedDispatch = mergeSaveResponseDispatchWithFlushResult(baseDispatch, flushResult, conversationAnalysis);
+      const flushLogEntry = flushResult?.skipped
+        ? buildDispatchProcessLogEntry(
+            'background_flush',
+            'skipped',
+            `reason=${mergedDispatch.flushSkipReason || 'unknown'}, followUp=${mergedDispatch.flushFollowUpScheduled === true}`
+          )
+        : buildDispatchProcessLogEntry(
+            'background_flush',
+            mergedDispatch.failed > 0 ? 'partial' : 'ok',
+            `accepted=${mergedDispatch.accepted || 0}, sent=${mergedDispatch.sent || 0}, failed=${mergedDispatch.failed || 0}, deferred=${mergedDispatch.deferred || 0}, remaining=${mergedDispatch.remaining || 0}, verifyState=${mergedDispatch.verifyState || 'n/a'}`
+          );
+      const finalLogEntry = buildDispatchProcessLogEntry(
+        'dispatch_final',
+        mergedDispatch.state === 'dispatch_failed'
+          ? 'error'
+          : (mergedDispatch.state === 'dispatch_confirmed' ? 'ok' : 'warn'),
+        `state=${mergedDispatch.state || 'dispatch_unknown'}, sent=${mergedDispatch.sent || 0}, failed=${mergedDispatch.failed || 0}, deferred=${mergedDispatch.deferred || 0}, remaining=${mergedDispatch.remaining || 0}, verifyState=${mergedDispatch.verifyState || 'n/a'}, failureStage=${mergedDispatch.failureStage || 'n/a'}, failureReason=${mergedDispatch.failureReason || 'n/a'}`
+      );
+      const mergedLog = mergeDispatchProcessLogs(baseLog, flushLogEntry, finalLogEntry);
+      mergedDispatch.processLog = mergedLog;
+
+      console.log('[copy-flow] [capture:tab-save:deferred-flush]', {
+        trace: copyTrace || '',
+        state: mergedDispatch.state || '',
+        sent: mergedDispatch.sent || 0,
+        failed: mergedDispatch.failed || 0,
+        deferred: mergedDispatch.deferred || 0,
+        remaining: mergedDispatch.remaining || 0,
+        verifyState: mergedDispatch.verifyState || ''
+      });
+
+      await updateProcessDispatchAfterFlushOutcome(saveResult, mergedDispatch, mergedLog);
+
+      return {
+        success: true,
+        dispatch: mergedDispatch,
+        dispatchProcessLog: mergedLog
+      };
+    })
+    .catch(async (error) => {
+      const errorMessage = error?.message || String(error);
+      const errorDispatch = normalizeSaveResponseDispatchOutcome({
+        ...baseDispatch,
+        flushDeferred: false,
+        flushDeferredReason: '',
+        flushSkipped: true,
+        flushSkipReason: 'background_flush_exception',
+        flushFollowUpScheduled: true,
+        firstFailure: truncateDispatchLogText(errorMessage, 300),
+        failureStage: 'flush',
+        failureReason: 'background_flush_exception',
+        remaining: Number.isInteger(baseDispatch?.remaining) && baseDispatch.remaining > 0
+          ? baseDispatch.remaining
+          : (Number.isInteger(baseDispatch?.queueSize) && baseDispatch.queueSize > 0 ? baseDispatch.queueSize : 1)
+      });
+      const errorLog = mergeDispatchProcessLogs(
+        baseLog,
+        buildDispatchProcessLogEntry('background_flush', 'error', errorMessage),
+        buildDispatchProcessLogEntry(
+          'dispatch_final',
+          'warn',
+          `state=${errorDispatch.state || 'dispatch_unknown'}, remaining=${errorDispatch.remaining || 0}, failureStage=${errorDispatch.failureStage || 'n/a'}, failureReason=${errorDispatch.failureReason || 'n/a'}`
+        )
+      );
+      errorDispatch.processLog = errorLog;
+      console.warn('[copy-flow] [capture:tab-save:deferred-flush-failed]', {
+        trace: copyTrace || '',
+        error: errorMessage
+      });
+      await updateProcessDispatchAfterFlushOutcome(saveResult, errorDispatch, errorLog).catch(() => false);
+      return {
+        success: false,
+        error: errorMessage,
+        dispatch: errorDispatch,
+        dispatchProcessLog: errorLog
+      };
+    });
+}
+
 function getProcessPersistenceDispatchSnapshot(process) {
   const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
     ? process.persistenceStatus
@@ -7565,16 +8764,32 @@ function getProcessQueueDeliveryState(process) {
   const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
     ? process.persistenceStatus
     : null;
-  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
-    ? process.finalStagePersistence
-    : null;
   const dispatch = getProcessPersistenceDispatchSnapshot(process);
 
-  const saveOk = typeof persistenceStatus?.saveOk === 'boolean'
-    ? persistenceStatus.saveOk
-    : (typeof process?.completedResponseSaved === 'boolean'
-      ? process.completedResponseSaved
-      : (typeof finalStagePersistence?.success === 'boolean' ? finalStagePersistence.success : null));
+  const resolveCompletedLocalSaveState = (candidate) => {
+    if (typeof getCompletedProcessLocalSaveState === 'function') {
+      return getCompletedProcessLocalSaveState(candidate);
+    }
+    if (!candidate || typeof candidate !== 'object') return null;
+    const candidatePersistenceStatus = candidate?.persistenceStatus && typeof candidate.persistenceStatus === 'object'
+      ? candidate.persistenceStatus
+      : null;
+    const candidateFinalStagePersistence = candidate?.finalStagePersistence && typeof candidate.finalStagePersistence === 'object'
+      ? candidate.finalStagePersistence
+      : null;
+    if (typeof candidatePersistenceStatus?.saveOk === 'boolean') {
+      return candidatePersistenceStatus.saveOk;
+    }
+    if (typeof candidate?.completedResponseSaved === 'boolean') {
+      return candidate.completedResponseSaved;
+    }
+    if (typeof candidateFinalStagePersistence?.success === 'boolean') {
+      return candidateFinalStagePersistence.success;
+    }
+    return null;
+  };
+
+  const saveOk = resolveCompletedLocalSaveState(process);
   const sent = Number.isInteger(dispatch?.sent) ? dispatch.sent : 0;
   const failed = Number.isInteger(dispatch?.failed) ? dispatch.failed : 0;
   const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
@@ -7775,6 +8990,18 @@ async function inspectProcessWindowContext(process) {
     }
   }
 
+  const matchedConversationTab = await findOpenProcessTabByConversationUrl(process);
+  if (matchedConversationTab && Number.isInteger(matchedConversationTab.id)) {
+    return {
+      exists: true,
+      missingKnown: false,
+      hasOnlyProcessTab: false,
+      reason: 'tab_present_by_conversation_url',
+      tabId: matchedConversationTab.id,
+      windowId: Number.isInteger(matchedConversationTab.windowId) ? matchedConversationTab.windowId : null
+    };
+  }
+
   if (processWindowId !== null) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
     if (tabsInWindow?.ok) {
@@ -7806,6 +9033,66 @@ async function inspectProcessWindowContext(process) {
   };
 }
 
+function getChatConversationCloseKey(rawUrl) {
+  const normalized = normalizeChatConversationUrl(typeof rawUrl === 'string' ? rawUrl : '');
+  if (!normalized) return '';
+  try {
+    const parsed = new URL(normalized);
+    const pathname = (parsed.pathname || '').replace(/\/+$/, '');
+    const pathParts = pathname.toLowerCase().split('/').filter(Boolean);
+    const conversationMarkerIndex = pathParts.indexOf('c');
+    if (conversationMarkerIndex < 0 || !pathParts[conversationMarkerIndex + 1]) {
+      return '';
+    }
+    return `${parsed.hostname.toLowerCase()}${pathname.toLowerCase()}`;
+  } catch (_) {
+    return '';
+  }
+}
+
+function collectProcessConversationCloseKeys(process) {
+  if (!process || typeof process !== 'object') return [];
+  const rawCandidates = [
+    typeof process.chatUrl === 'string' ? process.chatUrl : '',
+    ...(Array.isArray(process.conversationUrls) ? process.conversationUrls : []),
+    typeof process.completedStage12Snapshot?.conversationUrl === 'string'
+      ? process.completedStage12Snapshot.conversationUrl
+      : '',
+    typeof process.persistenceStatus?.conversationUrl === 'string'
+      ? process.persistenceStatus.conversationUrl
+      : ''
+  ];
+  const keys = [];
+  const seen = new Set();
+  for (const candidate of rawCandidates) {
+    const key = getChatConversationCloseKey(candidate);
+    if (!key || seen.has(key)) continue;
+    seen.add(key);
+    keys.push(key);
+  }
+  return keys;
+}
+
+async function findOpenProcessTabByConversationUrl(process) {
+  const closeKeys = collectProcessConversationCloseKeys(process);
+  if (closeKeys.length === 0 || !chrome?.tabs?.query) return null;
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (_) {
+    return null;
+  }
+  if (!Array.isArray(tabs) || tabs.length === 0) return null;
+  const keySet = new Set(closeKeys);
+  for (const tab of tabs) {
+    const tabKey = getChatConversationCloseKey(typeof tab?.url === 'string' ? tab.url : '');
+    if (tabKey && keySet.has(tabKey) && Number.isInteger(tab?.id)) {
+      return tab;
+    }
+  }
+  return null;
+}
+
 async function attemptProcessWindowClose(process) {
   if (!process || typeof process !== 'object') {
     return { closed: false, reason: 'invalid_process', closeMode: '' };
@@ -7821,11 +9108,40 @@ async function attemptProcessWindowClose(process) {
     }
   }
 
+  const matchedConversationTab = await findOpenProcessTabByConversationUrl(process);
+  if (matchedConversationTab && Number.isInteger(matchedConversationTab.id)) {
+    const matchedTabClosed = await removeTabSafe(matchedConversationTab.id);
+    if (matchedTabClosed) {
+      return {
+        closed: true,
+        reason: 'tab_closed_by_conversation_url',
+        closeMode: 'tab',
+        resolvedTabId: matchedConversationTab.id,
+        resolvedWindowId: Number.isInteger(matchedConversationTab.windowId) ? matchedConversationTab.windowId : null
+      };
+    }
+  }
+
   if (processWindowId !== null) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
     const validTabs = Array.isArray(tabsInWindow?.tabs)
       ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
       : [];
+    const chatTabs = validTabs.filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)));
+    const activeChatTab = chatTabs.find((tab) => tab?.active === true) || null;
+    const fallbackChatTab = activeChatTab || (chatTabs.length === 1 ? chatTabs[0] : null);
+    if (fallbackChatTab && Number.isInteger(fallbackChatTab.id)) {
+      const fallbackTabClosed = await removeTabSafe(fallbackChatTab.id);
+      if (fallbackTabClosed) {
+        return {
+          closed: true,
+          reason: activeChatTab ? 'active_chatgpt_tab_closed_in_process_window' : 'single_chatgpt_tab_closed_in_process_window',
+          closeMode: 'tab',
+          resolvedTabId: fallbackChatTab.id,
+          resolvedWindowId: Number.isInteger(fallbackChatTab.windowId) ? fallbackChatTab.windowId : processWindowId
+        };
+      }
+    }
     const hasOnlyProcessTab = validTabs.length === 1
       && processTabId !== null
       && validTabs[0].id === processTabId;
@@ -7877,12 +9193,14 @@ function clearProcessWindowCloseRetry(runId = '', options = {}) {
     clearTimeout(timerId);
   }
   processWindowCloseRetryTimersByRunId.delete(normalizedRunId);
+  processWindowCloseRetryDueAtByRunId.delete(normalizedRunId);
   if (options.keepAttempts !== true) {
     processWindowCloseRetryAttemptCountByRunId.delete(normalizedRunId);
   }
   if (options.keepInFlight !== true) {
     processWindowCloseRetryInFlight.delete(normalizedRunId);
   }
+  void syncProcessWindowCloseRetryAlarm();
   return true;
 }
 
@@ -7911,7 +9229,9 @@ function resolveProcessWindowCloseRetryPlan(process) {
     return { needed: false, reason: 'close_retry_exhausted', delivery };
   }
 
-  const hasWindowContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+  const hasWindowContext = Number.isInteger(process?.tabId)
+    || Number.isInteger(process?.windowId)
+    || collectProcessConversationCloseKeys(process).length > 0;
   if (!hasWindowContext) {
     return { needed: false, reason: 'missing_window_context', delivery };
   }
@@ -7925,11 +9245,10 @@ function resolveProcessWindowCloseRetryPlan(process) {
 
 function scheduleProcessWindowCloseRetriesForSnapshot(records = [], origin = 'registry_ready') {
   const snapshot = Array.isArray(records) ? records : [];
-  snapshot.forEach((process, index) => {
+  snapshot.forEach((process) => {
     scheduleProcessWindowCloseRetry(process, {
       origin,
-      force: true,
-      delayMs: Math.min(10000, Math.max(0, index) * 250)
+      force: true
     });
   });
 }
@@ -7960,18 +9279,38 @@ function scheduleProcessWindowCloseRetry(processOrRunId, options = {}) {
   }
 
   clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });
-  const attemptCount = processWindowCloseRetryAttemptCountByRunId.get(normalizedRunId) || 0;
+  const persistedAttemptCount = Number.isInteger(currentProcess?.windowClose?.attemptCount)
+    ? Math.max(0, currentProcess.windowClose.attemptCount)
+    : 0;
+  const attemptCount = Math.max(
+    processWindowCloseRetryAttemptCountByRunId.get(normalizedRunId) || 0,
+    persistedAttemptCount
+  );
+  const now = Date.now();
+  const persistedNextAttemptAt = Number.isInteger(currentProcess?.windowClose?.nextAttemptAt)
+    ? currentProcess.windowClose.nextAttemptAt
+    : 0;
   const delayMs = Number.isInteger(options?.delayMs)
     ? Math.max(0, options.delayMs)
-    : getProcessWindowCloseRetryDelayMs(attemptCount);
+    : (
+      options.force !== true
+      && persistedNextAttemptAt > now
+        ? Math.max(0, persistedNextAttemptAt - now)
+        : getProcessWindowCloseRetryDelayMs(attemptCount)
+    );
   const origin = typeof options?.origin === 'string' && options.origin.trim()
     ? options.origin.trim()
     : 'schedule_process_window_close_retry';
+  const dueAt = now + delayMs;
   const timerId = setTimeout(() => {
     processWindowCloseRetryTimersByRunId.delete(normalizedRunId);
+    processWindowCloseRetryDueAtByRunId.delete(normalizedRunId);
+    void syncProcessWindowCloseRetryAlarm();
     void runProcessWindowCloseRetry(normalizedRunId, { origin });
   }, delayMs);
   processWindowCloseRetryTimersByRunId.set(normalizedRunId, timerId);
+  processWindowCloseRetryDueAtByRunId.set(normalizedRunId, dueAt);
+  void syncProcessWindowCloseRetryAlarm(dueAt);
   return true;
 }
 
@@ -8011,11 +9350,26 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
           lastAttemptAt: now,
           attemptCount: currentAttemptCount,
           closedAt: now,
+          nextAttemptAt: 0,
           lastError: '',
           lastReason: inspectResult.reason || 'window_missing'
         },
         timestamp: now
       });
+      if (typeof emitWatchlistDispatchProcessLog === 'function') {
+        emitWatchlistDispatchProcessLog('info', 'completed_process_window_close_result', 'Process window already absent; marked as closed', {
+          runId: normalizedRunId,
+          origin: typeof options?.origin === 'string' && options.origin.trim()
+            ? options.origin.trim()
+            : 'process_window_close_retry',
+          state: 'closed',
+          reason: inspectResult.reason || 'window_missing',
+          attemptCount: currentAttemptCount,
+          tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+          windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+          dispatchState: plan?.delivery?.state || ''
+        });
+      }
       clearProcessWindowCloseRetry(normalizedRunId);
       return { success: true, closed: true, reason: inspectResult.reason || 'window_missing' };
     }
@@ -8029,21 +9383,41 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
           lastAttemptAt: now,
           attemptCount: currentAttemptCount,
           closedAt: now,
+          nextAttemptAt: 0,
           lastError: '',
           lastReason: closeResult.reason || closeResult.closeMode || 'closed'
         },
         timestamp: now
       });
+      if (typeof emitWatchlistDispatchProcessLog === 'function') {
+        emitWatchlistDispatchProcessLog('info', 'completed_process_window_close_result', 'Completed process tab/window closed', {
+          runId: normalizedRunId,
+          origin: typeof options?.origin === 'string' && options.origin.trim()
+            ? options.origin.trim()
+            : 'process_window_close_retry',
+          state: 'closed',
+          reason: closeResult.reason || closeResult.closeMode || 'closed',
+          closeMode: closeResult.closeMode || '',
+          attemptCount: currentAttemptCount,
+          tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+          windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+          dispatchState: plan?.delivery?.state || ''
+        });
+      }
       clearProcessWindowCloseRetry(normalizedRunId);
       return { success: true, closed: true, reason: closeResult.reason || 'closed' };
     }
 
+    const nextRetryAt = currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+      ? 0
+      : (now + getProcessWindowCloseRetryDelayMs(currentAttemptCount));
     const windowCloseState = {
       state: currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'failed' : 'retrying',
       requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
       lastAttemptAt: now,
       attemptCount: currentAttemptCount,
       closedAt: Number.isInteger(process?.windowClose?.closedAt) ? process.windowClose.closedAt : undefined,
+      nextAttemptAt: nextRetryAt,
       lastError: closeResult.reason || 'close_failed',
       lastReason: typeof options?.origin === 'string' && options.origin.trim()
         ? options.origin.trim()
@@ -8053,6 +9427,26 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
       windowClose: windowCloseState,
       timestamp: now
     });
+    if (typeof emitWatchlistDispatchProcessLog === 'function') {
+      emitWatchlistDispatchProcessLog(
+        currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'warn' : 'info',
+        'completed_process_window_close_result',
+        currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+          ? 'Completed process window close exhausted retries'
+          : 'Completed process window close still pending',
+        {
+          runId: normalizedRunId,
+          origin: windowCloseState.lastReason,
+          state: windowCloseState.state,
+          reason: closeResult.reason || 'close_failed',
+          closeMode: closeResult.closeMode || '',
+          attemptCount: currentAttemptCount,
+          tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+          windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+          dispatchState: plan?.delivery?.state || ''
+        }
+      );
+    }
 
     if (currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts) {
       clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });
@@ -8087,6 +9481,7 @@ async function closeProcessWindowAfterQueueSuccess(process, options = {}) {
         requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
         lastAttemptAt: now,
         attemptCount: Number.isInteger(process?.windowClose?.attemptCount) ? process.windowClose.attemptCount : 0,
+        nextAttemptAt: now,
         lastError: '',
         lastReason: typeof options?.origin === 'string' && options.origin.trim()
           ? options.origin.trim()
@@ -8117,12 +9512,14 @@ function clearCompletedProcessPersistenceRetry(runId = '', options = {}) {
     clearTimeout(timerId);
   }
   completedProcessPersistenceRetryTimersByRunId.delete(normalizedRunId);
+  completedProcessPersistenceRetryDueAtByRunId.delete(normalizedRunId);
   if (options.keepAttempts !== true) {
     completedProcessPersistenceRetryAttemptCountByRunId.delete(normalizedRunId);
   }
   if (options.keepInFlight !== true) {
     completedProcessPersistenceRetryInFlight.delete(normalizedRunId);
   }
+  void syncCompletedProcessPersistenceRetryAlarm();
   return true;
 }
 
@@ -8188,11 +9585,10 @@ function resolveCompletedProcessPersistenceRetryPlan(process) {
 
 function scheduleCompletedProcessPersistenceRetriesForSnapshot(records = [], origin = 'registry_ready') {
   const snapshot = Array.isArray(records) ? records : [];
-  snapshot.forEach((process, index) => {
+  snapshot.forEach((process) => {
     scheduleCompletedProcessPersistenceRetry(process, {
       origin,
-      force: true,
-      delayMs: Math.min(15000, Math.max(0, index) * 350)
+      force: true
     });
   });
 }
@@ -8243,8 +9639,11 @@ function scheduleCompletedProcessPersistenceRetry(processOrRunId, options = {}) 
     status: typeof currentProcess?.status === 'string' ? currentProcess.status : '',
     confirmed: plan.delivery?.confirmed === true
   });
+  const dueAt = Date.now() + delayMs;
   const timerId = setTimeout(() => {
     completedProcessPersistenceRetryTimersByRunId.delete(normalizedRunId);
+    completedProcessPersistenceRetryDueAtByRunId.delete(normalizedRunId);
+    void syncCompletedProcessPersistenceRetryAlarm();
     void runCompletedProcessPersistenceRetry(normalizedRunId, {
       origin,
       scheduledMode: plan.mode,
@@ -8252,6 +9651,8 @@ function scheduleCompletedProcessPersistenceRetry(processOrRunId, options = {}) 
     });
   }, delayMs);
   completedProcessPersistenceRetryTimersByRunId.set(normalizedRunId, timerId);
+  completedProcessPersistenceRetryDueAtByRunId.set(normalizedRunId, dueAt);
+  void syncCompletedProcessPersistenceRetryAlarm(dueAt);
   return true;
 }
 
@@ -8376,6 +9777,13 @@ async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
       : 'completed_process_retry';
     const attemptMode = plan.mode;
     const attemptReason = plan.reason;
+    const focusResponseId = resolveRemoteJobResponseId(process, normalizedRunId);
+    const flushFocus = normalizeWatchlistFlushFocus({
+      runId: normalizedRunId,
+      responseId: focusResponseId,
+      forceMatchingReady: true,
+      prioritizeMatching: true
+    });
     emitWatchlistDispatchProcessLog('info', 'completed_persist_retry_start', 'Started completed process persistence retry', {
       trace,
       runId: normalizedRunId,
@@ -8389,7 +9797,9 @@ async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
 
     let actionResult = null;
     if (attemptMode === 'flush') {
-      actionResult = await flushWatchlistDispatchOutbox(`completed_process_retry:${origin}`);
+      actionResult = await flushWatchlistDispatchOutbox(`completed_process_retry:${origin}`, {
+        focus: flushFocus
+      });
     } else {
       actionResult = await ensureCompletedProcessResponsePersisted(process, {
         force: true,
@@ -8521,6 +9931,86 @@ async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
   }
 }
 
+async function runDueCompletedProcessPersistenceRetries(origin = 'alarm') {
+  await ensureProcessRegistryReady();
+  const nowTs = Date.now();
+  const dueRunIds = new Set();
+  for (const [runId, dueAt] of completedProcessPersistenceRetryDueAtByRunId.entries()) {
+    if (Number.isInteger(dueAt) && dueAt <= nowTs) {
+      dueRunIds.add(runId);
+    }
+  }
+  if (dueRunIds.size === 0) {
+    for (const process of pruneProcessRecords(Array.from(processRegistry.values()))) {
+      const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+      if (!runId) continue;
+      const plan = resolveCompletedProcessPersistenceRetryPlan(process);
+      if (plan.needed === true) {
+        dueRunIds.add(runId);
+      }
+    }
+  }
+  let attempted = 0;
+  for (const runId of dueRunIds) {
+    clearCompletedProcessPersistenceRetry(runId, { keepAttempts: true });
+    const result = await runCompletedProcessPersistenceRetry(runId, {
+      origin: `${origin}_alarm`
+    }).catch((error) => ({
+      success: false,
+      reason: error?.message || String(error)
+    }));
+    if (result && result.skipped !== true) {
+      attempted += 1;
+    }
+  }
+  await syncCompletedProcessPersistenceRetryAlarm(nowTs).catch(() => {});
+  return {
+    success: true,
+    attempted,
+    due: dueRunIds.size
+  };
+}
+
+async function runDueProcessWindowCloseRetries(origin = 'alarm') {
+  await ensureProcessRegistryReady();
+  const nowTs = Date.now();
+  const dueRunIds = new Set();
+  for (const [runId, dueAt] of processWindowCloseRetryDueAtByRunId.entries()) {
+    if (Number.isInteger(dueAt) && dueAt <= nowTs) {
+      dueRunIds.add(runId);
+    }
+  }
+  if (dueRunIds.size === 0) {
+    for (const process of pruneProcessRecords(Array.from(processRegistry.values()))) {
+      const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+      if (!runId) continue;
+      const plan = resolveProcessWindowCloseRetryPlan(process);
+      if (plan.needed === true) {
+        dueRunIds.add(runId);
+      }
+    }
+  }
+  let attempted = 0;
+  for (const runId of dueRunIds) {
+    clearProcessWindowCloseRetry(runId, { keepAttempts: true });
+    const result = await runProcessWindowCloseRetry(runId, {
+      origin: `${origin}_alarm`
+    }).catch((error) => ({
+      success: false,
+      reason: error?.message || String(error)
+    }));
+    if (result && result.skipped !== true) {
+      attempted += 1;
+    }
+  }
+  await syncProcessWindowCloseRetryAlarm(nowTs).catch(() => {});
+  return {
+    success: true,
+    attempted,
+    due: dueRunIds.size
+  };
+}
+
 function generateAnalysisQueueRunId(prefix = 'analysis') {
   const safePrefix = typeof prefix === 'string' && prefix.trim()
     ? prefix.trim().replace(/[^a-zA-Z0-9._-]/g, '_')
@@ -8568,9 +10058,10 @@ function buildQueuedProcessPatchForJob(job) {
     patch.sourceUrl = sourceUrl;
   } else {
     const startIndex = Number.isInteger(safeJob.resumeStartIndex) ? safeJob.resumeStartIndex : 0;
-    patch.currentPrompt = Math.max(0, startIndex);
-    patch.stageIndex = startIndex > 0 ? (startIndex - 1) : null;
-    patch.stageName = startIndex > 0 ? `Prompt ${startIndex}` : 'Start';
+    const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(startIndex, totalPrompts);
+    patch.currentPrompt = pendingPrompt.currentPrompt;
+    patch.stageIndex = pendingPrompt.stageIndex;
+    patch.stageName = pendingPrompt.stageName;
     patch.tabId = safeJob.resumeTargetTabId;
     if (Number.isInteger(safeJob.resumeTargetWindowId)) {
       patch.windowId = safeJob.resumeTargetWindowId;
@@ -8607,6 +10098,10 @@ async function enqueueAnalysisJobs(rawJobs, options = {}) {
   persistedSnapshot = await withAnalysisQueueMutationLock(async () => {
     let state = cloneAnalysisQueueState();
     const nextJobs = [];
+    state.manualTextSources = mergeManualTextSourceRecords(
+      state.manualTextSources,
+      options?.manualTextSources
+    );
 
     for (const rawJob of sourceJobs) {
       const sequence = (state.lastSequence || 0) + 1;
@@ -9641,6 +11136,31 @@ function extractAssistantTextFromProcess(process) {
 }
 
 function getCompletedProcessFinalityState(process) {
+  const resolveCompletedLocalSaveState = (candidate) => {
+    if (typeof getCompletedProcessLocalSaveState === 'function') {
+      return getCompletedProcessLocalSaveState(candidate);
+    }
+    if (typeof hasCompletedProcessLocalSave === 'function') {
+      return hasCompletedProcessLocalSave(candidate) === true;
+    }
+    if (!candidate || typeof candidate !== 'object') return null;
+    const candidatePersistenceStatus = candidate?.persistenceStatus && typeof candidate.persistenceStatus === 'object'
+      ? candidate.persistenceStatus
+      : null;
+    const candidateFinalStagePersistence = candidate?.finalStagePersistence && typeof candidate.finalStagePersistence === 'object'
+      ? candidate.finalStagePersistence
+      : null;
+    if (typeof candidatePersistenceStatus?.saveOk === 'boolean') {
+      return candidatePersistenceStatus.saveOk;
+    }
+    if (typeof candidate?.completedResponseSaved === 'boolean') {
+      return candidate.completedResponseSaved;
+    }
+    if (typeof candidateFinalStagePersistence?.success === 'boolean') {
+      return candidateFinalStagePersistence.success;
+    }
+    return null;
+  };
   const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
   const totalPrompts = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
   const completedResponseText = typeof process?.completedResponseText === 'string'
@@ -9649,9 +11169,7 @@ function getCompletedProcessFinalityState(process) {
   const hasCompletedPayload = completedResponseText.length > 0;
   const hasCapturedPayload = Number.isInteger(process?.completedResponseCapturedAt)
     && process.completedResponseCapturedAt > 0;
-  const saveConfirmed = process?.completedResponseSaved === true
-    || process?.persistenceStatus?.saveOk === true
-    || process?.finalStagePersistence?.success === true;
+  const saveConfirmed = resolveCompletedLocalSaveState(process) === true;
   const promptComplete = totalPrompts > 0 && currentPrompt >= totalPrompts;
   const finalStageReached = hasCompletedPayload || hasCapturedPayload || saveConfirmed;
   return {
@@ -9816,7 +11334,33 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     return { attempted: false, success: false, reason: resolvedResponse?.reason || 'missing_response_text' };
   }
 
-  const alreadySaved = process?.completedResponseSaved === true || process?.persistenceStatus?.saveOk === true;
+  const resolveCompletedLocalSaveState = (candidate) => {
+    if (typeof getCompletedProcessLocalSaveState === 'function') {
+      return getCompletedProcessLocalSaveState(candidate);
+    }
+    if (typeof hasCompletedProcessLocalSave === 'function') {
+      return hasCompletedProcessLocalSave(candidate) === true;
+    }
+    if (!candidate || typeof candidate !== 'object') return null;
+    const candidatePersistenceStatus = candidate?.persistenceStatus && typeof candidate.persistenceStatus === 'object'
+      ? candidate.persistenceStatus
+      : null;
+    const candidateFinalStagePersistence = candidate?.finalStagePersistence && typeof candidate.finalStagePersistence === 'object'
+      ? candidate.finalStagePersistence
+      : null;
+    if (typeof candidatePersistenceStatus?.saveOk === 'boolean') {
+      return candidatePersistenceStatus.saveOk;
+    }
+    if (typeof candidate?.completedResponseSaved === 'boolean') {
+      return candidate.completedResponseSaved;
+    }
+    if (typeof candidateFinalStagePersistence?.success === 'boolean') {
+      return candidateFinalStagePersistence.success;
+    }
+    return null;
+  };
+
+  const alreadySaved = resolveCompletedLocalSaveState(process) === true;
   if (alreadySaved && options?.force !== true) {
     const dispatch = getProcessPersistenceDispatchSnapshot(process);
     const dispatchSummary = dispatch && typeof dispatch === 'object'
@@ -9905,6 +11449,14 @@ async function replayCompletedResponseForProcess(process, options = {}) {
         typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
       ),
       sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+    },
+    {
+      dispatchFlushFocus: {
+        runId: runId || '',
+        responseId,
+        forceMatchingReady: true,
+        prioritizeMatching: true
+      }
     }
   );
 
@@ -9951,6 +11503,22 @@ function summarizeFinalStagePersistence(result) {
   const dispatch = result?.dispatch && typeof result.dispatch === 'object'
     ? result.dispatch
     : null;
+  const nestedSaveResult = result?.saveResult && typeof result.saveResult === 'object'
+    ? result.saveResult
+    : null;
+  const emergencyLocalSave = result?.emergencyLocalSave && typeof result.emergencyLocalSave === 'object'
+    ? result.emergencyLocalSave
+    : (nestedSaveResult?.emergencyLocalSave && typeof nestedSaveResult.emergencyLocalSave === 'object'
+      ? nestedSaveResult.emergencyLocalSave
+      : null);
+  const emergencyPageSave = result?.emergencyPageSave && typeof result.emergencyPageSave === 'object'
+    ? result.emergencyPageSave
+    : (nestedSaveResult?.emergencyPageSave && typeof nestedSaveResult.emergencyPageSave === 'object'
+      ? nestedSaveResult.emergencyPageSave
+      : null);
+  const emergencyLocalOk = emergencyLocalSave?.success === true;
+  const emergencyPageOk = emergencyPageSave?.success === true;
+  const pageEmergencyOnly = result.success !== true && emergencyPageOk && !emergencyLocalOk;
   const sent = Number.isInteger(dispatch?.sent) ? dispatch.sent : null;
   const failed = Number.isInteger(dispatch?.failed) ? dispatch.failed : null;
   const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : null;
@@ -10005,10 +11573,18 @@ function summarizeFinalStagePersistence(result) {
     attempted: result.attempted === true,
     success: result.success === true,
     reason: typeof result.reason === 'string' ? result.reason : '',
+    saveError: typeof result.error === 'string' ? result.error : '',
+    bridgeError: typeof result.bridgeError === 'string' ? result.bridgeError : '',
     responseId: typeof result.responseId === 'string' ? result.responseId : '',
     copyTrace: typeof result.copyTrace === 'string' ? result.copyTrace : '',
     dispatchSummary: typeof result.dispatchSummary === 'string' ? result.dispatchSummary : '',
     verifiedCount: Number.isInteger(result?.verifiedCount) ? result.verifiedCount : null,
+    emergencyLocalSave,
+    emergencyPageSave,
+    emergencyLocalOk,
+    emergencyPageOk,
+    pageEmergencyOnly,
+    recoveryHint: pageEmergencyOnly ? 'reload_extension_refresh_chatgpt_tab' : '',
     sent,
     failed,
     deferred,
@@ -10016,6 +11592,8 @@ function summarizeFinalStagePersistence(result) {
     pending: (deferred ?? 0) + (remaining ?? 0),
     queueSkipped: dispatch?.queueSkipped === true,
     queueSkipReason: typeof dispatch?.queueSkipReason === 'string' ? dispatch.queueSkipReason : '',
+    flushDeferred: dispatch?.flushDeferred === true,
+    flushDeferredReason: typeof dispatch?.flushDeferredReason === 'string' ? dispatch.flushDeferredReason : '',
     flushSkipped: dispatch?.flushSkipped === true,
     flushSkipReason: typeof dispatch?.flushSkipReason === 'string' ? dispatch.flushSkipReason : '',
     flushFollowUpScheduled: dispatch?.flushFollowUpScheduled === true,
@@ -10035,6 +11613,91 @@ function summarizeFinalStagePersistence(result) {
     conversationSnapshotSource,
     state
   };
+}
+
+function buildSaveResponseProcessPersistencePatch(options = {}) {
+  const now = Number.isInteger(options?.now) && options.now > 0 ? options.now : Date.now();
+  const dispatch = options?.dispatch && typeof options.dispatch === 'object'
+    ? options.dispatch
+    : null;
+  const dispatchSummary = typeof options?.dispatchSummary === 'string' && options.dispatchSummary.trim()
+    ? options.dispatchSummary.trim()
+    : formatDispatchUiSummary(dispatch);
+  const dispatchProcessLog = normalizeDispatchProcessLog(
+    options?.dispatchProcessLog
+      || dispatch?.processLog
+      || []
+  );
+  const copyTrace = typeof options?.copyTrace === 'string' && options.copyTrace.trim()
+    ? options.copyTrace.trim()
+    : '';
+  const responseId = typeof options?.responseId === 'string' && options.responseId.trim()
+    ? options.responseId.trim()
+    : '';
+  const lifecycleStatus = typeof options?.lifecycleStatus === 'string' && options.lifecycleStatus.trim()
+    ? options.lifecycleStatus.trim()
+    : 'completed';
+  const phase = typeof options?.phase === 'string' && options.phase.trim()
+    ? options.phase.trim()
+    : 'dispatch_remote';
+  const statusCode = typeof options?.statusCode === 'string' && options.statusCode.trim()
+    ? options.statusCode.trim()
+    : 'dispatch.verify_pending';
+  const finalStagePersistence = summarizeFinalStagePersistence({
+    attempted: true,
+    success: true,
+    reason: 'saved',
+    responseId,
+    copyTrace,
+    dispatchSummary,
+    verifiedCount: Number.isInteger(options?.verifiedCount) ? options.verifiedCount : null,
+    dispatch,
+    conversationAnalysis: options?.conversationAnalysis && typeof options.conversationAnalysis === 'object'
+      ? options.conversationAnalysis
+      : null
+  });
+
+  const patch = {
+    lifecycleStatus,
+    status: lifecycleStatus,
+    phase,
+    actionRequired: 'none',
+    statusCode,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      hasResponse: true,
+      saveOk: true,
+      saveError: '',
+      copyTrace,
+      dispatchSummary,
+      dispatch,
+      dispatchProcessLog,
+      updatedAt: now
+    },
+    timestamp: now
+  };
+
+  if (copyTrace) {
+    patch.completedResponseSaveTrace = copyTrace;
+  }
+  if (dispatch) {
+    patch.completedResponseDispatch = dispatch;
+    patch.completedResponseDispatchSummary = dispatchSummary;
+    patch.completedResponseDispatchProcessLog = dispatchProcessLog;
+  }
+  if (options?.completedStage12Snapshot && typeof options.completedStage12Snapshot === 'object') {
+    patch.completedStage12Snapshot = options.completedStage12Snapshot;
+  }
+  if (finalStagePersistence) {
+    patch.finalStagePersistence = {
+      ...finalStagePersistence,
+      origin: typeof options?.origin === 'string' && options.origin.trim()
+        ? options.origin.trim()
+        : 'save_response',
+      updatedAt: now
+    };
+  }
+  return patch;
 }
 
 async function ensureCompletedProcessResponsePersisted(process, options = {}) {
@@ -11796,6 +13459,10 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     ? options.queueJobId.trim()
     : '';
   const queueManaged = !!queueJobId;
+  const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+    effectiveStartIndex,
+    PROMPTS_COMPANY.length
+  );
 
   await upsertProcess(processId, {
     title: processTitle,
@@ -11804,10 +13471,10 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     statusText: composerThinkingEffort
       ? `Auto-resume przygotowanie (${composerThinkingEffort})`
       : 'Auto-resume przygotowanie',
-    currentPrompt: effectiveStartIndex,
+    currentPrompt: pendingPrompt.currentPrompt,
     totalPrompts: PROMPTS_COMPANY.length,
-    stageIndex: effectiveStartIndex > 0 ? (effectiveStartIndex - 1) : null,
-    stageName: effectiveStartIndex > 0 ? `Prompt ${effectiveStartIndex}` : 'Start',
+    stageIndex: pendingPrompt.stageIndex,
+    stageName: pendingPrompt.stageName,
     needsAction: false,
     startedAt: Date.now(),
     timestamp: Date.now(),
@@ -11868,7 +13535,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         {
           persistFinalResponseViaMessage: true,
           mode: 'runtime_message',
-          saveTimeoutMs: 18000
+          saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS
         }
       ];
 
@@ -11975,11 +13642,15 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     }
 
     if (isInjectRateLimitBlockedResult(result)) {
+      const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+        executionPromptOffset,
+        PROMPTS_COMPANY.length
+      );
       const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-        currentPrompt: executionPromptOffset,
+        currentPrompt: pendingPrompt.currentPrompt,
         totalPrompts: PROMPTS_COMPANY.length,
-        stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
-        stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+        stageIndex: pendingPrompt.stageIndex,
+        stageName: pendingPrompt.stageName,
         conversationUrl: normalizeChatConversationUrl(result?.conversationUrl)
           || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab))
       });
@@ -12103,8 +13774,12 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
       await upsertProcess(processId, {
         title: processTitle,
         analysisType: 'company',
-        status: 'completed',
-        needsAction: false,
+        lifecycleStatus: persistenceSummary.lifecycleStatus || (persistenceSummary.saveOk ? 'completed' : 'failed'),
+        status: persistenceSummary.lifecycleStatus || (persistenceSummary.saveOk ? 'completed' : 'failed'),
+        phase: persistenceSummary.phase || (persistenceSummary.saveOk ? 'verify_remote' : 'save_local'),
+        actionRequired: persistenceSummary.actionRequired || 'none',
+        statusCode: persistenceSummary.statusCode || (persistenceSummary.saveOk ? 'process.completed' : 'storage.save_failed'),
+        needsAction: persistenceSummary.needsAction === true,
         statusText: persistenceSummary.statusText,
         reason: persistenceSummary.reason,
         ...(Number.isInteger(selectedPrompt) ? { currentPrompt: selectedPrompt } : {}),
@@ -12123,6 +13798,12 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
           copyTrace: persistenceSummary.copyTrace,
           saveError: persistenceSummary.saveError,
           bridgeError: persistenceSummary.bridgeError || '',
+          emergencyLocalSave: persistenceSummary.emergencyLocalSave || null,
+          emergencyPageSave: persistenceSummary.emergencyPageSave || null,
+          emergencyLocalOk: persistenceSummary.emergencyLocalOk === true,
+          emergencyPageOk: persistenceSummary.emergencyPageOk === true,
+          pageEmergencyOnly: persistenceSummary.pageEmergencyOnly === true,
+          recoveryHint: persistenceSummary.recoveryHint || '',
           dispatch: persistenceSummary.dispatch || null,
           dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
           updatedAt: Date.now()
@@ -12229,12 +13910,121 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   };
 }
 
+function getCompanyInvestProcessUrls(process) {
+  if (!process || typeof process !== 'object') return [];
+  return [
+    typeof process?.chatUrl === 'string' ? process.chatUrl : '',
+    ...(Array.isArray(process?.conversationUrls) ? process.conversationUrls : []),
+    typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+  ].filter((url) => typeof url === 'string' && url.trim());
+}
+
+function processHasInvestChatContext(process, investConversationUrls = null) {
+  const processUrls = getCompanyInvestProcessUrls(process);
+  if (processUrls.some((url) => isInvestGptUrl(url))) return true;
+
+  const normalizedConversationUrls = normalizeConversationUrlList(processUrls);
+  if (
+    investConversationUrls
+    && typeof investConversationUrls.has === 'function'
+    && normalizedConversationUrls.some((url) => investConversationUrls.has(url))
+  ) {
+    return true;
+  }
+
+  return false;
+}
+
+function isLikelyActiveCompanyInvestProcess(process, context = {}) {
+  if (!process || typeof process !== 'object') return false;
+  if (isClosedProcessStatus(process?.status) || isQueuedProcessStatus(process?.status)) return false;
+
+  const analysisType = typeof process?.analysisType === 'string' && process.analysisType.trim()
+    ? process.analysisType.trim().toLowerCase()
+    : 'company';
+  if (analysisType !== 'company') return false;
+
+  const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
+  const processWindowId = Number.isInteger(process?.windowId)
+    ? process.windowId
+    : (Number.isInteger(process?.invocationWindowId)
+      ? process.invocationWindowId
+      : (Number.isInteger(process?.sourceWindowId) ? process.sourceWindowId : null));
+  if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return false;
+
+  if (processHasInvestChatContext(process, context?.investConversationUrls || null)) return true;
+
+  const openTabIds = context?.openTabIds;
+  const openWindowIds = context?.openWindowIds;
+  const openChatTabIds = context?.openChatTabIds;
+  const openChatWindowIds = context?.openChatWindowIds;
+  const hasOpenTab = Number.isInteger(processTabId) && openTabIds && typeof openTabIds.has === 'function'
+    ? openTabIds.has(processTabId)
+    : false;
+  const hasOpenWindow = Number.isInteger(processWindowId) && openWindowIds && typeof openWindowIds.has === 'function'
+    ? openWindowIds.has(processWindowId)
+    : false;
+  const hasOpenChatTab = Number.isInteger(processTabId) && openChatTabIds && typeof openChatTabIds.has === 'function'
+    ? openChatTabIds.has(processTabId)
+    : false;
+  const hasOpenChatWindow = Number.isInteger(processWindowId) && openChatWindowIds && typeof openChatWindowIds.has === 'function'
+    ? openChatWindowIds.has(processWindowId)
+    : false;
+  const hasLiveContext = hasOpenTab || hasOpenWindow || hasOpenChatTab || hasOpenChatWindow;
+  if (context?.allowWithoutOpenContext !== true && !hasLiveContext) return false;
+
+  const processUrls = getCompanyInvestProcessUrls(process);
+  const hasChatGptContext = processUrls.some((url) => isChatGptUrl(url)) || hasOpenChatTab || hasOpenChatWindow;
+  if (!hasChatGptContext) return false;
+
+  const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  const runIdLooksCompany = /^(queue-article|resume-auto-company|company-run|manual-codex)-/i.test(runId);
+  const promptCount = Number.isInteger(process?.totalPrompts) ? process.totalPrompts : 0;
+  const currentPrompt = Number.isInteger(process?.currentPrompt) ? process.currentPrompt : 0;
+  const stageIndex = Number.isInteger(process?.stageIndex) ? process.stageIndex : null;
+  const canonicalPromptCount = Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0;
+  const promptCountLooksCompany = promptCount >= Math.max(8, Math.min(8, canonicalPromptCount || 8));
+  const hasPromptProgress = currentPrompt > 0 || (Number.isInteger(stageIndex) && stageIndex >= 0);
+
+  return runIdLooksCompany || promptCountLooksCompany || hasPromptProgress;
+}
+
+function canResumeCompanyInvestContextFromUrl(url, process, context = {}) {
+  if (isInvestGptUrl(url)) return true;
+  if (!isChatGptUrl(url)) return false;
+  return isLikelyActiveCompanyInvestProcess(process, {
+    ...context,
+    allowWithoutOpenContext: true
+  });
+}
+
 async function collectCompanyInvestContextSnapshot(options = {}) {
   const includeClosedProcesses = options?.includeClosedProcesses === true;
   const includeInvestTabs = options?.includeInvestTabs !== false;
   const includeProcessContextFallback = options?.includeProcessContextFallback !== false;
 
   const tabsRaw = includeInvestTabs ? await chrome.tabs.query({}) : [];
+  const openTabIds = new Set(
+    tabsRaw
+      .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
+      .filter((tabId) => Number.isInteger(tabId))
+  );
+  const openWindowIds = new Set(
+    tabsRaw
+      .map((tab) => (Number.isInteger(tab?.windowId) ? tab.windowId : null))
+      .filter((windowId) => Number.isInteger(windowId))
+  );
+  const chatTabs = tabsRaw.filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)));
+  const openChatTabIds = new Set(
+    chatTabs
+      .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
+      .filter((tabId) => Number.isInteger(tabId))
+  );
+  const openChatWindowIds = new Set(
+    chatTabs
+      .map((tab) => (Number.isInteger(tab?.windowId) ? tab.windowId : null))
+      .filter((windowId) => Number.isInteger(windowId))
+  );
   const investTabs = tabsRaw
     .filter((tab) => isInvestGptUrl(getTabEffectiveUrl(tab)))
     .sort(compareTabsByWindowAndIndex);
@@ -12256,7 +14046,11 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
       if (!includeClosedProcesses && isClosedProcessStatus(process?.status)) return false;
       if (isQueuedProcessStatus(process?.status)) return false;
       const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
-      const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+      const processWindowId = Number.isInteger(process?.windowId)
+        ? process.windowId
+        : (Number.isInteger(process?.invocationWindowId)
+          ? process.invocationWindowId
+          : (Number.isInteger(process?.sourceWindowId) ? process.sourceWindowId : null));
       if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return false;
       if (Number.isInteger(processTabId) && investTabIds.has(processTabId)) return true;
 
@@ -12274,6 +14068,16 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
         return true;
       }
 
+      if (isLikelyActiveCompanyInvestProcess(process, {
+        investConversationUrls,
+        openTabIds,
+        openWindowIds,
+        openChatTabIds,
+        openChatWindowIds
+      })) {
+        return true;
+      }
+
       return false;
     })
     .sort(compareProcessesForRestore);
@@ -12284,8 +14088,13 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     if (Number.isInteger(process?.tabId) && !processByTabId.has(process.tabId)) {
       processByTabId.set(process.tabId, process);
     }
-    if (Number.isInteger(process?.windowId) && !processByWindowId.has(process.windowId)) {
-      processByWindowId.set(process.windowId, process);
+    const processWindowId = Number.isInteger(process?.windowId)
+      ? process.windowId
+      : (Number.isInteger(process?.invocationWindowId)
+        ? process.invocationWindowId
+        : (Number.isInteger(process?.sourceWindowId) ? process.sourceWindowId : null));
+    if (Number.isInteger(processWindowId) && !processByWindowId.has(processWindowId)) {
+      processByWindowId.set(processWindowId, process);
     }
   });
 
@@ -12318,7 +14127,11 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
   if (includeProcessContextFallback) {
     processCandidates.forEach((process) => {
       const processTabId = Number.isInteger(process?.tabId) ? process.tabId : null;
-      const processWindowId = Number.isInteger(process?.windowId) ? process.windowId : null;
+      const processWindowId = Number.isInteger(process?.windowId)
+        ? process.windowId
+        : (Number.isInteger(process?.invocationWindowId)
+          ? process.invocationWindowId
+          : (Number.isInteger(process?.sourceWindowId) ? process.sourceWindowId : null));
       if (!Number.isInteger(processTabId) && !Number.isInteger(processWindowId)) return;
       const contextKey = Number.isInteger(processTabId)
         ? `tab:${processTabId}`
@@ -12349,6 +14162,8 @@ async function collectCompanyInvestContextSnapshot(options = {}) {
     processByWindowId,
     targets,
     skipped,
+    openTabCount: openTabIds.size,
+    openChatTabCount: openChatTabIds.size,
     includeProcessContextFallback
   };
 }
@@ -12957,6 +14772,31 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
     terminalFailure: false,
     verifyState: ''
   };
+  const resolveCompletedLocalSaveState = (candidate) => {
+    if (typeof getCompletedProcessLocalSaveState === 'function') {
+      return getCompletedProcessLocalSaveState(candidate);
+    }
+    if (typeof hasCompletedProcessLocalSave === 'function') {
+      return hasCompletedProcessLocalSave(candidate) === true;
+    }
+    if (!candidate || typeof candidate !== 'object') return null;
+    const candidatePersistenceStatus = candidate?.persistenceStatus && typeof candidate.persistenceStatus === 'object'
+      ? candidate.persistenceStatus
+      : null;
+    const candidateFinalStagePersistence = candidate?.finalStagePersistence && typeof candidate.finalStagePersistence === 'object'
+      ? candidate.finalStagePersistence
+      : null;
+    if (typeof candidatePersistenceStatus?.saveOk === 'boolean') {
+      return candidatePersistenceStatus.saveOk;
+    }
+    if (typeof candidate?.completedResponseSaved === 'boolean') {
+      return candidate.completedResponseSaved;
+    }
+    if (typeof candidateFinalStagePersistence?.success === 'boolean') {
+      return candidateFinalStagePersistence.success;
+    }
+    return null;
+  };
 
   try {
     if (process && typeof process === 'object') {
@@ -12970,6 +14810,12 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
       if (conversationUrl) processPatch.chatUrl = conversationUrl;
       if (Number.isInteger(tabId)) processPatch.tabId = tabId;
       if (Number.isInteger(windowId)) processPatch.windowId = windowId;
+      const normalizedResolvedResponseText = typeof responseText === 'string' ? responseText.trim() : '';
+      if (normalizedResolvedResponseText) {
+        processPatch.completedResponseText = normalizedResolvedResponseText;
+        processPatch.completedResponseCapturedAt = Date.now();
+        processPatch.completedResponseLength = normalizedResolvedResponseText.length;
+      }
       if (resolvedResponse?.processPatch && typeof resolvedResponse.processPatch === 'object') {
         Object.assign(processPatch, resolvedResponse.processPatch);
       }
@@ -13036,18 +14882,127 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         latestProcess = processId ? (processRegistry.get(processId) || latestProcess) : latestProcess;
       }
 
+      const localSaveKnownBeforeFallback = resolveCompletedLocalSaveState(latestProcess) === true
+        || persistenceResult?.delivery?.saveOk === true;
+      if (persistenceResult?.success !== true && !localSaveKnownBeforeFallback && normalizedResolvedResponseText) {
+        const analysisType = typeof latestProcess?.analysisType === 'string' && latestProcess.analysisType.trim()
+          ? latestProcess.analysisType.trim()
+          : 'company';
+        const sourceTitle = typeof latestProcess?.title === 'string' && latestProcess.title.trim()
+          ? latestProcess.title.trim()
+          : (title && title.trim() ? title.trim() : 'ChatGPT Invest');
+        const stagePromptNumber = Number.isInteger(latestProcess?.currentPrompt) && latestProcess.currentPrompt > 0
+          ? latestProcess.currentPrompt
+          : (Number.isInteger(latestProcess?.stageIndex) && latestProcess.stageIndex >= 0 ? (latestProcess.stageIndex + 1) : 0);
+        const existingCopyTrace = typeof latestProcess?.completedResponseSaveTrace === 'string' && latestProcess.completedResponseSaveTrace.trim()
+          ? latestProcess.completedResponseSaveTrace.trim()
+          : (typeof latestProcess?.persistenceStatus?.copyTrace === 'string' ? latestProcess.persistenceStatus.copyTrace.trim() : '');
+        const tracedResponseId = (() => {
+          const traceText = typeof existingCopyTrace === 'string' ? existingCopyTrace.trim() : '';
+          if (!traceText) return '';
+          const slashIndex = traceText.lastIndexOf('/');
+          const candidate = slashIndex >= 0 ? traceText.slice(slashIndex + 1).trim() : traceText;
+          return candidate;
+        })();
+        const fallbackHash = (() => {
+          let hash = 0;
+          for (let index = 0; index < normalizedResolvedResponseText.length; index += 1) {
+            hash = ((hash * 31) + normalizedResolvedResponseText.charCodeAt(index)) >>> 0;
+          }
+          return hash.toString(16).padStart(8, '0');
+        })();
+        const fallbackSafeRunId = processId
+          ? processId.replace(/[^a-zA-Z0-9._-]/g, '_')
+          : 'manual_copy_process';
+        const fallbackResponseId = tracedResponseId || `${fallbackSafeRunId}_manual_copy_p${Math.max(0, stagePromptNumber)}_${fallbackHash}`;
+        const fallbackStageMeta = {
+          selected_response_reason: 'manual_copy_recovered'
+        };
+        if (stagePromptNumber > 0) {
+          fallbackStageMeta.selected_response_prompt = stagePromptNumber;
+          fallbackStageMeta.selected_response_stage_index = stagePromptNumber - 1;
+        } else if (Number.isInteger(latestProcess?.stageIndex) && latestProcess.stageIndex >= 0) {
+          fallbackStageMeta.selected_response_stage_index = latestProcess.stageIndex;
+        }
+        const fallbackSourceUrl = typeof latestProcess?.sourceUrl === 'string' && latestProcess.sourceUrl.trim()
+          ? latestProcess.sourceUrl.trim()
+          : (typeof target?.url === 'string' && target.url.trim()
+            ? target.url.trim()
+            : (conversationUrl || ''));
+        const fallbackConversationUrl = conversationUrl
+          || normalizeChatConversationUrl(latestProcess?.chatUrl)
+          || normalizeChatConversationUrl(latestProcess?.sourceUrl)
+          || null;
+        const fallbackSaveResult = await saveResponse(
+          normalizedResolvedResponseText,
+          sourceTitle,
+          analysisType,
+          processId || null,
+          fallbackResponseId,
+          fallbackStageMeta,
+          fallbackConversationUrl,
+          {
+            sourceTitle,
+            sourceName: 'ChatGPT Invest',
+            sourceUrl: fallbackSourceUrl
+          }
+        );
+
+        persistenceResult = fallbackSaveResult?.success === true
+          ? {
+              attempted: true,
+              success: true,
+              reason: 'saved',
+              recoveryMode: 'manual_copy_recovered',
+              responseId: fallbackResponseId,
+              responseLength: normalizedResolvedResponseText.length,
+              verifiedCount: Number.isInteger(fallbackSaveResult?.verifiedCount) ? fallbackSaveResult.verifiedCount : null,
+              copyTrace: typeof fallbackSaveResult?.copyTrace === 'string' ? fallbackSaveResult.copyTrace : '',
+              dispatch: fallbackSaveResult?.dispatch && typeof fallbackSaveResult.dispatch === 'object'
+                ? fallbackSaveResult.dispatch
+                : null,
+              dispatchProcessLog: Array.isArray(fallbackSaveResult?.dispatchProcessLog)
+                ? fallbackSaveResult.dispatchProcessLog.slice(-16)
+                : [],
+              conversationAnalysis: fallbackSaveResult?.conversationAnalysis && typeof fallbackSaveResult.conversationAnalysis === 'object'
+                ? fallbackSaveResult.conversationAnalysis
+                : null,
+              dispatchSummary: formatDispatchUiSummary(fallbackSaveResult?.dispatch)
+            }
+          : {
+              attempted: true,
+              success: false,
+              reason: typeof fallbackSaveResult?.reason === 'string' && fallbackSaveResult.reason.trim()
+                ? fallbackSaveResult.reason.trim()
+                : 'save_response_failed',
+              error: typeof fallbackSaveResult?.error === 'string' ? fallbackSaveResult.error : '',
+              stage: typeof fallbackSaveResult?.stage === 'string' ? fallbackSaveResult.stage : '',
+              status: Number.isInteger(fallbackSaveResult?.status) ? fallbackSaveResult.status : null,
+              requestId: typeof fallbackSaveResult?.requestId === 'string' ? fallbackSaveResult.requestId : '',
+              intakeUrl: typeof fallbackSaveResult?.intakeUrl === 'string' ? fallbackSaveResult.intakeUrl : '',
+              recoveryMode: 'manual_copy_recovered',
+              responseId: fallbackResponseId,
+              responseLength: normalizedResolvedResponseText.length
+            };
+        persistenceMode = 'manual_copy_recovered';
+        latestProcess = processId ? (processRegistry.get(processId) || latestProcess) : latestProcess;
+      }
+
       persistence.attempted = true;
-      persistence.success = persistenceResult?.success === true;
-      persistence.localSaveOk = latestProcess?.completedResponseSaved === true
-        || latestProcess?.persistenceStatus?.saveOk === true
+      const localSaveKnown = resolveCompletedLocalSaveState(latestProcess) === true
+        || persistenceResult?.delivery?.saveOk === true
         || persistenceResult?.success === true;
+      persistence.success = persistenceResult?.success === true || localSaveKnown;
+      persistence.localSaveOk = localSaveKnown;
       persistence.mode = persistenceMode === 'already_verified'
         ? 'already_verified'
         : (persistenceMode === 'retry_existing_dispatch'
           ? 'retry_existing_dispatch'
           : (persistenceMode === 'replay_missing_dispatch'
             ? 'replay_missing_dispatch'
-            : 'process_replay'));
+            : (persistenceMode === 'manual_copy_recovered'
+              ? 'manual_copy_recovered'
+              : 'process_replay')));
       persistence.reason = typeof persistenceResult?.reason === 'string' ? persistenceResult.reason : '';
       persistence.copyTrace = typeof persistenceResult?.copyTrace === 'string' && persistenceResult.copyTrace.trim()
         ? persistenceResult.copyTrace.trim()
@@ -13326,6 +15281,195 @@ async function copyLatestInvestFinalResponse(options = {}) {
     }
   }
 
+  const batchPersistenceSettleBudgetMs = Number.isInteger(options?.batchPersistenceSettleBudgetMs)
+    ? Math.max(0, options.batchPersistenceSettleBudgetMs)
+    : 35000;
+  if (batchPersistenceSettleBudgetMs > 0) {
+    const settleStartedAt = Date.now();
+    const settlePause = typeof sleep === 'function'
+      ? (delayMs) => sleep(delayMs)
+      : (typeof setTimeout === 'function'
+        ? (delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs))
+        : null);
+    const batchPersistenceSettlePollMs = Number.isInteger(options?.batchPersistenceSettlePollMs)
+      ? Math.max(0, options.batchPersistenceSettlePollMs)
+      : (settlePause ? 1200 : 0);
+    const batchPersistenceSettleMaxRounds = Number.isInteger(options?.batchPersistenceSettleMaxRounds)
+      ? Math.max(1, options.batchPersistenceSettleMaxRounds)
+      : 4;
+    const resolveCompletedLocalSaveState = (candidate) => {
+      if (typeof getCompletedProcessLocalSaveState === 'function') {
+        return getCompletedProcessLocalSaveState(candidate);
+      }
+      if (typeof hasCompletedProcessLocalSave === 'function') {
+        return hasCompletedProcessLocalSave(candidate) === true;
+      }
+      if (!candidate || typeof candidate !== 'object') return null;
+      if (typeof candidate?.persistenceStatus?.saveOk === 'boolean') {
+        return candidate.persistenceStatus.saveOk;
+      }
+      if (typeof candidate?.completedResponseSaved === 'boolean') {
+        return candidate.completedResponseSaved;
+      }
+      if (typeof candidate?.finalStagePersistence?.success === 'boolean') {
+        return candidate.finalStagePersistence.success;
+      }
+      return null;
+    };
+    const applyLatestProcessPersistence = (row, latestProcess, retryResult = null) => {
+      if (!row || row?.success !== true || !row?.persistence || typeof row.persistence !== 'object') return;
+      const persistence = row.persistence;
+      const dispatchSnapshot = latestProcess && typeof getProcessPersistenceDispatchSnapshot === 'function'
+        ? getProcessPersistenceDispatchSnapshot(latestProcess)
+        : null;
+      const deliverySnapshot = retryResult?.delivery && typeof retryResult.delivery === 'object'
+        ? retryResult.delivery
+        : (latestProcess && typeof getProcessQueueDeliveryState === 'function'
+          ? getProcessQueueDeliveryState(latestProcess)
+          : null);
+      const localSaveOk = resolveCompletedLocalSaveState(latestProcess) === true
+        || deliverySnapshot?.saveOk === true
+        || persistence.localSaveOk === true;
+      persistence.localSaveOk = localSaveOk;
+      persistence.success = persistence.success === true || localSaveOk;
+      if (dispatchSnapshot && typeof dispatchSnapshot === 'object') {
+        persistence.dispatch = dispatchSnapshot;
+        persistence.dispatchSummary = formatDispatchUiSummary(dispatchSnapshot);
+        persistence.acceptedByIntake = isAcceptedWatchlistDispatch(dispatchSnapshot);
+        persistence.verifiedInDb = isExplicitlyVerifiedDispatch(dispatchSnapshot);
+        persistence.terminalFailure = isTerminalWatchlistDispatchFailure(dispatchSnapshot);
+        persistence.verifyState = typeof dispatchSnapshot?.verifyState === 'string'
+          ? dispatchSnapshot.verifyState.trim()
+          : '';
+      }
+      if (retryResult?.confirmed === true) {
+        persistence.mode = 'retry_existing_dispatch';
+        persistence.reason = 'dispatch_retry_confirmed';
+      } else if (retryResult?.pending === true) {
+        persistence.mode = 'retry_existing_dispatch';
+        persistence.reason = typeof retryResult?.reason === 'string' && retryResult.reason.trim()
+          ? retryResult.reason.trim()
+          : 'dispatch_retry_pending';
+      } else if (retryResult?.settled === true && typeof retryResult?.reason === 'string' && retryResult.reason.trim()) {
+        persistence.mode = 'retry_existing_dispatch';
+        persistence.reason = retryResult.reason.trim();
+      }
+    };
+    const needsSettleForRow = (row) => {
+      if (!row || row?.success !== true || !row?.persistence || typeof row.persistence !== 'object') {
+        return false;
+      }
+      const processId = typeof row?.processId === 'string' ? row.processId.trim() : '';
+      if (!processId) return false;
+      const persistence = row.persistence;
+      return persistence.attempted === true
+        && persistence.terminalFailure !== true
+        && (
+          persistence.localSaveOk !== true
+          || persistence.acceptedByIntake !== true
+          || persistence.verifiedInDb !== true
+        );
+    };
+    const captureSettleState = (row) => {
+      if (!row?.persistence || typeof row.persistence !== 'object') return '';
+      return [
+        row.persistence.localSaveOk === true ? 'save' : 'nosave',
+        row.persistence.acceptedByIntake === true ? 'accepted' : 'notaccepted',
+        row.persistence.verifiedInDb === true ? 'verified' : 'notverified',
+        row.persistence.terminalFailure === true ? 'terminal' : 'nonterminal',
+        typeof row.persistence.verifyState === 'string' ? row.persistence.verifyState.trim() : '',
+        typeof row.persistence.reason === 'string' ? row.persistence.reason.trim() : ''
+      ].join('|');
+    };
+    const touchedProcessIds = new Set();
+    let settleRounds = 0;
+    let settleAttempts = 0;
+    let settledRows = 0;
+    let settledAccepted = 0;
+    let settledVerified = 0;
+    while (
+      settleRounds < batchPersistenceSettleMaxRounds
+      && (Date.now() - settleStartedAt) < batchPersistenceSettleBudgetMs
+    ) {
+      settleRounds += 1;
+      let roundPendingRows = 0;
+      let roundProgress = false;
+      for (const row of results) {
+        if ((Date.now() - settleStartedAt) >= batchPersistenceSettleBudgetMs) {
+          break;
+        }
+        if (!needsSettleForRow(row)) {
+          continue;
+        }
+        roundPendingRows += 1;
+        const processId = typeof row?.processId === 'string' ? row.processId.trim() : '';
+        if (!processId) continue;
+        touchedProcessIds.add(processId);
+        const beforeState = captureSettleState(row);
+        let retryResult = null;
+        if (typeof runCompletedProcessPersistenceRetry === 'function') {
+          try {
+            retryResult = await runCompletedProcessPersistenceRetry(processId, {
+              origin: `${origin}:batch_finalize`
+            });
+          } catch (error) {
+            retryResult = {
+              success: false,
+              reason: error?.message || String(error)
+            };
+          }
+        }
+        const latestProcess = processRegistry.get(processId) || null;
+        applyLatestProcessPersistence(row, latestProcess, retryResult);
+        settleAttempts += 1;
+        if (captureSettleState(row) !== beforeState) {
+          roundProgress = true;
+        }
+      }
+      if (!results.some((row) => needsSettleForRow(row))) {
+        break;
+      }
+      if ((Date.now() - settleStartedAt) >= batchPersistenceSettleBudgetMs) {
+        break;
+      }
+      if (roundPendingRows <= 0) {
+        break;
+      }
+      if (batchPersistenceSettlePollMs <= 0 || !settlePause) {
+        if (!roundProgress) break;
+        continue;
+      }
+      const elapsedMs = Math.max(0, Date.now() - settleStartedAt);
+      const remainingBudgetMs = Math.max(0, batchPersistenceSettleBudgetMs - elapsedMs);
+      if (remainingBudgetMs <= 0) {
+        break;
+      }
+      await settlePause(Math.min(batchPersistenceSettlePollMs, remainingBudgetMs));
+    }
+    settledRows = touchedProcessIds.size;
+    settledAccepted = results.filter((row) => {
+      const processId = typeof row?.processId === 'string' ? row.processId.trim() : '';
+      return processId && touchedProcessIds.has(processId) && row?.persistence?.acceptedByIntake === true;
+    }).length;
+    settledVerified = results.filter((row) => {
+      const processId = typeof row?.processId === 'string' ? row.processId.trim() : '';
+      return processId && touchedProcessIds.has(processId) && row?.persistence?.verifiedInDb === true;
+    }).length;
+    console.log('[copy-latest-invest] Batch persistence settle', {
+      operationId,
+      origin,
+      scope,
+      budgetMs: batchPersistenceSettleBudgetMs,
+      pollMs: batchPersistenceSettlePollMs,
+      rounds: settleRounds,
+      attempts: settleAttempts,
+      elapsedMs: Math.max(0, Date.now() - settleStartedAt),
+      settledRows,
+      settledAccepted,
+      settledVerified
+    });
+  }
+
   const successfulResults = results.filter((row) => row?.success === true);
   const failedResults = results.filter((row) => row?.success !== true);
   const combinedText = buildCopyLatestInvestBatchClipboardText(successfulResults);
@@ -13562,8 +15706,9 @@ async function runResetScanStartAllTabs(options = {}) {
     const contextSnapshot = await collectCompanyInvestContextSnapshot({
       includeClosedProcesses: options?.includeClosedProcesses === true,
       includeInvestTabs: true,
-      // Resume-all should operate on currently open INVEST tabs only.
-      includeProcessContextFallback: false
+      // Resume-all must also see open company runs whose tab no longer exposes
+      // the stable /g/...-inwestycje URL after Chrome restore or ChatGPT routing.
+      includeProcessContextFallback: true
     });
     const activeProcesses = contextSnapshot.processCandidates;
     const processContexts = contextSnapshot.targets;
@@ -13971,7 +16116,7 @@ async function runResetScanStartAllTabs(options = {}) {
         row.url = getTabEffectiveUrl(tab) || row.url;
       }
 
-      if (!isInvestGptUrl(row.url)) {
+      if (!canResumeCompanyInvestContextFromUrl(row.url, process)) {
         row.action = 'skipped_outside_invest';
         row.reason = `outside_invest:${row.url || 'empty'}`;
         appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
@@ -14224,7 +16369,10 @@ async function runResetScanStartAllTabs(options = {}) {
         row.url = getTabEffectiveUrl(currentTab) || row.url;
         row.windowId = Number.isInteger(currentTab?.windowId) ? currentTab.windowId : row.windowId;
 
-        if (!isInvestGptUrl(row.url)) {
+        const currentProcess = row.runId
+          ? (processRegistry.get(row.runId) || target.process || null)
+          : (target.process || null);
+        if (!canResumeCompanyInvestContextFromUrl(row.url, currentProcess)) {
           row.action = 'skipped_outside_invest';
           row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
           appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
@@ -18076,13 +20224,20 @@ function formatDispatchUiSummary(dispatchOutcome) {
     const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
     const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
     const pending = deferred + remaining;
+    if (dispatch.flushDeferred === true) {
+      const queueSize = Number.isInteger(dispatch.queueSize) ? dispatch.queueSize : Math.max(1, pending || 0);
+      const reason = typeof dispatch.flushDeferredReason === 'string' && dispatch.flushDeferredReason.trim()
+        ? dispatch.flushDeferredReason.trim()
+        : 'deferred';
+      return `Dispatch: WAIT@flush kolejka=${queueSize}, flush w tle (${reason})${diagnosticSuffix}`;
+    }
     if (dispatch.flushSkipped) {
       const queueSize = Number.isInteger(dispatch.queueSize) ? dispatch.queueSize : 0;
       const reason = typeof dispatch.flushSkipReason === 'string' && dispatch.flushSkipReason.trim()
         ? dispatch.flushSkipReason.trim()
         : 'unknown';
-      if (reason === 'flush_in_progress' && dispatch.flushFollowUpScheduled === true) {
-        return `Dispatch: WAIT@flush kolejka=${queueSize}, flush w toku (follow-up zaplanowany)${diagnosticSuffix}`;
+      if (dispatch.flushFollowUpScheduled === true) {
+        return `Dispatch: WAIT@flush kolejka=${queueSize}, flush odlozony (${reason})${diagnosticSuffix}`;
       }
       return `Dispatch: STOP@flush kolejka=${queueSize}, flush pominiety (${reason})${diagnosticSuffix}`;
     }
@@ -18171,20 +20326,26 @@ function formatVerifyDbUiSummary(dispatchOutcome) {
   if (isWatchlistVerificationPendingState(verifyState)) {
     return `Verify DB: pending (${verifyReason || verifyState || 'pending'})${diagSuffix}`;
   }
-  if (accepted > 0 || sent > 0 || pending > 0) {
-    return `Verify DB: oczekiwanie (accepted=${accepted}, sent=${sent}, pending=${pending}, failed=${failed})${diagSuffix}`;
-  }
   if (dispatch.queueSkipped === true) {
     const queueSkipReason = typeof dispatch.queueSkipReason === 'string' && dispatch.queueSkipReason.trim()
       ? dispatch.queueSkipReason.trim()
       : 'queue_skipped';
     return `Verify DB: nieuruchomione (${queueSkipReason})${diagSuffix}`;
   }
+  if (dispatch.flushDeferred === true) {
+    const flushDeferredReason = typeof dispatch.flushDeferredReason === 'string' && dispatch.flushDeferredReason.trim()
+      ? dispatch.flushDeferredReason.trim()
+      : 'flush_deferred';
+    return `Verify DB: oczekiwanie na flush (${flushDeferredReason})${diagSuffix}`;
+  }
   if (dispatch.flushSkipped === true) {
     const flushSkipReason = typeof dispatch.flushSkipReason === 'string' && dispatch.flushSkipReason.trim()
       ? dispatch.flushSkipReason.trim()
       : 'flush_skipped';
     return `Verify DB: oczekiwanie na flush (${flushSkipReason})${diagSuffix}`;
+  }
+  if (accepted > 0 || sent > 0 || pending > 0) {
+    return `Verify DB: oczekiwanie (accepted=${accepted}, sent=${sent}, pending=${pending}, failed=${failed})${diagSuffix}`;
   }
   return 'Verify DB: brak potwierdzenia';
 }
@@ -18280,7 +20441,12 @@ function buildPersistenceUiSummary(options = {}) {
   const emergencyLocalSave = saveResult?.emergencyLocalSave && typeof saveResult.emergencyLocalSave === 'object'
     ? saveResult.emergencyLocalSave
     : null;
+  const emergencyPageSave = saveResult?.emergencyPageSave && typeof saveResult.emergencyPageSave === 'object'
+    ? saveResult.emergencyPageSave
+    : null;
   const emergencyLocalSaveOk = emergencyLocalSave?.success === true;
+  const emergencyPageSaveOk = emergencyPageSave?.success === true;
+  const pageEmergencyOnly = emergencyPageSaveOk && !emergencyLocalSaveOk && saveResult?.success !== true;
   const saveErrorRaw = typeof options?.saveError === 'string' && options.saveError.trim()
     ? options.saveError
     : (typeof saveResult?.reason === 'string' && saveResult.reason.trim()
@@ -18329,13 +20495,59 @@ function buildPersistenceUiSummary(options = {}) {
       dispatchProcessLog: [],
       copyTrace: '',
       saveError: 'empty_response',
-      bridgeError: ''
+      bridgeError: '',
+      emergencyLocalSave: null,
+      emergencyPageSave: null,
+      emergencyLocalOk: false,
+      emergencyPageOk: false,
+      pageEmergencyOnly: false,
+      recoveryHint: ''
     };
   }
 
   const saveOk = !!saveResult?.success || emergencyLocalSaveOk;
   if (!saveOk) {
     const normalizedSaveError = saveError || 'save_failed';
+    if (pageEmergencyOnly) {
+      const responseId = typeof emergencyPageSave?.responseId === 'string' && emergencyPageSave.responseId.trim()
+        ? emergencyPageSave.responseId.trim()
+        : (typeof saveResult?.response?.responseId === 'string' ? saveResult.response.responseId.trim() : '');
+      const idChunk = responseId ? ` (${responseId})` : '';
+      const localFallbackReason = typeof emergencyLocalSave?.reason === 'string' && emergencyLocalSave.reason.trim()
+        ? truncateDispatchLogText(emergencyLocalSave.reason.trim(), 140)
+        : '';
+      const logLines = [
+        `Baza: NIE wyslano; final tylko w page localStorage${idChunk}`,
+        ...(bridgeSummary ? [bridgeSummary] : []),
+        ...(localFallbackReason ? [`Fallback local: BLAD (${localFallbackReason})`] : []),
+        'Akcja: przeladuj rozszerzenie i odswiez karte ChatGPT, aby odpalic replay'
+      ];
+      return {
+        saveOk: false,
+        hasResponse: true,
+        lifecycleStatus: 'stopped',
+        phase: 'save_recovery',
+        actionRequired: 'replay_page_emergency',
+        statusCode: 'storage.page_emergency_only',
+        statusText: `Final NIE jest w bazie; zapis awaryjny tylko w stronie${idChunk}`,
+        reason: 'page_emergency_only',
+        tone: 'error',
+        needsAction: true,
+        logLines,
+        dispatchSummary,
+        dispatch,
+        dispatchProcessLog,
+        copyTrace: '',
+        saveError: normalizedSaveError,
+        bridgeError,
+        emergencyLocalSave,
+        emergencyPageSave,
+        emergencyLocalOk: emergencyLocalSaveOk,
+        emergencyPageOk: emergencyPageSaveOk,
+        pageEmergencyOnly: true,
+        recoveryHint: 'reload_extension_refresh_chatgpt_tab'
+      };
+    }
     const failureDiagnosticParts = [];
     if (saveFailureStage) failureDiagnosticParts.push(`etap=${saveFailureStage}`);
     if (saveFailureStatus !== null) failureDiagnosticParts.push(`http=${saveFailureStatus}`);
@@ -18370,7 +20582,13 @@ function buildPersistenceUiSummary(options = {}) {
       dispatchProcessLog,
       copyTrace: '',
       saveError: normalizedSaveError,
-      bridgeError
+      bridgeError,
+      emergencyLocalSave,
+      emergencyPageSave,
+      emergencyLocalOk: emergencyLocalSaveOk,
+      emergencyPageOk: emergencyPageSaveOk,
+      pageEmergencyOnly: false,
+      recoveryHint: ''
     };
   }
 
@@ -18423,6 +20641,7 @@ function buildPersistenceUiSummary(options = {}) {
     || isWatchlistVerificationTerminalState(dispatch?.verifyState);
   const pendingDispatch = dispatchState === 'dispatch_pending'
     || dispatchState === 'dispatch_queued_no_flush_result'
+    || dispatch?.flushDeferred === true
     || dispatch?.flushSkipped === true
     || (Number.isInteger(dispatch?.deferred) && dispatch.deferred > 0)
     || (Number.isInteger(dispatch?.remaining) && dispatch.remaining > 0)
@@ -18453,7 +20672,13 @@ function buildPersistenceUiSummary(options = {}) {
     dispatchProcessLog,
     copyTrace,
     saveError: '',
-    bridgeError
+    bridgeError,
+    emergencyLocalSave,
+    emergencyPageSave,
+    emergencyLocalOk: emergencyLocalSaveOk,
+    emergencyPageOk: emergencyPageSaveOk,
+    pageEmergencyOnly: false,
+    recoveryHint: ''
   };
 }
 
@@ -19795,6 +22020,59 @@ function isWatchlistOutboxDeliveryAccepted(item) {
   return Number.isInteger(item?.deliveryAcceptedAt) && item.deliveryAcceptedAt > 0;
 }
 
+function normalizeWatchlistFlushFocus(rawFocus, fallbackRunId = '', fallbackResponseId = '') {
+  const focus = rawFocus && typeof rawFocus === 'object' ? rawFocus : {};
+  const runId = typeof focus.runId === 'string' && focus.runId.trim()
+    ? focus.runId.trim()
+    : (typeof fallbackRunId === 'string' ? fallbackRunId.trim() : '');
+  const responseId = typeof focus.responseId === 'string' && focus.responseId.trim()
+    ? focus.responseId.trim()
+    : (typeof fallbackResponseId === 'string' ? fallbackResponseId.trim() : '');
+  if (!runId && !responseId) return null;
+  return {
+    runId,
+    responseId,
+    forceMatchingReady: focus.forceMatchingReady !== false,
+    prioritizeMatching: focus.prioritizeMatching !== false
+  };
+}
+
+function watchlistOutboxItemMatchesFocus(item, focusSpec) {
+  const focus = typeof normalizeWatchlistFlushFocus === 'function'
+    ? normalizeWatchlistFlushFocus(focusSpec)
+    : null;
+  if (!focus) return false;
+  const payload = item?.payload && typeof item.payload === 'object' ? item.payload : null;
+  if (!payload) return false;
+  const itemResponseId = typeof payload.responseId === 'string' ? payload.responseId.trim() : '';
+  if (focus.responseId && itemResponseId && itemResponseId === focus.responseId) {
+    return true;
+  }
+  const itemRunId = typeof payload.runId === 'string' ? payload.runId.trim() : '';
+  return !!focus.runId && !!itemRunId && itemRunId === focus.runId;
+}
+
+function prepareWatchlistOutboxForFlush(items, focusSpec = null) {
+  const source = Array.isArray(items) ? items : [];
+  const focus = typeof normalizeWatchlistFlushFocus === 'function'
+    ? normalizeWatchlistFlushFocus(focusSpec)
+    : null;
+  if (!focus) return source.slice();
+  return source.map((item) => {
+    if (!watchlistOutboxItemMatchesFocus(item, focus)) {
+      return item;
+    }
+    const nextItem = item && typeof item === 'object' ? { ...item } : item;
+    if (focus.forceMatchingReady) {
+      nextItem.nextAttemptAt = 0;
+      if (!isWatchlistOutboxDeliveryAccepted(nextItem)) {
+        nextItem.lastError = '';
+      }
+    }
+    return nextItem;
+  });
+}
+
 function getWatchlistOutboxFlushPriority(item, nowTs = Date.now()) {
   const nextAttemptAt = Number.isInteger(item?.nextAttemptAt) ? item.nextAttemptAt : 0;
   const ready = nextAttemptAt <= nowTs;
@@ -19805,11 +22083,24 @@ function getWatchlistOutboxFlushPriority(item, nowTs = Date.now()) {
   return 3;
 }
 
-function sortWatchlistOutboxForFlush(items, nowTs = Date.now()) {
+function sortWatchlistOutboxForFlush(items, nowTs = Date.now(), focusSpec = null) {
   const source = Array.isArray(items) ? items : [];
+  const focus = typeof normalizeWatchlistFlushFocus === 'function'
+    ? normalizeWatchlistFlushFocus(focusSpec)
+    : null;
   return source
-    .map((item, index) => ({ item, index }))
+    .map((item, index) => ({
+      item,
+      index,
+      focused: focus?.prioritizeMatching === true
+        && typeof watchlistOutboxItemMatchesFocus === 'function'
+        && watchlistOutboxItemMatchesFocus(item, focus)
+    }))
     .sort((left, right) => {
+      if (left.focused !== right.focused) {
+        return left.focused ? -1 : 1;
+      }
+
       const leftPriority = getWatchlistOutboxFlushPriority(left.item, nowTs);
       const rightPriority = getWatchlistOutboxFlushPriority(right.item, nowTs);
       if (leftPriority !== rightPriority) return leftPriority - rightPriority;
@@ -19934,6 +22225,7 @@ async function writeWatchlistOutbox(items) {
   const storageKey = WATCHLIST_DISPATCH.outboxStorageKey;
   const normalized = sanitizeWatchlistOutbox(items);
   await chrome.storage.local.set({ [storageKey]: normalized });
+  await syncWatchlistDispatchRetryAlarm(normalized);
   return normalized;
 }
 
@@ -21393,6 +23685,63 @@ async function verifyWatchlistDispatchDelivery(item, copyTrace = 'no-run/no-resp
     };
   }
 
+  const problemLogSchema = typeof PROBLEM_LOG_REMOTE_SCHEMA === 'string'
+    ? PROBLEM_LOG_REMOTE_SCHEMA.trim().toLowerCase()
+    : 'iskra.problem_log.v1';
+  const normalizedSchema = typeof payload?.schema === 'string' ? payload.schema.trim().toLowerCase() : '';
+  const normalizedAnalysisType = typeof payload?.analysisType === 'string' ? payload.analysisType.trim().toLowerCase() : '';
+  if (normalizedSchema === problemLogSchema || normalizedAnalysisType.startsWith('problem_log')) {
+    const responseId = typeof payload?.responseId === 'string' ? payload.responseId.trim() : '';
+    const runId = typeof payload?.runId === 'string' ? payload.runId.trim() : '';
+    const traceForHistory = (typeof copyTrace === 'string' && copyTrace.trim())
+      ? copyTrace.trim()
+      : buildCopyTrace(runId, responseId);
+    const eventId = normalizeWatchlistEventId(item?.deliveryEventId);
+    const requestId = typeof item?.deliveryRequestId === 'string' ? item.deliveryRequestId.trim() : '';
+    const intakeUrl = typeof item?.deliveryIntakeUrl === 'string' ? item.deliveryIntakeUrl.trim() : '';
+    emitWatchlistDispatchProcessLog('info', 'verify_skipped_problem_log', 'Database verification skipped for problem log payload', {
+      trace: copyTrace,
+      responseId,
+      runId,
+      eventId,
+      requestId,
+      intakeUrl,
+      schema: normalizedSchema || problemLogSchema,
+      analysisType: normalizedAnalysisType || ''
+    });
+    appendWatchlistDispatchHistory({
+      ts: Date.now(),
+      kind: 'verify',
+      reason: 'problem_log_verify_not_supported',
+      success: true,
+      queued: 0,
+      sent: 1,
+      failed: 0,
+      deferred: 0,
+      remaining: 0,
+      trace: traceForHistory,
+      runId,
+      responseId,
+      eventId,
+      requestId,
+      intakeUrl,
+      status: null
+    }).catch(() => {});
+    return {
+      success: true,
+      pending: false,
+      state: 'verify_not_supported',
+      reason: 'problem_log_verify_not_supported',
+      eventId,
+      requestId,
+      intakeUrl,
+      status: null,
+      stage: 'verify_skip',
+      materializedRowCount: 0,
+      expectedMaterializedRowCount: 0
+    };
+  }
+
   if (!WATCHLIST_DISPATCH.enabled || WATCHLIST_DISPATCH.verifyEnabled !== true) {
     return {
       success: false,
@@ -22197,8 +24546,13 @@ function normalizeWatchlistFlushReason(rawReason, fallback = 'manual') {
   return trimmed.slice(0, 80);
 }
 
-async function flushWatchlistDispatchOutbox(reason = 'manual') {
+async function flushWatchlistDispatchOutbox(reason = 'manual', options = {}) {
   const normalizedReason = normalizeWatchlistFlushReason(reason, 'manual');
+  const focus = normalizeWatchlistFlushFocus(
+    options?.focus,
+    options?.runId,
+    options?.responseId
+  );
   const ts = Date.now();
   const lockAgeMs = watchlistDispatchFlushStartedAt > 0
     ? Math.max(0, ts - watchlistDispatchFlushStartedAt)
@@ -22217,7 +24571,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       remaining: 0
     }).catch(() => {});
     emitWatchlistDispatchProcessLog('warn', 'flush_skipped_disabled', 'Flush skipped because dispatch is disabled', {
-      reason: normalizedReason
+      reason: normalizedReason,
+      focusRunId: focus?.runId || '',
+      focusResponseId: focus?.responseId || ''
     });
     return { skipped: true, reason: 'dispatch_disabled', stage: 'flush' };
   }
@@ -22263,7 +24619,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
     emitWatchlistDispatchProcessLog('info', 'flush_skipped_in_progress', 'Flush skipped because another flush is in progress', {
       reason: normalizedReason,
       lockAgeMs,
-      activeReason: watchlistDispatchFlushStartedReason || ''
+      activeReason: watchlistDispatchFlushStartedReason || '',
+      focusRunId: focus?.runId || '',
+      focusResponseId: focus?.responseId || ''
     });
     return {
       skipped: true,
@@ -22278,16 +24636,24 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
   watchlistDispatchFlushStartedAt = Date.now();
   watchlistDispatchFlushStartedReason = normalizedReason;
   try {
-    const queued = sortWatchlistOutboxForFlush(await readWatchlistOutbox(), ts);
+    const queued = sortWatchlistOutboxForFlush(
+      prepareWatchlistOutboxForFlush(await readWatchlistOutbox(), focus),
+      ts,
+      focus
+    );
     console.log(`[copy-flow] [dispatch:flush-start] reason=${normalizedReason} queued=${queued.length}`);
     emitWatchlistDispatchProcessLog('info', 'flush_start', 'Started flush of dispatch outbox', {
       reason: normalizedReason,
-      queued: queued.length
+      queued: queued.length,
+      focusRunId: focus?.runId || '',
+      focusResponseId: focus?.responseId || ''
     });
     if (queued.length === 0) {
       console.log(`[copy-flow] [dispatch:flush-empty] reason=${normalizedReason}`);
       emitWatchlistDispatchProcessLog('info', 'flush_empty', 'Flush finished: queue is empty', {
-        reason: normalizedReason
+        reason: normalizedReason,
+        focusRunId: focus?.runId || '',
+        focusResponseId: focus?.responseId || ''
       });
       appendWatchlistDispatchHistory({
         ts,
@@ -22665,7 +25031,9 @@ async function flushWatchlistDispatchOutbox(reason = 'manual') {
       conversationLogCount,
       hasConversationUrl,
       conversationSnapshotRefreshed,
-      conversationSnapshotSource: conversationSnapshotSource || ''
+      conversationSnapshotSource: conversationSnapshotSource || '',
+      focusRunId: focus?.runId || '',
+      focusResponseId: focus?.responseId || ''
     });
     appendWatchlistDispatchHistory({
       ts,
@@ -22809,6 +25177,160 @@ function clearAlarmSafe(alarmName) {
       resolve(false);
     }
   });
+}
+
+function computeWatchlistDispatchRetryAlarmAt(items, nowTs = Date.now()) {
+  const source = Array.isArray(items) ? items : [];
+  const now = Number.isInteger(nowTs) && nowTs > 0 ? nowTs : Date.now();
+  const immediateDelayMs = Number.isInteger(WATCHLIST_DISPATCH.retryAlarmImmediateDelayMs)
+    && WATCHLIST_DISPATCH.retryAlarmImmediateDelayMs > 0
+    ? WATCHLIST_DISPATCH.retryAlarmImmediateDelayMs
+    : 1000;
+  let earliestFutureAttemptAt = 0;
+
+  for (const item of source) {
+    if (!item || typeof item !== 'object' || !item.payload || typeof item.payload !== 'object') {
+      continue;
+    }
+    if (Number.isInteger(item.verifiedAt) && item.verifiedAt > 0) {
+      continue;
+    }
+    const nextAttemptAt = Number.isInteger(item.nextAttemptAt) ? item.nextAttemptAt : 0;
+    if (nextAttemptAt <= now) {
+      return now + immediateDelayMs;
+    }
+    if (earliestFutureAttemptAt <= 0 || nextAttemptAt < earliestFutureAttemptAt) {
+      earliestFutureAttemptAt = nextAttemptAt;
+    }
+  }
+
+  return earliestFutureAttemptAt > 0 ? earliestFutureAttemptAt : null;
+}
+
+async function syncWatchlistDispatchRetryAlarm(items, nowTs = Date.now()) {
+  const retryAlarmName = typeof WATCHLIST_DISPATCH.retryAlarmName === 'string'
+    ? WATCHLIST_DISPATCH.retryAlarmName.trim()
+    : '';
+  if (!retryAlarmName) {
+    return { scheduled: false, reason: 'missing_retry_alarm_name' };
+  }
+
+  if (!WATCHLIST_DISPATCH.enabled) {
+    await clearAlarmSafe(retryAlarmName);
+    return { scheduled: false, reason: 'dispatch_disabled' };
+  }
+
+  const nextRetryAt = computeWatchlistDispatchRetryAlarmAt(items, nowTs);
+  if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
+    await clearAlarmSafe(retryAlarmName);
+    return { scheduled: false, reason: 'no_retry_needed' };
+  }
+
+  if (!chrome?.alarms?.create) {
+    return {
+      scheduled: false,
+      reason: 'alarms_unavailable',
+      when: nextRetryAt
+    };
+  }
+
+  try {
+    chrome.alarms.create(retryAlarmName, { when: nextRetryAt });
+    return {
+      scheduled: true,
+      reason: 'retry_scheduled',
+      when: nextRetryAt
+    };
+  } catch (error) {
+    console.warn('[copy-flow] [dispatch:retry-alarm-failed]', {
+      alarmName: retryAlarmName,
+      nextRetryAt,
+      error: error?.message || String(error)
+    });
+    return {
+      scheduled: false,
+      reason: 'alarm_create_failed',
+      when: nextRetryAt,
+      error: error?.message || String(error)
+    };
+  }
+}
+
+async function refreshWatchlistDispatchRetryAlarmFromStorage(nowTs = Date.now()) {
+  const outbox = await readWatchlistOutbox();
+  return syncWatchlistDispatchRetryAlarm(outbox, nowTs);
+}
+
+function computeProcessRetryAlarmAt(dueAtByRunId, nowTs = Date.now()) {
+  const source = dueAtByRunId instanceof Map ? dueAtByRunId : new Map();
+  const now = Number.isInteger(nowTs) && nowTs > 0 ? nowTs : Date.now();
+  let earliestDueAt = 0;
+  for (const dueAt of source.values()) {
+    if (!Number.isInteger(dueAt) || dueAt <= 0) continue;
+    const normalizedDueAt = dueAt <= now ? (now + 1000) : dueAt;
+    if (earliestDueAt <= 0 || normalizedDueAt < earliestDueAt) {
+      earliestDueAt = normalizedDueAt;
+    }
+  }
+  return earliestDueAt > 0 ? earliestDueAt : null;
+}
+
+async function syncCompletedProcessPersistenceRetryAlarm(nowTs = Date.now()) {
+  const alarmName = typeof COMPLETED_PROCESS_PERSISTENCE_RETRY.alarmName === 'string'
+    ? COMPLETED_PROCESS_PERSISTENCE_RETRY.alarmName.trim()
+    : '';
+  if (!alarmName) {
+    return { scheduled: false, reason: 'missing_alarm_name' };
+  }
+  const nextRetryAt = computeProcessRetryAlarmAt(completedProcessPersistenceRetryDueAtByRunId, nowTs);
+  if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
+    await clearAlarmSafe(alarmName);
+    return { scheduled: false, reason: 'no_retry_needed' };
+  }
+  if (!chrome?.alarms?.create) {
+    return { scheduled: false, reason: 'alarms_unavailable', when: nextRetryAt };
+  }
+  try {
+    chrome.alarms.create(alarmName, { when: nextRetryAt });
+    return { scheduled: true, reason: 'retry_scheduled', when: nextRetryAt };
+  } catch (error) {
+    console.warn('[monitor] completed persistence retry alarm failed:', error?.message || String(error));
+    return {
+      scheduled: false,
+      reason: 'alarm_create_failed',
+      when: nextRetryAt,
+      error: error?.message || String(error)
+    };
+  }
+}
+
+async function syncProcessWindowCloseRetryAlarm(nowTs = Date.now()) {
+  const alarmName = typeof PROCESS_WINDOW_CLOSE_RETRY.alarmName === 'string'
+    ? PROCESS_WINDOW_CLOSE_RETRY.alarmName.trim()
+    : '';
+  if (!alarmName) {
+    return { scheduled: false, reason: 'missing_alarm_name' };
+  }
+  const nextRetryAt = computeProcessRetryAlarmAt(processWindowCloseRetryDueAtByRunId, nowTs);
+  if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
+    await clearAlarmSafe(alarmName);
+    return { scheduled: false, reason: 'no_retry_needed' };
+  }
+  if (!chrome?.alarms?.create) {
+    return { scheduled: false, reason: 'alarms_unavailable', when: nextRetryAt };
+  }
+  try {
+    chrome.alarms.create(alarmName, { when: nextRetryAt });
+    return { scheduled: true, reason: 'retry_scheduled', when: nextRetryAt };
+  } catch (error) {
+    console.warn('[monitor] process window close retry alarm failed:', error?.message || String(error));
+    return {
+      scheduled: false,
+      reason: 'alarm_create_failed',
+      when: nextRetryAt,
+      error: error?.message || String(error)
+    };
+  }
 }
 
 async function readAutoRestoreWindowsLastCycle() {
@@ -23299,6 +25821,9 @@ markRunningUnfinishedResumeBatchInterruptedOnBoot().catch((error) => {
   console.warn('[unfinished-resume] initial state recovery failed:', error?.message || String(error));
 });
 ensureWatchlistDispatchAlarm();
+refreshWatchlistDispatchRetryAlarmFromStorage().catch((error) => {
+  console.warn('[copy-flow] [dispatch:retry-alarm-sync-failed] reason=service_worker_boot', error);
+});
 ensureProcessMonitorHeartbeatAlarm();
 syncAutoRestoreWindowsAlarm().catch((error) => {
   console.warn('[auto-restore] sync alarm on boot failed:', error);
@@ -23549,12 +26074,34 @@ if (chrome?.alarms?.onAlarm) {
   chrome.alarms.onAlarm.addListener((alarm) => {
     if (!alarm || typeof alarm.name !== 'string') return;
 
-    if (alarm.name === WATCHLIST_DISPATCH.alarmName) {
-      logWatchlistDispatchStatusSnapshot('alarm:before_flush', false, { alarmName: alarm.name }).catch(() => {});
-      flushWatchlistDispatchOutbox('alarm').catch((error) => {
-        console.warn('[copy-flow] [dispatch:flush-error] reason=alarm', error);
+    if (alarm.name === WATCHLIST_DISPATCH.alarmName || alarm.name === WATCHLIST_DISPATCH.retryAlarmName) {
+      const alarmReason = alarm.name === WATCHLIST_DISPATCH.retryAlarmName ? 'retry_alarm' : 'alarm';
+      const alarmContext = alarm.name === WATCHLIST_DISPATCH.retryAlarmName
+        ? 'retry_alarm:before_flush'
+        : 'alarm:before_flush';
+      logWatchlistDispatchStatusSnapshot(alarmContext, false, { alarmName: alarm.name }).catch(() => {});
+      flushWatchlistDispatchOutbox(alarmReason).catch((error) => {
+        console.warn(`[copy-flow] [dispatch:flush-error] reason=${alarmReason}`, error);
       });
-      requestAnalysisQueueReconcile('watchlist_dispatch_alarm');
+      requestAnalysisQueueReconcile(
+        alarm.name === WATCHLIST_DISPATCH.retryAlarmName
+          ? 'watchlist_dispatch_retry_alarm'
+          : 'watchlist_dispatch_alarm'
+      );
+      return;
+    }
+
+    if (alarm.name === COMPLETED_PROCESS_PERSISTENCE_RETRY.alarmName) {
+      runDueCompletedProcessPersistenceRetries('completed_process_persistence').catch((error) => {
+        console.warn('[monitor] completed persistence retry alarm failed:', error?.message || String(error));
+      });
+      return;
+    }
+
+    if (alarm.name === PROCESS_WINDOW_CLOSE_RETRY.alarmName) {
+      runDueProcessWindowCloseRetries('process_window_close').catch((error) => {
+        console.warn('[monitor] process window close retry alarm failed:', error?.message || String(error));
+      });
       return;
     }
 
@@ -23599,7 +26146,8 @@ async function saveResponse(
   responseId = null,
   stage = null,
   conversationUrl = null,
-  sourceMeta = null
+  sourceMeta = null,
+  options = null
 ) {
   try {
     console.log(`\n${'*'.repeat(80)}`);
@@ -23634,6 +26182,30 @@ async function saveResponse(
     const copyFingerprint = textFingerprint(responseText);
     const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
     const normalizedSourceMeta = normalizeResponseSourceMeta(sourceMeta, source);
+    const saveOptions = options && typeof options === 'object'
+      ? options
+      : {};
+    const deferDispatchFlush = saveOptions.deferDispatchFlush === true;
+    const deferredFlushReason = typeof saveOptions.deferredFlushReason === 'string' && saveOptions.deferredFlushReason.trim()
+      ? saveOptions.deferredFlushReason.trim()
+      : 'save_response_deferred_flush';
+    const dispatchFlushReason = typeof saveOptions.dispatchFlushReason === 'string' && saveOptions.dispatchFlushReason.trim()
+      ? saveOptions.dispatchFlushReason.trim()
+      : 'save_response';
+    const dispatchFlushFocus = typeof normalizeWatchlistFlushFocus === 'function'
+      ? normalizeWatchlistFlushFocus(
+          saveOptions.dispatchFlushFocus && typeof saveOptions.dispatchFlushFocus === 'object'
+            ? saveOptions.dispatchFlushFocus
+            : {
+                runId: normalizedRunId,
+                responseId: normalizedResponseId,
+                forceMatchingReady: true,
+                prioritizeMatching: true
+              },
+          normalizedRunId,
+          normalizedResponseId
+        )
+      : null;
     if (normalizedRunId) {
       await upsertProcess(normalizedRunId, {
         lifecycleStatus: 'finalizing',
@@ -23778,6 +26350,8 @@ async function saveResponse(
       failureStatus: null,
       failureRequestId: '',
       failureIntakeUrl: '',
+      flushDeferred: false,
+      flushDeferredReason: '',
       verifyState: '',
       verifyReason: '',
       verifyAttemptCount: 0,
@@ -23820,95 +26394,66 @@ async function saveResponse(
         console.log(
           `[copy-flow] [dispatch:queued-ok] trace=${copyTrace} responseId=${dispatchQueueResult.responseId} queueSize=${dispatchQueueResult.queueSize}`
         );
-        appendDispatchProcessLog('flush_attempt', 'start', 'reason=save_response');
-        const flushResult = await flushWatchlistDispatchOutbox('save_response');
-        if (flushResult?.skipped) {
-          const flushSkipReason = typeof flushResult?.reason === 'string' ? flushResult.reason : 'unknown';
-          const flushLogMethod = flushSkipReason === 'flush_in_progress' ? 'log' : 'warn';
-          dispatchOutcome.flushSkipped = true;
-          dispatchOutcome.flushSkipReason = flushSkipReason;
-          dispatchOutcome.flushFollowUpScheduled = flushResult?.followUpScheduled === true;
-          dispatchOutcome.failureStage = typeof flushResult?.stage === 'string' && flushResult.stage.trim()
-            ? flushResult.stage.trim()
-            : 'flush';
-          dispatchOutcome.failureReason = flushSkipReason;
-          appendDispatchProcessLog(
-            'flush_result',
-            'skipped',
-            `reason=${flushSkipReason}, followUp=${dispatchOutcome.flushFollowUpScheduled}`
-          );
-          console[flushLogMethod](
-            `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${flushSkipReason} followUpScheduled=${dispatchOutcome.flushFollowUpScheduled}`
-          );
-        } else {
-          dispatchOutcome.accepted = Number.isInteger(flushResult?.accepted) ? flushResult.accepted : 0;
-          dispatchOutcome.sent = Number.isInteger(flushResult?.sent) ? flushResult.sent : 0;
-          dispatchOutcome.failed = Number.isInteger(flushResult?.failed) ? flushResult.failed : 0;
-          dispatchOutcome.deferred = Number.isInteger(flushResult?.deferred) ? flushResult.deferred : 0;
-          dispatchOutcome.remaining = Number.isInteger(flushResult?.remaining) ? flushResult.remaining : 0;
-          dispatchOutcome.firstFailure = typeof flushResult?.firstFailure === 'string' ? flushResult.firstFailure : '';
-          dispatchOutcome.failureStage = typeof flushResult?.firstFailureStage === 'string'
-            ? flushResult.firstFailureStage.trim()
-            : '';
-          dispatchOutcome.failureReason = typeof flushResult?.firstFailureReason === 'string'
-            ? flushResult.firstFailureReason.trim()
-            : '';
-          dispatchOutcome.failureStatus = Number.isInteger(flushResult?.firstFailureStatus)
-            ? flushResult.firstFailureStatus
-            : null;
-          dispatchOutcome.failureRequestId = typeof flushResult?.firstFailureRequestId === 'string'
-            ? flushResult.firstFailureRequestId.trim()
-            : '';
-          dispatchOutcome.failureIntakeUrl = typeof flushResult?.firstFailureIntakeUrl === 'string'
-            ? flushResult.firstFailureIntakeUrl.trim()
-            : '';
-          dispatchOutcome.verifyState = typeof flushResult?.verifyState === 'string'
-            ? flushResult.verifyState.trim()
-            : '';
-          dispatchOutcome.verifyReason = typeof flushResult?.verifyReason === 'string'
-            ? flushResult.verifyReason.trim()
-            : '';
-          dispatchOutcome.verifyAttemptCount = Number.isInteger(flushResult?.verifyAttemptCount)
-            ? flushResult.verifyAttemptCount
-            : 0;
-          dispatchOutcome.verifyEventId = normalizeWatchlistEventId(flushResult?.verifyEventId);
-          dispatchOutcome.materializedRowCount = Number.isInteger(flushResult?.materializedRowCount)
-            ? flushResult.materializedRowCount
-            : null;
-          dispatchOutcome.expectedMaterializedRowCount = Number.isInteger(flushResult?.expectedMaterializedRowCount)
-            ? flushResult.expectedMaterializedRowCount
-            : null;
-          if (Number.isInteger(flushResult?.conversationLogCount)) {
-            conversationAnalysis.conversationLogCount = Math.max(0, flushResult.conversationLogCount);
-          }
-          if (flushResult?.hasConversationUrl === true) {
-            conversationAnalysis.hasConversationUrl = true;
-          }
-          if (flushResult?.conversationSnapshotRefreshed === true) {
-            conversationAnalysis.snapshotRefreshedBeforeSend = true;
-          }
-          if (typeof flushResult?.conversationSnapshotSource === 'string' && flushResult.conversationSnapshotSource.trim()) {
-            conversationAnalysis.snapshotSource = flushResult.conversationSnapshotSource.trim();
-          }
-          dispatchOutcome.conversationLogCount = conversationAnalysis.conversationLogCount;
-          dispatchOutcome.hasConversationUrl = conversationAnalysis.hasConversationUrl;
-          dispatchOutcome.conversationSnapshotRefreshed = conversationAnalysis.snapshotRefreshedBeforeSend;
-          dispatchOutcome.conversationSnapshotSource = conversationAnalysis.snapshotSource;
-          appendDispatchProcessLog(
-            'flush_result',
-            dispatchOutcome.failed > 0 ? 'partial' : 'ok',
-            `accepted=${dispatchOutcome.accepted}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, verifyState=${dispatchOutcome.verifyState || 'n/a'}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
+        if (deferDispatchFlush) {
+          dispatchOutcome.flushDeferred = true;
+          dispatchOutcome.flushDeferredReason = deferredFlushReason;
+          dispatchOutcome.flushFollowUpScheduled = true;
+          dispatchOutcome.remaining = Math.max(
+            Number.isInteger(dispatchOutcome.remaining) ? dispatchOutcome.remaining : 0,
+            dispatchOutcome.queueSize > 0 ? dispatchOutcome.queueSize : 1
           );
           appendDispatchProcessLog(
-            'conversation_analysis',
-            'used_for_report',
-            `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, refreshed=${conversationAnalysis.snapshotRefreshedBeforeSend ? 'yes' : 'no'}, source=${conversationAnalysis.snapshotSource || 'n/a'}`
+            'flush_deferred',
+            'queued_only',
+            `reason=${deferredFlushReason}, queueSize=${dispatchOutcome.queueSize}, followUp=true`
           );
           console.log(
-            `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${flushResult?.sent || 0} failed=${flushResult?.failed || 0} deferred=${flushResult?.deferred || 0} remaining=${flushResult?.remaining || 0} firstFailure=${truncateDispatchLogText(flushResult?.firstFailure || '', 180)}`
+            `[copy-flow] [dispatch:flush-deferred] trace=${copyTrace} reason=${deferredFlushReason} queueSize=${dispatchOutcome.queueSize}`
           );
+          await logWatchlistDispatchStatusSnapshot('save_response:flush_deferred', false, {
+            trace: copyTrace,
+            reason: deferredFlushReason,
+            queueSize: dispatchOutcome.queueSize
+          });
+        } else {
+          appendDispatchProcessLog('flush_attempt', 'start', `reason=${dispatchFlushReason}`);
+          const flushResult = await flushWatchlistDispatchOutbox(
+            dispatchFlushReason,
+            dispatchFlushFocus ? { focus: dispatchFlushFocus } : {}
+          );
+          const mergedDispatchOutcome = mergeSaveResponseDispatchWithFlushResult(
+            dispatchOutcome,
+            flushResult,
+            conversationAnalysis
+          );
+          Object.assign(dispatchOutcome, mergedDispatchOutcome);
+          if (flushResult?.skipped) {
+            appendDispatchProcessLog(
+              'flush_result',
+              'skipped',
+              `reason=${dispatchOutcome.flushSkipReason || 'unknown'}, followUp=${dispatchOutcome.flushFollowUpScheduled === true}`
+            );
+            console[dispatchOutcome.flushSkipReason === 'flush_in_progress' ? 'log' : 'warn'](
+              `[copy-flow] [dispatch:flush-result] trace=${copyTrace} skipped=true reason=${dispatchOutcome.flushSkipReason || 'unknown'} followUpScheduled=${dispatchOutcome.flushFollowUpScheduled === true}`
+            );
+          } else {
+            appendDispatchProcessLog(
+              'flush_result',
+              dispatchOutcome.failed > 0 ? 'partial' : 'ok',
+              `accepted=${dispatchOutcome.accepted}, sent=${dispatchOutcome.sent}, failed=${dispatchOutcome.failed}, deferred=${dispatchOutcome.deferred}, remaining=${dispatchOutcome.remaining}, verifyState=${dispatchOutcome.verifyState || 'n/a'}, failureStage=${dispatchOutcome.failureStage || 'n/a'}, failureReason=${dispatchOutcome.failureReason || 'n/a'}`
+            );
+            appendDispatchProcessLog(
+              'conversation_analysis',
+              'used_for_report',
+              `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, refreshed=${conversationAnalysis.snapshotRefreshedBeforeSend ? 'yes' : 'no'}, source=${conversationAnalysis.snapshotSource || 'n/a'}`
+            );
+            console.log(
+              `[copy-flow] [dispatch:flush-result] trace=${copyTrace} sent=${dispatchOutcome.sent || 0} failed=${dispatchOutcome.failed || 0} deferred=${dispatchOutcome.deferred || 0} remaining=${dispatchOutcome.remaining || 0} firstFailure=${truncateDispatchLogText(dispatchOutcome.firstFailure || '', 180)}`
+            );
+          }
+          dispatchOutcome.processLog = dispatchProcessLog.slice(-16);
+          await logWatchlistDispatchStatusSnapshot('save_response:post_flush', false, { trace: copyTrace });
         }
-        await logWatchlistDispatchStatusSnapshot('save_response:post_flush', false, { trace: copyTrace });
       } else if (dispatchQueueResult?.skipped) {
         dispatchOutcome.queueSkipped = true;
         dispatchOutcome.queueSkipReason = typeof dispatchQueueResult?.reason === 'string' ? dispatchQueueResult.reason : 'unknown';
@@ -23935,39 +26480,17 @@ async function saveResponse(
       throw dispatchError;
     }
 
-    const pipelineDispatchState = (() => {
-      if (dispatchOutcome.queueSkipped) return 'dispatch_skipped';
-      if (isExplicitlyVerifiedDispatch(dispatchOutcome)) return 'dispatch_confirmed';
-      if (dispatchOutcome.failed > 0) return 'dispatch_failed';
-      if (dispatchOutcome.accepted > 0 || dispatchOutcome.sent > 0) return 'dispatch_pending';
-      if (dispatchOutcome.flushSkipped || dispatchOutcome.deferred > 0 || dispatchOutcome.remaining > 0) {
-        return 'dispatch_pending';
-      }
-      if (dispatchOutcome.queued) return 'dispatch_queued_no_flush_result';
-      return 'dispatch_unknown';
-    })();
-    if (!dispatchOutcome.failureStage && dispatchOutcome.failed > 0) {
-      dispatchOutcome.failureStage = 'send';
-    }
-    if (!dispatchOutcome.failureReason && dispatchOutcome.failed > 0) {
-      dispatchOutcome.failureReason = 'dispatch_failed';
-    }
-    if (!dispatchOutcome.failureStage && (dispatchOutcome.deferred > 0 || dispatchOutcome.remaining > 0)) {
-      dispatchOutcome.failureStage = 'flush';
-      dispatchOutcome.failureReason = 'pending_retry_window';
-    }
-    dispatchOutcome.state = pipelineDispatchState;
+    normalizeSaveResponseDispatchOutcome(dispatchOutcome);
+    dispatchOutcome.processLog = dispatchProcessLog.slice(-16);
+    const persistenceState = resolveSaveResponsePersistenceState(dispatchOutcome);
+    const pipelineDispatchState = persistenceState.pipelineDispatchState;
     const pipelineLogLevel = pipelineDispatchState === 'dispatch_failed'
       ? 'error'
       : (pipelineDispatchState === 'dispatch_confirmed' ? 'info' : 'warn');
     const completedStage12Snapshot = buildCompletedStage12Snapshot(responseText, normalizedSourceMeta.sourceTitle || source);
     const persistenceLifecycleStatus = 'completed';
-    const persistencePhase = pipelineDispatchState === 'dispatch_confirmed'
-      ? 'verify_remote'
-      : 'dispatch_remote';
-    const persistenceStatusCode = pipelineDispatchState === 'dispatch_confirmed'
-      ? 'dispatch.confirmed'
-      : (dispatchOutcome.queueSkipped === true ? 'dispatch.skipped' : (pipelineDispatchState === 'dispatch_failed' ? 'dispatch.failed' : 'dispatch.verify_pending'));
+    const persistencePhase = persistenceState.persistencePhase;
+    const persistenceStatusCode = persistenceState.persistenceStatusCode;
     emitWatchlistDispatchProcessLog(
       pipelineLogLevel,
       'pipeline_result',
@@ -24035,15 +26558,20 @@ async function saveResponse(
     console.log(`Fingerprint: ${copyFingerprint}`);
     console.log(`${'*'.repeat(80)}\n`);
     if (normalizedRunId) {
-      await upsertProcess(normalizedRunId, {
-        lifecycleStatus: persistenceLifecycleStatus,
-        status: persistenceLifecycleStatus,
-        phase: persistencePhase,
-        actionRequired: 'none',
-        statusCode: persistenceStatusCode,
+      await upsertProcess(normalizedRunId, buildSaveResponseProcessPersistencePatch({
+        responseId: normalizedResponseId,
+        copyTrace,
+        verifiedCount: verifiedResponses.length,
+        dispatch: dispatchOutcome,
+        dispatchSummary: formatDispatchUiSummary(dispatchOutcome),
+        dispatchProcessLog: dispatchProcessLog.slice(-16),
+        conversationAnalysis,
         completedStage12Snapshot,
-        timestamp: Date.now()
-      });
+        lifecycleStatus: persistenceLifecycleStatus,
+        phase: persistencePhase,
+        statusCode: persistenceStatusCode,
+        origin: deferDispatchFlush ? 'save_response_deferred' : 'save_response'
+      }));
     }
     return {
       success: true,
@@ -24110,51 +26638,25 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sourceTitle: message.sourceTitle || message.source || '',
         sourceName: message.sourceName || '',
         sourceUrl: message.sourceUrl || ''
+      },
+      {
+        deferDispatchFlush: true,
+        deferredFlushReason: 'runtime_bridge_fast_ack'
       }
     )
       .then((saveResult) => {
+        const runtimePayload = buildRuntimeSaveResultPayload(saveResult);
+        const deferredFlushTask = shouldStartDeferredSaveResponseFlush(saveResult)
+          ? startDeferredSaveResponseFlush(saveResult)
+          : null;
         if (typeof sendResponse === 'function') {
           sendResponse({
             success: !!saveResult?.success,
-            saveResult: saveResult
-              ? {
-                success: !!saveResult.success,
-                reason: typeof saveResult.reason === 'string' ? saveResult.reason : '',
-                error: typeof saveResult.error === 'string' ? saveResult.error : '',
-                stage: typeof saveResult.stage === 'string' ? saveResult.stage : '',
-                status: Number.isInteger(saveResult.status) ? saveResult.status : null,
-                requestId: typeof saveResult.requestId === 'string' ? saveResult.requestId : '',
-                intakeUrl: typeof saveResult.intakeUrl === 'string' ? saveResult.intakeUrl : '',
-                copyTrace: typeof saveResult.copyTrace === 'string' ? saveResult.copyTrace : '',
-                verifiedCount: Number.isInteger(saveResult.verifiedCount) ? saveResult.verifiedCount : null,
-                response: saveResult.response && typeof saveResult.response === 'object'
-                  ? {
-                    responseId: typeof saveResult.response.responseId === 'string' ? saveResult.response.responseId : ''
-                  }
-                  : null,
-                dispatch: saveResult.dispatch && typeof saveResult.dispatch === 'object'
-                  ? saveResult.dispatch
-                  : null,
-                dispatchProcessLog: Array.isArray(saveResult.dispatchProcessLog)
-                  ? saveResult.dispatchProcessLog
-                      .filter((entry) => typeof entry === 'string' && entry.trim())
-                      .slice(-16)
-                  : [],
-                conversationAnalysis: saveResult.conversationAnalysis && typeof saveResult.conversationAnalysis === 'object'
-                  ? {
-                    hasConversationUrl: saveResult.conversationAnalysis.hasConversationUrl === true,
-                    conversationLogCount: Number.isInteger(saveResult.conversationAnalysis.conversationLogCount)
-                      ? Math.max(0, saveResult.conversationAnalysis.conversationLogCount)
-                      : null,
-                    snapshotRefreshedBeforeSend: saveResult.conversationAnalysis.snapshotRefreshedBeforeSend === true,
-                    snapshotSource: typeof saveResult.conversationAnalysis.snapshotSource === 'string'
-                      ? saveResult.conversationAnalysis.snapshotSource
-                      : ''
-                  }
-                  : null
-              }
-              : null
+            saveResult: runtimePayload
           });
+        }
+        if (deferredFlushTask && typeof deferredFlushTask.catch === 'function') {
+          deferredFlushTask.catch(() => {});
         }
       })
       .catch((error) => {
@@ -25962,6 +28464,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     if (isManualSource) {
       extractedText = typeof tab?.manualText === 'string' ? tab.manualText : '';
       if (!extractedText) {
+        extractedText = await resolveManualTextSourceText(tab?.manualTextSourceId);
+      }
+      if (!extractedText) {
         await upsertProcess(processId, {
           title: processTitle,
           analysisType,
@@ -26140,7 +28645,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         {
           persistFinalResponseViaMessage: true,
           mode: 'runtime_message',
-          saveTimeoutMs: 15000
+          saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS
         },
         manualPdfAttachmentContext
       ];
@@ -26275,6 +28780,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     let finalStatusText = 'Zakonczono';
     let finalReason = '';
     let finalError = '';
+    let finalActionRequired = 'none';
+    let finalNeedsAction = false;
     const resultLastResponse = typeof result?.lastResponse === 'string'
       ? result.lastResponse
       : '';
@@ -26283,11 +28790,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     let completedResponsePatch = {};
     let persistencePatch = null;
     if (isInjectRateLimitBlockedResult(result)) {
+      const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+        executionPromptOffset,
+        processTotalPrompts
+      );
       const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-        currentPrompt: executionPromptOffset,
+        currentPrompt: pendingPrompt.currentPrompt,
         totalPrompts: processTotalPrompts,
-        stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
-        stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+        stageIndex: pendingPrompt.stageIndex,
+        stageName: pendingPrompt.stageName,
         conversationUrl
       });
       await upsertProcess(processId, {
@@ -26393,6 +28904,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
               ? saveResult.error.trim()
               : 'save_response_failed')),
         responseId: saveResult?.response?.responseId || providedResponseId || '',
+        saveResult,
+        error: persistenceSummary.saveError,
+        bridgeError: persistenceSummary.bridgeError || '',
         copyTrace: typeof saveResult?.copyTrace === 'string' ? saveResult.copyTrace : '',
         dispatchSummary: persistenceSummary.dispatchSummary,
         verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
@@ -26406,6 +28920,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       finalStatusCode = persistenceSummary.statusCode || 'process.completed';
       finalStatusText = persistenceSummary.statusText;
       finalReason = persistenceSummary.reason;
+      finalActionRequired = persistenceSummary.actionRequired || 'none';
+      finalNeedsAction = persistenceSummary.needsAction === true;
       persistencePatch = {
         persistenceLog: persistenceSummary.logLines,
         persistenceStatus: {
@@ -26415,6 +28931,12 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           copyTrace: persistenceSummary.copyTrace,
           saveError: persistenceSummary.saveError,
           bridgeError: persistenceSummary.bridgeError || '',
+          emergencyLocalSave: persistenceSummary.emergencyLocalSave || null,
+          emergencyPageSave: persistenceSummary.emergencyPageSave || null,
+          emergencyLocalOk: persistenceSummary.emergencyLocalOk === true,
+          emergencyPageOk: persistenceSummary.emergencyPageOk === true,
+          pageEmergencyOnly: persistenceSummary.pageEmergencyOnly === true,
+          recoveryHint: persistenceSummary.recoveryHint || '',
           dispatch: persistenceSummary.dispatch || null,
           dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
           updatedAt: Date.now()
@@ -26506,9 +29028,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       lifecycleStatus: finalStatus,
       status: finalStatus,
       phase: finalPhase,
-      actionRequired: 'none',
+      actionRequired: finalActionRequired,
       statusCode: finalStatusCode,
-      needsAction: false,
+      needsAction: finalNeedsAction,
       statusText: finalStatusText,
       reason: finalReason,
       error: finalError,
@@ -26517,7 +29039,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(persistencePatch ? persistencePatch : {}),
       ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
       ...(Object.keys(completedResponsePatch).length > 0 ? completedResponsePatch : {}),
-      ...((finalStatus === 'completed' || finalStatus === 'finalizing')
+      ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
         ? {
           currentPrompt: processTotalPrompts,
           totalPrompts: processTotalPrompts,
@@ -26601,6 +29123,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     });
 
     return enqueueAnalysisJobs(jobs, {
+      manualTextSources: options?.manualTextSources,
       reason: typeof options?.reason === 'string' && options.reason.trim()
         ? options.reason.trim()
         : 'process_articles_enqueue'
@@ -26798,7 +29321,7 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           {
             persistFinalResponseViaMessage: true,
             mode: 'runtime_message',
-            saveTimeoutMs: 15000,
+            saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS,
             sourceTitle: title,
             sourceName,
             sourceUrl
@@ -27026,6 +29549,8 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       let finalStatusText = 'Zakonczono';
       let finalReason = '';
       let finalError = '';
+      let finalActionRequired = 'none';
+      let finalNeedsAction = false;
       const resultLastResponse = typeof result?.lastResponse === 'string'
         ? result.lastResponse
         : '';
@@ -27034,11 +29559,15 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       let completedResponsePatch = {};
       let persistencePatch = null;
       if (isInjectRateLimitBlockedResult(result)) {
+        const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
+          executionPromptOffset,
+          processTotalPrompts
+        );
         const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-          currentPrompt: executionPromptOffset,
+          currentPrompt: pendingPrompt.currentPrompt,
           totalPrompts: processTotalPrompts,
-          stageIndex: executionPromptOffset > 0 ? (executionPromptOffset - 1) : null,
-          stageName: executionPromptOffset > 0 ? `Prompt ${executionPromptOffset}` : 'Start',
+          stageIndex: pendingPrompt.stageIndex,
+          stageName: pendingPrompt.stageName,
           conversationUrl
         });
         await upsertProcess(processId, {
@@ -27155,6 +29684,8 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         finalStatusCode = persistenceSummary.statusCode || 'process.completed';
         finalStatusText = persistenceSummary.statusText;
         finalReason = persistenceSummary.reason;
+        finalActionRequired = persistenceSummary.actionRequired || 'none';
+        finalNeedsAction = persistenceSummary.needsAction === true;
         persistencePatch = {
           persistenceLog: persistenceSummary.logLines,
           persistenceStatus: {
@@ -27164,6 +29695,12 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             copyTrace: persistenceSummary.copyTrace,
             saveError: persistenceSummary.saveError,
             bridgeError: persistenceSummary.bridgeError || '',
+            emergencyLocalSave: persistenceSummary.emergencyLocalSave || null,
+            emergencyPageSave: persistenceSummary.emergencyPageSave || null,
+            emergencyLocalOk: persistenceSummary.emergencyLocalOk === true,
+            emergencyPageOk: persistenceSummary.emergencyPageOk === true,
+            pageEmergencyOnly: persistenceSummary.pageEmergencyOnly === true,
+            recoveryHint: persistenceSummary.recoveryHint || '',
             dispatch: persistenceSummary.dispatch || null,
             dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
             updatedAt: Date.now()
@@ -27299,9 +29836,9 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         lifecycleStatus: finalStatus,
         status: finalStatus,
         phase: finalPhase,
-        actionRequired: 'none',
+        actionRequired: finalActionRequired,
         statusCode: finalStatusCode,
-        needsAction: false,
+        needsAction: finalNeedsAction,
         statusText: finalStatusText,
         reason: finalReason,
         error: finalError,
@@ -27312,7 +29849,7 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
           : {}),
-        ...((finalStatus === 'completed' || finalStatus === 'finalizing')
+        ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
           ? {
             currentPrompt: processTotalPrompts,
             totalPrompts: processTotalPrompts,
@@ -27692,6 +30229,8 @@ async function runManualSourceAnalysis(text, title, instances) {
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
   const safeInstances = normalizeManualInstances(instances);
   const timestamp = Date.now();
+  const manualTextSourceId = generateManualTextSourceId('manual-text');
+  const manualTextSource = buildManualTextSourceRecord(manualTextSourceId, safeText, safeTitle);
   const pseudoTabs = [];
 
   for (let i = 0; i < safeInstances; i += 1) {
@@ -27699,11 +30238,12 @@ async function runManualSourceAnalysis(text, title, instances) {
       id: `manual-${timestamp}-${i}`,
       title: safeTitle,
       url: 'manual://source',
-      manualText: safeText
+      manualTextSourceId
     });
   }
 
   return processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+    manualTextSources: manualTextSource ? [manualTextSource] : [],
     sourceKind: 'manual_text',
     reason: 'manual_source_enqueue'
   });
@@ -28671,6 +31211,15 @@ async function injectToChat(
     const payloadTextForMode = typeof payload === 'string' ? payload : '';
     const isResumeModeFromPayload = payloadTextForMode.trim() === ''
       || payloadTextForMode.includes('Resume from stage');
+    const preChainCurrentPrompt = isResumeModeFromPayload
+      ? (
+        Number.isInteger(totalPromptsForRun) && totalPromptsForRun > 0
+          ? Math.min(promptOffset + 1, totalPromptsForRun)
+          : (promptOffset + 1)
+      )
+      : promptOffset;
+    const preChainStageIndex = preChainCurrentPrompt > 0 ? (preChainCurrentPrompt - 1) : null;
+    const preChainStageName = preChainCurrentPrompt > 0 ? `Prompt ${preChainCurrentPrompt}` : 'Start';
     const baselineCompletedStages = Number.isInteger(promptOffset) && promptOffset > 0
       ? Math.min(
         promptOffset,
@@ -28910,6 +31459,74 @@ async function injectToChat(
       };
     }
 
+    function applyInjectedChatGptComputationStatePatch(target, source) {
+      if (typeof applyChatGptComputationStatePatch === 'function') {
+        return applyChatGptComputationStatePatch(target, source);
+      }
+      if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {
+        return target;
+      }
+
+      const normalizeMonitoringLabel = (value, maxLength = 180) => {
+        const normalized = typeof value === 'string'
+          ? value.replace(/\s+/g, ' ').trim()
+          : '';
+        if (!normalized) return '';
+        const limit = Number.isInteger(maxLength) && maxLength >= 32
+          ? maxLength
+          : 180;
+        return normalized.slice(0, limit);
+      };
+      const normalizeModeKind = (value) => {
+        const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (normalized === 'thinking' || normalized === 'instant' || normalized === 'auto') {
+          return normalized;
+        }
+        return '';
+      };
+      const normalizePlanHint = (value) => {
+        const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        return normalized === 'pro' ? normalized : '';
+      };
+      const normalizeThinkingEffort = (value) => {
+        const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+          return normalized;
+        }
+        return '';
+      };
+
+      const requestedThinkingEffort = normalizeThinkingEffort(source.composerThinkingEffort);
+      if (requestedThinkingEffort) target.composerThinkingEffort = requestedThinkingEffort;
+
+      const chatGptModeKind = normalizeModeKind(source.chatGptModeKind);
+      if (chatGptModeKind) target.chatGptModeKind = chatGptModeKind;
+
+      const chatGptPlanHint = normalizePlanHint(source.chatGptPlanHint);
+      if (chatGptPlanHint) target.chatGptPlanHint = chatGptPlanHint;
+
+      const chatGptModeLabel = normalizeMonitoringLabel(source.chatGptModeLabel, 120);
+      if (chatGptModeLabel) target.chatGptModeLabel = chatGptModeLabel;
+
+      const chatGptModelSwitcherLabel = normalizeMonitoringLabel(source.chatGptModelSwitcherLabel, 160);
+      if (chatGptModelSwitcherLabel) target.chatGptModelSwitcherLabel = chatGptModelSwitcherLabel;
+
+      const chatGptThinkingEffortDetected = normalizeThinkingEffort(source.chatGptThinkingEffortDetected);
+      if (chatGptThinkingEffortDetected) target.chatGptThinkingEffortDetected = chatGptThinkingEffortDetected;
+
+      const chatGptThinkingEffortLabel = normalizeMonitoringLabel(source.chatGptThinkingEffortLabel, 120);
+      if (chatGptThinkingEffortLabel) target.chatGptThinkingEffortLabel = chatGptThinkingEffortLabel;
+
+      const chatGptComputationLabel = normalizeMonitoringLabel(source.chatGptComputationLabel, 220);
+      if (chatGptComputationLabel) target.chatGptComputationLabel = chatGptComputationLabel;
+
+      if (Number.isInteger(source.chatGptComputationDetectedAt) && source.chatGptComputationDetectedAt > 0) {
+        target.chatGptComputationDetectedAt = source.chatGptComputationDetectedAt;
+      }
+
+      return target;
+    }
+
     function stagePageEmergencyResponse(responseText, responseId, stageMeta = null, options = {}) {
       const normalizedText = typeof responseText === 'string' ? responseText : '';
       if (!normalizedText.trim()) {
@@ -28943,7 +31560,7 @@ async function injectToChat(
         lastError: typeof options?.lastError === 'string' ? options.lastError.trim() : '',
         attempts: Number.isInteger(options?.attempts) ? options.attempts : 0
       };
-      applyChatGptComputationStatePatch(
+      applyInjectedChatGptComputationStatePatch(
         record,
         typeof detectChatGptComputationState === 'function'
           ? detectChatGptComputationState({ forceRefresh: true })
@@ -29062,7 +31679,7 @@ async function injectToChat(
       if (conversationUrl) {
         responseRecord.conversationUrl = conversationUrl;
       }
-      applyChatGptComputationStatePatch(
+      applyInjectedChatGptComputationStatePatch(
         responseRecord,
         typeof detectChatGptComputationState === 'function'
           ? detectChatGptComputationState({ forceRefresh: true })
@@ -30529,6 +33146,22 @@ async function injectToChat(
       );
     }
 
+    function isRetryableChatGptGenerationErrorText(text) {
+      const lowered = compactText(text || '').toLowerCase();
+      if (!lowered) return false;
+      return (
+        lowered.includes('something went wrong while generating the response') ||
+        (
+          lowered.includes('something went wrong') &&
+          lowered.includes('generating the response')
+        ) ||
+        (
+          lowered.includes('help.openai.com') &&
+          lowered.includes('generating')
+        )
+      );
+    }
+
     function getLastTurnState() {
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
@@ -30657,6 +33290,147 @@ async function injectToChat(
       }
 
       return false;
+    }
+
+    function elementTextForActionMatch(element) {
+      if (!(element instanceof HTMLElement)) return '';
+      return compactText([
+        element.innerText || '',
+        element.textContent || '',
+        element.getAttribute('aria-label') || '',
+        element.getAttribute('title') || ''
+      ].join(' ')).toLowerCase();
+    }
+
+    function isRetryActionElement(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      if (element.disabled || element.getAttribute('aria-disabled') === 'true') return false;
+      if (!isElementVisibleForInteraction(element)) return false;
+      const text = elementTextForActionMatch(element);
+      if (!text) return false;
+      return (
+        text.includes('retry') ||
+        text.includes('try again') ||
+        text.includes('regenerate') ||
+        text.includes('sprobuj ponownie') ||
+        text.includes('ponow')
+      );
+    }
+
+    function hasRetryableChatGptGenerationErrorInElement(element) {
+      if (!(element instanceof HTMLElement)) return false;
+      if (isRetryableChatGptGenerationErrorText(element.innerText || element.textContent || '')) {
+        return true;
+      }
+      const scopedCandidates = [
+        ...element.querySelectorAll('[role="alert"]'),
+        ...element.querySelectorAll('[role="status"]'),
+        ...element.querySelectorAll('[class*="error"]'),
+        ...element.querySelectorAll('[class*="text"]')
+      ];
+      return scopedCandidates.some((node) => isRetryableChatGptGenerationErrorText(node?.textContent || ''));
+    }
+
+    function collectRetryableErrorScopes() {
+      const state = getLastTurnState();
+      if (!state.turnLikelyCurrent) return [];
+
+      const scopes = [];
+      const seen = new Set();
+      const addScope = (element, maxDepth = 3) => {
+        if (!(element instanceof HTMLElement)) return;
+        let current = element;
+        let depth = 0;
+        while (
+          current &&
+          depth < maxDepth &&
+          current !== document.body &&
+          current !== document.documentElement
+        ) {
+          if (!seen.has(current)) {
+            seen.add(current);
+            scopes.push(current);
+          }
+          current = current.parentElement;
+          depth += 1;
+        }
+      };
+
+      addScope(state.lastAssistant, 3);
+      addScope(state.lastAssistantContainer, 2);
+
+      const alerts = [
+        ...document.querySelectorAll('[role="alert"]'),
+        ...document.querySelectorAll('[role="status"]')
+      ];
+      const lastAlert = alerts.length > 0 ? alerts[alerts.length - 1] : null;
+      addScope(lastAlert, 3);
+
+      return scopes.filter((scope) => hasRetryableChatGptGenerationErrorInElement(scope));
+    }
+
+    function findRetryButtonForRetryableGenerationError() {
+      const scopes = collectRetryableErrorScopes();
+      if (!scopes.length) return null;
+
+      const seenCandidates = new Set();
+      for (const scope of scopes) {
+        const candidates = [
+          ...scope.querySelectorAll('button'),
+          ...scope.querySelectorAll('[role="button"]')
+        ];
+        for (const candidate of candidates) {
+          if (seenCandidates.has(candidate)) continue;
+          seenCandidates.add(candidate);
+          if (isRetryActionElement(candidate)) {
+            return candidate;
+          }
+        }
+      }
+
+      const globalCandidates = [
+        ...document.querySelectorAll('button'),
+        ...document.querySelectorAll('[role="button"]')
+      ];
+      for (const candidate of globalCandidates) {
+        if (seenCandidates.has(candidate)) continue;
+        if (isRetryActionElement(candidate)) {
+          return candidate;
+        }
+      }
+
+      return null;
+    }
+
+    async function clickRetryForRetryableGenerationError(phase = 'unknown') {
+      const retryButton = findRetryButtonForRetryableGenerationError();
+      if (!retryButton) {
+        return { clicked: false, reason: 'retry_button_not_found' };
+      }
+
+      console.warn(`[chatgpt-retry] Wykryto blad generowania w fazie ${phase}; klikam Retry.`);
+      try {
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          phase: 'chatgpt_retry',
+          statusText: 'ChatGPT error - klikam Retry',
+          statusCode: 'chat.retry_generation_error',
+          actionRequired: 'none',
+          prompt: typeof currentPrompt !== 'undefined' ? currentPrompt : null,
+          total: typeof totalPrompts !== 'undefined' ? totalPrompts : null,
+          timestamp: Date.now()
+        });
+      } catch (_) {
+        // Retry should not depend on progress notifications.
+      }
+
+      const clicked = await activateElement(retryButton);
+      console.warn(`[chatgpt-retry] Retry click result: clicked=${clicked}, button="${elementTextForActionMatch(retryButton).slice(0, 80)}"`);
+      return {
+        clicked,
+        reason: clicked ? 'clicked' : 'click_failed',
+        buttonText: elementTextForActionMatch(retryButton)
+      };
     }
 
     async function detectPromptSentDespiteFailure(snapshot, promptText, maxWaitMs = 6000) {
@@ -31429,13 +34203,13 @@ async function injectToChat(
 
       updateCounter(
         counterRef,
-        promptOffset,
+        preChainCurrentPrompt,
         totalPromptsForRun,
         `Ustawiam thinking: ${requestedComposerThinkingEffort}...`
       );
       notifyProcess('PROCESS_PROGRESS', {
         status: 'running',
-        currentPrompt: promptOffset,
+        currentPrompt: preChainCurrentPrompt,
         totalPrompts: totalPromptsForRun,
         statusText: `Ustawiam thinking: ${requestedComposerThinkingEffort}`,
         reason: 'set_thinking_effort',
@@ -31451,7 +34225,7 @@ async function injectToChat(
         composerThinkingEffortApplied = true;
         notifyProcess('PROCESS_PROGRESS', {
           status: 'running',
-          currentPrompt: promptOffset,
+          currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
           statusText: `Thinking ustawiony: ${requestedComposerThinkingEffort}`,
           reason: 'thinking_effort_set',
@@ -32263,6 +35037,24 @@ async function injectToChat(
     const MIN_RESPONSE_DELTA = 10;
     let responseSeenInDOM = false;
     let lastObservedResponseCount = initialAssistantCount;
+    let generationErrorRetryAttempts = 0;
+    const maxGenerationErrorRetryAttempts = 2;
+    const tryRecoverFromGenerationError = async (phase) => {
+      if (!hasHardGenerationErrorMessage()) return false;
+      if (generationErrorRetryAttempts >= maxGenerationErrorRetryAttempts) {
+        return false;
+      }
+      const retryResult = await clickRetryForRetryableGenerationError(phase);
+      if (!retryResult.clicked) {
+        console.warn(`[chatgpt-retry] Nie udalo sie kliknac Retry (${retryResult.reason || 'unknown'}).`);
+        return false;
+      }
+      generationErrorRetryAttempts += 1;
+      responseSeenInDOM = false;
+      lastObservedResponseCount = getAssistantSnapshot().count;
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return true;
+    };
     console.log('Czekam na odpowiedz ChatGPT...');
 
     // Faza 1: wykryj start odpowiedzi.
@@ -32277,6 +35069,11 @@ async function injectToChat(
         return false;
       }
       if (hasHardGenerationErrorMessage()) {
+        if (await tryRecoverFromGenerationError('phase1')) {
+          phase1IdleSince = Date.now();
+          responseStarted = false;
+          continue;
+        }
         console.error('[FAZA 1] Wykryto hard error na ostatnim turnie.');
         return false;
       }
@@ -32337,6 +35134,14 @@ async function injectToChat(
         return false;
       }
       if (hasHardGenerationErrorMessage()) {
+        if (await tryRecoverFromGenerationError('phase2')) {
+          phase2IdleSince = Date.now();
+          lastAssistantChangeAt = Date.now();
+          consecutiveReady = 0;
+          const retrySnapshot = getAssistantSnapshot();
+          lastAssistantText = retrySnapshot.lastText || lastAssistantText;
+          continue;
+        }
         console.error('[FAZA 2] Wykryto hard error na ostatnim turnie.');
         return false;
       }
@@ -33759,7 +36564,7 @@ async function injectToChat(
   let stage0Response = '';
   notifyProcess('PROCESS_PROGRESS', {
     status: 'running',
-    currentPrompt: promptOffset,
+    currentPrompt: preChainCurrentPrompt,
     totalPrompts: totalPromptsForRun,
     statusText: 'Inicjalizacja procesu',
     needsAction: false
@@ -33799,10 +36604,10 @@ async function injectToChat(
       if (!thinkingEffortResult?.success) {
         const effortLabel = requestedComposerThinkingEffort || 'unknown';
         const effortError = thinkingEffortResult?.error || 'thinking_effort_not_set';
-        updateCounter(counter, promptOffset, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
         notifyProcess('PROCESS_PROGRESS', {
           status: 'failed',
-          currentPrompt: promptOffset,
+          currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
           statusText: `Nie ustawiono trybu thinking (${effortLabel})`,
           reason: 'thinking_effort_not_set',
@@ -33924,14 +36729,14 @@ async function injectToChat(
         }
       } else {
         // Resume mode - zacznij od razu od prompt chain
-        updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Resume from stage...');
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '🔄 Resume from stage...');
         console.log("⏭️ Pomijam payload - zaczynam od prompt chain");
         
         // NOWE: Dodatkowe czekanie na gotowość interfejsu w trybie resume
         console.log("🔍 Sprawdzam gotowość interfejsu przed rozpoczęciem resume chain...");
-        updateCounter(counter, promptOffset, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '⏳ Sprawdzam gotowość...');
         
-        const resumeInterfaceReady = await waitForInterfaceReady(interfaceReadyWaitMs, counter, promptOffset, totalPromptsForRun);
+        const resumeInterfaceReady = await waitForInterfaceReady(interfaceReadyWaitMs, counter, preChainCurrentPrompt, totalPromptsForRun);
         if (shouldStopNow()) {
           return forceStopResult();
         }
@@ -33939,21 +36744,21 @@ async function injectToChat(
         if (!resumeInterfaceReady) {
           const resumeInterfaceBlocker = captureGenerationBlockerState();
           if (resumeInterfaceBlocker) {
-            updateCounter(counter, promptOffset, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+            updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
             return buildGenerationBlockedResult({
               blocker: resumeInterfaceBlocker,
-              currentPrompt: promptOffset,
+              currentPrompt: preChainCurrentPrompt,
               totalPrompts: totalPromptsForRun,
-              stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+              stageIndex: preChainStageIndex,
               phase: 'prompt_send'
             });
           }
           console.error("❌ Interface nie jest gotowy w trybie resume - przerywam");
-          updateCounter(counter, promptOffset, totalPromptsForRun, '❌ Interface nie gotowy');
+          updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '❌ Interface nie gotowy');
           await new Promise(resolve => setTimeout(resolve, 5000));
           notifyProcess('PROCESS_PROGRESS', {
             status: 'failed',
-            currentPrompt: promptOffset,
+            currentPrompt: preChainCurrentPrompt,
             totalPrompts: totalPromptsForRun,
             statusText: 'Interface nie gotowy (resume)',
             reason: 'resume_interface_not_ready',
@@ -33968,7 +36773,7 @@ async function injectToChat(
         }
         
         console.log("✅ Interface gotowy - rozpoczynam resume chain");
-        updateCounter(counter, promptOffset, totalPromptsForRun, '🔄 Rozpoczynam chain...');
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, '🔄 Rozpoczynam chain...');
         await new Promise(resolve => setTimeout(resolve, 1000)); // Krótka stabilizacja
       }
       
@@ -34313,6 +37118,7 @@ async function injectToChat(
           let responseValid = false;
           let responseText = '';
           let responseDataGapDirective = null;
+          let validationGenerationErrorRetryAttempts = 0;
           while (!responseValid) {
             if (shouldStopNow()) {
               return forceStopResult();
@@ -34329,6 +37135,19 @@ async function injectToChat(
                 stageIndex: absoluteStageIndex,
                 phase: 'capture_validate'
               });
+            }
+            if (
+              isRetryableChatGptGenerationErrorText(responseText) &&
+              validationGenerationErrorRetryAttempts < 2
+            ) {
+              const retryResult = await clickRetryForRetryableGenerationError('validation');
+              if (retryResult.clicked) {
+                validationGenerationErrorRetryAttempts += 1;
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'ChatGPT error - Retry');
+                await new Promise((resolve) => setTimeout(resolve, 1200));
+                await waitForResponse(responseWaitMs);
+                continue;
+              }
             }
             const dataGapDirective = parseDataGapDirectiveResponse(responseText);
             const isValid = validateResponse(responseText);
@@ -34631,6 +37450,43 @@ async function injectToChat(
             }
           }
         }
+        const finalEmergencyLocalSave = persistedSaveResult?.emergencyLocalSave && typeof persistedSaveResult.emergencyLocalSave === 'object'
+          ? persistedSaveResult.emergencyLocalSave
+          : null;
+        const finalEmergencyPageSave = persistedSaveResult?.emergencyPageSave && typeof persistedSaveResult.emergencyPageSave === 'object'
+          ? persistedSaveResult.emergencyPageSave
+          : null;
+        const finalEmergencyLocalOk = finalEmergencyLocalSave?.success === true;
+        const finalEmergencyPageOk = finalEmergencyPageSave?.success === true;
+        const finalSaveOk = persistedViaMessage === true && persistedSaveResult?.success === true;
+        const finalPageEmergencyOnly = finalSaveOk !== true && finalEmergencyPageOk && !finalEmergencyLocalOk;
+        const finalPersistenceReason = finalSaveOk
+          ? ''
+          : (finalPageEmergencyOnly ? 'page_emergency_only' : (persistedSaveError || 'save_failed'));
+        const finalPersistenceStatusCode = finalSaveOk
+          ? 'storage.saved'
+          : (finalPageEmergencyOnly ? 'storage.page_emergency_only' : 'storage.save_failed');
+        const finalPersistenceStatusText = finalSaveOk
+          ? 'Prompt chain zakonczony - final zapisany do kolejki/bazy'
+          : (finalPageEmergencyOnly
+            ? 'Final NIE jest w bazie - jest tylko awaryjny zapis w stronie; przeladuj rozszerzenie i odswiez karte, aby zrobic replay'
+            : 'Prompt chain zakonczony - blad zapisu finalu do bazy');
+        const finalPersistenceAction = finalSaveOk
+          ? 'none'
+          : (finalPageEmergencyOnly ? 'replay_page_emergency' : 'manual_save_response');
+        if (finalSaveOk !== true) {
+          console.warn('[copy-flow] [capture:tab-save:practical-state]', {
+            dbSaved: false,
+            responseId,
+            saveError: persistedSaveError || 'save_failed',
+            pageEmergencyOnly: finalPageEmergencyOnly,
+            emergencyLocalOk: finalEmergencyLocalOk,
+            emergencyPageOk: finalEmergencyPageOk,
+            recovery: finalPageEmergencyOnly
+              ? 'reload_extension_and_refresh_chatgpt_tab'
+              : 'manual_save_or_retry_runtime'
+          });
+        }
         stopSwKeepalive();
         const finalProgressCapturedAt = Date.now();
         const finalProgressResponseTruncated = lastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
@@ -34638,16 +37494,18 @@ async function injectToChat(
           ? lastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
           : lastResponse;
         notifyProcess('PROCESS_PROGRESS', {
-          status: 'finalizing',
-          lifecycleStatus: 'finalizing',
+          status: finalSaveOk ? 'finalizing' : 'stopped',
+          lifecycleStatus: finalSaveOk ? 'finalizing' : 'stopped',
           currentPrompt: completedPrompt,
           totalPrompts: totalPromptsForRun,
           stageIndex: completedPrompt > 0 ? (completedPrompt - 1) : null,
           stageName: completedPrompt > 0 ? `Prompt ${completedPrompt}` : 'Start',
-          phase: 'save_local',
-          actionRequired: 'none',
-          statusCode: 'storage.saving_local',
-          statusText: 'Prompt chain zakonczony - trwa zapis do bazy',
+          phase: finalSaveOk ? 'verify_remote' : 'save_recovery',
+          actionRequired: finalPersistenceAction,
+          statusCode: finalPersistenceStatusCode,
+          statusText: finalPersistenceStatusText,
+          reason: finalPersistenceReason,
+          error: finalSaveOk ? '' : (persistedSaveError || finalPersistenceReason),
           ...(typeof responseId === 'string' && responseId.trim()
             ? { responseId: responseId.trim() }
             : {}),
@@ -34655,8 +37513,32 @@ async function injectToChat(
           completedResponseLength: lastResponse.length,
           completedResponseTruncated: finalProgressResponseTruncated,
           completedResponseCapturedAt: finalProgressCapturedAt,
-          completedResponseSaved: persistedViaMessage === true && persistedSaveResult?.success === true,
-          needsAction: false
+          completedResponseSaved: finalSaveOk,
+          persistenceStatus: {
+            hasResponse: lastResponse.trim().length > 0,
+            saveOk: finalSaveOk,
+            saveError: finalSaveOk ? '' : (persistedSaveError || finalPersistenceReason),
+            bridgeError: (persistedSaveError === 'runtime_unavailable' || persistedSaveError === 'runtime_timeout')
+              ? persistedSaveError
+              : '',
+            responseId,
+            emergencyLocalSave: finalEmergencyLocalSave,
+            emergencyPageSave: finalEmergencyPageSave,
+            emergencyLocalOk: finalEmergencyLocalOk,
+            emergencyPageOk: finalEmergencyPageOk,
+            pageEmergencyOnly: finalPageEmergencyOnly,
+            recoveryHint: finalPageEmergencyOnly ? 'reload_extension_refresh_chatgpt_tab' : '',
+            updatedAt: finalProgressCapturedAt
+          },
+          persistenceLog: finalSaveOk
+            ? ['Baza: OK']
+            : (finalPageEmergencyOnly
+              ? [
+                `Baza: NIE wyslano; final tylko w page localStorage (${responseId})`,
+                'Akcja: przeladuj rozszerzenie i odswiez karte ChatGPT, aby odpalic replay'
+              ]
+              : [`Baza: BLAD zapisu (${persistedSaveError || finalPersistenceReason})`]),
+          needsAction: finalSaveOk !== true
         });
 
         console.log('[inject][summary] completed', buildMetricsSnapshot({ completed: true, totalPrompts: totalPromptsForRun }));

@@ -242,15 +242,6 @@
     <p class="subtitle">Skroty na przyciskach</p>
   </div>
 
-  <div class="card card-accent">
-    <p class="card-title">Remote Intake</p>
-    <p class="card-copy">Otworz internetowy panel Iskry i od razu przejdz do dodania nowego artykulu do zdalnej kolejki.</p>
-    <div class="row">
-      <button class="btn btn-primary" id="openRemoteIntakeBtn">Nowy artykul w zdalnej kolejce</button>
-    </div>
-    <p class="status status-compact" id="remoteIntakeStatus" aria-live="polite" hidden></p>
-  </div>
-
   <div class="card">
     <p class="card-title">Analiza</p>
     <div class="row row-2">
@@ -328,6 +319,10 @@
   <details class="details">
     <summary>Narzedzia</summary>
     <div class="details-content">
+      <div class="row">
+        <button class="btn btn-primary btn-center" id="openRemoteIntakeBtn">Dodaj artykul do Iskry</button>
+      </div>
+      <p class="status status-compact" id="remoteIntakeStatus" aria-live="polite" hidden></p>
       <p class="card-title">Remote runner</p>
       <input
         class="dispatch-input"
