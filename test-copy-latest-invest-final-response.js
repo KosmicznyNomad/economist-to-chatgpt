@@ -122,6 +122,7 @@ function extractFunctionSource(source, functionName) {
 function buildVmContext(overrides = {}) {
   return vm.createContext({
     console,
+    URL,
     Date,
     Math,
     Set,
@@ -129,7 +130,12 @@ function buildVmContext(overrides = {}) {
     Number,
     String,
     Array,
+    RegExp,
     JSON,
+    CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'www.chatgpt.com', 'chat.openai.com', 'www.chat.openai.com']),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
+    PROMPTS_COMPANY: new Array(12).fill('prompt'),
     processRegistry: new Map(),
     normalizeWatchlistVerifyState(value) {
       return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -154,12 +160,37 @@ function buildVmContext(overrides = {}) {
         || dispatch?.queueSkipped === true
         || ['materialization_unavailable', 'expected_records_missing', 'missing_fields', 'mismatch', 'ingest_failed', 'ingest_quarantined'].includes(verifyState);
     },
+    getCompletedProcessLocalSaveState(process) {
+      if (!process || typeof process !== 'object') return null;
+      if (typeof process?.persistenceStatus?.saveOk === 'boolean') {
+        return process.persistenceStatus.saveOk;
+      }
+      if (typeof process?.completedResponseSaved === 'boolean') {
+        return process.completedResponseSaved;
+      }
+      if (typeof process?.finalStagePersistence?.success === 'boolean') {
+        return process.finalStagePersistence.success;
+      }
+      return null;
+    },
+    hasCompletedProcessLocalSave(process) {
+      if (!process || typeof process !== 'object') return false;
+      if (typeof process?.persistenceStatus?.saveOk === 'boolean') {
+        return process.persistenceStatus.saveOk === true;
+      }
+      if (typeof process?.completedResponseSaved === 'boolean') {
+        return process.completedResponseSaved === true;
+      }
+      return process?.finalStagePersistence?.success === true;
+    },
     getProcessPersistenceDispatchSnapshot(process) {
-      return process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || null;
+      return process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || process?.finalStagePersistence || null;
     },
     getProcessQueueDeliveryState(process) {
-      const dispatch = process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || null;
-      const saveOk = process?.persistenceStatus?.saveOk === true || process?.completedResponseSaved === true;
+      const dispatch = process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || process?.finalStagePersistence || null;
+      const saveOk = process?.persistenceStatus?.saveOk === true
+        || process?.completedResponseSaved === true
+        || process?.finalStagePersistence?.success === true;
       const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
       const remaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : 0;
       return {
@@ -174,11 +205,13 @@ function buildVmContext(overrides = {}) {
       };
     },
     resolveCompletedProcessPersistenceRetryPlan(process) {
-      const dispatch = process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || null;
+      const dispatch = process?.persistenceStatus?.dispatch || process?.completedResponseDispatch || process?.finalStagePersistence || null;
       const deferred = Number.isInteger(dispatch?.deferred) ? dispatch.deferred : 0;
       const remaining = Number.isInteger(dispatch?.remaining) ? dispatch.remaining : 0;
       const delivery = {
-        saveOk: process?.persistenceStatus?.saveOk === true || process?.completedResponseSaved === true,
+        saveOk: process?.persistenceStatus?.saveOk === true
+          || process?.completedResponseSaved === true
+          || process?.finalStagePersistence?.success === true,
         state: typeof dispatch?.state === 'string' ? dispatch.state : '',
         failed: Number.isInteger(dispatch?.failed) ? dispatch.failed : 0,
         pending: deferred + remaining,
@@ -318,7 +351,11 @@ async function testResolveInvestCopyTargetsAcceptsLegacyInvestUrls() {
   });
 
   [
+    'isChatGptUrl',
     'isInvestGptUrl',
+    'getCompanyInvestProcessUrls',
+    'processHasInvestChatContext',
+    'isLikelyActiveCompanyInvestProcess',
     'collectCompanyInvestContextSnapshot',
     'getActiveInvestTabIdInCurrentWindow',
     'findInvestCopyProcessForTab',
@@ -432,7 +469,11 @@ async function testResolveInvestCopyTargetsFallsBackToProcessContextWhenNoInvest
   });
 
   [
+    'isChatGptUrl',
     'isInvestGptUrl',
+    'getCompanyInvestProcessUrls',
+    'processHasInvestChatContext',
+    'isLikelyActiveCompanyInvestProcess',
     'collectCompanyInvestContextSnapshot',
     'getActiveInvestTabIdInCurrentWindow',
     'findInvestCopyProcessForTab',
@@ -549,7 +590,11 @@ async function testResolveInvestCopyTargetsIgnoresNonInvestProcessFromSameWindow
   });
 
   [
+    'isChatGptUrl',
     'isInvestGptUrl',
+    'getCompanyInvestProcessUrls',
+    'processHasInvestChatContext',
+    'isLikelyActiveCompanyInvestProcess',
     'collectCompanyInvestContextSnapshot',
     'getActiveInvestTabIdInCurrentWindow',
     'findInvestCopyProcessForTab',
@@ -664,7 +709,11 @@ async function testResolveInvestCopyTargetsPrefersLiveTabOverProcessFallbackInSa
   });
 
   [
+    'isChatGptUrl',
     'isInvestGptUrl',
+    'getCompanyInvestProcessUrls',
+    'processHasInvestChatContext',
+    'isLikelyActiveCompanyInvestProcess',
     'collectCompanyInvestContextSnapshot',
     'getActiveInvestTabIdInCurrentWindow',
     'findInvestCopyProcessForTab',
@@ -1121,6 +1170,167 @@ async function testCopyLatestInvestBatchReportsPartialSuccessAcrossAllWindows() 
   assert.strictEqual(summaryEvent.dispatchSummary, 'copied=2/3, failed=1, save=2/2, accepted=0, verified=0, terminal=0, urls=2');
 }
 
+async function testCopyLatestInvestBatchSettleRetriesAcrossRounds() {
+  const eventCalls = [];
+  let retryCalls = 0;
+  const processRegistry = new Map([
+    ['run-batch-settle', {
+      id: 'run-batch-settle',
+      persistenceStatus: {
+        saveOk: true,
+        dispatch: {
+          state: 'dispatch_pending',
+          accepted: 0,
+          sent: 0,
+          failed: 0,
+          deferred: 0,
+          remaining: 1,
+          verifyState: ''
+        }
+      }
+    }]
+  ]);
+  const context = buildVmContext({
+    processRegistry,
+    resolveInvestCopyTargets: async (options) => ({
+      success: true,
+      scope: 'all_open_windows',
+      investTabCount: 1,
+      windowCount: 1,
+      targets: [
+        { tabId: 401, windowId: 41, title: 'Delta', url: 'https://chatgpt.com/c/delta', process: { id: 'run-batch-settle' } }
+      ]
+    }),
+    copyLatestInvestFinalResponseForTarget: async (target, options) => ({
+      success: true,
+      text: 'DELTA FINAL',
+      textLength: 11,
+      tabId: target.tabId,
+      windowId: target.windowId,
+      title: target.title,
+      conversationUrl: 'https://chatgpt.com/c/delta',
+      processId: 'run-batch-settle',
+      persistence: {
+        attempted: true,
+        success: true,
+        localSaveOk: true,
+        mode: 'retry_existing_dispatch',
+        reason: 'dispatch_retry_pending',
+        copyTrace: 'trace-401',
+        dispatchSummary: 'pending',
+        dispatch: {
+          state: 'dispatch_pending',
+          accepted: 0,
+          sent: 0,
+          failed: 0,
+          deferred: 0,
+          remaining: 1,
+          verifyState: ''
+        },
+        acceptedByIntake: false,
+        verifiedInDb: false,
+        terminalFailure: false,
+        verifyState: ''
+      },
+      scope: 'all_open_windows',
+      targetOrdinal: options.targetOrdinal,
+      targetTotal: options.targetTotal
+    }),
+    runCompletedProcessPersistenceRetry: async (runId) => {
+      retryCalls += 1;
+      if (retryCalls === 1) {
+        processRegistry.set(runId, {
+          id: runId,
+          persistenceStatus: {
+            saveOk: true,
+            dispatch: {
+              state: 'dispatch_pending',
+              accepted: 1,
+              sent: 1,
+              failed: 0,
+              deferred: 0,
+              remaining: 1,
+              verifyState: 'http_accepted'
+            }
+          }
+        });
+        return {
+          success: true,
+          pending: true,
+          delivery: {
+            saveOk: true,
+            state: 'dispatch_pending',
+            failed: 0,
+            pending: 1,
+            confirmed: false
+          }
+        };
+      }
+      processRegistry.set(runId, {
+        id: runId,
+        persistenceStatus: {
+          saveOk: true,
+          dispatch: {
+            state: 'dispatch_confirmed',
+            accepted: 1,
+            sent: 1,
+            failed: 0,
+            deferred: 0,
+            remaining: 0,
+            verifyState: 'verified'
+          }
+        }
+      });
+      return {
+        success: true,
+        confirmed: true,
+        delivery: {
+          saveOk: true,
+          state: 'dispatch_confirmed',
+          failed: 0,
+          pending: 0,
+          confirmed: true
+        }
+      };
+    },
+    formatDispatchUiSummary(dispatch) {
+      if (!dispatch || typeof dispatch !== 'object') return '';
+      if (dispatch.verifyState === 'verified') return 'verified=1';
+      if (dispatch.accepted === 1) return 'accepted=1';
+      return 'pending';
+    },
+    reportCopyLatestInvestFinalResponseEvent(payload) {
+      eventCalls.push(payload);
+    }
+  });
+
+  [
+    'buildCopyLatestInvestBatchClipboardText',
+    'copyLatestInvestFinalResponse'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.copyLatestInvestFinalResponse({
+    origin: 'test-copy',
+    scope: 'all_open_windows',
+    batchPersistenceSettleBudgetMs: 5000,
+    batchPersistenceSettleMaxRounds: 4,
+    batchPersistenceSettlePollMs: 0
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.copied, 1);
+  assert.strictEqual(result.localSaveSuccessCount, 1);
+  assert.strictEqual(result.intakeAcceptedCount, 1);
+  assert.strictEqual(result.verifiedDbCount, 1);
+  assert.strictEqual(retryCalls, 2, 'batch settle should revisit the same process until it verifies');
+  assert.strictEqual(result.results[0].persistence.acceptedByIntake, true);
+  assert.strictEqual(result.results[0].persistence.verifiedInDb, true);
+  const summaryEvent = eventCalls[eventCalls.length - 1];
+  assert.strictEqual(summaryEvent.dispatchSummary, 'copied=1/1, failed=0, save=1/1, accepted=1, verified=1, terminal=0, urls=1');
+}
+
 async function testCopyLatestInvestUsesAlreadySavedProcessWithoutDuplicateDirectSave() {
   const saveCalls = [];
   const retryCalls = [];
@@ -1325,6 +1535,291 @@ async function testCopyLatestInvestAllowsProcessOnlyTargetWithoutTabId() {
   assert.ok(eventCalls.length > 0, 'copy flow should emit a telemetry event');
 }
 
+async function testCopyLatestInvestCountsFinalStagePersistenceAsLocalSave() {
+  const saveCalls = [];
+  const retryCalls = [];
+  const dispatch = {
+    state: 'dispatch_pending',
+    accepted: 1,
+    sent: 0,
+    failed: 0,
+    deferred: 1,
+    remaining: 0,
+    verifyState: 'http_accepted'
+  };
+  const context = buildVmContext({
+    processRegistry: new Map([
+      ['run-final-stage', {
+        id: 'run-final-stage',
+        finalStagePersistence: {
+          success: true,
+          dispatch,
+          state: 'dispatch_pending',
+          verifyState: 'http_accepted'
+        },
+        completedResponseDispatch: dispatch
+      }]
+    ]),
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: true,
+      responseText: 'VALID FINAL RESPONSE'
+    }),
+    replayCompletedResponseForProcess: async () => ({
+      attempted: false,
+      success: true,
+      reason: 'already_saved_retryable',
+      recoveryMode: 'retry_existing_dispatch',
+      dispatch,
+      dispatchSummary: 'accepted=1'
+    }),
+    runCompletedProcessPersistenceRetry: async (...args) => {
+      retryCalls.push(args);
+      return {
+        success: false,
+        skipped: true,
+        reason: 'retry_in_flight'
+      };
+    },
+    upsertProcess: async () => true,
+    reportCopyLatestInvestFinalResponseEvent() {},
+    saveResponse: async (...args) => {
+      saveCalls.push(args);
+      return {
+        success: true,
+        copyTrace: 'unexpected/direct-save'
+      };
+    },
+    formatDispatchUiSummary() {
+      return '';
+    }
+  });
+
+  [
+    'getCompletedProcessLocalSaveState',
+    'hasCompletedProcessLocalSave',
+    'resolveInvestCopyDomFallback',
+    'resolveCopyLatestInvestResponsePayload',
+    'copyLatestInvestFinalResponseForTarget'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.copyLatestInvestFinalResponseForTarget(
+    {
+      tabId: 98,
+      windowId: 12,
+      title: 'Invest final stage',
+      url: 'https://chatgpt.com/c/invest-final-stage',
+      conversationUrl: 'https://chatgpt.com/c/invest-final-stage',
+      process: {
+        id: 'run-final-stage'
+      }
+    },
+    {
+      origin: 'test-copy',
+      scope: 'latest',
+      targetOrdinal: 1,
+      targetTotal: 1,
+      tabReadTimeoutMs: 900
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.persistence.mode, 'retry_existing_dispatch');
+  assert.strictEqual(result.persistence.localSaveOk, true);
+  assert.strictEqual(result.persistence.acceptedByIntake, true);
+  assert.strictEqual(result.persistence.reason, 'retry_in_flight');
+  assert.strictEqual(retryCalls.length, 1, 'completed process should still attempt dispatch retry');
+  assert.strictEqual(saveCalls.length, 0, 'finalStagePersistence-backed process should not fall back to direct save');
+}
+
+async function testCopyLatestInvestCountsRetryDeliverySaveOkAsLocalSave() {
+  const saveCalls = [];
+  const retryCalls = [];
+  const dispatch = {
+    state: 'dispatch_pending',
+    accepted: 1,
+    sent: 1,
+    failed: 0,
+    deferred: 1,
+    remaining: 0,
+    verifyState: 'http_accepted'
+  };
+  const context = buildVmContext({
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: true,
+      responseText: 'VALID FINAL RESPONSE'
+    }),
+    replayCompletedResponseForProcess: async () => ({
+      attempted: false,
+      success: true,
+      reason: 'already_saved_retryable',
+      recoveryMode: 'retry_existing_dispatch',
+      dispatch,
+      dispatchSummary: 'accepted=1'
+    }),
+    runCompletedProcessPersistenceRetry: async (...args) => {
+      retryCalls.push(args);
+      return {
+        success: false,
+        reason: 'retry_in_flight',
+        delivery: {
+          saveOk: true,
+          state: 'dispatch_pending',
+          failed: 0,
+          pending: 1,
+          confirmed: false
+        }
+      };
+    },
+    upsertProcess: async () => true,
+    reportCopyLatestInvestFinalResponseEvent() {},
+    saveResponse: async (...args) => {
+      saveCalls.push(args);
+      return {
+        success: true,
+        copyTrace: 'unexpected/direct-save'
+      };
+    },
+    formatDispatchUiSummary() {
+      return '';
+    }
+  });
+
+  [
+    'resolveInvestCopyDomFallback',
+    'resolveCopyLatestInvestResponsePayload',
+    'copyLatestInvestFinalResponseForTarget'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.copyLatestInvestFinalResponseForTarget(
+    {
+      tabId: 108,
+      windowId: 18,
+      title: 'Invest retry delivery',
+      url: 'https://chatgpt.com/c/invest-retry-delivery',
+      conversationUrl: 'https://chatgpt.com/c/invest-retry-delivery',
+      process: {
+        id: 'run-retry-delivery'
+      }
+    },
+    {
+      origin: 'test-copy',
+      scope: 'latest',
+      targetOrdinal: 1,
+      targetTotal: 1,
+      tabReadTimeoutMs: 900
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.persistence.mode, 'retry_existing_dispatch');
+  assert.strictEqual(result.persistence.success, true);
+  assert.strictEqual(result.persistence.localSaveOk, true);
+  assert.strictEqual(result.persistence.acceptedByIntake, true);
+  assert.strictEqual(result.persistence.reason, 'retry_in_flight');
+  assert.strictEqual(retryCalls.length, 1, 'retryable process should still attempt dispatch retry');
+  assert.strictEqual(saveCalls.length, 0, 'delivery.saveOk should prevent duplicate direct save');
+}
+
+async function testCopyLatestInvestRecoversUsingKnownResponseWhenReplayFails() {
+  const saveCalls = [];
+  const eventCalls = [];
+  const context = buildVmContext({
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: true,
+      responseText: 'VALID FINAL RESPONSE'
+    }),
+    replayCompletedResponseForProcess: async () => ({
+      attempted: false,
+      success: false,
+      reason: 'missing_response_text'
+    }),
+    upsertProcess: async () => true,
+    reportCopyLatestInvestFinalResponseEvent(payload) {
+      eventCalls.push(payload);
+    },
+    saveResponse: async (...args) => {
+      saveCalls.push(args);
+      return {
+        success: true,
+        copyTrace: 'manual/recovered',
+        verifiedCount: 7,
+        dispatch: {
+          state: 'dispatch_pending',
+          accepted: 1,
+          sent: 1,
+          failed: 0,
+          deferred: 1,
+          remaining: 0,
+          verifyState: 'http_accepted'
+        },
+        dispatchProcessLog: ['queue_attempt|start|responseId=manual'],
+        conversationAnalysis: {
+          conversationLogCount: 2
+        }
+      };
+    },
+    formatDispatchUiSummary(dispatch) {
+      return dispatch && dispatch.accepted === 1 ? 'accepted=1' : '';
+    }
+  });
+
+  [
+    'resolveInvestCopyDomFallback',
+    'resolveCopyLatestInvestResponsePayload',
+    'copyLatestInvestFinalResponseForTarget'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.copyLatestInvestFinalResponseForTarget(
+    {
+      tabId: 118,
+      windowId: 19,
+      title: 'Invest replay fallback',
+      url: 'https://chatgpt.com/c/invest-replay-fallback',
+      conversationUrl: 'https://chatgpt.com/c/invest-replay-fallback',
+      process: {
+        id: 'run-replay-fallback',
+        stageIndex: 12,
+        currentPrompt: 13
+      }
+    },
+    {
+      origin: 'test-copy',
+      scope: 'latest',
+      targetOrdinal: 1,
+      targetTotal: 1,
+      tabReadTimeoutMs: 900
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.persistence.mode, 'manual_copy_recovered');
+  assert.strictEqual(result.persistence.success, true);
+  assert.strictEqual(result.persistence.localSaveOk, true);
+  assert.strictEqual(result.persistence.acceptedByIntake, true);
+  assert.strictEqual(result.persistence.reason, 'saved');
+  assert.strictEqual(result.persistence.dispatchSummary, 'accepted=1');
+  assert.strictEqual(saveCalls.length, 1, 'known response should be persisted directly when replay cannot recover');
+  assert.strictEqual(saveCalls[0][0], 'VALID FINAL RESPONSE');
+  assert.strictEqual(saveCalls[0][3], 'run-replay-fallback');
+  assert.ok(/^run-replay-fallback_manual_copy_p13_[0-9a-f]{8}$/.test(saveCalls[0][4]));
+  assert.ok(eventCalls.length > 0, 'copy flow should still emit telemetry for recovered save');
+}
+
 async function main() {
   await testCopyLatestInvestRequestsClosedProcesses();
   await testResolveInvestCopyTargetsAcceptsLegacyInvestUrls();
@@ -1339,8 +1834,12 @@ async function main() {
   await testResolveCopyLatestInvestReportsInvalidContractForRejectedDomFallback();
   await testResolveCopyLatestInvestRetriesDirectFallbackAfterActivation();
   await testCopyLatestInvestBatchReportsPartialSuccessAcrossAllWindows();
+  await testCopyLatestInvestBatchSettleRetriesAcrossRounds();
   await testCopyLatestInvestUsesAlreadySavedProcessWithoutDuplicateDirectSave();
   await testCopyLatestInvestAllowsProcessOnlyTargetWithoutTabId();
+  await testCopyLatestInvestCountsFinalStagePersistenceAsLocalSave();
+  await testCopyLatestInvestCountsRetryDeliverySaveOkAsLocalSave();
+  await testCopyLatestInvestRecoversUsingKnownResponseWhenReplayFails();
   console.log('test-copy-latest-invest-final-response.js: ok');
 }
 
