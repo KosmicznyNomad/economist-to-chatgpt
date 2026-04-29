@@ -235,9 +235,9 @@ function parsePromptChainText(rawText) {
   return [normalizedText.trim()];
 }
 
-function testCompanyPromptCatalogIsTwelvePrompts() {
+function testCompanyPromptCatalogIsFifteenPrompts() {
   const prompts = parsePromptChainText(promptsText);
-  assert.strictEqual(prompts.length, 12, 'Company prompt chain should contain exactly 12 prompts.');
+  assert.strictEqual(prompts.length, 15, 'Company prompt chain should contain exactly 15 prompts.');
 
   const stageMetadataBlockMatch = backgroundSource.match(/const STAGE_METADATA_COMPANY = \[[\s\S]*?\n\];/);
   assert(stageMetadataBlockMatch, 'Stage metadata block should exist.');
@@ -245,13 +245,13 @@ function testCompanyPromptCatalogIsTwelvePrompts() {
   const promptNumbers = [...stageMetadataBlockMatch[0].matchAll(/promptNumber:\s*(\d+)/g)].map((match) => Number(match[1]));
   assert.deepStrictEqual(
     promptNumbers,
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12],
-    'Stage metadata prompt numbers should align to the 12-prompt chain.'
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15],
+    'Stage metadata prompt numbers should align to the 15-prompt chain.'
   );
 
   assert(
-    stageMapText.includes('## Prompt Index Mapping (12 prompts)'),
-    'Stage map should document the same 12-prompt total.'
+    stageMapText.includes('## Prompt Index Mapping (15 prompts)'),
+    'Stage map should document the same 15-prompt total.'
   );
 }
 
@@ -265,7 +265,7 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     JSON,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
-    PROMPTS_COMPANY: new Array(12).fill('prompt'),
+    PROMPTS_COMPANY: new Array(15).fill('prompt'),
     sanitizeAnalysisQueueJob(job) {
       return job;
     }
@@ -290,7 +290,7 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     resumeTargetTabId: 101
   });
   assert.strictEqual(firstPromptPatch.currentPrompt, 1);
-  assert.strictEqual(firstPromptPatch.totalPrompts, 12);
+  assert.strictEqual(firstPromptPatch.totalPrompts, 15);
   assert.strictEqual(firstPromptPatch.stageIndex, 0);
   assert.strictEqual(firstPromptPatch.stageName, 'Prompt 1');
 
@@ -300,17 +300,17 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     analysisType: 'company',
     kind: 'resume_stage',
     createdAt: 1,
-    resumeStartIndex: 11,
+    resumeStartIndex: 14,
     resumeTargetTabId: 202
   });
-  assert.strictEqual(finalPromptPatch.currentPrompt, 12);
-  assert.strictEqual(finalPromptPatch.totalPrompts, 12);
-  assert.strictEqual(finalPromptPatch.stageIndex, 11);
-  assert.strictEqual(finalPromptPatch.stageName, 'Prompt 12');
+  assert.strictEqual(finalPromptPatch.currentPrompt, 15);
+  assert.strictEqual(finalPromptPatch.totalPrompts, 15);
+  assert.strictEqual(finalPromptPatch.stageIndex, 14);
+  assert.strictEqual(finalPromptPatch.stageName, 'Prompt 15');
 }
 
 function main() {
-  testCompanyPromptCatalogIsTwelvePrompts();
+  testCompanyPromptCatalogIsFifteenPrompts();
   testResumeQueuePatchUsesNextPromptNumber();
   console.log('test-company-prompt-count.js: ok');
 }

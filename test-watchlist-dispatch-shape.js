@@ -44,7 +44,7 @@ function testDispatchShapeNormalizesDecisionRecords() {
         primary_kill_risk: 'pricing reset'
       },
       extras: {
-        record_version: 'watchlist.v3_decision_rich'
+        note: 'legacy-compatible'
       }
     },
     null
@@ -84,7 +84,7 @@ function testDispatchShapeNormalizesDecisionRecords() {
   assert.strictEqual(records[0].proofClass, 'FUNDED');
   assert.strictEqual(records[0].proof_class, 'FUNDED');
   assert.strictEqual(records[0].primaryKillRisk, 'pricing reset');
-  assert.strictEqual(records[0].recordVersion, 'watchlist.v3_decision_rich');
+  assert.strictEqual(records[0].recordVersion, undefined);
 }
 
 function testDispatchShapeNormalizesStructuredRecords() {
@@ -93,7 +93,6 @@ function testDispatchShapeNormalizesStructuredRecords() {
       decision_role: 'primary',
       fields: {
         data_decyzji: '2026-03-29',
-        status_decyzji: 'WATCH',
         spolka: 'Leidos Holdings Inc. (LDOS:NYSE)',
         material_zrodlowy_podcast: 'a16z podcast',
         teza_inwestycyjna: 'Primary thesis',
@@ -103,7 +102,8 @@ function testDispatchShapeNormalizesStructuredRecords() {
         voi_falsy_kluczowe_ryzyka: 'VOI: backlog'
       },
       taxonomy: {
-        sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+        sector: 'Defense',
+        worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
         company_family: 'Technologia i oprogramowanie',
         company_type: 'Oprogramowanie obronne',
         revenue_model: 'Integracja i wdrozenia',
@@ -135,6 +135,9 @@ function testDispatchShapeNormalizesStructuredRecords() {
   assert.strictEqual(records[0].decision_role, 'PRIMARY');
   assert.strictEqual(records[0].fields.decision_role, 'PRIMARY');
   assert.strictEqual(records[0].fields.spolka, 'Leidos Holdings Inc. (LDOS:NYSE)');
+  assert.strictEqual(records[0].fields.status_decyzji, undefined);
+  assert.strictEqual(records[0].taxonomy.sector, 'Defense');
+  assert.strictEqual(records[0].taxonomy.worldview_bucket, 'Software steruje praca, pieniedzmi i ryzykiem');
   assert.strictEqual(records[0].taxonomy.company_type, 'Oprogramowanie obronne');
   assert.strictEqual(records[0].opportunity.value_chain_position, 'Platforma');
   assert.strictEqual(records[0].character.primary_kill_risk, 'brak sily cenowej');
@@ -186,7 +189,7 @@ function testDispatchShapeBackfillsAliasStructuredRecords() {
         ]
       },
       extras: {
-        record_version: 'watchlist.v2_enhanced'
+        note: 'alias-compatible'
       }
     }
   ]);
@@ -194,7 +197,8 @@ function testDispatchShapeBackfillsAliasStructuredRecords() {
   assert.strictEqual(records.length, 1);
   assert.strictEqual(records[0].decision_role, 'SECONDARY');
   assert.strictEqual(records[0].fields.decision_role, 'SECONDARY');
-  assert.strictEqual(records[0].fields.status_decyzji, 'WATCH');
+  assert.strictEqual(records[0].fields.decyzja, 'WATCH');
+  assert.strictEqual(records[0].fields.status_decyzji, undefined);
   assert.strictEqual(records[0].fields.spolka, 'AT&S (ATS:VIE)');
   assert.strictEqual(records[0].taxonomy.company_family, 'Infrastruktura polprzewodnikowa i substraty');
   assert.strictEqual(records[0].taxonomy.company_type, 'Producent substratow IC');
@@ -204,7 +208,7 @@ function testDispatchShapeBackfillsAliasStructuredRecords() {
   assert.strictEqual(records[0].character.market_expectation_state, 'Rynek dyskontuje duration');
   assert.strictEqual(records[0].kpi.items[0].key, 'FQ');
   assert.strictEqual(records[0].kpi.items[0].value, 5);
-  assert.deepStrictEqual(records[0].extras, { record_version: 'watchlist.v2_enhanced' });
+  assert.deepStrictEqual(records[0].extras, { note: 'alias-compatible' });
 }
 
 function main() {

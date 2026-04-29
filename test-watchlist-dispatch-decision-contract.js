@@ -129,7 +129,6 @@ function makeStructuredV2Record(overrides = {}) {
     decision_role: 'PRIMARY',
     fields: {
       data_decyzji: '2026-04-12',
-      status_decyzji: 'WATCH',
       spolka: 'Camtek (CAMT:NASDAQ)',
       material_zrodlowy_podcast: 'SemiAnalysis Rubin Ultra',
       teza_inwestycyjna: 'Camtek thesis',
@@ -139,7 +138,8 @@ function makeStructuredV2Record(overrides = {}) {
       voi_falsy_kluczowe_ryzyka: 'VOI: orders'
     },
     taxonomy: {
-      sector: 'Technologia',
+      sector: 'Semiconductors',
+      worldview_bucket: 'Fizyczne waskie gardla dyktuja wartosc',
       company_family: 'Polprzewodniki',
       company_type: 'Metrologia',
       revenue_model: 'Sprzet i software',
@@ -159,7 +159,9 @@ function makeStructuredV2Record(overrides = {}) {
       ]
     },
     extras: {
-      record_version: 'watchlist.v2_enhanced'
+      identity: {
+        decision_category: 'WATCH'
+      }
     }
   };
   return {
@@ -321,13 +323,11 @@ function testFallbackMapperPreservesKpiScorecard() {
 
 function testStructuredV2PayloadPreservesRecords() {
   const text = JSON.stringify({
-    schema: 'economist.response.v2',
     records: [
       {
         decision_role: 'PRIMARY',
         fields: {
           data_decyzji: '2026-03-20',
-          status_decyzji: 'WATCH',
           spolka: 'Alpha Corp (ALP:NASDAQ)',
           zrodlo_tezy: 'Alpha source',
           material_zrodlowy_podcast: 'Alpha source',
@@ -336,7 +336,7 @@ function testStructuredV2PayloadPreservesRecords() {
           base_scenario_total: 'Base_TOTAL: 20',
           bull_scenario_total: 'Bull_TOTAL: 30',
           voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
-          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sektor: 'Software',
           rodzina_spolki: 'Technologia i oprogramowanie',
           typ_spolki: 'Software',
           model_przychodu: 'Subscription',
@@ -344,7 +344,8 @@ function testStructuredV2PayloadPreservesRecords() {
           waluta: 'USD'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Software',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Software',
           revenue_model: 'Subscription',
@@ -374,13 +375,16 @@ function testStructuredV2PayloadPreservesRecords() {
             { key: 'MR', value: 6 }
           ]
         },
-        extras: {}
+        extras: {
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       },
       {
         decision_role: 'SECONDARY',
         fields: {
           data_decyzji: '2026-03-20',
-          status_decyzji: 'WATCH',
           spolka: 'Beta Corp (BET:NASDAQ)',
           zrodlo_tezy: 'Beta source',
           material_zrodlowy_podcast: 'Beta source',
@@ -389,7 +393,7 @@ function testStructuredV2PayloadPreservesRecords() {
           base_scenario_total: 'Base_TOTAL: 21',
           bull_scenario_total: 'Bull_TOTAL: 31',
           voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.0/5.0, EntryScore: 7.9/10, Sizing: 2%',
-          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sektor: 'Software',
           rodzina_spolki: 'Technologia i oprogramowanie',
           typ_spolki: 'Software',
           model_przychodu: 'Subscription',
@@ -397,7 +401,8 @@ function testStructuredV2PayloadPreservesRecords() {
           waluta: 'USD'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Software',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Software',
           revenue_model: 'Subscription',
@@ -427,7 +432,12 @@ function testStructuredV2PayloadPreservesRecords() {
             { key: 'MR', value: 6 }
           ]
         },
-        extras: { shortfall_reason: '' }
+        extras: {
+          shortfall_reason: '',
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       }
     ]
   });
@@ -447,6 +457,9 @@ function testStructuredV2PayloadPreservesRecords() {
   assert.strictEqual(payload.decisionRecords.length, 2);
   assert.strictEqual(payload.records[0].decision_role, 'PRIMARY');
   assert.strictEqual(payload.records[0].fields.spolka, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(payload.records[0].fields.status_decyzji, undefined);
+  assert.strictEqual(payload.records[0].taxonomy.sector, 'Software');
+  assert.strictEqual(payload.records[0].taxonomy.worldview_bucket, 'Software steruje praca, pieniedzmi i ryzykiem');
   assert.strictEqual(payload.records[0].kpi.items.length, 10);
   assert.strictEqual(payload.records[0].opportunity.value_chain_position, 'Platforma');
   assert.strictEqual(payload.records[1].character.primary_kill_risk, 'procurement delay');
@@ -599,7 +612,7 @@ function testStructuredJsonDispatchPayloadBackfillsAliasFields() {
           ]
         },
         extras: {
-          record_version: 'watchlist.v2_enhanced'
+          note: 'alias-compatible'
         }
       }
     ]
@@ -619,7 +632,8 @@ function testStructuredJsonDispatchPayloadBackfillsAliasFields() {
   assert.strictEqual(payload.decisionRecords.length, 1);
   assert.strictEqual(payload.records[0].decision_role, 'SECONDARY');
   assert.strictEqual(payload.records[0].fields.spolka, 'AT&S (ATS:VIE)');
-  assert.strictEqual(payload.records[0].fields.status_decyzji, 'WATCH');
+  assert.strictEqual(payload.records[0].fields.decyzja, 'WATCH');
+  assert.strictEqual(payload.records[0].fields.status_decyzji, undefined);
   assert.strictEqual(payload.records[0].opportunity.invoice_issuer, 'AT&S Austria Technologie & Systemtechnik AG');
   assert.strictEqual(payload.records[0].character.market_expectation_state, 'Rynek dyskontuje duration');
   assert.strictEqual(payload.records[0].kpi.items[0].value, 5);

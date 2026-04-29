@@ -145,13 +145,11 @@ function makeCurrent16Line(role, company) {
 
 function makeStructuredV2Response(company = 'Alpha Corp') {
   return JSON.stringify({
-    schema: 'economist.response.v2',
     records: [
       {
         decision_role: 'PRIMARY',
         fields: {
           data_decyzji: '2026-03-20',
-          status_decyzji: 'WATCH',
           spolka: `${company} (ALP:NASDAQ)`,
           zrodlo_tezy: 'Alpha source',
           material_zrodlowy_podcast: 'Alpha source',
@@ -160,7 +158,7 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
           base_scenario_total: 'Base_TOTAL: 20',
           bull_scenario_total: 'Bull_TOTAL: 30',
           voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
-          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sektor: 'Software',
           rodzina_spolki: 'Technologia i oprogramowanie',
           typ_spolki: 'Software',
           model_przychodu: 'Subscription',
@@ -168,7 +166,8 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
           waluta: 'USD'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Software',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Software',
           revenue_model: 'Subscription',
@@ -190,7 +189,11 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
             { key: 'MR', value: 6 }
           ]
         },
-        extras: {}
+        extras: {
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       }
     ]
   });

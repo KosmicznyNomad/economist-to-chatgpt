@@ -12722,6 +12722,27 @@ const STAGE_METADATA_COMPANY = [
     stageId: '12',
     stageName: "Stage 12: Final Investment Record Builder",
     description: "Final structured watchlist records for downstream ingestion."
+  },
+  {
+    promptIndex: 12,
+    promptNumber: 13,
+    stageId: '12.5',
+    stageName: "Stage 12.5: MCP Write Final Investment Records",
+    description: "Persist the previous Stage 12 records through the watchlist MCP write tool."
+  },
+  {
+    promptIndex: 13,
+    promptNumber: 14,
+    stageId: '13',
+    stageName: "Stage 13: Sector Memory Row Writer",
+    description: "Reusable sector-memory rows for future company analyses."
+  },
+  {
+    promptIndex: 14,
+    promptNumber: 15,
+    stageId: '13.5',
+    stageName: "Stage 13.5: MCP Write Sector Memory Rows",
+    description: "Persist the previous Stage 13 sector-memory rows through the sector-context MCP tool."
   }
 ];
 
@@ -12747,6 +12768,9 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['10', 10],
   ['11', 10], // Stage 11 exists as a section inside the Stage 10 prompt
   ['12', 11],
+  ['12.5', 12],
+  ['13', 13],
+  ['13.5', 14],
   ['10.5', 10], // legacy alias: old chain used Stage 10.5 for composite rank
   ['2.5', 4], // legacy alias: old chain used 2.5 for Reverse DCF Lite
   ['3.2', 4], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
@@ -21182,7 +21206,7 @@ function extractStructuredWatchlistResponseFromText(rawText) {
         continue;
       }
       const schema = normalizeStructuredWatchlistValue(parsed.schema).toLowerCase();
-      if (schema !== 'economist.response.v2') {
+      if (schema && schema !== 'economist.response.v2') {
         continue;
       }
 
@@ -21580,7 +21604,8 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
       );
       return scorePayload(rightPayload) > scorePayload(leftPayload) ? rightPayload : leftPayload;
     };
-    if (schema !== 'economist.response.v2' && !hasStructuredRecords) {
+    const extractedFromText = extractStructuredWatchlistResponseFromText(rawText);
+    if (schema !== 'economist.response.v2' && !hasStructuredRecords && !extractedFromText) {
       return null;
     }
     const records = Array.isArray(rawPayload.records)
@@ -21601,7 +21626,7 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     }
     return chooseRicherStructuredPayload(
       null,
-      extractStructuredWatchlistResponseFromText(rawText)
+      extractedFromText
     );
   })();
   if (schema === 'economist.response.v2' && !structuredResponse) {
@@ -37657,10 +37682,6 @@ function waitForTabComplete(tabId) {
     });
   });
 }
-
-
-
-
 
 
 

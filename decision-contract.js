@@ -53,6 +53,37 @@
     return normalized;
   }
 
+  function normalizeStructuredDecisionAction(value) {
+    const normalized = normalizeText(value).toUpperCase();
+    if (!normalized) return '';
+    if (normalized.includes('AVOID')) return 'AVOID';
+    if (normalized.includes('WATCH')) return 'WATCH';
+    if (normalized.includes('BUY')) return 'BUY';
+    if (normalized.includes('UNIKAJ') || normalized.includes('SPRZEDAJ')) return 'AVOID';
+    if (normalized.includes('OBSERWUJ')) return 'WATCH';
+    if (normalized.includes('KUPUJ')) return 'BUY';
+    return normalized;
+  }
+
+  function deriveStructuredDecisionStatus(fields, record) {
+    const extras = record && typeof record.extras === 'object' ? record.extras : {};
+    const identity = extras && typeof extras.identity === 'object' ? extras.identity : {};
+    const candidates = [
+      fields.status_decyzji,
+      fields.decision_action,
+      record.decision_status,
+      record.decision,
+      record.decision_action,
+      identity.decision_category,
+      identity.decision_action
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeStructuredDecisionAction(candidate);
+      if (normalized) return normalized;
+    }
+    return 'WATCH';
+  }
+
   function parseDecisionRecordParts(rawLine) {
     const line = normalizeText(rawLine);
     if (!line || !line.includes(';')) return null;
@@ -288,7 +319,8 @@
   function extractStructuredDecisionPayload(rawText) {
     const parsed = safeParseJsonObject(rawText);
     if (!parsed) return null;
-    if (normalizeText(parsed.schema).toLowerCase() !== 'economist.response.v2') return null;
+    const schema = normalizeText(parsed.schema).toLowerCase();
+    if (schema && schema !== 'economist.response.v2') return null;
 
     const records = (Array.isArray(parsed.records) ? parsed.records : [])
       .map((record) => normalizeStructuredPayloadRecord(record))
@@ -315,7 +347,7 @@
       recordFormat: 'structured_v2_json',
       rawFieldCount: 0,
       decisionDate: normalizeText(fields.data_decyzji),
-      decisionStatus: normalizeText(fields.status_decyzji),
+      decisionStatus: deriveStructuredDecisionStatus(fields, record),
       decisionRole: normalizeText(record.decision_role || fields.decision_role).toUpperCase(),
       company: normalizeText(fields.spolka),
       sourceMaterial: normalizeText(fields.material_zrodlowy_podcast || fields.zrodlo_tezy),

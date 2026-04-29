@@ -32,7 +32,10 @@ const STAGE_TO_PROMPT_INDEX = new Map([
   ['9', 9],
   ['10', 10],
   ['11', 10],
-  ['12', 11]
+  ['12', 11],
+  ['12.5', 12],
+  ['13', 13],
+  ['13.5', 14]
 ]);
 
 function normalizeStageId(value) {
@@ -242,7 +245,7 @@ function loadPromptByStage() {
 
 function run() {
   const { prompts, promptByStageId } = loadPromptByStage();
-  assert.strictEqual(prompts.length, 12, 'prompts-company.txt should contain the current 12-prompt chain');
+  assert.strictEqual(prompts.length, 15, 'prompts-company.txt should contain the current 15-prompt chain');
   assert(promptByStageId.has('2') && promptByStageId.has('3'), 'stage prompts 2 and 3 must be present');
   assert.strictEqual(
     promptByStageId.get('10'),
@@ -300,7 +303,7 @@ function run() {
     }
   }
 
-  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12'];
+  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'];
   assert.deepStrictEqual(stripUnknownStages(executed), expected);
 
   // Test 2b: if missing stage is far earlier (e.g. at stage 7), replay must start
@@ -329,7 +332,7 @@ function run() {
   }
   const expectedFar = [
     '1', '2', '3', '4', '5', '6', '7',
-    '2', '3', '4', '5', '6', '7', '8', '9', '10', '12'
+    '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedFar), expectedFar);
 
@@ -360,14 +363,14 @@ function run() {
   const expectedSelf = [
     '1', '2', '3',
     '2', '3',
-    '4', '5', '6', '7', '8', '9', '10', '12'
+    '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedSelf), expectedSelf);
 
   // Test 2c: generic rollback rule for many stage pairs.
   // For each current stage C and missing stage M where M < C (by prompt number),
   // expect replay sequence M..C inserted right after C.
-  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12'];
+  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'];
   const orderedByPromptNumber = orderedStages
     .map((stageId) => ({
       stageId,
