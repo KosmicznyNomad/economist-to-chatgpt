@@ -30,7 +30,7 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 | 14 | 13 | 13 | Stage 13: Composite Rank | Cross-company composite ranking with PRIMARY/SECONDARY selection. |
 | 15 | 14 | 14 | Stage 14: Final Investment Record Builder | Final structured watchlist records for downstream ingestion. |
 | 16 | 15 | 15 | Stage 15: MCP Write Final Investment Records | Persist the generated Stage 14 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 14 JSON forward. |
-| 17 | 16 | 16 | Stage 16: Sector Memory Row Writer | Reusable sector-memory rows for future company analyses. |
+| 17 | 16 | 16 | Stage 16: Sector Intelligence Memory Row Writer | Durable sector intelligence records for future portfolio positioning and company analyses. |
 | 18 | 17 | 17 | Stage 17: MCP Write Sector Memory Rows | Persist the generated Stage 16 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 16 JSON forward. |
 
 ## Stage Id Rules

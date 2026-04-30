@@ -13070,8 +13070,8 @@ const DEFAULT_STAGE_METADATA_COMPANY = [
     promptIndex: 16,
     promptNumber: 17,
     stageId: '16',
-    stageName: "Stage 16: Sector Memory Row Writer",
-    description: "Reusable sector-memory rows for future company analyses."
+    stageName: "Stage 16: Sector Intelligence Memory Row Writer",
+    description: "Durable sector intelligence records for future portfolio positioning and company analyses."
   },
   {
     promptIndex: 17,
@@ -26826,10 +26826,10 @@ async function saveSectorMemoryResponse(
   }
 
   const payload = {
-    schema: 'economist.sector_memory_rows.v3',
+    schema: 'economist.sector_memory_rows.v5',
     responseId: normalizedResponseId,
     runId: normalizedRunId || null,
-    source: typeof source === 'string' && source.trim() ? source.trim() : 'ChatGPT Stage 16 sector memory',
+    source: typeof source === 'string' && source.trim() ? source.trim() : 'ChatGPT Stage 16 sector intelligence memory',
     analysisType: 'sector_memory',
     timestamp: new Date(capturedAt).toISOString(),
     stage: 'stage_16',
@@ -26907,7 +26907,7 @@ async function persistSectorMemoryResponseFromResult(result, options = {}) {
   const responseId = buildSectorMemoryResponseId(options?.runId || '', responseText, promptNumber);
   return saveSectorMemoryResponse(
     responseText,
-    options?.source || 'ChatGPT Stage 16 sector memory',
+    options?.source || 'ChatGPT Stage 16 sector intelligence memory',
     options?.runId || null,
     responseId,
     options?.conversationUrl || null,

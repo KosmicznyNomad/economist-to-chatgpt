@@ -6422,66 +6422,460 @@ Odpowiedź Promptu 16 musi być JSON-em, nie tekstem operacyjnym. Jeśli znalezi
 
 Nie zwracaj podsumowania MCP, nie zwracaj statusu zapisu, nie zwracaj pustej odpowiedzi, nie używaj markdownu.
 --- PROMPT SEPARATOR ---
-STAGE 16 — SECTOR MEMORY ROW WRITER
-economist.sector_memory_rows.v3
+STAGE 16 — SECTOR INTELLIGENCE MEMORY ROW WRITER
+economist.sector_memory_rows.v5
 
-CEL
+OBJECTIVE
 
-Ten etap tworzy finalną tablicę trwałej wiedzy sektorowej.
+This stage creates durable sector intelligence records.
 
-Nie tworzysz nowej rekomendacji.
-Nie robisz nowej wyceny.
-Nie zmieniasz decyzji spółkowych.
-Nie piszesz raportu.
-Nie tworzysz tabeli analitycznej.
-Nie tworzysz kolejnego handoffu.
-Nie wywołujesz MCP.
-Nie generujesz metadanych technicznych.
+You are not writing an investment recommendation.
+You are not valuing a company.
+You are not checking margins, FCF, ROIC, multiples, backlog conversion, or DCF.
+You are not summarizing the article.
+You are not summarizing the conversation.
+You are not producing a report.
+You are not producing a table.
+You are not calling MCP.
+You are not adding workflow metadata.
 
-Tworzysz wyłącznie merytoryczne rekordy sektorowe, które pomagają później odróżniać dobre firmy od słabych firm w tym samym sektorze.
+You are extracting a small number of deep, reusable market mechanisms from the article and the prior conversation.
 
-Każdy rekord ma być jednym wierszem wiedzy sektorowej i zawierać tylko:
+Each record must capture a durable sector-level insight that could help future portfolio positioning around a market, technology cycle, capital flow, supply-chain shift, regulatory change, or business-model transition.
+
+The output format is JSON only, with exactly three fields per record:
 
 - sektor
 - podsektor
 - opis
 
-JSON jest tylko formatem odpowiedzi.
-Nie jest systemem komunikacji.
-Nie jest miejscem na logikę workflow.
-Nie ma zawierać technicznych metadanych.
+All field values must be written in Polish, including "sektor", "podsektor", and "opis".
 
 ------------------------------------------------------------
-INHERITANCE / ŹRÓDŁO WIEDZY
+CORE TASK
 ------------------------------------------------------------
 
-Wykorzystaj całą wcześniejszą analizę z rozmowy:
+Read the article and the prior conversation as a source of market intelligence.
 
-- thesis i worldview,
-- invoice-first subsegmenty,
-- company mapping,
-- traction,
-- moat,
+Do not merely repeat what happened.
+Do not merely repeat what the company does.
+Do not merely repeat that demand is growing.
+Do not write generic investment diligence.
+
+Instead, infer what the event reveals about how the sector works.
+
+The goal is to compress the most important sector understanding into a few precise records.
+
+A good record should answer questions like:
+
+- What did this article or conversation reveal about the structure of the market?
+- What changed in the system, and why does that change matter?
+- Where is capital moving from, and where is it moving to?
+- Which technical constraint is forcing spending, adoption, redesign, localization, or substitution?
+- What is the deployment order in the real world?
+- Which type of firm becomes more strategically important?
+- Which type of firm becomes less important, commoditized, bypassed, or squeezed out?
+- Which business model captures the new flow of money?
+- Which macro, regulatory, geopolitical, energy, infrastructure, or supply-chain condition changes the market’s direction?
+- How could this insight later help the portfolio understand which exposure is structural and which exposure is only narrative?
+
+The record should feel like distilled market intelligence from someone who understood the article, the technology, the economics, and the strategic implications.
+
+------------------------------------------------------------
+WHAT A GOOD RECORD IS
+------------------------------------------------------------
+
+A good record is not a financial checklist.
+
+A good record is a short sector mechanism.
+
+It should contain a concrete interpretation of how the market functions.
+
+Examples of valid mechanisms:
+
+- a budget migrates from one layer of the stack to another,
+- a deployment sequence creates a new ordering of winners,
+- a physical constraint makes a previously secondary supplier strategically important,
+- a standard shift moves value from custom integration to repeatable components,
+- a software layer captures the workflow while hardware becomes interchangeable,
+- an infrastructure bottleneck moves the scarce asset from chips to power, cooling, permitting, land, interconnection, or operations,
+- a geopolitical rule forces local duplication of supply chains,
+- a customer internalizes a function and turns external suppliers into commodity vendors,
+- a new architecture bypasses an old bottleneck,
+- a regulated or government budget creates demand that behaves differently from commercial demand,
+- a one-time installation market turns into a recurring service, maintenance, compliance, or spare-parts loop.
+
+A good record should be useful months later when analyzing a different company in the same sector.
+
+------------------------------------------------------------
+WHAT A BAD RECORD IS
+------------------------------------------------------------
+
+A bad record sounds sophisticated but says nothing specific about the market.
+
+Do not write records like:
+
+- demand is strong but margins must be monitored,
+- the company needs better FCF conversion,
+- the backlog must convert into revenue,
+- capex discipline is important,
+- ROIC will decide whether the opportunity is real,
+- the segment must be material,
+- valuation must be attractive,
+- AI is a secular growth driver,
+- the company has exposure to a large TAM,
+- execution risk remains important.
+
+These are generic investment comments, not sector intelligence.
+
+Do not use valuation language as the substance of a record.
+
+Avoid the following terms unless absolutely necessary for a specific factual mechanism:
+
+- DCF,
+- valuation,
+- multiple,
+- EPS,
+- FCF,
+- ROIC,
+- gross margin,
+- operating margin,
+- margin expansion,
+- cash conversion,
+- capex discipline,
+- backlog conversion,
+- book-to-bill,
+- segment materiality,
 - returns quality,
-- wedge / core / valuation diagnostics,
-- finalne decyzje spółkowe,
-- wszystkie wnioski o mechanizmach sektora, kontraktach, bottleneckach, income chain, red flagach i proof protocol.
+- wedge,
+- core,
+- proof protocol / protokół potwierdzenia.
 
-Nie rekonstruuj całej analizy.
-Nie streszczaj wszystkich etapów.
-Wydobądź tylko te sektorowe insighty, które są wielokrotnego użytku.
+If the previous discussion used these terms, translate them into a real market mechanism.
 
-Najważniejszy test:
+For example:
 
-Czy ten rekord pomoże lepiej ocenić kolejną spółkę w tym sektorze?
+Bad:
+“Konwersja backlogu ma znaczenie.”
 
-Jeśli nie, nie twórz rekordu.
+Better:
+“Rynek jest nadal w fazie, w której klienci rezerwują rzadkie miejsca wdrożeniowe, zanim cała infrastruktura niższego poziomu jest gotowa, więc wczesne ogłoszenia zamówień mogą oznaczać ustawianie się w kolejce zamiast natychmiastowej aktywacji systemu.”
+
+Bad:
+“Marże zależą od siły cenowej.”
+
+Better:
+“Dostawca posiadający plik kwalifikacyjny, certyfikację bezpieczeństwa, historię niezawodności w terenie i know-how integracyjne może pozostać osadzony po pierwszym wdrożeniu, podczas gdy dostawcy wymiennych modułów tracą znaczenie, gdy klient zamraża projekt referencyjny.”
 
 ------------------------------------------------------------
-FORMAT REKORDU
+DEDUCTIVE TECHNIQUES TO USE INTERNALLY
 ------------------------------------------------------------
 
-Każdy rekord ma dokładnie taki kształt:
+Use these techniques internally to extract sector intelligence.
+Do not name these techniques in the final JSON.
+
+1. CENTRAL EVENT EXTRACTION
+
+Identify the central event in the article or conversation.
+
+Ask:
+What actually happened?
+What decision, constraint, launch, bottleneck, regulation, architecture shift, supply-chain move, customer behavior, or capital allocation was the center of gravity?
+
+Do not summarize all details.
+Find the event that changes how the market should be understood.
+
+2. EVENT-TO-SYSTEM DEDUCTION
+
+Translate the event into a system-level mechanism.
+
+Ask:
+What does this event reveal about the market structure?
+Which layer of the system became more important?
+Which old assumption became weaker?
+Which dependency became visible?
+
+Example:
+A chip announcement may actually reveal a memory bandwidth constraint.
+A data center announcement may actually reveal a grid interconnection problem.
+A robotics launch may actually reveal that actuator cost, not AI software, controls adoption speed.
+
+3. DEPLOYMENT SEQUENCE RECONSTRUCTION
+
+Infer the real-world order of implementation.
+
+Ask:
+What must happen first?
+What happens second?
+What becomes relevant only after deployment?
+Which suppliers are early-cycle beneficiaries?
+Which suppliers benefit later through service, replacement, software, optimization, or compliance?
+
+Use this to avoid vague statements like “demand is growing.”
+
+A useful record should often contain a sequence such as:
+architecture choice → component requirement → qualification → integration → deployment → operation → optimization.
+
+Or:
+permitting → interconnection → power equipment → cooling → rack installation → utilization → service loop.
+
+4. CAPITAL ROUTING MAP
+
+Identify where the money comes from and where it goes.
+
+Ask:
+Which budget is being redirected?
+Is capital moving from labor to automation, from ownership to rental, from hardware to service, from cloud to on-prem, from import to domestic production, from experimental budget to operating budget, from one supplier category to another?
+
+Do not write “revenue growth.”
+Write the actual economic rerouting.
+
+Examples:
+- enterprise IT budget moves from seat-based software to usage-based automation,
+- hyperscaler budget moves from chips alone to power, networking, memory, cooling, and land,
+- defense budget moves from platform procurement to munitions replenishment and sensor-to-shooter software,
+- utility budget moves from generation assets to grid reinforcement and interconnection management,
+- industrial capex moves from labor-intensive production to robotics cells, maintenance, and spare parts.
+
+5. CONTROL-POINT IDENTIFICATION
+
+Find the point in the value chain that controls the rest of the system.
+
+Ask:
+Who controls the standard, qualification, data, certification, workflow, customer interface, architecture decision, physical site, supply allocation, installed base, service loop, or operating permission?
+
+A control point is not the same as “pricing power.”
+A control point is a concrete reason why another participant cannot easily bypass the firm or category.
+
+Examples:
+- ownership of a qualified process,
+- control of a software workflow,
+- access to constrained land or grid connection,
+- installed base requiring certified maintenance,
+- integration with a platform architecture,
+- compliance approval,
+- field reliability data,
+- proprietary tooling,
+- model-specific optimization,
+- supply allocation during shortage.
+
+6. BUSINESS-MODEL TRANSLATION
+
+Translate the mechanism into the business model that captures it.
+
+Ask:
+Is the value captured through component sales, system sales, NRE plus volume production, usage-based pricing, subscription, leasing, capacity rental, regulated return, maintenance, spare parts, certification, managed service, marketplace fee, data monetization, or platform ecosystem control?
+
+Do not say “better business model.”
+Explain why that model captures the capital flow created by the sector change.
+
+Example:
+If the market is shifting from buying machines to buying uptime, the durable value may move from equipment sales to maintenance contracts, remote diagnostics, spare parts, and guaranteed availability.
+
+7. WINNER / LOSER ARCHETYPE DEDUCTION
+
+Do not merely say “leaders win.”
+Identify archetypes.
+
+Ask:
+Which type of firm becomes structurally more important?
+Which type becomes structurally weaker?
+Who benefits in the early phase?
+Who benefits in the standardized phase?
+Who gets bypassed when the customer internalizes knowledge?
+Who gets commoditized when reference designs stabilize?
+
+Useful archetypes:
+- standard owner,
+- platform prime,
+- qualified process supplier,
+- system integrator,
+- installed-base service provider,
+- commodity assembler,
+- interchangeable component vendor,
+- compliance gatekeeper,
+- local regulated operator,
+- scarce-site owner,
+- data-layer owner,
+- maintenance-loop owner,
+- customer-facing workflow owner,
+- vendor exposed only to the first installation wave.
+
+8. SUBSTITUTION AND COMMODITIZATION PATH
+
+For each insight, ask how the mechanism can break.
+
+What could bypass this layer?
+What could make the supplier replaceable?
+What could move value upstream or downstream?
+What could turn engineering work into a reference design?
+What could move value from hardware to software or from software to infrastructure?
+What could be internalized by the customer?
+
+Do not write “pricing pressure.”
+Write the cause of commoditization.
+
+Examples:
+- open standards reduce dependence on a proprietary vendor,
+- hyperscalers dual-source the component,
+- customers internalize integration,
+- software reduces hardware intensity,
+- a new architecture avoids the constraint,
+- regulation forces a local supplier into the chain,
+- reference designs remove the need for custom engineering.
+
+9. MACRO / REGULATION / GEOPOLITICS FILTER
+
+Use macro only when it changes the mechanism.
+
+Do not write generic macro comments.
+
+Relevant macro mechanisms include:
+
+- grid access,
+- permitting queues,
+- energy price and availability,
+- localization of supply chains,
+- export controls,
+- industrial policy,
+- defense replenishment cycles,
+- data sovereignty,
+- reimbursement pathways,
+- utility regulation,
+- tariff walls,
+- local-content rules,
+- capital cost only when it changes infrastructure ownership or leasing economics,
+- labor scarcity when it changes automation adoption,
+- raw material concentration when it changes supply security.
+
+The record should explain how the macro factor changes deployment, ownership, substitution, supply, or capital routing.
+
+10. PORTFOLIO POSITIONING RELEVANCE
+
+Each record should help future portfolio thinking, without making a recommendation.
+
+Ask:
+What kind of exposure does this insight make more valuable?
+What kind of exposure is only a superficial proxy?
+Which part of the value chain should be studied more carefully?
+Which companies might be false beneficiaries because they are near the theme but not near the control point?
+Which companies might be hidden beneficiaries because they control an enabling layer?
+
+Do not say “buy” or “sell.”
+Write the sector understanding that would later help decide where portfolio exposure should or should not sit.
+
+------------------------------------------------------------
+ANTI-REPETITION RULE
+------------------------------------------------------------
+
+Do not create multiple records that say the same thing in different sectors.
+
+Before final output, compare all records.
+
+If two records share the same underlying mechanism, merge them or keep only the sharper version.
+
+Each record must have a distinct reason to exist.
+
+Acceptable differences:
+- one record explains memory hierarchy,
+- one explains data center power sequencing,
+- one explains software workflow capture,
+- one explains defense replenishment,
+- one explains robotics actuator economics.
+
+Unacceptable repetition:
+- three records saying “AI infrastructure needs power and cooling,”
+- three records saying “HBM is important,”
+- three records saying “qualified suppliers win,”
+- three records saying “backlog does not equal value,”
+- several records that only rename the same bottleneck.
+
+If the insight applies across multiple sectors, choose the sector where the mechanism is most concrete and most reusable.
+
+------------------------------------------------------------
+SPECIFICITY RULE
+------------------------------------------------------------
+
+Every record must contain concrete sector nouns.
+
+Bad nouns:
+- demand,
+- opportunity,
+- growth,
+- execution,
+- quality,
+- visibility,
+- exposure,
+- TAM,
+- moat,
+- upside,
+- tailwind,
+- bottleneck without naming the bottleneck.
+
+Good nouns:
+- HBM bandwidth,
+- KV cache,
+- interposer,
+- substrate,
+- probe card,
+- retimer,
+- active electrical cable,
+- optical circuit switch,
+- grid interconnection,
+- transformer,
+- switchgear,
+- UPS,
+- CDU,
+- actuator,
+- reducer,
+- servo drive,
+- sensor fusion,
+- safety case,
+- reimbursement code,
+- claims workflow,
+- munitions stockpile,
+- fire-control software,
+- export license,
+- data sovereignty,
+- permitting queue,
+- regulated asset base,
+- installed-base maintenance.
+
+Do not use sophisticated words to hide a generic thought.
+Use concrete objects, processes, decision rights, and economic flows.
+
+------------------------------------------------------------
+SOURCE DISCIPLINE
+------------------------------------------------------------
+
+Use only knowledge supported by the article, the conversation, or reasonable deduction from them.
+
+Do not invent a new sector thesis unrelated to the source material.
+Do not add generic industry facts just because they sound plausible.
+Do not turn one company detail into a broad sector rule unless the mechanism is reusable.
+
+If the article provides only a narrow event, extract one or two precise mechanisms instead of forcing many records.
+
+The record should preserve the central insight of the source event.
+
+------------------------------------------------------------
+OUTPUT FORMAT
+------------------------------------------------------------
+
+Return only a JSON array.
+
+Do not use markdown.
+Do not add commentary.
+Do not add explanations.
+Do not add metadata.
+Do not add IDs.
+Do not add dates.
+Do not add source fields.
+Do not add tickers as separate fields.
+Do not use nested structures.
+Do not use bullet points inside "opis".
+
+Each record must have exactly this structure:
 
 {
   "sektor": "...",
@@ -6489,432 +6883,196 @@ Każdy rekord ma dokładnie taki kształt:
   "opis": "..."
 }
 
-Nie dodawaj innych pól.
-Nie dodawaj id.
-Nie dodawaj stage.
-Nie dodawaj generated_by.
-Nie dodawaj min_opis_chars.
-Nie dodawaj source_material_id.
-Nie dodawaj source_run_id.
-Nie dodawaj links.
-Nie dodawaj dat.
-Nie dodawaj tickera jako osobnego pola.
-Nie twórz zagnieżdżonych struktur.
-Nie używaj list w polu opis.
+All values must be written in Polish.
 
-Warstwa zapisu dopisze metadane techniczne poza modelem, jeśli są potrzebne.
+The field names must remain exactly:
+- sektor
+- podsektor
+- opis
 
 ------------------------------------------------------------
-FORMAT ODPOWIEDZI
+FIELD: sektor
 ------------------------------------------------------------
 
-Zwróć wyłącznie finalną tablicę JSON bez markdownu, bez komentarza i bez tekstu przed ani po JSON:
+"sektor" must be a real economic sector or investment industry.
+
+Good examples:
+- Półprzewodniki
+- Infrastruktura chmurowa
+- Infrastruktura centrów danych
+- Infrastruktura sieciowa
+- Sprzęt elektryczny
+- Infrastruktura energetyczna
+- Usługi użyteczności publicznej
+- Automatyka przemysłowa
+- Robotyka
+- Obronność
+- Lotnictwo i kosmos
+- Oprogramowanie
+- Ochrona zdrowia
+- Infrastruktura finansowa
+- Produkcja przemysłowa
+- Chemikalia
+- Logistyka
+- Platformy konsumenckie
+
+Bad examples:
+- Fizyczne wąskie gardła tworzą wartość
+- AI zjada compute i energię
+- Suwerenność jest ważniejsza niż efektywność
+- Jakość marży decyduje o zwycięzcach
+- Backlog musi się skonwertować
+- Głębokie value compoundery
+- Świetne biznesy z opcjonalnością
+
+If a theme is important, mention it naturally in "opis"; do not use it as "sektor".
+
+------------------------------------------------------------
+FIELD: podsektor
+------------------------------------------------------------
+
+"podsektor" must name the specific part of the value chain, technical layer, business-model transition, deployment sequence, or sector mechanism.
+
+Good examples:
+- HBM / hierarchia pamięci i kwalifikacja platformowa
+- Packaging AI / ograniczenia substratów i interposerów
+- Sieci AI / architektura scale-up kontra scale-out
+- Zasilanie centrów danych / kolejność wdrożenia od sieci do racka
+- Chłodzenie cieczą / gęstość cieplna i pętla serwisowa
+- Infrastruktura chmurowa / wynajem kontra własność mocy obliczeniowej
+- Robotyka / stos aktuatorów i precyzyjne reduktory
+- Robotyka / software autonomii i safety case
+- Obronność / cykl uzupełniania amunicji
+- Obronność / łańcuch sensor-to-shooter
+- Infrastruktura energetyczna / kolejki przyłączeń do sieci
+- Oprogramowanie / automatyzacja workflow i przechwycenie danych
+- Ochrona zdrowia / ścieżka refundacyjna i workflow kliniczny
+- Infrastruktura finansowa / routing płatności i warstwa compliance
+- Produkcja przemysłowa / komodytyzacja projektu referencyjnego
+
+Avoid subsector names that are financial checklists:
+- przechwycenie marży,
+- konwersja FCF,
+- jakość ROIC,
+- jakość backlogu,
+- ryzyko wyceny,
+- materialność wedge-to-core,
+- jakość zwrotów,
+- protokół potwierdzenia.
+
+If the earlier analysis used those ideas, translate them into a technical, operational, or economic mechanism.
+
+------------------------------------------------------------
+FIELD: opis
+------------------------------------------------------------
+
+"opis" must be one compact Polish paragraph.
+
+It should usually be 3–6 sentences.
+
+It should usually contain:
+
+- the central sector mechanism,
+- the deployment or adoption sequence,
+- the capital flow or budget shift,
+- the business model that captures the flow,
+- winner and loser archetypes,
+- the substitution or commoditization path,
+- macro/regulatory/geopolitical context if relevant.
+
+Do not force all seven elements into every record.
+Use the elements that make the record sharp and true.
+
+The paragraph should be concise but dense.
+It should not be a slogan.
+It should not be a mini-report.
+It should not be a checklist.
+
+Target length:
+- usually 500–1000 characters,
+- maximum 1300 characters unless the mechanism is unusually complex.
+
+------------------------------------------------------------
+NUMBER OF RECORDS
+------------------------------------------------------------
+
+Create only as many records as contain real, reusable sector intelligence.
+
+Usually create 3–7 records.
+Do not exceed 10 records unless the article and conversation clearly cover several unrelated sector mechanisms.
+
+It is better to return 3 excellent records than 10 generic records.
+
+Return [] if there is no reusable sector intelligence.
+
+------------------------------------------------------------
+QUALITY GATE BEFORE FINAL OUTPUT
+------------------------------------------------------------
+
+Before returning the JSON, silently check each record against these questions:
+
+1. Does it explain how the sector works, rather than how to value a stock?
+2. Is it anchored in the article or conversation?
+3. Does it contain concrete sector nouns?
+4. Does it identify a technical, economic, operational, regulatory, or macro mechanism?
+5. Does it explain a capital flow, deployment sequence, business model, or control point?
+6. Does it distinguish likely winners from likely losers at the archetype level?
+7. Would it help future portfolio positioning?
+8. Is it non-duplicative versus the other records?
+9. Does it avoid generic finance language?
+10. Could a future analyst use it when studying a different company in the same sector?
+
+If any record fails, rewrite it or remove it.
+
+------------------------------------------------------------
+BAD OUTPUT EXAMPLE
+------------------------------------------------------------
 
 [
   {
-    "sektor": "...",
-    "podsektor": "...",
-    "opis": "..."
+    "sektor": "Półprzewodniki",
+    "podsektor": "HBM / renta pojemności",
+    "opis": "HBM jest ważnym wąskim gardłem AI, ale inwestorzy muszą monitorować marże, FCF, dyscyplinę capexu, konwersję backlogu i materialność segmentu, zanim uznają okazję za trwałą."
   }
 ]
 
-Jeśli nie ma żadnej wartościowej wiedzy sektorowej, zwróć pustą tablicę:
-
-[]
-
-------------------------------------------------------------
-DEFINICJA POLA "sektor"
-------------------------------------------------------------
-
-Pole "sektor" musi być realnym sektorem gospodarki lub branżą inwestycyjną, a nie kategorią filozofii inwestycyjnej.
-
-Dobre wartości:
-- Semiconductors
-- Industrial Automation
-- Energy Infrastructure
-- Defense
-- Software
-- Robotics
-- Chemicals
-- Healthcare
-- Financial Infrastructure
-- Aerospace
-- Manufacturing
-
-Złe wartości:
-- Fizyczne waskie gardla dyktuja wartosc
-- AI pozera compute, energie i robotyke
-- Suwerennosc jest wazniejsza niz efektywnosc
-- Zaufanie, zdrowie i rzadkosc utrzymuja premie
-
-Jeśli kategoria tematyczna jest ważna, wpisz ją naturalnie w polu "opis", ale nie używaj jej jako "sektor".
+Why this is bad:
+It is a finance checklist. It does not explain memory hierarchy, platform qualification, customer architecture, capital routing, deployment order, or winner and loser archetypes.
 
 ------------------------------------------------------------
-DEFINICJA POLA "podsektor"
+GOOD OUTPUT EXAMPLE
 ------------------------------------------------------------
 
-Pole "podsektor" ma wskazywać realny podsektor, konkretny punkt łańcucha wartości albo przekrojową regułę sektorową.
-
-Dobre wartości:
-- ABF substrates / qualified materials
-- AI packaging / process chemistry
-- AI packaging / contract economics
-- AI packaging / non-flow rules
-- AI packaging / supply response
-- AI packaging / wedge-to-core materiality
-- HBM test / probe cards
-- Advanced packaging / metrology
-- Robotics / precision reducers
-- Robotics / actuator modules
-- Defense / munition production capacity
-- Energy infrastructure / grid interconnection
-- Software / workflow automation
-
-Jeżeli rekord dotyczy reguły przekrojowej, nazwij podsektor jako:
-
-[obszar] / [typ reguły]
-
-Przykłady:
-- AI packaging / contract economics
-- AI packaging / non-flow rules
-- AI packaging / supply response
-- HBM test / proof protocol
-- Robotics reducers / wedge-to-core risk
-- Grid infrastructure / permitting bottlenecks
-
-------------------------------------------------------------
-LICZBA REKORDÓW
-------------------------------------------------------------
-
-Twórz tylko tyle rekordów, ile zawiera realną, wielokrotnego użytku wiedzę sektorową.
-
-Zwykle wystarczy 3–7 rekordów.
-Nie przekraczaj 10 rekordów, chyba że analiza obejmuje kilka wyraźnie różnych podsektorów.
-Nie twórz rekordu tylko dlatego, że informacja brzmi ważnie.
-Nie twórz rekordu, który jest tylko streszczeniem spółki.
-
-Twórz rekord tylko wtedy, gdy opis pomaga odróżnić dobrą firmę od słabej firmy w tym sektorze.
-
-------------------------------------------------------------
-JAKI MA BYĆ OPIS
-------------------------------------------------------------
-
-Pole "opis" ma mieć 4–8 zdań.
-Ma być po polsku.
-Ma być gęste informacyjnie.
-Ma opisywać proces ekonomiczny, a nie hasło sektorowe.
-Ma pokazywać, gdzie pieniądz zamienia się w trwałą marżę, FCF i ROIC, a gdzie tylko przepływa przez firmę albo omija akcjonariusza.
-
-Opis nie ma być raportem.
-Opis nie ma być listą.
-Opis nie ma być decyzją inwestycyjną.
-Opis ma być zapisem reguły ekonomicznej, którą można wykorzystać przy kolejnej spółce.
-
-Dobry opis powinien zawierać co najmniej 4 z poniższych składników, jeśli są dostępne w analizie:
-
-1. Technical forcing mechanism:
-   co technicznie, operacyjnie albo regulacyjnie zmusza klienta do wydatku.
-
-2. Payer vs spec owner:
-   kto formalnie płaci, a kto technicznie wymusza zakup, kwalifikację albo utrzymanie dostawcy.
-
-3. Income chain:
-   kto wystawia fakturę, kto zatrzymuje marżę, kto ponosi capex, kto finansuje working capital.
-
-4. Bypass path:
-   jak klient, konkurent albo rynek może obejść dostawcę.
-
-5. Supply response:
-   czy podaż może szybko odpowiedzieć i skompresować ceny.
-
-6. Customer bargaining power:
-   czy klient może przechwycić ekonomię przez ceny, rezerwację mocy, customer-funded capex, długie terminy płatności albo volume commitments.
-
-7. Service tail / repeatability:
-   czy przychód jest jednorazową falą capexu, czy ma replacement cycle, service, consumables, renewal, installed-base economics albo repeat orders.
-
-8. Segment materiality and disclosure risk:
-   czy segment jest widoczny i materialny wobec całej spółki, czy jest ukryty, mały albo rozmyty.
-
-9. Non-flow / red flags:
-   gdzie kapitał nie dotrze do akcjonariusza mimo wzrostu sektora.
-
-------------------------------------------------------------
-NIE CHCEMY
-------------------------------------------------------------
-
-Nie twórz opisów typu:
-- "HBM jest ważny dla AI."
-- "Advanced packaging będzie rosnąć."
-- "Robotyka potrzebuje komponentów."
-- "Spółki z ekspozycją na ten trend mogą korzystać."
-- "Sektor ma duży TAM."
-- "To jest ciekawy rynek."
-
-To są ogólniki, nie wiedza inwestycyjna.
-
-Nie pisz decyzji spółkowej jako wiedzy sektorowej.
-Nie pisz "spółka jest WATCH" jako głównego insightu.
-Nie używaj wyceny jako centrum rekordu.
-Nie powtarzaj pełnej analizy.
-Nie twórz opisów, które są tylko ładnym streszczeniem bez reguły klasyfikacyjnej.
-
-Nie używaj w tym outputcie:
-- Bear_TOTAL
-- Base_TOTAL
-- Bull_TOTAL
-- DCF
-- WACC
-- implied CAGR
-- price target
-- current price
-- market cap
-- EV/EBIT
-- valuation multiple
-- asymmetry ratio
-- entry price
-
-Ten etap nie służy do zapisywania liczb wyceny.
-Jeżeli liczba operacyjna z wcześniejszej analizy jest absolutnie kluczowa dla zrozumienia mechanizmu, możesz jej użyć, ale domyślnie opis ma być jakościowy i ekonomiczny.
-
-------------------------------------------------------------
-CHCEMY
-------------------------------------------------------------
-
-Chcemy opisów, które pokazują:
-- gdzie powstaje przymus wydatku,
-- kto formalnie płaci,
-- kto technicznie wymusza specyfikację,
-- jaki typ faktury pojawia się w realnym świecie,
-- kto ma prawo do income, a kto tylko do revenue,
-- gdzie marża jest chroniona,
-- gdzie wzrost jest pass-through,
-- gdzie capex i working capital zjadają FCF,
-- czy customer-funded capex pomaga dostawcy, czy oddaje ekonomię klientowi,
-- który bottleneck jest trwały, a który tylko opóźnia dostawy,
-- jak klient może obejść dostawcę,
-- jak szybko supply response może zabić pricing,
-- jaki dowód potwierdza mechanizm,
-- kiedy revenue growth przechodzi w margin / FCF / ROIC,
-- kiedy segment może zmienić Core całej spółki,
-- kiedy teza jest tylko overlayem,
-- kiedy insight wolno przenieść na kolejną spółkę,
-- kiedy insightu nie wolno przenosić mimo podobnych słów sektorowych.
-
-------------------------------------------------------------
-EKONOMICZNA LOGIKA
-------------------------------------------------------------
-
-Myśl o sektorze jak o rzece kapitału.
-
-Pieniądz wypływa od klienta, bo pojawia się techniczny, produkcyjny, regulacyjny, logistyczny albo finansowy przymus wydatku. Następnie przepływa przez kontrakty, faktury, dostawców, prime contractorów, integratorów, capacity ownerów, dostawców materiałów, dostawców chemii, sprzętu, testu, software’u albo usług.
-
-W jednych miejscach zatrzymuje się jako marża i FCF. W innych przepływa dalej, zostaje oddany klientowi przez pricing, znika w capexie, zapasach, working capital, yield ramp, regulacji, pass-through albo fixed-price risk.
-
-Twoim zadaniem jest zapisać miejsca, w których rzeka kapitału:
-- naprawdę osadza się jako wartość dla akcjonariusza,
-- tylko przepływa przez firmę,
-- omija firmę mimo narracyjnej ekspozycji,
-- albo może z czasem zmienić bazową ekonomię całego biznesu.
-
-------------------------------------------------------------
-ROZRÓŻNIAJ FAKTURĘ OD TECHNICZNEGO ŹRÓDŁA BOTTLENECKU
-------------------------------------------------------------
-
-Invoice item to to, za co klient faktycznie płaci.
-Technical bottleneck to to, co sprawia, że faktura jest konieczna albo cenna.
-
-Nie zapisuj wewnętrznych kroków procesu jako osobnych faktur, jeśli klient faktycznie kupuje gotowy produkt, usługę, qualified capacity albo zatwierdzony materiał.
-
-Przykład słabszy:
-"Klient płaci za build-up, laser vias, plating, test elektryczny i warpage screening."
-
-Przykład lepszy:
-"Klient płaci za kwalifikowane wysokowarstwowe substraty ABF / FC-BGA i dostęp do pojemności produkcyjnej, a techniczna trudność po stronie dostawcy wynika z build-up process, laser vias, plating uniformity, testu elektrycznego, warpage control i yield ramp."
-
-To rozróżnienie jest ważne, bo klient może płacić za produkt końcowy albo qualified capacity, a nie za każdy wewnętrzny krok procesu jako osobną linię faktury.
-
-------------------------------------------------------------
-UWZGLĘDNIAJ PAYER VS SPEC OWNER
-------------------------------------------------------------
-
-Jeżeli to możliwe, opisuj różnicę między payerem a spec ownerem.
-
-Payer to podmiot formalnie płacący fakturę.
-Spec owner to funkcja organizacyjna lub zespół techniczny, który wymusza wybór dostawcy, kwalifikację, utrzymanie dostawcy albo parametry produktu.
-
-W sektorach technicznych formalny zakup może przechodzić przez procurement, ale realny gate często kontrolują:
-- process engineering,
-- packaging engineering,
-- yield engineering,
-- reliability engineering,
-- production ramp team,
-- quality team,
-- safety / compliance team,
-- system architecture,
-- customer qualification team.
-
-To jest ważne, bo supplier może mieć słabą pozycję wobec procurementu, ale silną pozycję wobec inżynierii procesu, jeśli zmiana dostawcy zwiększa ryzyko yield, opóźnień, rekwalifikacji albo awarii systemu.
-
-Jeśli nie wiadomo, kto jest spec ownerem, nie wymyślaj konkretnej jednostki. Napisz ogólnie, która funkcja prawdopodobnie kontroluje specyfikację, albo pomiń ten element.
-
-------------------------------------------------------------
-UWZGLĘDNIAJ BYPASS PATH
-------------------------------------------------------------
-
-Każdy opis, w którym występuje bottleneck albo qualification, powinien jeśli to możliwe wskazać bypass path.
-
-Bypass path oznacza sposób, w jaki klient, konkurent albo rynek może ominąć dostawcę lub osłabić jego pricing power.
-
-Przykłady bypass path:
-- dual-source,
-- alternatywny materiał,
-- inny zakwalifikowany vendor,
-- redesign produktu,
-- process workaround,
-- internalization przez klienta,
-- użycie istniejących narzędzi,
-- szybszy supply response konkurencji,
-- customer-funded capacity z preferencyjnymi cenami.
-
-Jeśli bypass path jest łatwy, bottleneck może być prawdziwy operacyjnie, ale słaby inwestycyjnie.
-
-------------------------------------------------------------
-UWZGLĘDNIAJ SUPPLY RESPONSE
-------------------------------------------------------------
-
-Opis powinien, jeśli to możliwe, powiedzieć, czy supply response jest szybki, średni czy wolny jakościowo.
-
-Nie trzeba podawać liczby miesięcy, jeśli jej nie ma.
-Wystarczy wyjaśnić, czy konkurencja może łatwo zwiększyć podaż i skompresować ceny.
-
-Zasada:
-- jeśli supply response jest szybki, bottleneck może nie chronić marży,
-- jeśli supply response wymaga kwalifikacji, specjalistycznego know-how, yield learning albo customer approval, scarcity może być trwalsze,
-- jeśli supply response wymaga ciężkiego capexu, może powstać najpierw scarcity, a później overbuild i spadek ROIC.
-
-Opis powinien pokazywać nie tylko, czy bottleneck istnieje, ale czy jest inwestycyjnie trwały.
-
-------------------------------------------------------------
-UWZGLĘDNIAJ CUSTOMER BARGAINING POWER
-------------------------------------------------------------
-
-Uwzględniaj siłę negocjacyjną klienta.
-
-W wielu sektorach klient może potrzebować dostawcy, ale nadal przechwycić część ekonomii przez:
-- preferencyjne ceny,
-- capacity reservation,
-- volume commitments,
-- customer-funded capex,
-- długie terminy płatności,
-- presję na marżę,
-- wymóg zapasów,
-- dual sourcing,
-- przeniesienie ryzyka yield albo delivery na dostawcę.
-
-Customer-funded capex nie jest automatycznie pozytywny.
-Może zmniejszyć ryzyko finansowania, ale oddać ekonomię klientowi.
-
-------------------------------------------------------------
-UWZGLĘDNIAJ SERVICE TAIL I DURATION OF DEMAND
-------------------------------------------------------------
-
-Dla equipment, metrology, test, software i installed-base businesses opis powinien rozróżniać jednorazową falę capexu od trwałej ekonomii.
-
-Szukaj:
-- service tail,
-- replacement cycle,
-- consumables,
-- installed-base lock-in,
-- renewal,
-- repeat orders,
-- software attach,
-- maintenance,
-- next-generation upgrade cycle.
-
-Jeżeli nie ma service tail ani replacement cycle, equipment wedge zwykle jest falą, nie perpetuity.
-Jeżeli kolejne generacje technologii wymuszają powtarzalne zakupy, wedge może zacząć wyglądać jak Core.
-
-------------------------------------------------------------
-UWZGLĘDNIAJ SEGMENT DISCLOSURE RISK
-------------------------------------------------------------
-
-Opis powinien wskazywać ryzyko rozmycia lub braku widoczności segmentu, jeśli insight dotyczy szerokiej spółki lub konglomeratu.
-
-Jeśli segment jest mały, niedisclosed, połączony z innymi produktami albo ma inną marżę niż reszta firmy, nie traktuj ekspozycji jako stock-material bez dowodu.
-
-W takich sytuacjach spółka może być:
-- thesis monitor,
-- benchmark,
-- proof watch,
-ale niekoniecznie candidate stock.
-
-Nie myl prawdziwości mechanizmu sektorowego z materialnością dla akcji.
-
-------------------------------------------------------------
-DODAJ REGUŁĘ "CZEGO NIE ROBIĆ"
-------------------------------------------------------------
-
-Każdy rekord powinien, jeśli to możliwe, zawierać jedną regułę "czego nie robić".
-
-Przykłady:
-- Nie kupować ogólnej ekspozycji na advanced packaging bez dowodu segmentowej materialności i FCF conversion.
-- Nie traktować design win jako przychodu.
-- Nie traktować fali zamówień equipment jako perpetuity bez service tail.
-- Nie zakładać, że customer-funded capex jest dobry, jeśli klient przejmuje ekonomię przez ceny lub capacity reservation.
-- Nie liczyć całego thesis-linked revenue jako nowego wedge, jeśli jest już w Revenue0.
-- Nie traktować regulatory delay jako moat, jeśli można go rozwiązać procesowo.
-- Nie kupować capacity ownera tylko dlatego, że ma największy revenue pool.
-
-------------------------------------------------------------
-RODZAJE MYŚLI, KTÓRE MOGĄ POJAWIĆ SIĘ W OPISACH
-------------------------------------------------------------
-
-Nie twórz osobnych pól dla tych rodzajów. To są wskazówki, co może znaleźć się w tekście.
-
-1. Techniczny przymus wydatku.
-2. Income chain.
-3. Ekonomia kontraktu.
-4. Bottleneck i scarcity.
-5. Archetyp biznesowy.
-6. Proof protocol.
-7. Non-flow red flags.
-8. Wedge-to-core.
-9. Materialność dla akcji.
-10. Role spółek.
-11. Reguła transferu.
-
-------------------------------------------------------------
-FINALNA KONTROLA
-------------------------------------------------------------
-
-Przed zapisem sprawdź każdy rekord:
-
-1. Czy "sektor" jest prawdziwym sektorem, a nie tematyczną etykietą?
-2. Czy "podsektor" jest realnym podsektorem lub jasną regułą przekrojową?
-3. Czy opis mówi coś więcej niż "sektor rośnie"?
-4. Czy opis pomaga rozróżnić firmy?
-5. Czy wiadomo, gdzie powstaje przymus wydatku?
-6. Czy wiadomo, kto formalnie płaci i kto technicznie wymusza zakup?
-7. Czy wiadomo, kto może zatrzymać marżę?
-8. Czy wiadomo, gdzie kapitał może nie przepłynąć?
-9. Czy opis wskazuje bypass path albo supply response, jeśli są istotne?
-10. Czy opis uwzględnia customer bargaining power, jeśli klient jest silny?
-11. Czy opis rozróżnia jednorazową falę od trwałej ekonomii?
-12. Czy opis wskazuje ryzyko segment disclosure / materiality, jeśli spółka jest szeroka?
-13. Czy wiadomo, jaki dowód potwierdza mechanizm?
-14. Czy opis unika wyceny i liczb giełdowych?
-15. Czy opis da się wykorzystać przy kolejnej spółce?
-16. Czy opis nie myli invoice item z technicznym krokiem procesu?
-17. Czy opis nie przypisuje spec ownera zbyt konkretnie bez dowodu?
-
-Jeśli rekord nie przechodzi tych testów, usuń go albo przepisz.
+[
+  {
+    "sektor": "Półprzewodniki",
+    "podsektor": "HBM / hierarchia pamięci i kwalifikacja platformowa",
+    "opis": "Popyt na HBM powstaje wyżej w architekturze akceleratora, a nie w ogólnym popycie na pamięć: długość kontekstu modelu, KV cache, przepustowość na wat i topologia pakietu określają, ile pamięci musi znajdować się obok compute. Sekwencja wdrożenia biegnie od architektury modelu do projektu akceleratora, potem przez kwalifikację stacku HBM, packaging, test i ramp platformy. Kapitał przesuwa się z budżetów compute hyperscalerów do dostawców już zakwalifikowanych w cyklu platformowym. Wygrywają dostawcy pamięci wcześnie osadzeni przy zespołach packagingu i niezawodności, a słabsi dostawcy DRAM pozostają poza socketem albo są wymieniani, gdy kolejna generacja platformy zmienia kwalifikację."
+  },
+  {
+    "sektor": "Infrastruktura centrów danych",
+    "podsektor": "Zasilanie centrów danych / kolejność wdrożenia od sieci do racka",
+    "opis": "Wydatki na centra danych AI podążają fizyczną sekwencją, zanim GPU mogą być użyteczne: wybór lokalizacji, przyłączenie do sieci, transformatory, switchgear, UPS, dystrybucja zasilania, chłodzenie, integracja racków i dopiero potem wykorzystanie compute. Kapitał przesuwa się więc z abstrakcyjnych budżetów ekspansji chmury do lokalnych warstw infrastruktury, które decydują, czy klaster da się faktycznie zasilić. Wygrywają właściciele rzadkiego dostępu do przyłączeń, sprzętu wysokiego napięcia, projektowania termicznego i know-how uruchomieniowego, a słabsi dostawcy wymiennych komponentów tracą znaczenie, gdy kupujący standaryzuje projekt kampusu. Ograniczeniem makro jest lokalna dostępność energii i permitting, a nie sam popyt na AI."
+  },
+  {
+    "sektor": "Produkcja przemysłowa",
+    "podsektor": "Integracja serwerów AI / komodytyzacja projektu referencyjnego",
+    "opis": "Wczesne rampy serwerów AI premiują integratorów, którzy potrafią składać niestabilne konfiguracje, rozwiązywać problemy termiczne i sieciowe oraz koordynować rzadkie komponenty pod presją czasu. Gdy platformy dojrzewają, klient zamraża projekty referencyjne, dual-source'uje dostawców i przenosi więcej pracy do rutyn procurementu. Kapitał przesuwa się wtedy z customowej integracji w stronę powtarzalnej produkcji, logistyki, testu i wsparcia terenowego. Wygrywają firmy pozostające blisko kwalifikacji, serwisu i operacji lifecycle, a czyści assemblerzy tracą strategiczną wartość, gdy projekt staje się standardowy i klient może przenosić wolumen między fabrykami."
+  }
+]
 
 ------------------------------------------------------------
 FINAL OUTPUT RULE
 ------------------------------------------------------------
 
-Finalny output modelu musi być samą tablicą JSON:
+The final answer must be only the JSON array.
+
+No markdown.
+No commentary.
+No explanation.
+No text before or after the JSON.
+
+Use this exact format:
 
 [
   {
@@ -6923,12 +7081,6 @@ Finalny output modelu musi być samą tablicą JSON:
     "opis": "..."
   }
 ]
-
-Żadnych innych pól.
-Żadnych komentarzy.
-Żadnego markdownu.
-Żadnych metadanych technicznych.
-Nie wywołuj MCP w tym etapie.
 --- PROMPT SEPARATOR ---
 STAGE 17 — MCP WRITE SECTOR MEMORY ROWS
 Zadanie: wstaw dokładnie wygenerowany JSON Stage 16 do pamięci sektorowej przez MCP Iskierka.
