@@ -238,11 +238,11 @@ function buildContext() {
 async function main() {
   const context = buildContext();
   const sourceText = 'A'.repeat(50000);
-  const result = await context.runManualSourceAnalysis(sourceText, 'Manual large source', 10);
+  const result = await context.runManualSourceAnalysis(sourceText, 'Manual large source', 20);
 
-  assert.strictEqual(result.queuedCount, 10);
+  assert.strictEqual(result.queuedCount, 20);
   assert.ok(context.captured, 'processArticles should be called');
-  assert.strictEqual(context.captured.tabs.length, 10);
+  assert.strictEqual(context.captured.tabs.length, 20);
   assert.strictEqual(context.captured.options.manualTextSources.length, 1);
   assert.strictEqual(context.captured.options.manualTextSources[0].text, sourceText);
   assert.ok(context.captured.options.manualTextSources[0].id.startsWith('manual-text-'));

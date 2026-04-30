@@ -143,6 +143,7 @@ let remoteRunnerConfigSnapshot = null;
 const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
 const REMOTE_INTAKE_FALLBACK_ORIGIN = 'https://iskierka-watchlist.duckdns.org';
 const REMOTE_INTAKE_PATH = '/iskra';
+const MANUAL_SOURCE_PREFILL_STORAGE_KEY = 'manual_source_prefill_draft';
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -218,6 +219,61 @@ function setRemoteRunnerStatus(text, isError = false) {
 
 function setRemoteIntakeStatus(text, isError = false) {
   setStatusElement(remoteIntakeStatus, text, isError);
+}
+
+function getManualSourcePrefillStorageArea() {
+  const storage = typeof chrome !== 'undefined' ? chrome.storage : null;
+  if (storage?.session) return storage.session;
+  if (storage?.local) return storage.local;
+  return null;
+}
+
+function setChromeStorage(area, payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      area.set(payload, () => {
+        const lastError = typeof chrome !== 'undefined' ? chrome.runtime?.lastError : null;
+        if (lastError) {
+          reject(new Error(lastError.message || 'storage_set_failed'));
+          return;
+        }
+        resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function readManualSourceClipboardText() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+  if (!clipboard?.readText) {
+    return { text: '', error: 'clipboard_unavailable' };
+  }
+  try {
+    const text = await clipboard.readText();
+    return { text: typeof text === 'string' ? text : '', error: '' };
+  } catch (error) {
+    return { text: '', error: error?.message || 'clipboard_read_failed' };
+  }
+}
+
+async function storeManualSourcePrefillDraft(text) {
+  const safeText = typeof text === 'string' ? text : '';
+  if (!safeText.trim()) return '';
+
+  const storageArea = getManualSourcePrefillStorageArea();
+  if (!storageArea) return '';
+
+  const token = `manual-source-prefill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await setChromeStorage(storageArea, {
+    [MANUAL_SOURCE_PREFILL_STORAGE_KEY]: {
+      token,
+      text: safeText,
+      createdAt: Date.now()
+    }
+  });
+  return token;
 }
 
 function compactRemoteIdentifier(rawValue, fallback = '') {
@@ -2019,6 +2075,47 @@ async function getActiveTabInCurrentWindow() {
   return tabs.length > 0 ? tabs[0] : null;
 }
 
+async function openManualSourceWindowFromPopup(button) {
+  if (!button) return;
+
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  button.textContent = 'Otwieram...';
+
+  let prefillToken = '';
+  const clipboardResult = await readManualSourceClipboardText();
+  if (clipboardResult.text.trim()) {
+    try {
+      prefillToken = await storeManualSourcePrefillDraft(clipboardResult.text);
+    } catch (error) {
+      console.warn('[manual-source] clipboard prefill storage failed:', error?.message || error);
+    }
+  }
+
+  try {
+    const activeTab = await getActiveTabInCurrentWindow();
+    const title = activeTab?.title || '';
+    const url = activeTab?.url || '';
+    const params = new URLSearchParams();
+    if (title) params.set('title', title);
+    if (url) params.set('url', url);
+    if (prefillToken) params.set('prefillToken', prefillToken);
+    const targetUrl = chrome.runtime.getURL(`manual-source.html${params.toString() ? `?${params.toString()}` : ''}`);
+
+    await chrome.windows.create({
+      url: targetUrl,
+      type: 'popup',
+      width: 800,
+      height: 600,
+    });
+    window.close();
+  } catch (error) {
+    setRunStatus(`Nie udalo sie otworzyc wklejania: ${error?.message || String(error)}.`, true);
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
 if (openRemoteIntakeBtn) {
   openRemoteIntakeBtn.addEventListener('click', async () => {
     const originalLabel = openRemoteIntakeBtn.textContent;
@@ -2114,22 +2211,7 @@ if (copyLatestInvestFinalResponseBtn) {
 const manualSourceBtn = document.getElementById('manualSourceBtn');
 if (manualSourceBtn) {
   manualSourceBtn.addEventListener('click', () => {
-    withActiveWindowContext(({ activeTab }) => {
-      const title = activeTab?.title || '';
-      const url = activeTab?.url || '';
-      const params = new URLSearchParams();
-      if (title) params.set('title', title);
-      if (url) params.set('url', url);
-      const targetUrl = chrome.runtime.getURL(`manual-source.html${params.toString() ? `?${params.toString()}` : ''}`);
-
-      chrome.windows.create({
-        url: targetUrl,
-        type: 'popup',
-        width: 800,
-        height: 600,
-      });
-      window.close();
-    });
+    void openManualSourceWindowFromPopup(manualSourceBtn);
   });
 }
 

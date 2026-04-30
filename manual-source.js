@@ -5,18 +5,18 @@ const sourceInput = document.getElementById('sourceInput');
 const pdfInput = document.getElementById('pdfInput');
 const pdfList = document.getElementById('pdfList');
 const providerStatus = document.getElementById('providerStatus');
-const instancesValue = document.getElementById('instancesValue');
-const decreaseBtn = document.getElementById('decreaseBtn');
-const increaseBtn = document.getElementById('increaseBtn');
+const instancePresetButtons = Array.from(document.querySelectorAll('[data-instances]'));
 const submitBtn = document.getElementById('submitBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 
-const MIN_INSTANCES = 1;
-const MAX_INSTANCES = 10;
+const DEFAULT_INSTANCES = 5;
+const ALLOWED_INSTANCE_COUNTS = new Set([5, 10, 20]);
+const MANUAL_SOURCE_PREFILL_STORAGE_KEY = 'manual_source_prefill_draft';
+const MANUAL_SOURCE_PREFILL_MAX_AGE_MS = 5 * 60 * 1000;
 const DEFAULT_CHUNK_SIZE = 512 * 1024;
 const PROVIDER_KEEPALIVE_INTERVAL_MS = 15000;
 
-let instances = 1;
+let instances = DEFAULT_INSTANCES;
 let queueActive = false;
 const providerId = `manual-pdf-provider-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 const pdfFileByToken = new Map();
@@ -26,6 +26,7 @@ let providerKeepaliveTimer = null;
 
 const urlParams = new URLSearchParams(window.location.search);
 const presetTitle = urlParams.get('title') || '';
+const prefillToken = urlParams.get('prefillToken') || '';
 if (presetTitle && !titleInput.value) {
   titleInput.value = presetTitle;
 }
@@ -58,10 +59,20 @@ function updateSubmitButton() {
   submitBtn.disabled = queueActive || (!hasText && !hasPdf);
 }
 
+function normalizeInstances(value) {
+  const parsed = Number(value);
+  if (!Number.isInteger(parsed)) return DEFAULT_INSTANCES;
+  return ALLOWED_INSTANCE_COUNTS.has(parsed) ? parsed : DEFAULT_INSTANCES;
+}
+
 function updateInstancesDisplay() {
-  instancesValue.textContent = instances;
-  decreaseBtn.disabled = instances <= MIN_INSTANCES;
-  increaseBtn.disabled = instances >= MAX_INSTANCES;
+  instancePresetButtons.forEach((button) => {
+    const buttonValue = normalizeInstances(button.dataset.instances);
+    const isActive = buttonValue === instances;
+    button.classList.toggle('is-active', isActive);
+    button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
+    button.disabled = queueActive;
+  });
 }
 
 function setQueueUiLocked(locked) {
@@ -70,10 +81,83 @@ function setQueueUiLocked(locked) {
   sourceInput.disabled = isLocked;
   pdfInput.disabled = isLocked;
   if (isLocked) {
-    decreaseBtn.disabled = true;
-    increaseBtn.disabled = true;
+    instancePresetButtons.forEach((button) => {
+      button.disabled = true;
+    });
   } else {
     updateInstancesDisplay();
+  }
+}
+
+function getManualSourcePrefillStorageArea() {
+  const storage = typeof chrome !== 'undefined' ? chrome.storage : null;
+  if (storage?.session) return storage.session;
+  if (storage?.local) return storage.local;
+  return null;
+}
+
+function readChromeStorage(area, keys) {
+  return new Promise((resolve, reject) => {
+    try {
+      area.get(keys, (result) => {
+        const lastError = typeof chrome !== 'undefined' ? chrome.runtime?.lastError : null;
+        if (lastError) {
+          reject(new Error(lastError.message || 'storage_get_failed'));
+          return;
+        }
+        resolve(result || {});
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+function removeChromeStorage(area, keys) {
+  return new Promise((resolve) => {
+    try {
+      area.remove(keys, () => resolve());
+    } catch (_) {
+      resolve();
+    }
+  });
+}
+
+async function hydrateClipboardPrefill() {
+  if (!prefillToken) return;
+
+  const storageArea = getManualSourcePrefillStorageArea();
+  if (!storageArea) {
+    setProviderStatus('Nie udalo sie odczytac tekstu ze schowka. Wklej recznie.', 'error');
+    return;
+  }
+
+  try {
+    const stored = await readChromeStorage(storageArea, [MANUAL_SOURCE_PREFILL_STORAGE_KEY]);
+    const draft = stored?.[MANUAL_SOURCE_PREFILL_STORAGE_KEY];
+    const draftToken = typeof draft?.token === 'string' ? draft.token : '';
+    const createdAt = Number.isInteger(draft?.createdAt) ? draft.createdAt : 0;
+    const isFresh = createdAt > 0 && Date.now() - createdAt <= MANUAL_SOURCE_PREFILL_MAX_AGE_MS;
+    const text = typeof draft?.text === 'string' ? draft.text : '';
+
+    if (draftToken !== prefillToken) {
+      return;
+    }
+
+    if (!isFresh || !text.trim()) {
+      await removeChromeStorage(storageArea, [MANUAL_SOURCE_PREFILL_STORAGE_KEY]);
+      return;
+    }
+
+    if (!sourceInput.value.trim()) {
+      sourceInput.value = text;
+      updateSubmitButton();
+      sourceInput.focus();
+      setProviderStatus('Wczytano tekst ze schowka.', 'success');
+    }
+    await removeChromeStorage(storageArea, [MANUAL_SOURCE_PREFILL_STORAGE_KEY]);
+  } catch (error) {
+    setProviderStatus(`Nie udalo sie odczytac schowka: ${error?.message || String(error)}.`, 'error');
   }
 }
 
@@ -308,18 +392,12 @@ function releasePdfProviderState(releaseMessage = '') {
 sourceInput.addEventListener('input', updateSubmitButton);
 pdfInput.addEventListener('change', syncPdfSelection);
 
-decreaseBtn.addEventListener('click', () => {
-  if (instances > MIN_INSTANCES) {
-    instances -= 1;
+instancePresetButtons.forEach((button) => {
+  button.addEventListener('click', () => {
+    if (queueActive) return;
+    instances = normalizeInstances(button.dataset.instances);
     updateInstancesDisplay();
-  }
-});
-
-increaseBtn.addEventListener('click', () => {
-  if (instances < MAX_INSTANCES) {
-    instances += 1;
-    updateInstancesDisplay();
-  }
+  });
 });
 
 submitBtn.addEventListener('click', async () => {
@@ -432,56 +510,60 @@ window.addEventListener('unload', () => {
   stopProviderKeepalive();
 });
 
-chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
-  if (!message || typeof message !== 'object') return false;
+const runtimeMessageApi = typeof chrome !== 'undefined' ? chrome.runtime?.onMessage : null;
+if (runtimeMessageApi?.addListener) {
+  runtimeMessageApi.addListener((message, sender, sendResponse) => {
+    if (!message || typeof message !== 'object') return false;
 
-  if (message.type === 'MANUAL_PDF_PROVIDER_READ_CHUNK') {
-    (async () => {
-      const result = await handlePdfChunkRead(message);
-      sendResponse(result);
-    })().catch((error) => {
-      sendResponse({
-        success: false,
-        error: error?.message || 'chunk_read_failed',
+    if (message.type === 'MANUAL_PDF_PROVIDER_READ_CHUNK') {
+      (async () => {
+        const result = await handlePdfChunkRead(message);
+        sendResponse(result);
+      })().catch((error) => {
+        sendResponse({
+          success: false,
+          error: error?.message || 'chunk_read_failed',
+        });
       });
-    });
-    return true;
-  }
+      return true;
+    }
 
-  if (message.type === 'MANUAL_PDF_PROVIDER_STATUS') {
-    if (message.providerId === providerId) {
-      const statusText = typeof message.message === 'string' ? message.message : '';
-      const status = typeof message.status === 'string' ? message.status : '';
-      if (statusText) {
-        if (status === 'failed') {
-          setProviderStatus(statusText, 'error');
-        } else if (status === 'completed') {
-          setProviderStatus(statusText, 'success');
-        } else {
-          setProviderStatus(statusText, 'info');
+    if (message.type === 'MANUAL_PDF_PROVIDER_STATUS') {
+      if (message.providerId === providerId) {
+        const statusText = typeof message.message === 'string' ? message.message : '';
+        const status = typeof message.status === 'string' ? message.status : '';
+        if (statusText) {
+          if (status === 'failed') {
+            setProviderStatus(statusText, 'error');
+          } else if (status === 'completed') {
+            setProviderStatus(statusText, 'success');
+          } else {
+            setProviderStatus(statusText, 'info');
+          }
         }
       }
+      if (typeof sendResponse === 'function') {
+        sendResponse({ success: true });
+      }
+      return false;
     }
-    if (typeof sendResponse === 'function') {
-      sendResponse({ success: true });
-    }
-    return false;
-  }
 
-  if (message.type === 'MANUAL_PDF_PROVIDER_RELEASE') {
-    if (message.providerId === providerId) {
-      const releaseMessage = typeof message.message === 'string' ? message.message : '';
-      releasePdfProviderState(releaseMessage);
+    if (message.type === 'MANUAL_PDF_PROVIDER_RELEASE') {
+      if (message.providerId === providerId) {
+        const releaseMessage = typeof message.message === 'string' ? message.message : '';
+        releasePdfProviderState(releaseMessage);
+      }
+      if (typeof sendResponse === 'function') {
+        sendResponse({ success: true });
+      }
+      return false;
     }
-    if (typeof sendResponse === 'function') {
-      sendResponse({ success: true });
-    }
-    return false;
-  }
 
-  return false;
-});
+    return false;
+  });
+}
 
 setQueueUiLocked(false);
 updateSubmitButton();
 updateInstancesDisplay();
+void hydrateClipboardPrefill();

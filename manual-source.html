@@ -122,7 +122,8 @@
 
     .instances-control {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
+      flex-wrap: wrap;
       gap: 12px;
       margin-bottom: 18px;
       padding: 12px;
@@ -134,22 +135,25 @@
       font-size: 14px;
       font-weight: 500;
       color: #333;
+      line-height: 36px;
     }
 
-    .instances-input-group {
+    .instances-presets {
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
     }
 
     .instances-btn {
-      width: 32px;
-      height: 32px;
+      min-width: 64px;
+      height: 36px;
       border: 1px solid #ddd;
       background: #fff;
       border-radius: 4px;
       cursor: pointer;
-      font-size: 16px;
+      font-size: 14px;
+      font-weight: 600;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -164,17 +168,15 @@
       background: #e0e0e0;
     }
 
-    .instances-btn:disabled {
-      opacity: 0.3;
-      cursor: not-allowed;
+    .instances-btn.is-active {
+      background: #111827;
+      border-color: #111827;
+      color: #fff;
     }
 
-    .instances-value {
-      font-size: 18px;
-      font-weight: 600;
-      color: #333;
-      min-width: 30px;
-      text-align: center;
+    .instances-btn:disabled {
+      opacity: 0.55;
+      cursor: not-allowed;
     }
 
     .info {
@@ -260,13 +262,13 @@
     </div>
 
     <div class="instances-control">
-      <span class="instances-label">Liczba instancji:</span>
-      <div class="instances-input-group">
-        <button class="instances-btn" id="decreaseBtn">-</button>
-        <span class="instances-value" id="instancesValue">1</span>
-        <button class="instances-btn" id="increaseBtn">+</button>
+      <span class="instances-label">Dodaj do kolejki:</span>
+      <div class="instances-presets" aria-label="Liczba instancji">
+        <button type="button" class="instances-btn is-active" data-instances="5" aria-pressed="true">5</button>
+        <button type="button" class="instances-btn" data-instances="10" aria-pressed="false">10</button>
+        <button type="button" class="instances-btn" data-instances="20" aria-pressed="false">20</button>
       </div>
-      <span class="info">(1-10; dla PDF mnozy kazdy plik)</span>
+      <span class="info">Dla PDF mnozy kazdy plik.</span>
     </div>
 
     <div class="buttons">

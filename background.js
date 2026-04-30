@@ -27822,7 +27822,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
     const mode = message?.mode === 'pdf' ? 'pdf' : 'text';
-    const normalizedInstances = Math.max(1, Math.min(10, Number.isInteger(message?.instances) ? message.instances : 1));
+    const normalizedInstances = normalizeManualInstances(message?.instances);
     console.log('[manual-source] MANUAL_SOURCE_SUBMIT:', {
       mode,
       titleLength: typeof message?.title === 'string' ? message.title.length : 0,
@@ -30996,7 +30996,7 @@ async function runAnalysis(options = {}) {
 
 // Funkcja uruchamiająca analizę z ręcznie wklejonego źródła
 function normalizeManualInstances(instances) {
-  return Math.max(1, Math.min(10, Number.isInteger(instances) ? instances : 1));
+  return Math.max(1, Math.min(20, Number.isInteger(instances) ? instances : 1));
 }
 
 function buildManualPdfPayload(fileName) {
