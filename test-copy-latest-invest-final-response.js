@@ -135,7 +135,7 @@ function buildVmContext(overrides = {}) {
     CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'www.chatgpt.com', 'chat.openai.com', 'www.chat.openai.com']),
     INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
     INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
-    PROMPTS_COMPANY: new Array(12).fill('prompt'),
+    PROMPTS_COMPANY: new Array(15).fill('prompt'),
     processRegistry: new Map(),
     normalizeWatchlistVerifyState(value) {
       return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -232,6 +232,13 @@ function buildVmContext(overrides = {}) {
       success: true,
       reason: 'saved',
       recoveryMode: 'replayed'
+    }),
+    extractLatestStage12InvestmentResponseFromTab: async () => ({
+      text: '',
+      contract: null,
+      scannedCount: 0,
+      sourceIndex: null,
+      reason: 'not_found'
     }),
     runCompletedProcessPersistenceRetry: async () => ({
       success: true,
@@ -861,6 +868,111 @@ async function testCopyLatestInvestFallsBackToDirectSaveWithoutProcess() {
   assert.ok(eventCalls.length > 0, 'copy flow should emit a telemetry event');
 }
 
+async function testCopyLatestInvestDirectSaveUsesStage12DomHistoryBeforeLastMessage() {
+  const eventCalls = [];
+  const saveCalls = [];
+  const stage12Json = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          spolka: 'Ajinomoto (2802.T:Tokyo)',
+          status_decyzji: 'WATCH',
+          teza_inwestycyjna: 'Valid Stage 12 JSON'
+        }
+      }
+    ]
+  });
+  let lastAssistantReadCount = 0;
+  const context = buildVmContext({
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    extractLatestStage12InvestmentResponseFromTab: async () => ({
+      text: stage12Json,
+      contract: {
+        valid: true,
+        kind: 'economist.response.v2'
+      },
+      scannedCount: 4,
+      sourceIndex: 2,
+      reason: 'economist_response_v2'
+    }),
+    extractLastAssistantResponseFromTab: async () => {
+      lastAssistantReadCount += 1;
+      return '[{"sektor":"ABF","podsektor":"Stage 13","opis":"not a Stage 12 record"}]';
+    },
+    buildResponseContractValidation(text) {
+      return {
+        valid: text === stage12Json,
+        kind: text === stage12Json ? 'economist.response.v2' : 'invalid'
+      };
+    },
+    reportCopyLatestInvestFinalResponseEvent(payload) {
+      eventCalls.push(payload);
+    },
+    saveResponse: async (...args) => {
+      saveCalls.push(args);
+      return {
+        success: true,
+        copyTrace: 'copy/stage12-dom-history',
+        dispatch: {
+          accepted: 1,
+          sent: 1,
+          failed: 0,
+          verifyState: 'http_accepted'
+        },
+        conversationAnalysis: {
+          conversationLogCount: 5
+        }
+      };
+    },
+    generateResponseId(prefix) {
+      return `${prefix}_stage12-test`;
+    },
+    formatDispatchUiSummary(dispatch) {
+      return dispatch && dispatch.accepted === 1 ? 'accepted=1' : '';
+    }
+  });
+
+  [
+    'resolveInvestCopyDomFallback',
+    'resolveCopyLatestInvestResponsePayload',
+    'copyLatestInvestFinalResponseForTarget'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.copyLatestInvestFinalResponseForTarget(
+    {
+      tabId: 17,
+      windowId: 5,
+      title: 'Invest Stage 12 History',
+      url: 'https://chatgpt.com/c/invest-stage12-history',
+      conversationUrl: 'https://chatgpt.com/c/invest-stage12-history',
+      process: null
+    },
+    {
+      origin: 'test-copy',
+      scope: 'latest',
+      tabReadTimeoutMs: 900
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.text, stage12Json);
+  assert.strictEqual(result.persistence.mode, 'direct_save');
+  assert.strictEqual(result.persistence.success, true);
+  assert.strictEqual(saveCalls.length, 1, 'manual copy should save the recovered Stage 12 JSON');
+  assert.strictEqual(saveCalls[0][0], stage12Json);
+  assert.strictEqual(saveCalls[0][5].selected_response_reason, 'manual_copy_stage12_dom_history');
+  assert.strictEqual(saveCalls[0][5].selected_response_prompt, 12);
+  assert.strictEqual(saveCalls[0][5].selected_response_stage_index, 11);
+  assert.strictEqual(lastAssistantReadCount, 0, 'copy flow should not read the last assistant message when Stage 12 JSON is found');
+  assert.ok(eventCalls.length > 0, 'copy flow should emit telemetry for Stage 12 history recovery');
+}
+
 async function testResolveCopyLatestInvestReturnsFinalProcessNotFoundWhenDomIsEmpty() {
   const context = buildVmContext({
     extractLastAssistantResponseFromTab: async () => '',
@@ -945,6 +1057,167 @@ async function testResolveCopyLatestInvestRetriesProcessDomFallbackAfterActivati
   assert.strictEqual(result.responseText, 'VALID FINAL RESPONSE');
   assert.strictEqual(prepareCalls, 1, 'process flow should activate the tab before retrying');
   assert.strictEqual(extractCalls, 2, 'process flow should retry DOM extraction after activation');
+}
+
+async function testResolveCopyLatestInvestPrefersStage12DomHistoryForProcessFallback() {
+  const stage12Json = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          spolka: 'Ajinomoto (2802.T:Tokyo)',
+          status_decyzji: 'WATCH',
+          teza_inwestycyjna: 'Valid Stage 12 JSON'
+        }
+      }
+    ]
+  });
+  let stage12ScanCalls = 0;
+  let lastAssistantReadCount = 0;
+  const context = buildVmContext({
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: false,
+      reason: 'invalid_final_response_contract'
+    }),
+    extractLatestStage12InvestmentResponseFromTab: async () => {
+      stage12ScanCalls += 1;
+      return {
+        text: stage12Json,
+        contract: {
+          valid: true,
+          kind: 'economist.response.v2'
+        },
+        scannedCount: 5,
+        sourceIndex: 3,
+        reason: 'economist_response_v2'
+      };
+    },
+    extractLastAssistantResponseFromTab: async () => {
+      lastAssistantReadCount += 1;
+      return '[{"sektor":"ABF","podsektor":"Stage 13","opis":"not a Stage 12 record"}]';
+    },
+    buildResponseContractValidation(text) {
+      return {
+        valid: text === stage12Json,
+        kind: text === stage12Json ? 'economist.response.v2' : 'invalid'
+      };
+    },
+    prepareTabForDetection: async () => {
+      throw new Error('activation should not be needed when Stage 12 JSON is already in DOM history');
+    }
+  });
+
+  [
+    'resolveInvestCopyDomFallback',
+    'resolveCopyLatestInvestResponsePayload'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context);
+  });
+
+  const result = await context.resolveCopyLatestInvestResponsePayload(
+    {
+      tabId: 43,
+      windowId: 10
+    },
+    {
+      id: 'run-stage12-history'
+    },
+    {
+      tabReadTimeoutMs: 900
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.responseText, stage12Json);
+  assert.strictEqual(result.resolutionMode, 'process_stage12_dom_history');
+  assert.strictEqual(result.fromDom, true);
+  assert.strictEqual(result.selectedPrompt, 12);
+  assert.strictEqual(result.selectedResponseReason, 'manual_copy_stage12_dom_history');
+  assert.strictEqual(result.processPatch.completedResponseText, stage12Json);
+  assert.strictEqual(stage12ScanCalls, 1, 'process fallback should scan assistant history once');
+  assert.strictEqual(lastAssistantReadCount, 0, 'process fallback should not use the last assistant text when Stage 12 JSON is found');
+}
+
+async function testReplayPreservesStage12CopySelectionMetadata() {
+  const saveCalls = [];
+  const stage12Json = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          spolka: 'Ajinomoto (2802.T:Tokyo)',
+          status_decyzji: 'WATCH',
+          teza_inwestycyjna: 'Valid Stage 12 JSON'
+        }
+      }
+    ]
+  });
+  const context = buildVmContext({
+    resolveCompletedProcessFinalResponseText: async () => ({
+      success: true,
+      responseText: stage12Json
+    }),
+    getCompletedProcessLocalSaveState: () => false,
+    hasCompletedProcessLocalSave: () => false,
+    extractResponseIdFromCopyTrace: () => '',
+    buildRestartReplayResponseId(runId, responseText, promptNumber) {
+      return `${runId}_p${promptNumber}_${responseText.length}`;
+    },
+    normalizeChatConversationUrl(value) {
+      return typeof value === 'string' ? value.trim() : '';
+    },
+    resolveSupportedSourceNameFromUrl() {
+      return 'ChatGPT Invest';
+    },
+    saveResponse: async (...args) => {
+      saveCalls.push(args);
+      return {
+        success: true,
+        copyTrace: 'copy/replay-stage12',
+        dispatch: {
+          accepted: 1,
+          sent: 1,
+          failed: 0,
+          verifyState: 'http_accepted'
+        },
+        conversationAnalysis: {
+          conversationLogCount: 1
+        }
+      };
+    },
+    formatDispatchUiSummary(dispatch) {
+      return dispatch && dispatch.accepted === 1 ? 'accepted=1' : '';
+    }
+  });
+
+  vm.runInContext(extractFunctionSource(backgroundSource, 'replayCompletedResponseForProcess'), context);
+
+  const result = await context.replayCompletedResponseForProcess(
+    {
+      id: 'run-stage12-replay',
+      title: 'Stage 12 replay',
+      analysisType: 'company',
+      currentPrompt: 15,
+      stageIndex: 14,
+      chatUrl: 'https://chatgpt.com/c/stage12-replay'
+    },
+    {
+      force: true,
+      selectedPrompt: 12,
+      selectedStageIndex: 11,
+      selectedResponseReason: 'manual_copy_stage12_dom_history'
+    }
+  );
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(saveCalls.length, 1, 'replay should save the selected Stage 12 response once');
+  assert.strictEqual(saveCalls[0][0], stage12Json);
+  assert.strictEqual(saveCalls[0][4], `run-stage12-replay_p12_${stage12Json.length}`);
+  assert.strictEqual(saveCalls[0][5].selected_response_prompt, 12);
+  assert.strictEqual(saveCalls[0][5].selected_response_stage_index, 11);
+  assert.strictEqual(saveCalls[0][5].selected_response_reason, 'manual_copy_stage12_dom_history');
 }
 
 async function testResolveCopyLatestInvestPassesThroughProcessPatchFromStrictResolution() {
@@ -1828,8 +2101,11 @@ async function main() {
   await testResolveInvestCopyTargetsPrefersLiveTabOverProcessFallbackInSameWindow();
   await testFindInvestCopyProcessUsesConversationHistory();
   await testCopyLatestInvestFallsBackToDirectSaveWithoutProcess();
+  await testCopyLatestInvestDirectSaveUsesStage12DomHistoryBeforeLastMessage();
   await testResolveCopyLatestInvestReturnsFinalProcessNotFoundWhenDomIsEmpty();
   await testResolveCopyLatestInvestRetriesProcessDomFallbackAfterActivation();
+  await testResolveCopyLatestInvestPrefersStage12DomHistoryForProcessFallback();
+  await testReplayPreservesStage12CopySelectionMetadata();
   await testResolveCopyLatestInvestPassesThroughProcessPatchFromStrictResolution();
   await testResolveCopyLatestInvestReportsInvalidContractForRejectedDomFallback();
   await testResolveCopyLatestInvestRetriesDirectFallbackAfterActivation();

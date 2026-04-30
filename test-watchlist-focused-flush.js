@@ -27,9 +27,9 @@ function extractFunctionSource(source, functionName) {
   let escaped = false;
   let braceStart = -1;
 
-  for (let index = paramsStart; index < source.length; index += 1) {
-    const char = source[index];
-    const next = source[index + 1];
+  for (let i = paramsStart; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
 
     if (inLineComment) {
       if (char === '\n') inLineComment = false;
@@ -38,7 +38,7 @@ function extractFunctionSource(source, functionName) {
     if (inBlockComment) {
       if (char === '*' && next === '/') {
         inBlockComment = false;
-        index += 1;
+        i += 1;
       }
       continue;
     }
@@ -72,12 +72,12 @@ function extractFunctionSource(source, functionName) {
 
     if (char === '/' && next === '/') {
       inLineComment = true;
-      index += 1;
+      i += 1;
       continue;
     }
     if (char === '/' && next === '*') {
       inBlockComment = true;
-      index += 1;
+      i += 1;
       continue;
     }
     if (char === '\'') {
@@ -92,6 +92,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '(') {
       parenDepth += 1;
       continue;
@@ -99,7 +100,7 @@ function extractFunctionSource(source, functionName) {
     if (char === ')') {
       parenDepth -= 1;
       if (parenDepth === 0) {
-        braceStart = source.indexOf('{', index);
+        braceStart = source.indexOf('{', i);
         break;
       }
     }
@@ -117,9 +118,9 @@ function extractFunctionSource(source, functionName) {
   inBlockComment = false;
   escaped = false;
 
-  for (let index = braceStart; index < source.length; index += 1) {
-    const char = source[index];
-    const next = source[index + 1];
+  for (let i = braceStart; i < source.length; i += 1) {
+    const char = source[i];
+    const next = source[i + 1];
 
     if (inLineComment) {
       if (char === '\n') inLineComment = false;
@@ -128,7 +129,7 @@ function extractFunctionSource(source, functionName) {
     if (inBlockComment) {
       if (char === '*' && next === '/') {
         inBlockComment = false;
-        index += 1;
+        i += 1;
       }
       continue;
     }
@@ -162,12 +163,12 @@ function extractFunctionSource(source, functionName) {
 
     if (char === '/' && next === '/') {
       inLineComment = true;
-      index += 1;
+      i += 1;
       continue;
     }
     if (char === '/' && next === '*') {
       inBlockComment = true;
-      index += 1;
+      i += 1;
       continue;
     }
     if (char === '\'') {
@@ -182,11 +183,12 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '{') depth += 1;
     if (char === '}') {
       depth -= 1;
       if (depth === 0) {
-        return source.slice(startIndex, index + 1);
+        return source.slice(startIndex, i + 1);
       }
     }
   }
@@ -194,95 +196,91 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-async function main() {
-  const setCalls = [];
-  const queuedPayloads = [];
-  const context = {
+function main() {
+  const context = vm.createContext({
     console,
-    Promise,
-    runId: 'run-1',
-    sourceTitleForSave: 'Article title',
-    articleTitle: 'Article title',
-    analysisType: 'company',
-    sourceNameForSave: 'Economist',
-    sourceUrlForSave: 'https://example.com/article',
-    location: {
-      href: 'https://chatgpt.com/c/test'
-    },
-    buildInjectedResponseId: () => 'generated-response-id',
-    buildCopyTrace: (runId, responseId) => `${runId || 'no-run'}/${responseId || 'no-response'}`,
-    normalizeWatchlistDispatchPayload: (payload) => ({
-      ...payload,
-      schema: 'dispatch.v1'
-    }),
-    detectChatGptComputationState: () => ({
-      composerThinkingEffort: 'heavy',
-      chatGptModeKind: 'thinking',
-      chatGptModelSwitcherLabel: 'ChatGPT Pro',
-      chatGptThinkingEffortDetected: 'heavy',
-      chatGptComputationLabel: 'ChatGPT Pro | Thinking | Heavy',
-      chatGptComputationDetectedAt: 1_710_000_123_456
-    }),
-    enqueueWatchlistDispatchPayload: async (payload, trace) => {
-      queuedPayloads.push({ payload, trace });
-      return {
-        queued: true,
-        queueSize: 3
-      };
-    },
-    chrome: {
-      storage: {
-        local: {
-          get: async () => ({
-            responses: []
-          }),
-          set: async (payload) => {
-            setCalls.push(payload);
-          }
-        },
-        session: {}
-      }
-    },
-    ResponseStorageUtils: null,
-    DecisionContractUtils: null,
-    globalThis: null
-  };
-  context.globalThis = context;
-
-  vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'applyInjectedChatGptComputationStatePatch'), context, {
-    filename: 'background.js'
-  });
-  vm.runInContext(extractFunctionSource(backgroundSource, 'persistResponseViaLocalEmergencyFallback'), context, {
-    filename: 'background.js'
+    Date
   });
 
-  const result = await context.persistResponseViaLocalEmergencyFallback(
-    'Final response text',
-    'resp-1',
+  [
+    'isWatchlistOutboxDeliveryAccepted',
+    'normalizeWatchlistFlushFocus',
+    'watchlistOutboxItemMatchesFocus',
+    'prepareWatchlistOutboxForFlush',
+    'getWatchlistOutboxFlushPriority',
+    'sortWatchlistOutboxForFlush'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
+  });
+
+  const now = Date.now();
+  const focus = context.normalizeWatchlistFlushFocus({
+    runId: 'run-target',
+    responseId: 'resp-target',
+    forceMatchingReady: true,
+    prioritizeMatching: true
+  });
+
+  assert.strictEqual(focus.runId, 'run-target');
+  assert.strictEqual(focus.responseId, 'resp-target');
+  assert.strictEqual(focus.forceMatchingReady, true);
+  assert.strictEqual(focus.prioritizeMatching, true);
+
+  const items = [
     {
-      selected_response_prompt: 7
+      payload: { runId: 'run-older', responseId: 'resp-older' },
+      queuedAt: now - 30_000,
+      deliveryAcceptedAt: 0,
+      nextAttemptAt: 0,
+      attemptCount: 0,
+      verifyAttemptCount: 0,
+      lastError: ''
+    },
+    {
+      payload: { runId: 'run-target', responseId: 'resp-target' },
+      queuedAt: now - 5_000,
+      deliveryAcceptedAt: now - 4_000,
+      nextAttemptAt: now + 120_000,
+      attemptCount: 3,
+      verifyAttemptCount: 3,
+      lastError: 'verify:materialization_pending'
+    },
+    {
+      payload: { runId: 'run-other', responseId: 'resp-other' },
+      queuedAt: now - 10_000,
+      deliveryAcceptedAt: now - 9_000,
+      nextAttemptAt: now + 60_000,
+      attemptCount: 2,
+      verifyAttemptCount: 2,
+      lastError: 'verify:materialization_pending'
     }
+  ];
+
+  assert.strictEqual(context.watchlistOutboxItemMatchesFocus(items[1], focus), true);
+  assert.strictEqual(context.watchlistOutboxItemMatchesFocus(items[0], focus), false);
+
+  const prepared = context.prepareWatchlistOutboxForFlush(items, focus);
+  assert.notStrictEqual(prepared, items);
+  assert.strictEqual(prepared[1].nextAttemptAt, 0, 'Focused item should bypass backoff.');
+  assert.strictEqual(prepared[1].lastError, 'verify:materialization_pending', 'Accepted verify item should keep diagnostic error text.');
+  assert.strictEqual(prepared[0].nextAttemptAt, 0, 'Non-focused ready item should remain unchanged.');
+  assert.strictEqual(prepared[2].nextAttemptAt, now + 60_000, 'Non-focused deferred item should keep original retry window.');
+
+  const sorted = context.sortWatchlistOutboxForFlush(prepared, now, focus);
+  assert.deepStrictEqual(
+    sorted.map((item) => item.payload.responseId),
+    ['resp-target', 'resp-older', 'resp-other'],
+    'Focused retry should prioritize the requested response ahead of older queue items.'
   );
 
-  assert.strictEqual(result.success, true);
-  assert.strictEqual(result.outboxQueued, true);
-  assert.strictEqual(result.queueSize, 3);
-  assert.strictEqual(queuedPayloads.length, 1, 'Emergency fallback should use shared outbox enqueue helper.');
-  assert.strictEqual(queuedPayloads[0].payload.composerThinkingEffort, 'heavy');
-  assert.strictEqual(queuedPayloads[0].payload.chatGptModeKind, 'thinking');
-  assert.strictEqual(queuedPayloads[0].payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
-  assert.strictEqual(queuedPayloads[0].payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
-  assert.strictEqual(
-    setCalls.some((payload) => Object.prototype.hasOwnProperty.call(payload, 'watchlist_dispatch_outbox')),
-    false,
-    'Emergency fallback must not overwrite dispatch outbox directly.'
-  );
-
-  console.log('emergency local save fallback test: ok');
+  console.log('watchlist focused flush test: ok');
 }
 
-main().catch((error) => {
-  console.error(error);
-  process.exit(1);
-});
+try {
+  main();
+} catch (error) {
+  console.error(error?.stack || error?.message || String(error));
+  process.exitCode = 1;
+}

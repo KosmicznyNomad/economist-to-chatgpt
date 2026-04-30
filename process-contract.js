@@ -111,6 +111,7 @@
       || normalized === 'canceled'
       || normalized === 'aborted'
       || normalized === 'interrupted'
+      || normalized === 'force_stopped'
     ) {
       return 'stopped';
     }
@@ -172,15 +173,37 @@
     return 'none';
   }
 
+  function isForceStoppedRecord(source = {}) {
+    const value = source && typeof source === 'object' ? source : {};
+    const markers = [
+      normalizeCodeToken(value.status || ''),
+      normalizeCodeToken(value.lifecycleStatus || ''),
+      normalizeCodeToken(value.statusCode || ''),
+      normalizeCodeToken(value.reason || ''),
+      normalizeCodeToken(value.error || ''),
+      normalizeCodeToken(value.statusText || '')
+    ].filter(Boolean);
+    return markers.some((marker) => (
+      marker === 'force_stop'
+      || marker === 'force_stopped'
+      || marker === 'process.stopped'
+      || marker === 'bulk_resume_prepare'
+      || marker === 'bulk_reset_before_detect_resume'
+      || marker === 'manual_stop'
+    ));
+  }
+
   function deriveStatusCode(input = {}) {
     const normalized = input && typeof input === 'object' ? input : {};
     const explicit = normalizeCodeToken(normalized.statusCode || '');
     if (explicit) return explicit;
 
-    const lifecycleStatus = normalizeLifecycleStatus(
-      normalized.lifecycleStatus || normalized.status,
-      'running'
-    );
+    const lifecycleStatus = isForceStoppedRecord(normalized)
+      ? 'stopped'
+      : normalizeLifecycleStatus(
+        normalized.lifecycleStatus || normalized.status,
+        'running'
+      );
     const phase = normalizePhase(normalized.phase || '', defaultPhaseForLifecycle(lifecycleStatus));
     const actionRequired = normalizeActionRequired(
       normalized.actionRequired || '',
@@ -242,7 +265,15 @@
     if (reason === 'execute_script_failed' || error === 'execute_script_failed') return 'chat.execute_script_failed';
     if (reason === 'invalid_response' || error === 'invalid_response') return 'response.invalid';
     if (reason === 'timeout' || error === 'timeout') return 'chat.response_timeout';
-    if (reason === 'force_stop' || lifecycleStatus === 'stopped') return 'process.stopped';
+    if (
+      reason === 'force_stop'
+      || reason === 'force_stopped'
+      || error === 'force_stopped'
+      || isForceStoppedRecord(normalized)
+      || lifecycleStatus === 'stopped'
+    ) {
+      return 'process.stopped';
+    }
     if (lifecycleStatus === 'completed') return 'process.completed';
     if (lifecycleStatus === 'failed') return 'process.failed';
     if (lifecycleStatus === 'finalizing') return 'process.finalizing';
@@ -286,10 +317,12 @@
 
   function buildOperatorStatusText(rawProcess = {}) {
     const process = rawProcess && typeof rawProcess === 'object' ? rawProcess : {};
-    const lifecycleStatus = normalizeLifecycleStatus(
-      process.lifecycleStatus || process.status,
-      'running'
-    );
+    const lifecycleStatus = isForceStoppedRecord(process)
+      ? 'stopped'
+      : normalizeLifecycleStatus(
+        process.lifecycleStatus || process.status,
+        'running'
+      );
     const phase = normalizePhase(process.phase || '', defaultPhaseForLifecycle(lifecycleStatus));
     const actionRequired = normalizeActionRequired(
       process.actionRequired || '',
@@ -545,10 +578,12 @@
         ? telemetry.phaseTotalsMs
         : {})
     };
-    const lifecycleStatus = normalizeLifecycleStatus(
-      process.lifecycleStatus || process.status,
-      'running'
-    );
+    const lifecycleStatus = isForceStoppedRecord(process)
+      ? 'stopped'
+      : normalizeLifecycleStatus(
+        process.lifecycleStatus || process.status,
+        'running'
+      );
     const phase = normalizePhase(process.phase || '', defaultPhaseForLifecycle(lifecycleStatus));
     if (isClosedLifecycleStatus(lifecycleStatus) || !phase) return totals;
     const phaseStartedAt = normalizePositiveInteger(process.phaseStartedAt);
@@ -744,10 +779,12 @@
   }
 
   function getProcessContract(process = {}) {
-    const lifecycleStatus = normalizeLifecycleStatus(
-      process.lifecycleStatus || process.status,
-      'running'
-    );
+    const lifecycleStatus = isForceStoppedRecord(process)
+      ? 'stopped'
+      : normalizeLifecycleStatus(
+        process.lifecycleStatus || process.status,
+        'running'
+      );
     const actionRequired = normalizeActionRequired(
       process.actionRequired || '',
       deriveActionRequiredFromLegacy(process)

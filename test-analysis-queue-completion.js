@@ -333,6 +333,7 @@ async function main() {
     'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'hasProcessCloseableSavedResponse',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
     'resolveAnalysisQueueReleaseDecision',
@@ -506,6 +507,31 @@ async function main() {
   assert.strictEqual(timedOutDispatchDecision.action, 'release');
   assert.strictEqual(timedOutDispatchDecision.closeWindow, true);
   assert.strictEqual(timedOutDispatchDecision.reason, 'dispatch_pending');
+
+  const savedStoppedDecision = context.resolveAnalysisQueueReleaseDecision(
+    { jobId: 'aq-1', runId: 'run-1' },
+    {
+      id: 'run-1',
+      status: 'stopped',
+      reason: 'local_context_missing',
+      currentPrompt: 5,
+      totalPrompts: 5,
+      completedResponseSaved: true,
+      persistenceStatus: {
+        saveOk: true,
+        dispatch: {
+          state: 'dispatch_confirmed',
+          sent: 1,
+          failed: 0,
+          pending: 0
+        }
+      }
+    },
+    1000
+  );
+  assert.strictEqual(savedStoppedDecision.action, 'release');
+  assert.strictEqual(savedStoppedDecision.closeWindow, true);
+  assert.strictEqual(savedStoppedDecision.reason, 'dispatch_confirmed');
 
   context.analysisQueueState = {
     waitingJobs: [

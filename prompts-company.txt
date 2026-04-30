@@ -4823,106 +4823,63 @@ Nie używaj markdownu.
 Nie zwracaj nic poza JSON-em.
 PRIMARY jako pierwszy rekord, SECONDARY jako drugi.
 --- PROMPT SEPARATOR ---
-STAGE 12.5 — MCP WRITE FINAL INVESTMENT RECORDS
-watchlist.stage12_research_rows.upsert.v1
+STAGE 13 — MCP WRITE FINAL INVESTMENT RECORDS
+Zadanie: wstaw dokładnie wygenerowany JSON Stage 12 do bazy przez MCP Iskierka.
 
-CEL
+Źródło danych dla tego etapu to wygenerowany output Stage 12 / Prompt 12 z 15, niekoniecznie bezpośrednio poprzednia wiadomość.
 
-Ten prompt nie tworzy nowej analizy.
-Ten prompt nie poprawia rekordu Stage 12.
-Ten prompt nie streszcza decyzji.
-Ten prompt nie tworzy nowego handoffu.
-
-Jedynym zadaniem jest wstawienie poprzedniej odpowiedzi Stage 12 do bazy przez MCP.
-
-ŹRÓDŁO DANYCH
-
-Użyj wyłącznie bezpośrednio poprzedniej odpowiedzi modelu.
-
-Poprzednia odpowiedź Stage 12 powinna być dokładnie jednym obiektem JSON:
+Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 12, czyli obiekt JSON z:
 
 {
-  "records": [ ... ]
+  "schema": "economist.response.v2",
+  "records": [...]
 }
 
-Jeżeli poprzednia odpowiedź została zwrócona w code blocku albo z przypadkowym tekstem wokół JSON, wyodrębnij sam obiekt JSON.
+Ignoruj wiadomości techniczne Stage 13, wyniki MCP, statusy narzędzi, komentarze oraz inne teksty, które nie są poprawnym obiektem `economist.response.v2` z tablicą `records`. Nie używaj Stage 14 ani tablic sektorowych jako źródła dla Stage 13.
 
-Nie rekonstruuj rekordów z pamięci.
-Nie naprawiaj treści rekordów.
-Nie zmieniaj pól.
-Nie dodawaj pól.
-Nie usuwaj pól.
-Nie zmieniaj kolejności rekordów.
-Nie generuj nowych opisów.
+Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
 
-Jeśli nie da się znaleźć poprawnego pola records jako tablicy, zwróć dokładnie:
+Jeśli nie da się znaleźć poprawnego `records` jako tablicy, zwróć dokładnie:
 
 DATA_GAP_STAGE=12
 
-i zakończ.
-
-GDZIE TO TRAFIA
-
-Zapis idzie do bazy przez dashboard MCP endpoint:
-
-POST /api/v1/dashboard/mcp/stage12-research-rows
-
-Backend zapisuje rekordy do istniejącej tabeli research rows:
-
-psm_research_rows
-
-Backend następnie próbuje zmaterializować monitor entity dla spółki, jeśli identyfikacja spółki jest możliwa.
-
-Nie wywołuj intake event endpointu.
-Nie wywołuj ręcznego endpointu history/entries.
-Nie twórz alternatywnego zapisu.
-
-JAKIE NARZĘDZIE
-
 Użyj MCP server:
 
-watchlist-company-context
+iskierka
 
 Użyj MCP tool:
 
-upsert_stage12_research_rows
+stage12_research_rows.upsert
 
-KOMENDA MCP
+Jeśli lista narzędzi MCP pokazuje wariant bez kropek, użyj tego samego toola jako `stage12_research_rows_upsert`.
 
-Wywołaj narzędzie dokładnie z argumentem:
+Wywołaj tool dokładnie tak:
 
 {
-  "records": <POPRZEDNIA_ODPOWIEDZ_STAGE_12.records>
+  "records": <WYGENEROWANY_JSON_STAGE_12.records>
 }
 
-WAŻNE:
+Przekaż wyłącznie tablicę `records`. Nie przekazuj `schema`, `stage`, `status`, `generated_by`, `validation_status`, `source_material_id`, `source_run_id`, `links`, dat technicznych ani informacji o modelu.
 
-- Przekaż wyłącznie tablicę records.
-- Nie przekazuj całego obiektu { "records": [...] } jako pojedynczego rekordu.
-- Nie przekazuj schema.
-- Nie przekazuj stage.
-- Nie przekazuj status.
-- Nie przekazuj generated_by.
-- Nie przekazuj validation_status.
-- Nie przekazuj source_material_id.
-- Nie przekazuj source_run_id.
-- Nie przekazuj links.
-- Nie przekazuj dat technicznych.
-- Nie przekazuj informacji o modelu.
+Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/history endpoints ani `watchlist-company-context`. Stage 12 ma trafić do `psm_research_rows` przez dedykowany writer `stage12_research_rows.upsert`.
 
-Te pola, jeśli są potrzebne, dopisuje backend / MCP adapter poza modelem.
+Po próbie zapisu zwróć dokładnie znaleziony wygenerowany JSON Stage 12 `economist.response.v2` bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 12, żeby pipeline mógł przejść do Stage 14.
 
-FINAL OUTPUT RULE
+Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 12 `economist.response.v2` bez zmian.
 
-Jeśli MCP tool jest dostępny i wywołanie się powiedzie, nie wypisuj dodatkowego tekstu.
+Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znaleziony wygenerowany JSON Stage 12 `economist.response.v2` bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnego Stage 12 z `records`; wtedy użyj `DATA_GAP_STAGE=12`.
 
-Jeśli MCP tool nie jest dostępny, zwróć dokładnie:
+FINAL OUTPUT RULE DLA PROMPTU 13:
+Odpowiedź Promptu 13 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 12, zwróć wyłącznie pełny obiekt JSON `economist.response.v2`:
 
-MCP_TOOL_UNAVAILABLE_STAGE12_UPSERT
+{
+  "schema": "economist.response.v2",
+  "records": [...]
+}
 
-Jeśli MCP tool zwróci błąd walidacji, zwróć wyłącznie treść błędu zwróconą przez tool, bez komentarza i bez markdownu.
+Nie zwracaj podsumowania MCP, nie zwracaj statusu zapisu, nie zwracaj pustej odpowiedzi, nie używaj markdownu.
 --- PROMPT SEPARATOR ---
-STAGE 13 — SECTOR MEMORY ROW WRITER
+STAGE 14 — SECTOR MEMORY ROW WRITER
 economist.sector_memory_rows.v3
 
 CEL
@@ -5430,23 +5387,12 @@ Finalny output modelu musi być samą tablicą JSON:
 Żadnych metadanych technicznych.
 Nie wywołuj MCP w tym etapie.
 --- PROMPT SEPARATOR ---
-STAGE 13.5 — MCP WRITE SECTOR MEMORY ROWS
-economist.sector_memory_rows.upsert.v1
+STAGE 15 — MCP WRITE SECTOR MEMORY ROWS
+Zadanie: wstaw dokładnie wygenerowany JSON Stage 14 do pamięci sektorowej przez MCP Iskierka.
 
-CEL
+Źródło danych dla tego etapu to wygenerowany output Stage 14 / Prompt 14 z 15, niekoniecznie bezpośrednio poprzednia wiadomość.
 
-Ten prompt nie tworzy nowej wiedzy sektorowej.
-Ten prompt nie poprawia rekordów Stage 13.
-Ten prompt nie streszcza analizy.
-Ten prompt nie tworzy kolejnego handoffu.
-
-Jedynym zadaniem jest wstawienie poprzedniej odpowiedzi Stage 13 do pamięci sektorowej przez MCP.
-
-ŹRÓDŁO DANYCH
-
-Użyj wyłącznie bezpośrednio poprzedniej odpowiedzi modelu.
-
-Poprzednia odpowiedź Stage 13 powinna być dokładnie jedną tablicą JSON:
+Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszą poprawną finalną tablicę JSON Stage 14, czyli top-level tablicę rekordów:
 
 [
   {
@@ -5456,84 +5402,55 @@ Poprzednia odpowiedź Stage 13 powinna być dokładnie jedną tablicą JSON:
   }
 ]
 
-Jeżeli poprzednia odpowiedź została zwrócona w code blocku albo z przypadkowym tekstem wokół JSON, wyodrębnij samą tablicę JSON.
+Ignoruj wiadomości techniczne Stage 15, wyniki MCP, statusy narzędzi, komentarze, Stage 12 `economist.response.v2` oraz inne teksty, które nie są top-level tablicą rekordów z polami `sektor`, `podsektor`, `opis`.
 
-Nie rekonstruuj rekordów z pamięci.
-Nie naprawiaj treści rekordów.
-Nie zmieniaj pól.
-Nie dodawaj pól.
-Nie usuwaj pól.
-Nie zmieniaj kolejności rekordów.
-Nie generuj nowych opisów.
+Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
 
 Jeśli nie da się znaleźć poprawnej tablicy JSON, zwróć dokładnie:
 
-DATA_GAP_STAGE=13
-
-i zakończ.
-
-GDZIE TO TRAFIA
-
-Zapis idzie do bazy przez MCP pamięci sektorowej:
-
-sector_context.upsert_stage13
-
-Backend / MCP adapter zapisuje rekordy w tabeli pamięci sektorowej i sam dopisuje techniczne metadane, jeśli ich potrzebuje.
-
-Nie wywołuj endpointu Stage 12.
-Nie wywołuj endpointu research rows.
-Nie generuj linków do spółek.
-Nie twórz alternatywnego zapisu.
-
-JAKIE NARZĘDZIE
+DATA_GAP_STAGE=14
 
 Użyj MCP server:
 
-iskierka-watchlist / watchlist-mcp
+iskierka
 
 Użyj MCP tool:
 
 sector_context.upsert_stage13
 
-KOMENDA MCP
+Jeśli lista narzędzi MCP pokazuje wariant bez kropek, użyj tego samego toola jako `sector_context_upsert_stage13`.
 
-Wywołaj narzędzie dokładnie z argumentem:
+Wywołaj tool dokładnie tak:
 
 {
-  "items": <POPRZEDNIA_ODPOWIEDZ_STAGE_13>
+  "items": <WYGENEROWANY_JSON_STAGE_14>
 }
 
-Jeśli poprzednia odpowiedź Stage 13 to pusta tablica, wywołaj:
+Jeśli wygenerowany JSON Stage 14 to pusta tablica, wywołaj:
 
 {
   "items": []
 }
 
-WAŻNE:
+Przekaż wyłącznie tablicę rekordów jako `items`. Nie przekazuj `source_material_id`, `source_run_id`, `stage`, `generated_by`, `status`, `validation_status`, `min_opis_chars`, `created_at`, `updated_at`, `links`, dat technicznych ani informacji o modelu.
 
-- Przekaż wyłącznie tablicę rekordów jako items.
-- Nie przekazuj całego obiektu z dodatkowymi polami.
-- Nie przekazuj source_material_id.
-- Nie przekazuj source_run_id.
-- Nie przekazuj stage.
-- Nie przekazuj generated_by.
-- Nie przekazuj status.
-- Nie przekazuj validation_status.
-- Nie przekazuj min_opis_chars.
-- Nie przekazuj created_at.
-- Nie przekazuj updated_at.
-- Nie przekazuj links.
-- Nie przekazuj dat technicznych.
-- Nie przekazuj informacji o modelu.
+Nie używaj `stage12_research_rows.upsert`, endpointów research rows ani `watchlist-company-context`. Stage 14 ma trafić do pamięci sektorowej przez `sector_context.upsert_stage13`.
 
-Te pola, jeśli są potrzebne, dopisuje backend / MCP adapter poza modelem.
+Po próbie zapisu zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 14 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 14, żeby pipeline mógł zakończyć etap techniczny bez blokowania procesu.
 
-FINAL OUTPUT RULE
+Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 14 bez zmian.
 
-Jeśli MCP tool jest dostępny i wywołanie się powiedzie, nie wypisuj dodatkowego tekstu.
+Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 14 bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnej tablicy JSON Stage 14; wtedy użyj `DATA_GAP_STAGE=14`.
 
-Jeśli MCP tool nie jest dostępny, zwróć dokładnie:
+FINAL OUTPUT RULE DLA PROMPTU 15:
+Odpowiedź Promptu 15 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 14, zwróć wyłącznie pełną tablicę JSON Stage 14:
 
-MCP_TOOL_UNAVAILABLE_STAGE13_UPSERT
+[
+  {
+    "sektor": "...",
+    "podsektor": "...",
+    "opis": "..."
+  }
+]
 
-Jeśli MCP tool zwróci błąd walidacji, zwróć wyłącznie treść błędu zwróconą przez tool, bez komentarza i bez markdownu.
+Nie dodawaj opisu, statusu MCP, podsumowania, markdownu ani tekstu przed albo po JSON-ie. Jeśli MCP nie jest dostępne, nadal zwróć tę samą tablicę JSON. Jeśli Stage 14 nie istnieje w historii, zwróć wyłącznie `DATA_GAP_STAGE=14`.

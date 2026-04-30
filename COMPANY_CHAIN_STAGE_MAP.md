@@ -26,9 +26,9 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 | 10 | 9 | 9 | Stage 9: Reverse DCF (TOTAL) | Market-implied growth/margin extraction and divergence diagnostics. |
 | 11 | 10 | 10 | Stage 10: Four-Gate Decision + Stage 11 Composite Rank | Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection. |
 | 12 | 11 | 12 | Stage 12: Final Investment Record Builder | Final structured watchlist records for downstream ingestion. |
-| 13 | 12 | 12.5 | Stage 12.5: MCP Write Final Investment Records | Persist the previous Stage 12 records through the watchlist MCP write tool. |
-| 14 | 13 | 13 | Stage 13: Sector Memory Row Writer | Reusable sector-memory rows for future company analyses. |
-| 15 | 14 | 13.5 | Stage 13.5: MCP Write Sector Memory Rows | Persist the previous Stage 13 sector-memory rows through the sector-context MCP tool. |
+| 13 | 12 | 13 | Stage 13: MCP Write Final Investment Records | Persist the generated Stage 12 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 12 JSON forward. |
+| 14 | 13 | 14 | Stage 14: Sector Memory Row Writer | Reusable sector-memory rows for future company analyses. |
+| 15 | 14 | 15 | Stage 15: MCP Write Sector Memory Rows | Persist the generated Stage 14 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 14 JSON forward. |
 
 ## Legacy Stage Id Aliases
 These aliases are still accepted by `findCompanyPromptIndexByStageIdentifier()`:

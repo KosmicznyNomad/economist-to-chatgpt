@@ -1,5 +1,5 @@
-const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
-const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje";
+const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/project";
+const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const CHAT_GPT_HOSTS = new Set([
   'chatgpt.com',
@@ -11,7 +11,7 @@ const INVEST_GPT_PATH_BASE = (() => {
   try {
     return new URL(INVEST_GPT_URL_BASE).pathname.replace(/\/+$/, '');
   } catch (error) {
-    return '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje';
+    return '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka';
   }
 })();
 
@@ -178,7 +178,9 @@ const PROCESS_MONITOR_HEARTBEAT = {
   // Treat runs as stale when no progress update arrives within TTL.
   staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
   staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2,
-  autoStopNoContextTtlMs: 24 * 60 * 60 * 1000,
+  autoStopNoContextTtlMs: 15 * 60 * 1000,
+  autoStopLiveStaleTtlMs: WAIT_FOR_RESPONSE_MS + (30 * 60 * 1000),
+  autoStopFinalizingStaleTtlMs: 30 * 60 * 1000,
   finalPromptRecoveryTtlMs: 10 * 60 * 1000,
   finalPromptRecoveryCooldownMs: 15 * 60 * 1000
 };
@@ -4247,7 +4249,10 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
   finalPromptRecoveryInFlight.add(runId);
   finalPromptRecoveryLastAttemptAtByRunId.set(runId, nowTs);
   try {
-    const responseText = await extractLastAssistantResponseFromTab(tabId, 2600);
+    const stage12DomResponse = await extractLatestStage12InvestmentResponseFromTab(tabId, 2600);
+    const responseText = stage12DomResponse?.text
+      ? stage12DomResponse.text
+      : await extractLastAssistantResponseFromTab(tabId, 2600);
     const normalizedResponseText = typeof responseText === 'string' ? responseText.trim() : '';
     if (!normalizedResponseText) {
       return { success: false, reason: 'missing_response_text' };
@@ -4261,9 +4266,13 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
       };
     }
 
-    const promptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
-      ? process.currentPrompt
-      : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+    const recoveredFromStage12History = !!stage12DomResponse?.text;
+    const recoveredInvestmentJson = recoveredFromStage12History || contract?.kind === 'economist.response.v2';
+    const promptNumber = recoveredInvestmentJson
+      ? 12
+      : (Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
+        ? process.currentPrompt
+        : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0));
     const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'run';
     const responseId = `${safeRunId}_p${promptNumber > 0 ? promptNumber : 0}_${textFingerprint(normalizedResponseText)}`;
     const stageMeta = {};
@@ -4271,7 +4280,9 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
       stageMeta.selected_response_prompt = promptNumber;
       stageMeta.selected_response_stage_index = promptNumber - 1;
     }
-    stageMeta.selected_response_reason = 'stale_final_prompt_recovery';
+    stageMeta.selected_response_reason = recoveredFromStage12History
+      ? 'stale_final_prompt_stage12_dom_history'
+      : (recoveredInvestmentJson ? 'stale_final_prompt_stage12_last_message' : 'stale_final_prompt_recovery');
     const source = typeof process?.title === 'string' && process.title.trim()
       ? process.title.trim()
       : 'Stale final prompt recovery';
@@ -4384,22 +4395,69 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
         const autoStopNoContextTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs)
           && PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs > 0
           ? PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs
-          : (24 * 60 * 60 * 1000);
+          : (15 * 60 * 1000);
+        const fallbackWaitForResponseMs = (
+          typeof WAIT_FOR_RESPONSE_MS === 'number'
+          && Number.isInteger(WAIT_FOR_RESPONSE_MS)
+          && WAIT_FOR_RESPONSE_MS > 0
+        )
+          ? WAIT_FOR_RESPONSE_MS
+          : (4 * 60 * 60 * 1000);
+        const autoStopLiveStaleTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs)
+          && PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs > 0
+          ? PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs
+          : (fallbackWaitForResponseMs + (30 * 60 * 1000));
+        const autoStopFinalizingStaleTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopFinalizingStaleTtlMs)
+          && PROCESS_MONITOR_HEARTBEAT.autoStopFinalizingStaleTtlMs > 0
+          ? PROCESS_MONITOR_HEARTBEAT.autoStopFinalizingStaleTtlMs
+          : (30 * 60 * 1000);
+        const closeableSavedResponse = typeof hasProcessCloseableSavedResponse === 'function'
+          ? hasProcessCloseableSavedResponse(process)
+          : false;
+        if (
+          lifecycleStatus === 'finalizing'
+          && !closeableSavedResponse
+          && progressAgeMs >= autoStopFinalizingStaleTtlMs
+        ) {
+          const stoppedRecord = await upsertProcess(runId, {
+            lifecycleStatus: 'stopped',
+            status: 'stopped',
+            actionRequired: 'none',
+            needsAction: false,
+            reason: 'heartbeat_stale_finalizing',
+            statusCode: 'process.heartbeat_stale_finalizing',
+            statusText: 'Finalizacja bez postepu - proces zatrzymany przez sweep',
+            autoRecovery: null,
+            finishedAt: nowTs,
+            timestamp: nowTs
+          });
+          if (stoppedRecord) autoStopped += 1;
+          continue;
+        }
         if (
           (lifecycleStatus === 'running' || lifecycleStatus === 'starting')
-          && progressAgeMs >= autoStopNoContextTtlMs
           && typeof getAnalysisQueueProcessActivityState === 'function'
         ) {
           const processActivity = await getAnalysisQueueProcessActivityState(process, nowTs).catch(() => null);
-          if (processActivity?.active !== true) {
+          const shouldStopNoContext = processActivity?.active !== true
+            && progressAgeMs >= autoStopNoContextTtlMs;
+          const shouldStopLiveTimeout = processActivity?.active === true
+            && processActivity?.live === true
+            && progressAgeMs >= autoStopLiveStaleTtlMs;
+          if (shouldStopNoContext || shouldStopLiveTimeout) {
+            const staleReason = shouldStopLiveTimeout
+              ? 'heartbeat_stale_live_timeout'
+              : 'heartbeat_stale_no_context';
             const stoppedRecord = await upsertProcess(runId, {
               lifecycleStatus: 'stopped',
               status: 'stopped',
               actionRequired: 'none',
               needsAction: false,
-              reason: 'heartbeat_stale_no_context',
-              statusCode: 'process.heartbeat_stale_no_context',
-              statusText: 'Brak postepu i lokalnego kontekstu - proces zatrzymany przez sweep',
+              reason: staleReason,
+              statusCode: `process.${staleReason}`,
+              statusText: shouldStopLiveTimeout
+                ? 'Brak postepu powyzej limitu oczekiwania - proces zatrzymany przez sweep'
+                : 'Brak postepu i lokalnego kontekstu - proces zatrzymany przez sweep',
               autoRecovery: null,
               finishedAt: nowTs,
               timestamp: nowTs
@@ -7732,6 +7790,24 @@ function removeWindowSafe(windowId) {
   });
 }
 
+function isChromeMissingTabOrWindowError(message, target = '') {
+  const normalized = typeof message === 'string' ? message.trim().toLowerCase() : '';
+  if (!normalized) return false;
+  const wantsTab = target === 'tab' || !target;
+  const wantsWindow = target === 'window' || !target;
+  return (
+    wantsTab && (
+      normalized.includes('no tab with id')
+      || normalized.includes('invalid tab id')
+    )
+  ) || (
+    wantsWindow && (
+      normalized.includes('no window with id')
+      || normalized.includes('invalid window id')
+    )
+  );
+}
+
 function removeTabSafe(tabId) {
   return new Promise((resolve) => {
     if (!Number.isInteger(tabId)) {
@@ -8816,6 +8892,21 @@ function getProcessQueueDeliveryState(process) {
   };
 }
 
+function hasProcessCloseableSavedResponse(process) {
+  if (!process || typeof process !== 'object') return false;
+  const delivery = getProcessQueueDeliveryState(process);
+  if (delivery.saveOk !== true) return false;
+  if (hasProcessReachedFinalStage(process)) return true;
+
+  const stage = resolveProcessStageSnapshot(process);
+  const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : 0;
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : 0;
+  if (totalPrompts > 0 && currentPrompt >= totalPrompts) return true;
+  if (Number.isInteger(process?.completedResponseCapturedAt) && process.completedResponseCapturedAt > 0) return true;
+  if (typeof process?.completedResponseText === 'string' && process.completedResponseText.trim()) return true;
+  return process?.completedResponseSaved === true;
+}
+
 function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   if (!job || typeof job !== 'object') {
     return { action: 'release', closeWindow: false, reason: 'invalid_job' };
@@ -8858,6 +8949,17 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   }
 
   if (isClosedProcessStatus(status)) {
+    const delivery = getProcessQueueDeliveryState(process);
+    if (hasProcessCloseableSavedResponse(process)) {
+      return {
+        action: 'release',
+        closeWindow: true,
+        reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending',
+        slotReleaseReason: delivery.confirmed === true
+          ? 'dispatch_confirmed_after_local_context_loss'
+          : 'final_stage_local_saved_after_local_context_loss'
+      };
+    }
     return { action: 'release', closeWindow: false, reason: status || 'closed' };
   }
 
@@ -9017,6 +9119,14 @@ async function inspectProcessWindowContext(process) {
         reason: validTabs.length > 0 ? 'window_present' : 'window_empty'
       };
     }
+    if (isChromeMissingTabOrWindowError(tabsInWindow?.reason || '', 'window')) {
+      return {
+        exists: false,
+        missingKnown: true,
+        hasOnlyProcessTab: false,
+        reason: 'window_missing'
+      };
+    }
     return {
       exists: true,
       missingKnown: false,
@@ -9124,9 +9234,23 @@ async function attemptProcessWindowClose(process) {
 
   if (processWindowId !== null) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
+    if (tabsInWindow?.ok === false && isChromeMissingTabOrWindowError(tabsInWindow?.reason || '', 'window')) {
+      return {
+        closed: true,
+        reason: 'window_already_missing',
+        closeMode: 'window'
+      };
+    }
     const validTabs = Array.isArray(tabsInWindow?.tabs)
       ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
       : [];
+    if (tabsInWindow?.ok === true && validTabs.length === 0) {
+      return {
+        closed: true,
+        reason: 'window_empty',
+        closeMode: 'window'
+      };
+    }
     const chatTabs = validTabs.filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)));
     const activeChatTab = chatTabs.find((tab) => tab?.active === true) || null;
     const fallbackChatTab = activeChatTab || (chatTabs.length === 1 ? chatTabs[0] : null);
@@ -9155,7 +9279,9 @@ async function attemptProcessWindowClose(process) {
     }
     return {
       closed: false,
-      reason: validTabs.length > 0 ? 'window_contains_other_tabs' : 'tab_remove_failed',
+      reason: validTabs.length > 0
+        ? 'window_contains_other_tabs'
+        : (tabsInWindow?.ok === false ? (tabsInWindow.reason || 'window_query_failed') : 'tab_remove_failed'),
       closeMode: ''
     };
   }
@@ -9209,10 +9335,11 @@ function resolveProcessWindowCloseRetryPlan(process) {
     return { needed: false, reason: 'invalid_process', delivery: null };
   }
   const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
-  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing') {
+  const closeableSavedResponse = hasProcessCloseableSavedResponse(process);
+  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing' && !closeableSavedResponse) {
     return { needed: false, reason: 'status_not_closeable', delivery: getProcessQueueDeliveryState(process) };
   }
-  if (!hasProcessReachedFinalStage(process)) {
+  if (!hasProcessReachedFinalStage(process) && !closeableSavedResponse) {
     return { needed: false, reason: 'not_final_stage', delivery: getProcessQueueDeliveryState(process) };
   }
 
@@ -10789,11 +10916,19 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             ? await getAnalysisQueueProcessActivityState(process, now)
             : null;
           if (process && processActivity?.active !== true) {
+            const closeSavedMissingContextWindow = hasProcessCloseableSavedResponse(process);
+            const delivery = closeSavedMissingContextWindow ? getProcessQueueDeliveryState(process) : null;
+            const releaseReason = closeSavedMissingContextWindow
+              ? (delivery?.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending')
+              : 'local_context_missing';
             releaseJobs.push({
               job: activeJob,
               process,
-              reason: 'local_context_missing',
-              closeWindow: false
+              reason: releaseReason,
+              slotReleaseReason: closeSavedMissingContextWindow
+                ? 'final_stage_local_saved_after_local_context_loss'
+                : 'local_context_missing',
+              closeWindow: closeSavedMissingContextWindow
             });
             const stalePatch = await buildStaleQueueReleasePatch(process, now);
             if (stalePatch) {
@@ -10803,7 +10938,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
                 queueState: 'slot_released',
                 slotReserved: false,
                 slotReleasedAt: now,
-                slotReleaseReason: 'local_context_missing',
+                slotReleaseReason: closeSavedMissingContextWindow
+                  ? 'final_stage_local_saved_after_local_context_loss'
+                  : 'local_context_missing',
                 ...stalePatch
               });
             }
@@ -11216,7 +11353,13 @@ async function resolveCompletedProcessFinalResponseText(process, options = {}) {
     responseText = extractAssistantTextFromProcess(process);
   }
   if (!responseText && force && options?.allowDomFallback === true && Number.isInteger(options?.tabId)) {
-    responseText = await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
+    const stage12DomResponse = await extractLatestStage12InvestmentResponseFromTab(
+      options.tabId,
+      options?.tabReadTimeoutMs || 1800
+    );
+    responseText = stage12DomResponse?.text
+      ? stage12DomResponse.text
+      : await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
   }
   responseText = typeof responseText === 'string' ? responseText.trim() : '';
   if (!responseText) {
@@ -11319,6 +11462,167 @@ async function extractLastAssistantResponseFromTab(tabId, maxWaitMs = 1800) {
   }
 }
 
+function resolveInvestmentResponseCandidateFromText(rawText) {
+  const text = typeof rawText === 'string' ? rawText.trim() : '';
+  if (!text) {
+    return {
+      text: '',
+      contract: null,
+      reason: 'empty_text'
+    };
+  }
+
+  const candidates = typeof extractStructuredWatchlistJsonCandidates === 'function'
+    ? extractStructuredWatchlistJsonCandidates(text)
+    : [text];
+  for (const candidate of candidates) {
+    const candidateText = typeof candidate === 'string' ? candidate.trim() : '';
+    if (!candidateText) continue;
+    const contract = buildResponseContractValidation(candidateText);
+    if (contract?.valid === true && contract?.kind === 'economist.response.v2') {
+      return {
+        text: candidateText,
+        contract,
+        reason: 'economist_response_v2'
+      };
+    }
+  }
+
+  const fallbackContract = buildResponseContractValidation(text);
+  if (fallbackContract?.valid === true && fallbackContract?.kind === 'economist.response.v2') {
+    return {
+      text,
+      contract: fallbackContract,
+      reason: 'economist_response_v2_full_text'
+    };
+  }
+
+  return {
+    text: '',
+    contract: fallbackContract,
+    reason: fallbackContract?.kind || 'invalid'
+  };
+}
+
+async function extractLatestStage12InvestmentResponseFromTab(tabId, maxWaitMs = 1800) {
+  if (!Number.isInteger(tabId)) {
+    return {
+      text: '',
+      contract: null,
+      scannedCount: 0,
+      sourceIndex: null,
+      reason: 'invalid_tab'
+    };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: async (waitMs) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const normalizeText = (text) => (text || '')
+          .replace(/\u00a0/g, ' ')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+
+        function extractTextFromNode(node) {
+          if (!node) return '';
+          const clone = node.cloneNode(true);
+          const removableSelectors = [
+            '[data-testid="copy-turn-action-button"]',
+            '[data-testid="message-actions"]',
+            'button',
+            'svg',
+            'aside',
+            'nav',
+            'footer'
+          ];
+          removableSelectors.forEach((selector) => {
+            clone.querySelectorAll(selector).forEach((child) => child.remove());
+          });
+          return normalizeText(clone.innerText || clone.textContent || '');
+        }
+
+        function readAssistantTexts() {
+          const texts = [];
+          const seen = new Set();
+          const pushText = (text) => {
+            const normalized = normalizeText(text);
+            if (!normalized || seen.has(normalized)) return;
+            seen.add(normalized);
+            texts.push(normalized);
+          };
+
+          const byRole = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+          for (let i = byRole.length - 1; i >= 0; i -= 1) {
+            pushText(extractTextFromNode(byRole[i]));
+          }
+          if (texts.length > 0) return texts;
+
+          const conversationTurns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'));
+          for (let i = conversationTurns.length - 1; i >= 0; i -= 1) {
+            const turn = conversationTurns[i];
+            const candidate = turn.querySelector('[data-message-author-role="assistant"]') || turn;
+            pushText(extractTextFromNode(candidate));
+          }
+          if (texts.length > 0) return texts;
+
+          const articles = Array.from(document.querySelectorAll('article'));
+          for (let i = articles.length - 1; i >= 0; i -= 1) {
+            pushText(extractTextFromNode(articles[i]));
+          }
+          return texts;
+        }
+
+        const startedAt = Date.now();
+        let bestTexts = [];
+        while ((Date.now() - startedAt) <= waitMs) {
+          const candidateTexts = readAssistantTexts();
+          const candidateLength = candidateTexts.reduce((sum, text) => sum + text.length, 0);
+          const bestLength = bestTexts.reduce((sum, text) => sum + text.length, 0);
+          if (candidateTexts.length > bestTexts.length || candidateLength > bestLength) {
+            bestTexts = candidateTexts;
+          }
+          await sleep(220);
+        }
+        return bestTexts;
+      },
+      args: [Math.max(500, Math.min(maxWaitMs, 12000))]
+    });
+    const texts = Array.isArray(results?.[0]?.result)
+      ? results[0].result.filter((item) => typeof item === 'string' && item.trim())
+      : [];
+    for (let index = 0; index < texts.length; index += 1) {
+      const resolved = resolveInvestmentResponseCandidateFromText(texts[index]);
+      if (resolved?.text && resolved?.contract?.valid === true) {
+        return {
+          text: resolved.text,
+          contract: resolved.contract,
+          scannedCount: texts.length,
+          sourceIndex: index,
+          reason: resolved.reason || 'economist_response_v2'
+        };
+      }
+    }
+    return {
+      text: '',
+      contract: null,
+      scannedCount: texts.length,
+      sourceIndex: null,
+      reason: texts.length > 0 ? 'not_found' : 'no_assistant_messages'
+    };
+  } catch (error) {
+    return {
+      text: '',
+      contract: null,
+      scannedCount: 0,
+      sourceIndex: null,
+      reason: error?.message || 'extract_failed'
+    };
+  }
+}
+
 async function replayCompletedResponseForProcess(process, options = {}) {
   if (!process || typeof process !== 'object') {
     return { attempted: false, success: false, reason: 'invalid_process' };
@@ -11415,21 +11719,29 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     ? process.completedResponseSaveTrace.trim()
     : (typeof process?.persistenceStatus?.copyTrace === 'string' ? process.persistenceStatus.copyTrace.trim() : '');
   const responseIdFromTrace = extractResponseIdFromCopyTrace(existingTrace, runId);
-  const promptNumber = Number.isInteger(process.currentPrompt) && process.currentPrompt > 0
-    ? process.currentPrompt
-    : (Number.isInteger(process.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+  const promptNumber = Number.isInteger(options?.selectedPrompt) && options.selectedPrompt > 0
+    ? options.selectedPrompt
+    : (Number.isInteger(process.currentPrompt) && process.currentPrompt > 0
+      ? process.currentPrompt
+      : (Number.isInteger(process.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0));
   const responseId = responseIdFromTrace || buildRestartReplayResponseId(runId, responseText, promptNumber);
 
   const stageMeta = {};
   if (promptNumber > 0) {
     stageMeta.selected_response_prompt = promptNumber;
   }
-  if (Number.isInteger(process.stageIndex) && process.stageIndex >= 0) {
+  if (Number.isInteger(options?.selectedStageIndex) && options.selectedStageIndex >= 0) {
+    stageMeta.selected_response_stage_index = options.selectedStageIndex;
+  } else if (Number.isInteger(options?.selectedPrompt) && options.selectedPrompt > 0) {
+    stageMeta.selected_response_stage_index = options.selectedPrompt - 1;
+  } else if (Number.isInteger(process.stageIndex) && process.stageIndex >= 0) {
     stageMeta.selected_response_stage_index = process.stageIndex;
   } else if (promptNumber > 0) {
     stageMeta.selected_response_stage_index = promptNumber - 1;
   }
-  stageMeta.selected_response_reason = 'restart_replay';
+  stageMeta.selected_response_reason = typeof options?.selectedResponseReason === 'string' && options.selectedResponseReason.trim()
+    ? options.selectedResponseReason.trim()
+    : 'restart_replay';
 
   const conversationUrl = normalizeChatConversationUrl(process.chatUrl)
     || normalizeChatConversationUrl(process.sourceUrl)
@@ -12726,23 +13038,23 @@ const STAGE_METADATA_COMPANY = [
   {
     promptIndex: 12,
     promptNumber: 13,
-    stageId: '12.5',
-    stageName: "Stage 12.5: MCP Write Final Investment Records",
-    description: "Persist the previous Stage 12 records through the watchlist MCP write tool."
+    stageId: '13',
+    stageName: "Stage 13: MCP Write Final Investment Records",
+    description: "Persist the generated Stage 12 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 12 JSON forward."
   },
   {
     promptIndex: 13,
     promptNumber: 14,
-    stageId: '13',
-    stageName: "Stage 13: Sector Memory Row Writer",
+    stageId: '14',
+    stageName: "Stage 14: Sector Memory Row Writer",
     description: "Reusable sector-memory rows for future company analyses."
   },
   {
     promptIndex: 14,
     promptNumber: 15,
-    stageId: '13.5',
-    stageName: "Stage 13.5: MCP Write Sector Memory Rows",
-    description: "Persist the previous Stage 13 sector-memory rows through the sector-context MCP tool."
+    stageId: '15',
+    stageName: "Stage 15: MCP Write Sector Memory Rows",
+    description: "Persist the generated Stage 14 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 14 JSON forward."
   }
 ];
 
@@ -12768,9 +13080,9 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['10', 10],
   ['11', 10], // Stage 11 exists as a section inside the Stage 10 prompt
   ['12', 11],
-  ['12.5', 12],
-  ['13', 13],
-  ['13.5', 14],
+  ['13', 12],
+  ['14', 13],
+  ['15', 14],
   ['10.5', 10], // legacy alias: old chain used Stage 10.5 for composite rank
   ['2.5', 4], // legacy alias: old chain used 2.5 for Reverse DCF Lite
   ['3.2', 4], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
@@ -14552,6 +14864,21 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
   const retryTimeoutMs = Number.isInteger(options?.retryTabReadTimeoutMs)
     ? options.retryTabReadTimeoutMs
     : Math.max(initialTimeoutMs + 1600, 3600);
+  const firstStage12 = await extractLatestStage12InvestmentResponseFromTab(tabId, initialTimeoutMs);
+  if (firstStage12?.text && firstStage12?.contract?.valid === true) {
+    return {
+      text: firstStage12.text,
+      contract: firstStage12.contract,
+      attemptCount: 1,
+      activated: false,
+      resolutionMode: 'stage12_dom_history',
+      selectedPrompt: 12,
+      selectedResponseReason: 'manual_copy_stage12_dom_history',
+      scannedCount: Number.isInteger(firstStage12.scannedCount) ? firstStage12.scannedCount : null,
+      sourceIndex: Number.isInteger(firstStage12.sourceIndex) ? firstStage12.sourceIndex : null
+    };
+  }
+
   const firstText = await extractLastAssistantResponseFromTab(tabId, initialTimeoutMs);
   const firstContract = buildResponseContractValidation(firstText);
   if (firstContract?.valid === true) {
@@ -14559,7 +14886,8 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
       text: firstText,
       contract: firstContract,
       attemptCount: 1,
-      activated: false
+      activated: false,
+      resolutionMode: 'dom_contract'
     };
   }
 
@@ -14576,7 +14904,23 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
       text: firstText,
       contract: firstContract,
       attemptCount: 1,
-      activated: false
+      activated: false,
+      resolutionMode: 'dom_invalid'
+    };
+  }
+
+  const secondStage12 = await extractLatestStage12InvestmentResponseFromTab(tabId, retryTimeoutMs);
+  if (secondStage12?.text && secondStage12?.contract?.valid === true) {
+    return {
+      text: secondStage12.text,
+      contract: secondStage12.contract,
+      attemptCount: 2,
+      activated: true,
+      resolutionMode: 'stage12_dom_history',
+      selectedPrompt: 12,
+      selectedResponseReason: 'manual_copy_stage12_dom_history',
+      scannedCount: Number.isInteger(secondStage12.scannedCount) ? secondStage12.scannedCount : null,
+      sourceIndex: Number.isInteger(secondStage12.sourceIndex) ? secondStage12.sourceIndex : null
     };
   }
 
@@ -14589,7 +14933,10 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
     text: shouldPreferSecond ? secondText : firstText,
     contract: shouldPreferSecond ? secondContract : firstContract,
     attemptCount: 2,
-    activated: true
+    activated: true,
+    resolutionMode: shouldPreferSecond
+      ? (secondContract?.valid === true ? 'dom_contract' : 'dom_invalid')
+      : (firstContract?.valid === true ? 'dom_contract' : 'dom_invalid')
   };
 }
 
@@ -14621,10 +14968,16 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
     const domFallbackText = typeof domFallback?.text === 'string' ? domFallback.text : '';
     const domFallbackContract = domFallback?.contract || buildResponseContractValidation(domFallbackText);
     if (domFallbackText && domFallbackContract?.valid === true) {
+      const isStage12DomHistory = domFallback?.resolutionMode === 'stage12_dom_history';
       return {
         success: true,
         responseText: domFallbackText,
-        resolutionMode: 'process_dom_contract',
+        resolutionMode: isStage12DomHistory ? 'process_stage12_dom_history' : 'process_dom_contract',
+        fromDom: true,
+        selectedPrompt: Number.isInteger(domFallback?.selectedPrompt) ? domFallback.selectedPrompt : null,
+        selectedResponseReason: typeof domFallback?.selectedResponseReason === 'string' && domFallback.selectedResponseReason.trim()
+          ? domFallback.selectedResponseReason.trim()
+          : (isStage12DomHistory ? 'manual_copy_stage12_dom_history' : 'manual_copy_dom_contract'),
         processPatch: {
           completedResponseText: domFallbackText,
           completedResponseCapturedAt: Date.now()
@@ -14670,7 +15023,16 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
   return {
     success: true,
     responseText: directFallbackText,
-    resolutionMode: 'direct_save'
+    resolutionMode: directFallback?.resolutionMode === 'stage12_dom_history'
+      ? 'direct_stage12_dom_history'
+      : 'direct_save',
+    fromDom: true,
+    selectedPrompt: Number.isInteger(directFallback?.selectedPrompt) ? directFallback.selectedPrompt : null,
+    selectedResponseReason: typeof directFallback?.selectedResponseReason === 'string' && directFallback.selectedResponseReason.trim()
+      ? directFallback.selectedResponseReason.trim()
+      : (directFallback?.resolutionMode === 'stage12_dom_history'
+        ? 'manual_copy_stage12_dom_history'
+        : 'manual_copy_fallback')
   };
 }
 
@@ -14851,10 +15213,17 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         ? (processRegistry.get(processId) || { ...process, ...processPatch })
         : { ...process, ...processPatch };
       let persistenceResult = await replayCompletedResponseForProcess(latestProcess, {
-        force: resolvedResponse?.resolutionMode === 'process_dom_contract',
+        force: resolvedResponse?.fromDom === true || resolvedResponse?.resolutionMode === 'process_dom_contract',
         allowDomFallback: false,
         tabId,
-        tabReadTimeoutMs
+        tabReadTimeoutMs,
+        selectedPrompt: Number.isInteger(resolvedResponse?.selectedPrompt) ? resolvedResponse.selectedPrompt : null,
+        selectedStageIndex: Number.isInteger(resolvedResponse?.selectedPrompt) && resolvedResponse.selectedPrompt > 0
+          ? resolvedResponse.selectedPrompt - 1
+          : null,
+        selectedResponseReason: typeof resolvedResponse?.selectedResponseReason === 'string'
+          ? resolvedResponse.selectedResponseReason
+          : ''
       });
       let persistenceMode = typeof persistenceResult?.recoveryMode === 'string'
         ? persistenceResult.recoveryMode
@@ -14915,9 +15284,11 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         const sourceTitle = typeof latestProcess?.title === 'string' && latestProcess.title.trim()
           ? latestProcess.title.trim()
           : (title && title.trim() ? title.trim() : 'ChatGPT Invest');
-        const stagePromptNumber = Number.isInteger(latestProcess?.currentPrompt) && latestProcess.currentPrompt > 0
-          ? latestProcess.currentPrompt
-          : (Number.isInteger(latestProcess?.stageIndex) && latestProcess.stageIndex >= 0 ? (latestProcess.stageIndex + 1) : 0);
+        const stagePromptNumber = Number.isInteger(resolvedResponse?.selectedPrompt) && resolvedResponse.selectedPrompt > 0
+          ? resolvedResponse.selectedPrompt
+          : (Number.isInteger(latestProcess?.currentPrompt) && latestProcess.currentPrompt > 0
+            ? latestProcess.currentPrompt
+            : (Number.isInteger(latestProcess?.stageIndex) && latestProcess.stageIndex >= 0 ? (latestProcess.stageIndex + 1) : 0));
         const existingCopyTrace = typeof latestProcess?.completedResponseSaveTrace === 'string' && latestProcess.completedResponseSaveTrace.trim()
           ? latestProcess.completedResponseSaveTrace.trim()
           : (typeof latestProcess?.persistenceStatus?.copyTrace === 'string' ? latestProcess.persistenceStatus.copyTrace.trim() : '');
@@ -14940,7 +15311,9 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
           : 'manual_copy_process';
         const fallbackResponseId = tracedResponseId || `${fallbackSafeRunId}_manual_copy_p${Math.max(0, stagePromptNumber)}_${fallbackHash}`;
         const fallbackStageMeta = {
-          selected_response_reason: 'manual_copy_recovered'
+          selected_response_reason: typeof resolvedResponse?.selectedResponseReason === 'string' && resolvedResponse.selectedResponseReason.trim()
+            ? resolvedResponse.selectedResponseReason.trim()
+            : 'manual_copy_recovered'
         };
         if (stagePromptNumber > 0) {
           fallbackStageMeta.selected_response_prompt = stagePromptNumber;
@@ -15057,7 +15430,15 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         null,
         generateResponseId('manual_copy_fallback'),
         {
-          selected_response_reason: 'manual_copy_fallback'
+          selected_response_reason: typeof resolvedResponse?.selectedResponseReason === 'string' && resolvedResponse.selectedResponseReason.trim()
+            ? resolvedResponse.selectedResponseReason.trim()
+            : 'manual_copy_fallback',
+          ...(Number.isInteger(resolvedResponse?.selectedPrompt) && resolvedResponse.selectedPrompt > 0
+            ? {
+              selected_response_prompt: resolvedResponse.selectedPrompt,
+              selected_response_stage_index: resolvedResponse.selectedPrompt - 1
+            }
+            : {})
         },
         conversationUrl || null,
         {
@@ -15731,7 +16112,7 @@ async function runResetScanStartAllTabs(options = {}) {
       includeClosedProcesses: options?.includeClosedProcesses === true,
       includeInvestTabs: true,
       // Resume-all must also see open company runs whose tab no longer exposes
-      // the stable /g/...-inwestycje URL after Chrome restore or ChatGPT routing.
+      // the stable /g/... project URL after Chrome restore or ChatGPT routing.
       includeProcessContextFallback: true
     });
     const activeProcesses = contextSnapshot.processCandidates;
@@ -15889,7 +16270,11 @@ async function runResetScanStartAllTabs(options = {}) {
       if (shouldRecordIssueForProcess(process)) return false;
       const processTs = Number.isInteger(process?.timestamp) ? process.timestamp : 0;
       const ageMs = processTs > 0 ? Math.max(0, Date.now() - processTs) : Number.MAX_SAFE_INTEGER;
-      if (ageMs > PROCESS_MONITOR_HEARTBEAT.staleTtlMs) return false;
+      const livePreserveTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT?.autoStopLiveStaleTtlMs)
+        && PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs > 0
+        ? PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs
+        : (WAIT_FOR_RESPONSE_MS + (30 * 60 * 1000));
+      if (ageMs > livePreserveTtlMs) return false;
       return true;
     };
     const computeResumePlanFromSavedStage = (row) => {
@@ -16398,11 +16783,11 @@ async function runResetScanStartAllTabs(options = {}) {
           : (target.process || null);
         if (!canResumeCompanyInvestContextFromUrl(row.url, currentProcess)) {
           row.action = 'skipped_outside_invest';
-          row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
+          row.reason = `tab_url_not_iskierka_gpt:${row.url || 'empty'}`;
           appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
-          console.warn('[reset-scan-start] Skip process (url outside inwestycje GPT)', {
+          console.warn('[reset-scan-start] Skip process (url outside Iskierka GPT)', {
             runId: row.runId || '',
             tabId: row.tabId,
             reason: row.reason
@@ -17473,7 +17858,7 @@ function isInvestGptUrl(url) {
   const compactUrl = url.trim();
   if (!compactUrl) return false;
 
-  // GPT ids rotate, but the stable routing suffix is the Invest slug.
+  // GPT ids can rotate, and the local project was renamed from "inwestycje" to "iskierka".
   const matchesInvestPath = (pathname) => {
     const normalizedPath = typeof pathname === 'string'
       ? pathname.replace(/\/+$/, '').toLowerCase()
@@ -17488,7 +17873,7 @@ function isInvestGptUrl(url) {
       if (normalizedPath.startsWith(`${primaryPathBase}/`)) return true;
     }
 
-    return /^\/g\/[^/]*-inwestycje(?:\/|$)/i.test(normalizedPath);
+    return /^\/g\/[^/]*-(?:inwestycje|iskierka)(?:\/|$)/i.test(normalizedPath);
   };
 
   try {
@@ -17497,7 +17882,7 @@ function isInvestGptUrl(url) {
     if (!CHAT_GPT_HOSTS.has(parsed.hostname.toLowerCase())) return false;
     return matchesInvestPath(parsed.pathname || '');
   } catch (error) {
-    if (/^https?:\/\/(?:www\.)?(?:chatgpt\.com|chat\.openai\.com)\/g\/[^/?#]*-inwestycje(?:[/?#]|$)/i.test(compactUrl)) {
+    if (/^https?:\/\/(?:www\.)?(?:chatgpt\.com|chat\.openai\.com)\/g\/[^/?#]*-(?:inwestycje|iskierka)(?:[/?#]|$)/i.test(compactUrl)) {
       return true;
     }
 
@@ -20703,6 +21088,48 @@ function buildPersistenceUiSummary(options = {}) {
     emergencyPageOk: emergencyPageSaveOk,
     pageEmergencyOnly: false,
     recoveryHint: ''
+  };
+}
+
+function isForceStoppedExecutionResult(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (result.stopped === true) return true;
+  const error = typeof result.error === 'string' ? result.error.trim().toLowerCase() : '';
+  return error === 'force_stopped';
+}
+
+function buildForceStoppedExecutionSummary(result = {}) {
+  const reason = typeof result?.reason === 'string' && result.reason.trim()
+    ? result.reason.trim()
+    : 'force_stop';
+  const origin = typeof result?.origin === 'string' && result.origin.trim()
+    ? result.origin.trim()
+    : '';
+  const statusText = reason === 'bulk_resume_prepare'
+    ? 'Zatrzymano przed wznowieniem zbiorczym'
+    : (reason === 'bulk_reset_before_detect_resume'
+      ? 'Zatrzymano przed ponownym rozpoznaniem'
+      : (reason === 'restarted_in_same_window'
+        ? 'Zatrzymano przez ponowne uruchomienie'
+        : (reason === 'manual_stop'
+          ? 'Zatrzymano recznie'
+          : 'Proces zatrzymany')));
+  const logLines = [
+    `Powod: ${reason}`,
+    ...(origin ? [`Origin: ${origin}`] : [])
+  ];
+  return {
+    lifecycleStatus: 'stopped',
+    phase: 'response_wait',
+    actionRequired: 'none',
+    needsAction: false,
+    statusCode: 'process.stopped',
+    statusText,
+    reason,
+    error: '',
+    heading: statusText,
+    tone: 'warn',
+    logLines
   };
 }
 
@@ -29008,6 +29435,22 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         lines: persistenceSummary.logLines,
         autoCloseMs: 0
       });
+    } else if (isForceStoppedExecutionResult(result)) {
+      const stopSummary = buildForceStoppedExecutionSummary(result);
+      finalStatus = stopSummary.lifecycleStatus;
+      finalPhase = stopSummary.phase;
+      finalStatusCode = stopSummary.statusCode;
+      finalStatusText = stopSummary.statusText;
+      finalReason = stopSummary.reason;
+      finalError = stopSummary.error;
+      finalActionRequired = stopSummary.actionRequired;
+      finalNeedsAction = stopSummary.needsAction;
+      await renderFinalCounterStatusOnTab(chatTabId, {
+        heading: stopSummary.heading,
+        tone: stopSummary.tone,
+        lines: stopSummary.logLines,
+        autoCloseMs: 0
+      });
     } else if (result && !result.success) {
       finalStatus = 'failed';
       finalPhase = 'response_wait';
@@ -29084,6 +29527,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
 
     return {
       success: finalStatus === 'completed',
+      stopped: finalStatus === 'stopped',
       title,
       reason: finalReason || '',
       error: finalError || ''
@@ -29809,6 +30253,23 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
+      } else if (isForceStoppedExecutionResult(result)) {
+        const stopSummary = buildForceStoppedExecutionSummary(result);
+        finalStatus = stopSummary.lifecycleStatus;
+        finalPhase = stopSummary.phase;
+        finalStatusCode = stopSummary.statusCode;
+        finalStatusText = stopSummary.statusText;
+        finalReason = stopSummary.reason;
+        finalError = stopSummary.error;
+        finalActionRequired = stopSummary.actionRequired;
+        finalNeedsAction = stopSummary.needsAction;
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: stopSummary.heading,
+          tone: stopSummary.tone,
+          lines: stopSummary.logLines,
+          autoCloseMs: 0
+        });
+        console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
         finalStatus = 'failed';
@@ -29896,6 +30357,7 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
       return {
         success: processSuccess,
+        stopped: finalStatus === 'stopped',
         title,
         reason: finalReason || '',
         error: finalError || ''
@@ -29932,6 +30394,7 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
     .map((result, index) => {
       if (result.status === 'fulfilled') {
         if (result.value?.success) return null;
+        if (result.value?.stopped) return null;
         return {
           index,
           title: result.value?.title || tabs[index]?.title || 'Bez tytulu',
@@ -30822,14 +31285,20 @@ async function injectToChat(
       forceStopListener = (message, sender, sendResponse) => {
         if (!isForceStopForCurrentRun(message)) return;
         markForceStopRequested(message);
-        console.warn(`[injectToChat] Otrzymano PROCESS_FORCE_STOP (runId=${runId || 'n/a'})`);
+        console.warn(`[injectToChat] Otrzymano PROCESS_FORCE_STOP (runId=${runId || 'n/a'})`, {
+          reason: forceStopReason,
+          origin: forceStopOrigin,
+          messageRunId: typeof message?.runId === 'string' ? message.runId : ''
+        });
         if (typeof sendResponse === 'function') {
           try {
             sendResponse({
               success: true,
               acknowledged: true,
               stopped: true,
-              runId: runId || null
+              runId: runId || null,
+              reason: forceStopReason,
+              origin: forceStopOrigin
             });
           } catch (error) {
             // Ignore sendResponse issues.
@@ -30948,6 +31417,10 @@ async function injectToChat(
     let _swKeepaliveCleanup = null;
     const forceStopResult = () => {
       if (typeof _swKeepaliveCleanup === 'function') { try { _swKeepaliveCleanup(); } catch (_) {} }
+      console.warn(`[injectToChat] FORCE_STOP_EXIT ${runTag}`, {
+        reason: forceStopReason,
+        origin: forceStopOrigin
+      });
       return {
         success: false,
         lastResponse: '',
@@ -32457,7 +32930,7 @@ async function injectToChat(
       };
     }
 
-    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex) {
+    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex, selectedResponseReason = 'last_prompt') {
       const normalizedText = typeof responseText === 'string' ? responseText : '';
       if (!normalizedText.trim()) {
         return { ok: false, error: 'empty_response' };
@@ -32471,7 +32944,9 @@ async function injectToChat(
         stageMeta.selected_response_stage_index = selectedStageIndex;
       }
       if (Number.isInteger(selectedPrompt)) {
-        stageMeta.selected_response_reason = 'last_prompt';
+        stageMeta.selected_response_reason = typeof selectedResponseReason === 'string' && selectedResponseReason.trim()
+          ? selectedResponseReason.trim()
+          : 'last_prompt';
       }
       const promptFromStage = Number.isInteger(stageMeta?.selected_response_prompt)
         ? stageMeta.selected_response_prompt
@@ -35052,9 +35527,34 @@ async function injectToChat(
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
   // Snapshot ostatniej odpowiedzi assistant
 
-  async function waitForResponse(maxWaitMs) {
+  async function waitForResponse(maxWaitMs, progressMeta = {}) {
     if (shouldStopNow()) return false;
     const safeMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
+    const waitProgress = progressMeta && typeof progressMeta === 'object' ? progressMeta : {};
+    const waitCurrentPrompt = Number.isInteger(waitProgress.currentPrompt) ? waitProgress.currentPrompt : preChainCurrentPrompt;
+    const waitTotalPrompts = Number.isInteger(waitProgress.totalPrompts) ? waitProgress.totalPrompts : totalPromptsForRun;
+    const waitStageIndex = Number.isInteger(waitProgress.stageIndex) ? waitProgress.stageIndex : null;
+    const waitStageName = typeof waitProgress.stageName === 'string' && waitProgress.stageName.trim()
+      ? waitProgress.stageName.trim()
+      : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
+    const emitResponseWaitHeartbeat = (phase, elapsedMs = 0, extra = {}) => {
+      if (!runId) return;
+      const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
+      notifyProcess('PROCESS_PROGRESS', {
+        status: 'running',
+        lifecycleStatus: 'running',
+        currentPrompt: waitCurrentPrompt,
+        totalPrompts: waitTotalPrompts,
+        ...(waitStageIndex !== null ? { stageIndex: waitStageIndex } : {}),
+        ...(waitStageName ? { stageName: waitStageName } : {}),
+        phase: 'response_wait',
+        statusCode: 'chat.response_waiting',
+        statusText: elapsedSec > 0 ? `Czekam na odpowiedz (${elapsedSec}s)` : 'Czekam na odpowiedz',
+        reason: phase || 'response_wait',
+        needsAction: false,
+        ...extra
+      });
+    };
     const initialSnapshot = getAssistantSnapshot();
     const initialAssistantCount = initialSnapshot.count;
     const initialAssistantText = initialSnapshot.lastText || '';
@@ -35081,11 +35581,13 @@ async function injectToChat(
       return true;
     };
     console.log('Czekam na odpowiedz ChatGPT...');
+    emitResponseWaitHeartbeat('response_wait_start', 0);
 
     // Faza 1: wykryj start odpowiedzi.
     const phase1StartTime = Date.now();
     let phase1IdleSince = Date.now();
     let responseStarted = false;
+    let lastResponseWaitHeartbeatAt = Date.now();
 
     while (true) {
       if (shouldStopNow()) return false;
@@ -35134,6 +35636,10 @@ async function injectToChat(
       if ((Date.now() - phase1StartTime) % 30000 < 500) {
         const elapsed = Math.round((Date.now() - phase1StartTime) / 1000);
         console.log(`[FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`);
+      }
+      if (Date.now() - lastResponseWaitHeartbeatAt >= 30_000) {
+        lastResponseWaitHeartbeatAt = Date.now();
+        emitResponseWaitHeartbeat('response_wait_phase1', Date.now() - phase1StartTime);
       }
 
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -35198,6 +35704,14 @@ async function injectToChat(
         });
       }
       logInterval += 1;
+      if (Date.now() - lastResponseWaitHeartbeatAt >= 30_000) {
+        lastResponseWaitHeartbeatAt = Date.now();
+        emitResponseWaitHeartbeat('response_wait_phase2', Date.now() - phase2StartTime, {
+          responseSeenInDOM,
+          chatGptGenerating: genStatus.generating === true ? 'yes' : 'no',
+          chatGptGenerationReason: typeof genStatus.reason === 'string' ? genStatus.reason : ''
+        });
+      }
 
       const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
       const noGeneration = !genStatus.generating;
@@ -35757,6 +36271,62 @@ async function injectToChat(
     }
 
     console.log(`📊 Walidacja: ✅ OK (${text.length} >= ${minLength} znaków)`);
+    return true;
+  }
+
+  function extractStage12InvestmentJsonText(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return '';
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const objectStart = raw.indexOf('{');
+    const objectEnd = raw.lastIndexOf('}');
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      candidates.push(raw.slice(objectStart, objectEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (
+          parsed
+          && typeof parsed === 'object'
+          && !Array.isArray(parsed)
+          && parsed.schema === 'economist.response.v2'
+          && Array.isArray(parsed.records)
+        ) {
+          return candidate;
+        }
+      } catch (_error) {
+        // Keep trying other candidate shapes.
+      }
+    }
+    return '';
+  }
+
+  function rememberStage12InvestmentJson(promptNumber, responseText) {
+    const candidate = extractStage12InvestmentJsonText(responseText);
+    if (!candidate) return false;
+    const canonicalStage12Prompt = 12;
+    const hasExistingStage12 = typeof window._stage12ResponseToSave === 'string'
+      && window._stage12ResponseToSave.trim();
+    if (hasExistingStage12 && Number.isInteger(promptNumber) && promptNumber > canonicalStage12Prompt) {
+      console.log(
+        `[copy-flow] [capture:stage12-json-skip-copy] prompt=${promptNumber} keptPrompt=${window._stage12ResponsePrompt || canonicalStage12Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+      );
+      return true;
+    }
+    window._stage12ResponseToSave = candidate;
+    window._stage12ResponsePrompt = canonicalStage12Prompt;
+    console.log(
+      `[copy-flow] [capture:stage12-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalStage12Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+    );
     return true;
   }
   
@@ -36629,23 +37199,23 @@ async function injectToChat(
       if (!thinkingEffortResult?.success) {
         const effortLabel = requestedComposerThinkingEffort || 'unknown';
         const effortError = thinkingEffortResult?.error || 'thinking_effort_not_set';
-        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, `Thinking ${effortLabel}: nie ustawiono, kontynuuje`);
         notifyProcess('PROCESS_PROGRESS', {
-          status: 'failed',
+          status: 'running',
+          lifecycleStatus: 'running',
           currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
-          statusText: `Nie ustawiono trybu thinking (${effortLabel})`,
-          reason: 'thinking_effort_not_set',
+          phase: 'editor_ready',
+          statusCode: 'chat.thinking_effort_not_set',
+          statusText: `Nie ustawiono thinking ${effortLabel}; kontynuuje`,
+          reason: 'thinking_effort_warn',
           error: effortError,
           needsAction: false
         });
-        return {
-          success: false,
-          lastResponse: '',
-          error: 'thinking_effort_not_set',
-          details: effortError,
-          metrics: buildMetricsSnapshot({ completed: false, reason: 'thinking_effort_not_set' })
-        };
+        console.warn('[thinking-effort] requested effort not set; continuing prompt chain', {
+          effort: effortLabel,
+          error: effortError
+        });
       }
 
       if (!isResume) {
@@ -36716,7 +37286,12 @@ async function injectToChat(
         }
 
         updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedz...');
-        const payloadResponseCompleted = await waitForResponse(responseWaitMs);
+        const payloadResponseCompleted = await waitForResponse(responseWaitMs, {
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+          stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload'
+        });
         if (shouldStopNow()) {
           return forceStopResult();
         }
@@ -37065,7 +37640,12 @@ async function injectToChat(
               return forceStopResult();
             }
             console.log(`[${i + 1}/${promptChain.length}] Wywołuję waitForResponse()...`);
-            const completed = await waitForResponse(responseWaitMs);
+            const completed = await waitForResponse(responseWaitMs, {
+              currentPrompt: absoluteCurrentPrompt,
+              totalPrompts: totalPromptsForRun,
+              stageIndex: absoluteStageIndex,
+              stageName: `Prompt ${absoluteCurrentPrompt}`
+            });
             if (shouldStopNow()) {
               return forceStopResult();
             }
@@ -37170,7 +37750,12 @@ async function injectToChat(
                 validationGenerationErrorRetryAttempts += 1;
                 updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'ChatGPT error - Retry');
                 await new Promise((resolve) => setTimeout(resolve, 1200));
-                await waitForResponse(responseWaitMs);
+                await waitForResponse(responseWaitMs, {
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  stageName: `Prompt ${absoluteCurrentPrompt}`
+                });
                 continue;
               }
             }
@@ -37195,7 +37780,12 @@ async function injectToChat(
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
               
               // Poczekaj na zakończenie odpowiedzi ChatGPT
-              await waitForResponse(responseWaitMs);
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`
+              });
               if (shouldStopNow()) {
                 return forceStopResult();
               }
@@ -37370,6 +37960,7 @@ async function injectToChat(
         });
         const stageValidated = validateResponse(responseText);
         registerStageCompletion(absoluteCurrentPrompt, responseText, stageValidated);
+        rememberStage12InvestmentJson(absoluteCurrentPrompt, responseText);
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -37424,12 +38015,25 @@ async function injectToChat(
           : Math.max(counterCurrent, 1);
         updateCounter(counter, counterCurrent, counterTotal, 'Prompt chain zakonczony. Trwa zapis do bazy...');
         
-        // Zwróć ostatnią odpowiedź do zapisania
-        const lastResponse = window._lastResponseToSave || '';
+        // Zwróć wygenerowany Stage 12 JSON do zapisu inwestycyjnego.
+        // Ostatni prompt obecnego chaina może być Stage 15 (sector memory MCP write), więc nie zapisujemy go jako watchlist final.
+        const lastPromptResponse = window._lastResponseToSave || '';
+        const stage12Response = window._stage12ResponseToSave || '';
+        const stage12ResponsePrompt = Number.isInteger(window._stage12ResponsePrompt)
+          ? window._stage12ResponsePrompt
+          : null;
+        const selectedResponseReason = stage12Response
+          ? 'stage12_investment_json'
+          : 'last_prompt';
+        const lastResponse = stage12Response || lastPromptResponse;
         delete window._lastResponseToSave;
-        console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków)`);
-        console.log(`[copy-flow] [capture:return] prompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)}`);
-        const selectedPrompt = completedPrompt;
+        delete window._stage12ResponseToSave;
+        delete window._stage12ResponsePrompt;
+        console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków, reason=${selectedResponseReason})`);
+        console.log(`[copy-flow] [capture:return] prompt=${stage12Response ? stage12ResponsePrompt : completedPrompt} completedPrompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)} reason=${selectedResponseReason}`);
+        const selectedPrompt = stage12Response && Number.isInteger(stage12ResponsePrompt)
+          ? stage12ResponsePrompt
+          : completedPrompt;
         const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
         const responseId = buildInjectedResponseId(lastResponse, selectedPrompt);
         let persistedViaMessage = false;
@@ -37443,7 +38047,8 @@ async function injectToChat(
             lastResponse,
             responseId,
             selectedPrompt,
-            selectedStageIndex
+            selectedStageIndex,
+            selectedResponseReason
           );
           if (tabSaveResult.ok) {
             persistedViaMessage = true;

@@ -247,6 +247,13 @@ async function main() {
     buildResponseContractValidation() {
       return { valid: true, kind: 'current' };
     },
+    extractLatestStage12InvestmentResponseFromTab: async () => ({
+      text: '',
+      contract: null,
+      scannedCount: 0,
+      sourceIndex: null,
+      reason: 'not_found'
+    }),
     extractLastAssistantResponseFromTab: async () => '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}',
     normalizeChatConversationUrl(value) {
       return typeof value === 'string' && value.trim() ? value.trim() : '';
@@ -279,9 +286,9 @@ async function main() {
     status: 'running',
     lifecycleStatus: 'running',
     phase: 'prompt_send',
-    currentPrompt: 12,
-    totalPrompts: 12,
-    stageIndex: 11,
+    currentPrompt: 15,
+    totalPrompts: 15,
+    stageIndex: 14,
     tabId: 55,
     title: 'Alpha Corp',
     analysisType: 'company',
@@ -297,14 +304,48 @@ async function main() {
   assert.strictEqual(saved.length, 1);
   assert.strictEqual(saved[0][0], '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}');
   assert.strictEqual(saved[0][3], 'run-final');
-  assert.strictEqual(saved[0][4], 'run-final_p12_00000054');
+  assert.strictEqual(saved[0][4], 'run-final_p15_00000054');
   assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_recovery');
-  assert.strictEqual(saved[0][5].selected_response_prompt, 12);
+  assert.strictEqual(saved[0][5].selected_response_prompt, 15);
   assert.strictEqual(saved[0][6], 'https://chatgpt.com/c/test');
   assert(
     auditLogs.some((entry) => entry.code === 'stale_final_prompt_recovered'),
     'Expected recovery audit log.'
   );
+
+  saved.length = 0;
+  const recoveredStage12Json = '{"schema":"economist.response.v2","records":[{"ticker":"XYZ","decision":"PRIMARY"}]}';
+  context.extractLatestStage12InvestmentResponseFromTab = async () => ({
+    text: recoveredStage12Json,
+    contract: {
+      valid: true,
+      kind: 'economist.response.v2'
+    },
+    scannedCount: 3,
+    sourceIndex: 1,
+    reason: 'economist_response_v2'
+  });
+  context.buildResponseContractValidation = () => ({
+    valid: true,
+    kind: 'economist.response.v2'
+  });
+  const stage12HistoryProcess = {
+    ...process,
+    id: 'run-final-stage12-history',
+    currentPrompt: 15,
+    totalPrompts: 15,
+    stageIndex: 14,
+    lastProgressAt: nowTs - (12 * 60 * 1000)
+  };
+
+  const historyResult = await context.attemptStaleFinalPromptRecovery(stage12HistoryProcess, 'test', nowTs + 1000);
+  assert.strictEqual(historyResult.success, true);
+  assert.strictEqual(saved.length, 1);
+  assert.strictEqual(saved[0][0], recoveredStage12Json);
+  assert.strictEqual(saved[0][4], 'run-final-stage12-history_p12_00000054');
+  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_stage12_dom_history');
+  assert.strictEqual(saved[0][5].selected_response_prompt, 12);
+  assert.strictEqual(saved[0][5].selected_response_stage_index, 11);
 
   console.log('test-stale-final-prompt-recovery.js: ok');
 }

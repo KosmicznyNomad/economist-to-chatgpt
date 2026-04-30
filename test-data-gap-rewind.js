@@ -33,9 +33,9 @@ const STAGE_TO_PROMPT_INDEX = new Map([
   ['10', 10],
   ['11', 10],
   ['12', 11],
-  ['12.5', 12],
-  ['13', 13],
-  ['13.5', 14]
+  ['13', 12],
+  ['14', 13],
+  ['15', 14]
 ]);
 
 function normalizeStageId(value) {
@@ -303,7 +303,7 @@ function run() {
     }
   }
 
-  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'];
+  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'];
   assert.deepStrictEqual(stripUnknownStages(executed), expected);
 
   // Test 2b: if missing stage is far earlier (e.g. at stage 7), replay must start
@@ -332,7 +332,7 @@ function run() {
   }
   const expectedFar = [
     '1', '2', '3', '4', '5', '6', '7',
-    '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'
+    '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedFar), expectedFar);
 
@@ -363,14 +363,14 @@ function run() {
   const expectedSelf = [
     '1', '2', '3',
     '2', '3',
-    '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'
+    '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedSelf), expectedSelf);
 
   // Test 2c: generic rollback rule for many stage pairs.
   // For each current stage C and missing stage M where M < C (by prompt number),
   // expect replay sequence M..C inserted right after C.
-  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '12.5', '13', '13.5'];
+  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'];
   const orderedByPromptNumber = orderedStages
     .map((stageId) => ({
       stageId,

@@ -374,6 +374,54 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   assert.deepStrictEqual(context.closedRuns, ['run-1']);
 }
 
+async function testSavedProcessWithMissingLocalContextClosesWindow() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [{ jobId: 'aq-1', runId: 'run-1', sequence: 1, createdAt: now, slotReservedAt: now }],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'running',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0
+      }
+    },
+    tabId: 321,
+    windowId: 421,
+    timestamp: now - 120000
+  });
+
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  await context.reconcileAnalysisQueueState('saved_missing_context');
+
+  assert.deepStrictEqual(context.closedRuns, ['run-1']);
+  assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
+  assert(
+    context.upserts.some((entry) => (
+      entry.runId === 'run-1'
+      && entry.patch.slotReleaseReason === 'final_stage_local_saved_after_local_context_loss'
+    )),
+    'Saved process that lost its local tab should release and request process-window close.'
+  );
+}
+
 async function testLocalSaveFailureKeepsCompletedProcessWindowOpen() {
   context = buildScenarioContext();
   const now = Date.now();
@@ -647,6 +695,7 @@ function buildScenarioContext() {
     'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'hasProcessCloseableSavedResponse',
     'buildStaleQueueReleasePatch',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
@@ -684,6 +733,7 @@ async function main() {
   await testClosedWindowDoesNotConsumeSlot();
   await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();
   await testCompletedPendingDispatchKeepsSlotReserved();
+  await testSavedProcessWithMissingLocalContextClosesWindow();
   await testLocalSaveFailureKeepsCompletedProcessWindowOpen();
   await testDuplicateActiveJobsReleaseSupersededContext();
   await testManualPdfJobsRespectDedicatedConcurrencyCap();

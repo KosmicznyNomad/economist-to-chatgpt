@@ -225,6 +225,29 @@ const context = {
     }
     return '';
   },
+  getCompletedProcessLocalSaveState(process) {
+    if (!process || typeof process !== 'object') return null;
+    if (typeof process?.persistenceStatus?.saveOk === 'boolean') {
+      return process.persistenceStatus.saveOk;
+    }
+    if (typeof process?.completedResponseSaved === 'boolean') {
+      return process.completedResponseSaved;
+    }
+    if (typeof process?.finalStagePersistence?.success === 'boolean') {
+      return process.finalStagePersistence.success;
+    }
+    return null;
+  },
+  hasCompletedProcessLocalSave(process) {
+    if (!process || typeof process !== 'object') return false;
+    if (typeof process?.persistenceStatus?.saveOk === 'boolean') {
+      return process.persistenceStatus.saveOk === true;
+    }
+    if (typeof process?.completedResponseSaved === 'boolean') {
+      return process.completedResponseSaved === true;
+    }
+    return process?.finalStagePersistence?.success === true;
+  },
   extractLastAssistantResponseFromTab() {
     throw new Error('DOM fallback should not be used in this test');
   }
@@ -242,6 +265,8 @@ vm.createContext(context);
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
   'buildResponseContractValidation',
+  'getCompletedProcessLocalSaveState',
+  'hasCompletedProcessLocalSave',
   'getCompletedProcessFinalityState',
   'resolveCompletedProcessFinalResponseText'
 ].forEach((functionName) => {
@@ -250,8 +275,8 @@ vm.createContext(context);
 
 async function testRequiresCompletedPayload() {
   const result = await context.resolveCompletedProcessFinalResponseText({
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: ''
   });
 
@@ -262,7 +287,7 @@ async function testRequiresCompletedPayload() {
 async function testAcceptsCompletedPayloadEvenWhenPromptCountersLag() {
   const result = await context.resolveCompletedProcessFinalResponseText({
     currentPrompt: 11,
-    totalPrompts: 12,
+    totalPrompts: 15,
     completedResponseText: makeStructuredV2Response('Alpha Corp')
   });
 
@@ -272,8 +297,8 @@ async function testAcceptsCompletedPayloadEvenWhenPromptCountersLag() {
 
 async function testRejectsInvalidFinalContract() {
   const result = await context.resolveCompletedProcessFinalResponseText({
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: 'plain text without final contract'
   });
 
@@ -283,8 +308,8 @@ async function testRejectsInvalidFinalContract() {
 
 async function testAcceptsStructuredV2FinalContract() {
   const result = await context.resolveCompletedProcessFinalResponseText({
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: makeStructuredV2Response('Alpha Corp')
   });
 
@@ -307,8 +332,8 @@ async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {
   const result = await context.resolveCompletedProcessFinalResponseText({
     id: 'run-alpha',
     analysisType: 'company',
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: '',
     chatUrl: 'https://chatgpt.com/c/alpha',
     finalStagePersistence: {
@@ -344,13 +369,13 @@ function testCriticalCompletedResponsePatchFlushesImmediately() {
     {
       id: 'run-alpha',
       lifecycleStatus: 'finalizing',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: ''
     },
     {
       id: 'run-alpha',
       lifecycleStatus: 'finalizing',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: ''
     },
     {
@@ -365,13 +390,13 @@ function testCriticalCompletedResponsePatchFlushesImmediately() {
     {
       id: 'run-alpha',
       lifecycleStatus: 'completed',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: 'dispatch_pending'
     },
     {
       id: 'run-alpha',
       lifecycleStatus: 'completed',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: 'dispatch_pending'
     },
     {
@@ -399,6 +424,8 @@ function testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot() {
   });
 
   [
+    'getCompletedProcessLocalSaveState',
+    'hasCompletedProcessLocalSave',
     'getCompletedProcessFinalityState',
     'normalizeProcessLifecycleStatus',
     'normalizeProcessStatus',
@@ -416,9 +443,9 @@ function testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot() {
     id: 'run-alpha',
     status: 'finalizing',
     lifecycleStatus: 'finalizing',
-    currentPrompt: 12,
-    totalPrompts: 12,
-    stageIndex: 11,
+    currentPrompt: 15,
+    totalPrompts: 15,
+    stageIndex: 14,
     completedResponseSaved: true,
     persistenceStatus: {
       saveOk: true,
@@ -468,7 +495,7 @@ async function testProcessProgressCarriesCompletedResponsePayload() {
     },
     ensureProcessRegistryReady: async () => {},
     processRegistry: new Map([
-      ['run-progress', { id: 'run-progress', currentPrompt: 12, totalPrompts: 12 }]
+      ['run-progress', { id: 'run-progress', currentPrompt: 15, totalPrompts: 15 }]
     ]),
     applyChatGptComputationStatePatch(target, source) {
       if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {

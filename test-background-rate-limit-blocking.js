@@ -205,10 +205,13 @@ const context = {
 
 vm.createContext(context);
 [
+  'compactText',
   'normalizeChatGptUiText',
   'isChatGptLimitOrRestrictionText',
   'isInjectRateLimitBlockedResult',
-  'buildInjectRateLimitNeedsActionPatch'
+  'buildInjectRateLimitNeedsActionPatch',
+  'isHardGenerationErrorText',
+  'isRetryableChatGptGenerationErrorText'
 ].forEach((functionName) => {
   vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
     filename: 'background.js'
@@ -276,6 +279,21 @@ function testBlockedResultHelperAndPatchBuilder() {
   assert.strictEqual(patch.chatUrl, 'https://chatgpt.com/c/alpha');
 }
 
+function testRetryableGenerationErrorClassifier() {
+  const retryableMessage = 'Something went wrong while generating the response. If this issue persists please contact us through our help center at help.openai.com.';
+  assert.strictEqual(context.isHardGenerationErrorText(retryableMessage), true);
+  assert.strictEqual(context.isRetryableChatGptGenerationErrorText(retryableMessage), true);
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Something went wrong while generating the response.'),
+    true
+  );
+  assert.strictEqual(context.isRetryableChatGptGenerationErrorText('Network error'), false);
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Streaming interrupted while waiting for the complete message.'),
+    false
+  );
+}
+
 function testInjectKeepsLimitClassifierInsideInjectedScope() {
   const start = backgroundSource.indexOf('async function injectToChat(');
   const end = backgroundSource.indexOf('\nfunction sleep(', start);
@@ -286,11 +304,14 @@ function testInjectKeepsLimitClassifierInsideInjectedScope() {
 
   assert.match(injectSource, /function isInjectedChatGptLimitOrRestrictionText\s*\(/);
   assert.doesNotMatch(injectSource, /\bisChatGptLimitOrRestrictionText\s*\(/);
+  assert.match(injectSource, /function clickRetryForRetryableGenerationError\s*\(/);
+  assert.match(injectSource, /statusCode:\s*'chat\.retry_generation_error'/);
 }
 
 function main() {
   testClassifierRecognizesLimitAndRestrictionMessages();
   testBlockedResultHelperAndPatchBuilder();
+  testRetryableGenerationErrorClassifier();
   testInjectKeepsLimitClassifierInsideInjectedScope();
   console.log('test-background-rate-limit-blocking.js passed');
 }

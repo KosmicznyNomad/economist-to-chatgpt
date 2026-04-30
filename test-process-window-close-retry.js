@@ -212,10 +212,17 @@ async function main() {
     Number,
     String,
     Array,
+    URL,
     JSON,
     Map,
     Set,
     ProcessContractUtils,
+    CHAT_GPT_HOSTS: new Set([
+      'chatgpt.com',
+      'www.chatgpt.com',
+      'chat.openai.com',
+      'www.chat.openai.com'
+    ]),
     PROCESS_WINDOW_CLOSE_RETRY: {
       initialDelayMs: 1500,
       maxDelayMs: 60 * 1000,
@@ -232,6 +239,9 @@ async function main() {
         create(name, info) {
           createCalls.push({ name, info });
         }
+      },
+      tabs: {
+        query: async () => []
       }
     },
     clearAlarmSafe: async (alarmName) => {
@@ -273,6 +283,13 @@ async function main() {
   });
 
   [
+    'normalizeChatConversationUrl',
+    'isChatGptUrl',
+    'getTabEffectiveUrl',
+    'isChromeMissingTabOrWindowError',
+    'getChatConversationCloseKey',
+    'collectProcessConversationCloseKeys',
+    'findOpenProcessTabByConversationUrl',
     'normalizeProcessLifecycleStatus',
     'normalizeProcessStatus',
     'resolveProcessStageSnapshot',
@@ -280,6 +297,7 @@ async function main() {
     'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'hasProcessCloseableSavedResponse',
     'normalizeProcessWindowCloseState',
     'inspectProcessWindowContext',
     'attemptProcessWindowClose',
@@ -302,9 +320,9 @@ async function main() {
     id: 'run-close',
     status: 'completed',
     lifecycleStatus: 'completed',
-    currentPrompt: 12,
-    totalPrompts: 12,
-    stageIndex: 11,
+    currentPrompt: 15,
+    totalPrompts: 15,
+    stageIndex: 14,
     tabId: 11,
     windowId: 22,
     persistenceStatus: {
@@ -354,6 +372,152 @@ async function main() {
     clearCalls.includes('completed-process-window-close-retry'),
     'Successful completion should clear the durable window-close retry alarm.'
   );
+
+  const removedTabIds = [];
+  context.getTabByIdSafe = async () => null;
+  context.chrome.tabs.query = async () => [
+    {
+      id: 77,
+      windowId: 88,
+      url: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/69ef2120-5ba0-83eb-bf2e-13893c147e32?model=gpt-5'
+    }
+  ];
+  context.removeTabSafe = async (tabId) => {
+    removedTabIds.push(tabId);
+    return tabId === 77;
+  };
+
+  const staleTabClose = await context.attemptProcessWindowClose({
+    id: 'run-stale-tab',
+    tabId: 11,
+    windowId: 22,
+    chatUrl: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/69ef2120-5ba0-83eb-bf2e-13893c147e32',
+    conversationUrls: [
+      'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/project'
+    ]
+  });
+
+  assert.strictEqual(staleTabClose.closed, true);
+  assert.strictEqual(staleTabClose.reason, 'tab_closed_by_conversation_url');
+  assert.deepStrictEqual(removedTabIds, [11, 77]);
+
+  const fallbackRemovedTabIds = [];
+  context.chrome.tabs.query = async () => [];
+  context.queryTabsInWindowSafe = async () => ({
+    ok: true,
+    tabs: [
+      { id: 99, windowId: 22, active: true, url: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/project' },
+      { id: 100, windowId: 22, active: false, url: 'https://example.com/' }
+    ],
+    reason: ''
+  });
+  context.removeTabSafe = async (tabId) => {
+    fallbackRemovedTabIds.push(tabId);
+    return tabId === 99;
+  };
+
+  const activeChatClose = await context.attemptProcessWindowClose({
+    id: 'run-active-chat-tab',
+    tabId: 11,
+    windowId: 22
+  });
+
+  assert.strictEqual(activeChatClose.closed, true);
+  assert.strictEqual(activeChatClose.reason, 'active_chatgpt_tab_closed_in_process_window');
+  assert.deepStrictEqual(fallbackRemovedTabIds, [11, 99]);
+
+  const stoppedRemovedTabIds = [];
+  context.processRegistry.set('run-stopped-saved', {
+    id: 'run-stopped-saved',
+    status: 'stopped',
+    reason: 'local_context_missing',
+    currentPrompt: 15,
+    totalPrompts: 15,
+    tabId: 501,
+    windowId: 502,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0
+      }
+    }
+  });
+  context.getTabByIdSafe = async () => null;
+  context.chrome.tabs.query = async () => [];
+  context.queryTabsInWindowSafe = async () => ({
+    ok: true,
+    tabs: [
+      { id: 503, windowId: 502, active: true, url: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project' },
+      { id: 504, windowId: 502, active: false, url: 'https://example.com/' }
+    ],
+    reason: ''
+  });
+  context.removeTabSafe = async (tabId) => {
+    stoppedRemovedTabIds.push(tabId);
+    return tabId === 503;
+  };
+
+  const stoppedSavedClose = await context.closeProcessWindowAfterQueueSuccess(
+    context.processRegistry.get('run-stopped-saved'),
+    { origin: 'test-stopped-saved-close' }
+  );
+
+  assert.strictEqual(stoppedSavedClose, true);
+  assert.deepStrictEqual(stoppedRemovedTabIds, [501, 503]);
+  assert.strictEqual(context.processRegistry.get('run-stopped-saved').windowClose.state, 'closed');
+
+  context.processRegistry.set('run-window-missing', {
+    id: 'run-window-missing',
+    status: 'completed',
+    currentPrompt: 15,
+    totalPrompts: 15,
+    tabId: 601,
+    windowId: 602,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0
+      }
+    }
+  });
+  context.getTabByIdSafe = async () => null;
+  context.queryTabsInWindowSafe = async () => ({
+    ok: false,
+    tabs: [],
+    reason: 'No window with id: 602'
+  });
+  context.removeTabSafe = async () => false;
+
+  const missingWindowClose = await context.runProcessWindowCloseRetry('run-window-missing', {
+    origin: 'test-window-missing'
+  });
+
+  assert.strictEqual(missingWindowClose.closed, true);
+  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose.state, 'closed');
+  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose.lastReason, 'window_missing');
+
+  const urlOnlyPlan = context.resolveProcessWindowCloseRetryPlan({
+    id: 'run-url-only',
+    status: 'completed',
+    lifecycleStatus: 'completed',
+    currentPrompt: 15,
+    totalPrompts: 15,
+    chatUrl: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/69ef2120-5ba0-83eb-bf2e-13893c147e32',
+    persistenceStatus: {
+      saveOk: true
+    }
+  });
+
+  assert.strictEqual(urlOnlyPlan.needed, true);
+  assert.strictEqual(urlOnlyPlan.reason, 'local_save_completed');
 
   console.log('test-process-window-close-retry.js: ok');
 }

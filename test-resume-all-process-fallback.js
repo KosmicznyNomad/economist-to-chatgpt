@@ -206,9 +206,9 @@ function createContext({ tabs = [], processes = [] } = {}) {
     RegExp,
     JSON,
     CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'chat.openai.com']),
-    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
-    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
-    PROMPTS_COMPANY: new Array(12).fill('prompt'),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
+    PROMPTS_COMPANY: new Array(15).fill('prompt'),
     processRegistry: new Map(),
     chrome: {
       tabs: {
@@ -276,7 +276,7 @@ async function testResumeAllFindsProcessWhenTabIsGenericChatGptConversation() {
     tabId: 10,
     windowId: 1,
     currentPrompt: 9,
-    totalPrompts: 12,
+    totalPrompts: 15,
     chatUrl: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/c/abc',
     title: 'AI source'
   };
@@ -307,6 +307,26 @@ async function testResumeAllFindsProcessWhenTabIsGenericChatGptConversation() {
   assert.strictEqual(context.canResumeCompanyInvestContextFromUrl('https://chatgpt.com/c/abc', process), true);
 }
 
+async function testInvestMatcherAcceptsCurrentIskierkaAndLegacyInvestUrls() {
+  const context = createContext();
+
+  assert.strictEqual(
+    context.isInvestGptUrl('https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/live'),
+    true
+  );
+  assert.strictEqual(
+    context.isInvestGptUrl('https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/c/legacy'),
+    true
+  );
+  assert.strictEqual(
+    context.canResumeCompanyInvestContextFromUrl(
+      'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/live',
+      null
+    ),
+    true
+  );
+}
+
 async function testResumeAllUsesInvocationWindowFallbackForProcessContext() {
   const process = {
     id: 'queue-article-window-only',
@@ -314,7 +334,7 @@ async function testResumeAllUsesInvocationWindowFallbackForProcessContext() {
     status: 'running',
     invocationWindowId: 22,
     currentPrompt: 3,
-    totalPrompts: 12,
+    totalPrompts: 15,
     chatUrl: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/c/window-only',
     title: 'Window-only process'
   };
@@ -377,6 +397,7 @@ async function testAutoCloseWaitsForRowOnlyStartedProcessConfirmation() {
 
 async function main() {
   await testResumeAllFindsProcessWhenTabIsGenericChatGptConversation();
+  await testInvestMatcherAcceptsCurrentIskierkaAndLegacyInvestUrls();
   await testResumeAllUsesInvocationWindowFallbackForProcessContext();
   await testAutoCloseWaitsForRowOnlyStartedProcessConfirmation();
   console.log('test-resume-all-process-fallback.js passed');

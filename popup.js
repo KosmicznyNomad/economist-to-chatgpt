@@ -1798,24 +1798,55 @@ function formatCopyLatestInvestFinalResponseStatus(response) {
     const conversationUrlCount = Number.isInteger(response?.conversationUrlCount)
       ? response.conversationUrlCount
       : results.filter((row) => typeof row?.conversationUrl === 'string' && row.conversationUrl.trim()).length;
-    const persistenceAttemptedCount = Number.isInteger(response?.persistenceAttemptedCount)
-      ? response.persistenceAttemptedCount
-      : results.filter((row) => row?.persistence && row.persistence.attempted === true).length;
-    const persistenceSuccessCount = Number.isInteger(response?.persistenceSuccessCount)
-      ? response.persistenceSuccessCount
-      : results.filter((row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true).length;
-    const localSaveSuccessCount = Number.isInteger(response?.localSaveSuccessCount)
-      ? response.localSaveSuccessCount
-      : results.filter((row) => row?.persistence?.localSaveOk === true || row?.persistence?.success === true).length;
-    const intakeAcceptedCount = Number.isInteger(response?.intakeAcceptedCount)
-      ? response.intakeAcceptedCount
-      : results.filter((row) => row?.persistence?.acceptedByIntake === true).length;
-    const verifiedDbCount = Number.isInteger(response?.verifiedDbCount)
-      ? response.verifiedDbCount
-      : results.filter((row) => row?.persistence?.verifiedInDb === true).length;
-    const terminalFailureCount = Number.isInteger(response?.terminalFailureCount)
-      ? response.terminalFailureCount
-      : results.filter((row) => row?.persistence?.terminalFailure === true).length;
+    const hasDetailedPersistenceResults = results.some((row) => row?.persistence && typeof row.persistence === 'object');
+    const derivedPersistenceAttemptedCount = results.filter(
+      (row) => row?.persistence && row.persistence.attempted === true
+    ).length;
+    const derivedPersistenceSuccessCount = results.filter(
+      (row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true
+    ).length;
+    const derivedLocalSaveSuccessCount = results.filter(
+      (row) => row?.persistence?.localSaveOk === true || row?.persistence?.success === true
+    ).length;
+    const derivedIntakeAcceptedCount = results.filter(
+      (row) => row?.persistence?.acceptedByIntake === true
+    ).length;
+    const derivedVerifiedDbCount = results.filter(
+      (row) => row?.persistence?.verifiedInDb === true
+    ).length;
+    const derivedTerminalFailureCount = results.filter(
+      (row) => row?.persistence?.terminalFailure === true
+    ).length;
+    const persistenceAttemptedCount = hasDetailedPersistenceResults
+      ? derivedPersistenceAttemptedCount
+      : (Number.isInteger(response?.persistenceAttemptedCount)
+        ? response.persistenceAttemptedCount
+        : derivedPersistenceAttemptedCount);
+    const persistenceSuccessCount = hasDetailedPersistenceResults
+      ? derivedPersistenceSuccessCount
+      : (Number.isInteger(response?.persistenceSuccessCount)
+        ? response.persistenceSuccessCount
+        : derivedPersistenceSuccessCount);
+    const localSaveSuccessCount = hasDetailedPersistenceResults
+      ? derivedLocalSaveSuccessCount
+      : (Number.isInteger(response?.localSaveSuccessCount)
+        ? response.localSaveSuccessCount
+        : derivedLocalSaveSuccessCount);
+    const intakeAcceptedCount = hasDetailedPersistenceResults
+      ? derivedIntakeAcceptedCount
+      : (Number.isInteger(response?.intakeAcceptedCount)
+        ? response.intakeAcceptedCount
+        : derivedIntakeAcceptedCount);
+    const verifiedDbCount = hasDetailedPersistenceResults
+      ? derivedVerifiedDbCount
+      : (Number.isInteger(response?.verifiedDbCount)
+        ? response.verifiedDbCount
+        : derivedVerifiedDbCount);
+    const terminalFailureCount = hasDetailedPersistenceResults
+      ? derivedTerminalFailureCount
+      : (Number.isInteger(response?.terminalFailureCount)
+        ? response.terminalFailureCount
+        : derivedTerminalFailureCount);
     const lines = [
       `Skopiowano finalne odpowiedzi z ${copied}/${requested} okien Invest.`,
       `Otwarte okna Invest: ${windowCount}. Laczna dlugosc: ${textLength} znakow.`

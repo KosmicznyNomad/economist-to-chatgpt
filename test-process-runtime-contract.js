@@ -272,8 +272,8 @@ function testPromptCheckpointAndFinalizingDoForceFlush() {
 
   assert.strictEqual(
     context.shouldFlushProcessUpdateImmediately(
-      { lifecycleStatus: 'running', currentPrompt: 12, queueState: 'active', actionRequired: 'none' },
-      { lifecycleStatus: 'finalizing', currentPrompt: 12, queueState: 'active', actionRequired: 'none' },
+      { lifecycleStatus: 'running', currentPrompt: 15, queueState: 'active', actionRequired: 'none' },
+      { lifecycleStatus: 'finalizing', currentPrompt: 15, queueState: 'active', actionRequired: 'none' },
       {}
     ),
     false
@@ -281,8 +281,8 @@ function testPromptCheckpointAndFinalizingDoForceFlush() {
 
   assert.strictEqual(
     context.shouldFlushProcessUpdateImmediately(
-      { lifecycleStatus: 'finalizing', currentPrompt: 12, queueState: 'active', actionRequired: 'none' },
-      { lifecycleStatus: 'completed', currentPrompt: 12, queueState: 'active', actionRequired: 'none' },
+      { lifecycleStatus: 'finalizing', currentPrompt: 15, queueState: 'active', actionRequired: 'none' },
+      { lifecycleStatus: 'completed', currentPrompt: 15, queueState: 'active', actionRequired: 'none' },
       {}
     ),
     true

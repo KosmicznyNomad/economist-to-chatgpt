@@ -205,6 +205,7 @@ const reasonLabels = {
   pdf_attach_failed: 'Nie udalo sie dolaczyc PDF',
   save_failed: 'Blad zapisu odpowiedzi',
   save_response_failed: 'Nieudany zapis odpowiedzi',
+  page_emergency_only: 'Final tylko w awaryjnym zapisie strony',
   empty_response: 'Pusta odpowiedz (bez zapisu)',
   auto_recovery_send_failed: 'Auto-resend po bledzie wysylania',
   auto_recovery_timeout: 'Auto-resend po timeout',
@@ -220,9 +221,11 @@ const persistenceErrorLabels = {
   save_message_failed: 'blad save-message',
   save_response_failed: 'blad save-response',
   save_failed: 'blad zapisu',
+  page_emergency_only: 'tylko awaryjny zapis w stronie',
   dispatch_failed: 'blad dispatch',
   missing_intake_url: 'brak Intake URL',
   missing_dispatch_credentials: 'brak danych dispatch',
+  local_storage_unavailable: 'local storage rozszerzenia niedostepny',
   storage_unavailable: 'storage niedostepny',
   empty_response: 'pusta odpowiedz'
 };
@@ -393,6 +396,59 @@ function getPersistenceErrorLabel(errorCode) {
   return humanizeToken(normalized);
 }
 
+function getProcessEmergencyPersistence(process) {
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  const emergencyPageSave = persistenceStatus?.emergencyPageSave && typeof persistenceStatus.emergencyPageSave === 'object'
+    ? persistenceStatus.emergencyPageSave
+    : (finalStagePersistence?.emergencyPageSave && typeof finalStagePersistence.emergencyPageSave === 'object'
+      ? finalStagePersistence.emergencyPageSave
+      : null);
+  const emergencyLocalSave = persistenceStatus?.emergencyLocalSave && typeof persistenceStatus.emergencyLocalSave === 'object'
+    ? persistenceStatus.emergencyLocalSave
+    : (finalStagePersistence?.emergencyLocalSave && typeof finalStagePersistence.emergencyLocalSave === 'object'
+      ? finalStagePersistence.emergencyLocalSave
+      : null);
+  const emergencyPageOk = persistenceStatus?.emergencyPageOk === true
+    || finalStagePersistence?.emergencyPageOk === true
+    || emergencyPageSave?.success === true;
+  const emergencyLocalOk = persistenceStatus?.emergencyLocalOk === true
+    || finalStagePersistence?.emergencyLocalOk === true
+    || emergencyLocalSave?.success === true;
+
+  let saveOk = null;
+  if (typeof persistenceStatus?.saveOk === 'boolean') {
+    saveOk = persistenceStatus.saveOk;
+  } else if (typeof process?.completedResponseSaved === 'boolean') {
+    saveOk = process.completedResponseSaved;
+  } else if (typeof finalStagePersistence?.success === 'boolean') {
+    saveOk = finalStagePersistence.success;
+  }
+
+  const pageEmergencyOnly = persistenceStatus?.pageEmergencyOnly === true
+    || finalStagePersistence?.pageEmergencyOnly === true
+    || (saveOk === false && emergencyPageOk && !emergencyLocalOk);
+  const responseId = [
+    persistenceStatus?.responseId,
+    finalStagePersistence?.responseId,
+    process?.responseId
+  ].find((value) => typeof value === 'string' && value.trim()) || '';
+
+  return {
+    saveOk,
+    emergencyPageSave,
+    emergencyLocalSave,
+    emergencyPageOk,
+    emergencyLocalOk,
+    pageEmergencyOnly,
+    responseId: typeof responseId === 'string' ? responseId.trim() : ''
+  };
+}
+
 function buildProcessReasonLine(process) {
   if (!process || typeof process !== 'object') return '';
   const reasonCode = normalizeCodeToken(process?.reason);
@@ -403,8 +459,12 @@ function buildProcessReasonLine(process) {
     : null;
   const saveErrorCode = normalizeCodeToken(persistenceStatus?.saveError || '');
   const bridgeErrorCode = normalizeCodeToken(persistenceStatus?.bridgeError || '');
+  const emergencyPersistence = getProcessEmergencyPersistence(process);
 
   const details = [];
+  if (emergencyPersistence.pageEmergencyOnly) {
+    details.push('page=awaryjny zapis strony');
+  }
   if (saveErrorCode && saveErrorCode !== 'empty_response') {
     details.push(`save=${getPersistenceErrorLabel(saveErrorCode)}`);
   }
@@ -491,6 +551,12 @@ function getPersistenceLogLines(process, maxLines = 4) {
   const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
     ? process.persistenceStatus
     : null;
+  const emergencyPersistence = getProcessEmergencyPersistence(process);
+  if (emergencyPersistence.pageEmergencyOnly) {
+    const idChunk = emergencyPersistence.responseId ? ` (${emergencyPersistence.responseId})` : '';
+    lines.push(`Baza: NIE wyslano; final tylko w page localStorage${idChunk}`);
+    lines.push('Akcja: przeladuj rozszerzenie i odswiez karte ChatGPT, aby odpalic replay');
+  }
 
   const directLog = Array.isArray(process?.persistenceLog)
     ? process.persistenceLog
@@ -553,6 +619,7 @@ function resolveProcessDatabaseDelivery(process) {
   const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
     ? process.finalStagePersistence
     : null;
+  const emergencyPersistence = getProcessEmergencyPersistence(process);
   const dispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
     ? persistenceStatus.dispatch
     : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
@@ -589,9 +656,26 @@ function resolveProcessDatabaseDelivery(process) {
   } else if (typeof finalStagePersistence?.success === 'boolean') {
     saveOk = finalStagePersistence.success;
   }
+  if (saveOk === null && typeof emergencyPersistence.saveOk === 'boolean') {
+    saveOk = emergencyPersistence.saveOk;
+  }
 
   return {
     saveOk,
+    responseId: emergencyPersistence.responseId,
+    emergencyPageOk: emergencyPersistence.emergencyPageOk,
+    emergencyLocalOk: emergencyPersistence.emergencyLocalOk,
+    pageEmergencyOnly: emergencyPersistence.pageEmergencyOnly,
+    saveError: typeof persistenceStatus?.saveError === 'string'
+      ? persistenceStatus.saveError
+      : (typeof finalStagePersistence?.saveError === 'string'
+        ? finalStagePersistence.saveError
+        : ''),
+    bridgeError: typeof persistenceStatus?.bridgeError === 'string'
+      ? persistenceStatus.bridgeError
+      : (typeof finalStagePersistence?.bridgeError === 'string'
+        ? finalStagePersistence.bridgeError
+        : ''),
     sent: safeSent,
     failed: safeFailed,
     deferred: safeDeferred,
@@ -605,13 +689,24 @@ function resolveProcessDatabaseDelivery(process) {
 
 function getDatabaseBadgeModel(process) {
   const delivery = resolveProcessDatabaseDelivery(process);
-  const hasSignal = delivery.saveOk !== null || delivery.hasNumericDispatch || !!delivery.summaryText;
+  const hasSignal = delivery.saveOk !== null || delivery.hasNumericDispatch || !!delivery.summaryText || delivery.pageEmergencyOnly;
   if (!hasSignal) {
     return {
       visible: false,
       text: '',
       className: 'db-badge db-info',
       detailText: ''
+    };
+  }
+
+  if (delivery.pageEmergencyOnly) {
+    const idChunk = delivery.responseId ? ` (${delivery.responseId})` : '';
+    const saveError = getPersistenceErrorLabel(delivery.saveError || delivery.bridgeError || 'page_emergency_only');
+    return {
+      visible: true,
+      text: 'Baza: PAGE-EMERGENCY',
+      className: 'db-badge db-warning',
+      detailText: `Baza danych: NIE wyslano finalu; zapis awaryjny tylko w stronie${idChunk}. Powod: ${saveError}.`
     };
   }
 
@@ -829,6 +924,10 @@ function isCompletedStatus(status) {
     return ProcessContractUtils.isCompletedLifecycleStatus(status);
   }
   return status === 'completed';
+}
+
+function isStoppedStatus(status) {
+  return status === 'stopped';
 }
 
 const priorityReasonWeights = Object.freeze({
@@ -2729,7 +2828,7 @@ function updateUI(processes, options = {}) {
         ? String(persistenceStatus.saveOk)
         : '';
       const dbDelivery = resolveProcessDatabaseDelivery(process);
-      const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}`;
+      const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}:${dbDelivery.pageEmergencyOnly ? 1 : 0}:${dbDelivery.emergencyPageOk ? 1 : 0}:${dbDelivery.responseId || ''}`;
       const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
       return `${process.id}|${sortKey}|${getNormalizedStatus(process)}|${getProcessActionRequired(process)}|${getProcessPhase(process)}|${getProcessStatusCode(process)}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}`;
@@ -2831,7 +2930,9 @@ function updateHistory(processes) {
     const stageLabel = resolveStageLabel(process);
 
     const statusLabel = isProcessClosed(process)
-      ? (isFailedStatus(getNormalizedStatus(process)) ? 'Blad' : 'Zakonczono')
+      ? (isFailedStatus(getNormalizedStatus(process))
+        ? 'Blad'
+        : (isStoppedStatus(getNormalizedStatus(process)) ? 'Zatrzymano' : 'Zakonczono'))
       : 'Przerwane';
 
     const meta = document.createElement('div');
@@ -3108,6 +3209,7 @@ function getProcessCompletionAuditStateLabel(state) {
   const labels = {
     response_missing: 'brak odpowiedzi koncowej',
     save_failed: 'blad zapisu lokalnego',
+    page_emergency_only: 'tylko awaryjny zapis w stronie',
     save_pending: 'zapis lokalny w toku',
     saved_local: 'zapis lokalny OK',
     dispatch_pending: 'dispatch oczekuje',
@@ -3137,6 +3239,7 @@ function getProcessCompletionAuditLevel(audit) {
   const windowState = typeof audit?.windowCloseState === 'string' ? audit.windowCloseState.trim().toLowerCase() : '';
   if (
     overall === 'save_failed'
+    || overall === 'page_emergency_only'
     || overall === 'dispatch_failed'
     || overall === 'dispatch_confirmed_window_close_failed'
     || dispatchState === 'dispatch_failed'
@@ -3318,9 +3421,11 @@ function renderDetails() {
     ? 'Zakonczono'
     : isFailedStatus(selectedStatus)
       ? 'Blad'
-      : processNeedsAction(selected)
-        ? 'Wymaga akcji'
-        : 'W trakcie';
+      : isStoppedStatus(selectedStatus)
+        ? 'Zatrzymano'
+        : processNeedsAction(selected)
+          ? 'Wymaga akcji'
+          : 'W trakcie';
   subtitle.textContent = `Status: ${statusLabel}`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
