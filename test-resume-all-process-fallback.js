@@ -208,7 +208,7 @@ function createContext({ tabs = [], processes = [] } = {}) {
     CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'chat.openai.com']),
     INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
     INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
-    PROMPTS_COMPANY: new Array(15).fill('prompt'),
+    PROMPTS_COMPANY: new Array(18).fill('prompt'),
     processRegistry: new Map(),
     chrome: {
       tabs: {

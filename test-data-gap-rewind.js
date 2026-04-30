@@ -6,7 +6,7 @@ const path = require('path');
 const assert = require('assert');
 
 const PROMPTS_PATH = path.join(__dirname, 'prompts-company.txt');
-const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i;
+const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i;
 const MAX_REPLAYS_PER_STAGE = 2;
 const PROMPT_SEPARATOR_TOKEN_SOURCE = String.raw`PROMPT(?:[ _-]+)SEPARATOR`;
 const PROMPT_SEPARATOR_PREFIX_SOURCE = String.raw`(?:\u25C4|\u00E2\u2014\u201E)?[ \t-]*`;
@@ -31,23 +31,22 @@ const STAGE_TO_PROMPT_INDEX = new Map([
   ['8', 8],
   ['9', 9],
   ['10', 10],
-  ['11', 10],
-  ['12', 11],
-  ['13', 12],
-  ['14', 13],
-  ['15', 14]
+  ['11', 11],
+  ['12', 12],
+  ['13', 13],
+  ['14', 14],
+  ['15', 15],
+  ['16', 16],
+  ['17', 17]
 ]);
 
 function normalizeStageId(value) {
   const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
   if (!raw) return '';
-  const match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+  const compact = raw.replace(/\s+/g, '').toUpperCase();
+  const match = compact.match(/^(\d+)$/);
   if (!match) return '';
-  const whole = String(Number.parseInt(match[1], 10));
-  const fractionRaw = typeof match[2] === 'string' ? match[2] : '';
-  if (!fractionRaw) return whole;
-  const fraction = fractionRaw.replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction}` : whole;
+  return String(Number.parseInt(match[1], 10));
 }
 
 function parseDirective(responseText) {
@@ -245,12 +244,12 @@ function loadPromptByStage() {
 
 function run() {
   const { prompts, promptByStageId } = loadPromptByStage();
-  assert.strictEqual(prompts.length, 15, 'prompts-company.txt should contain the current 15-prompt chain');
+  assert.strictEqual(prompts.length, 18, 'prompts-company.txt should contain the current 18-prompt chain');
   assert(promptByStageId.has('2') && promptByStageId.has('3'), 'stage prompts 2 and 3 must be present');
-  assert.strictEqual(
-    promptByStageId.get('10'),
-    promptByStageId.get('11'),
-    'Stage 11 should resolve to the same prompt text as Stage 10 in the current chain'
+  assert.notStrictEqual(
+    promptByStageId.get('12'),
+    promptByStageId.get('13'),
+    'Stage 13 should now resolve to its own prompt text'
   );
   assert.deepStrictEqual(
     parsePromptChainText('Prompt A\n--- PROMPT SEPARATOR ---\nPrompt B'),
@@ -264,7 +263,10 @@ function run() {
   );
 
   // Test 1: parser should accept only strict one-line DATA_GAP directive.
-  assert.strictEqual(parseDirective('DATA_GAP_STAGE=2.5').stageId, '2.5');
+  assert.strictEqual(parseDirective('DATA_GAP_STAGE=two'), null);
+  assert.strictEqual(parseDirective('DATA_GAP_STAGE=boundary'), null);
+  assert.strictEqual(parseDirective('DATA_GAP_STAGE=four'), null);
+  assert.strictEqual(parseDirective('DATA_GAP_STAGE=stage4'), null);
   assert.strictEqual(parseDirective('  DATA_GAP_STAGE = 7  ').stageId, '7');
   assert.strictEqual(parseDirective('DATA_GAP_STAGE=2\nextra'), null);
   assert.strictEqual(parseDirective('SYSTEM_COMMAND: DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN'), null);
@@ -303,7 +305,7 @@ function run() {
     }
   }
 
-  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'];
+  const expected = ['1', '2', '3', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'];
   assert.deepStrictEqual(stripUnknownStages(executed), expected);
 
   // Test 2b: if missing stage is far earlier (e.g. at stage 7), replay must start
@@ -332,7 +334,7 @@ function run() {
   }
   const expectedFar = [
     '1', '2', '3', '4', '5', '6', '7',
-    '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'
+    '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedFar), expectedFar);
 
@@ -363,14 +365,14 @@ function run() {
   const expectedSelf = [
     '1', '2', '3',
     '2', '3',
-    '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'
+    '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'
   ];
   assert.deepStrictEqual(stripUnknownStages(executedSelf), expectedSelf);
 
   // Test 2c: generic rollback rule for many stage pairs.
   // For each current stage C and missing stage M where M < C (by prompt number),
   // expect replay sequence M..C inserted right after C.
-  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '12', '13', '14', '15'];
+  const orderedStages = ['1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'];
   const orderedByPromptNumber = orderedStages
     .map((stageId) => ({
       stageId,
@@ -421,7 +423,7 @@ function run() {
     promptByStageId.get('1'),
     promptByStageId.get('2'),
     promptByStageId.get('3'),
-    promptByStageId.get('4'),
+    promptByStageId.get('6'),
     promptByStageId.get('5')
   ];
   const replayGuardCounts = new Map();
@@ -450,7 +452,7 @@ function run() {
   const chainForStage3 = prompts.slice(1);
   const chainForStage4 = prompts.slice(1);
   const stage3Prompt = promptByStageId.get('3');
-  const stage4Prompt = promptByStageId.get('4');
+  const stage4Prompt = promptByStageId.get('6');
   const stage3Index = chainForStage3.findIndex((item) => normalizePromptText(item) === normalizePromptText(stage3Prompt));
   const stage4Index = chainForStage4.findIndex((item) => normalizePromptText(item) === normalizePromptText(stage4Prompt));
   assert(stage3Index >= 0 && stage4Index >= 0, 'stage 3/4 prompts should exist in chain');

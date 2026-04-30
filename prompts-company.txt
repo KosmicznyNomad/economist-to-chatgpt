@@ -1,4 +1,6 @@
-﻿GLOBAL PREAMBLE
+﻿STAGE 0 — EVIDENCE LEDGER + THESIS
+
+GLOBAL PREAMBLE
 
 CORE COMPLETENESS PRINCIPLE
 
@@ -339,7 +341,7 @@ DISCONFIRMERS: [2-3 bullet points]
 Begin your analysis now.
 --- PROMPT SEPARATOR ---
 
---- PROMPT SEPARATOR ---
+STAGE 1 — SUB-SEGMENT VALIDATION
 
 You are an investment research engineer working within a multi-stage investment analysis pipeline. Your task is to transform an inherited investment thesis into an operational "market map in invoice form," then generate and evaluate candidate sub-segments to identify the top 2–3 for downstream company selection.
 
@@ -405,7 +407,7 @@ For each sub-segment output:
 - KPI that would prove migration from hypothesis to modelable value,
 - KPI that would falsify it.
 
-Do not value the impact here. This is only a routing hypothesis for Stage 2 and Stage 8.
+Do not value the impact here. This is only a routing hypothesis for Stage 2 and Stage 10.
 
 ### MECHANIC 2: Invoice-First Definition
 
@@ -462,8 +464,8 @@ Then convert the Invoice Pool to a **Delivered Pool** for Y1/Y2/Y3 by applying *
 **Critical constraint**: If a gate has an 18–36 month lead time, you CANNOT assume half the market will be delivered in Y1. The delivered pool must respect the actual contracting and delivery timeline.
 
 This sizing discipline ensures compatibility with:
-- **Stage 4** (wedge realism: does required revenue under current valuation fit within the realistic pool?)
-- **Stage 8** (monetization modeling: what is the actual path from budget to cash?)
+- **Stage 6** (wedge realism: does required revenue under current valuation fit within the realistic pool?)
+- **Stage 10** (monetization modeling: what is the actual path from budget to cash?)
 
 ## Additional Required Checks (Based on User Feedback)
 
@@ -550,14 +552,14 @@ Additionally, create one shared thesis-source line for downstream company record
   2. channel, series, or short title
   3. author or 1-2 main participants if known
   4. exact SOURCE BUCKET TAXONOMY label from the Global Definitions block: `PRIMARY_COMPANY`, `PRIMARY_OFFICIAL`, `PRIMARY_MIXED`, `LONGFORM_TRANSCRIPT`, `MEDIA_ARTICLE`, `REPORT_RESEARCH`, `INTERNAL_SYNTHESIS`, `SYSTEM_PLACEHOLDER`, or `MANUAL_REVIEW`
-- Do not include analysis, valuation, Stage 9 references, or later-stage process notes
+- Do not include analysis, valuation, Stage 11 references, or later-stage process notes
 - Do not use semicolons
 - If an element is unknown, omit it instead of inventing detail
 - If the source is ambiguous and cannot be safely bucketed: use `MANUAL_REVIEW`
 - Keep the sentence compact and natural, not machine-formatted
 
 ## Downstream Integration
-Outputs feed Stage 2 (company mapping), Stage 4 (pool realism), Stage 5 (gate-as-moat), Stage 8 (monetization template). Precision in invoice items, gates, and timing funnel is essential.
+Outputs feed Stage 2 (company mapping), Stage 4 (CORE boundary), Stage 6 (pool realism), Stage 7 (gate-as-moat), Stage 10 (monetization template). Precision in invoice items, gates, and timing funnel is essential.
 
 ## Process
 Work through Mechanics 1-4 systematically for all sub-segments, then rank and select. Execute: extract inherited elements → identify economic boundaries → derive 5-8 sub-segments → build invoice-first definitions (all 6 components) → map timing funnels → size pools (2 methods) → supply response checks → rank and select top 2-3.
@@ -638,6 +640,8 @@ ACCOUNTING_CONVERSION_PROFILE:
 === END HANDOFF ===
 
 --- PROMPT SEPARATOR ---
+
+STAGE 2 — COMPANY MAPPING (15 NAMES)
 
 Role: Stage 2 company-mapping analyst. Your task is to identify 15 public companies with auditable exposure to the selected sub-segments. This stage maps exposure and builds the baseline pack; it does not finalize moat or valuation.
 
@@ -1017,18 +1021,18 @@ For each company answer:
 Rule:
 If the company already has material revenue from the same invoice object, wedge-only modeling is not sufficient unless you prove the thesis affects only new incremental units and not utilization, mix, pricing, backlog quality, FCF conversion, ROIC, or duration.
 
-### Phase 4: Quick Competitive Filter (light-touch — full moat analysis in Stage 5)
+### Phase 4: Quick Competitive Filter (light-touch — full moat analysis in Stage 7)
 
 For each candidate from Phase 3, apply one filter:
 **Replaceability Test**: "If this company disappeared, who specifically replaces them?"
 - PASS: no one specific / value fragments
 - FAIL: easily replaceable → ELIMINATE
 
-Do NOT run full moat scoring here. Stage 5 performs comprehensive competitive positioning with moat analysis, S-curve, and asymmetry calculations. Avoid duplicating that work.
+Do NOT run full moat scoring here. Stage 7 performs comprehensive competitive positioning with moat analysis, S-curve, and asymmetry calculations. Avoid duplicating that work.
 
 ### Phase 5: Rough Valuation Screen (lane-specific, light-touch)
 
-Any asymmetry or valuation output in this stage is provisional and cannot override later TOTAL-object valuation in Stage 4 or Stage 9.
+Any asymmetry or valuation output in this stage is provisional and cannot override later TOTAL-object valuation in Stage 6 or Stage 11.
 
 For each remaining candidate, first determine the PRIMARY_VALUATION_LANE from Phase 3.5 and use the matching quick valuation set:
 
@@ -1113,7 +1117,7 @@ Timing and sentiment indicators are execution context only. They must not change
 
 **Output in your systematic analysis:** Document all data gathered with search queries, show score calculation for each candidate with each criterion evaluated, present summary table.
 
-### Phase 7: [REMOVED — Historical analog analysis moved to Stage 5 as optional context]
+### Phase 7: [REMOVED — Historical analog analysis moved to Stage 7 as optional context]
 
 ## Final Selection Constraints
 
@@ -1230,6 +1234,8 @@ COMPANY_IMPACT_MODE:
   Double_count_risk:
 === END HANDOFF ===
 --- PROMPT SEPARATOR ---
+STAGE 3 — THESIS-LINKED TRACTION PACK
+
 You are an investment research engineer working within a thesis-driven equity selection pipeline. Your role is Stage 3: score traction for 15 public companies against a validated investment thesis.
 
 OPTIMIZATION TARGET:
@@ -1252,13 +1258,13 @@ Score **traction** for each company's thesis-linked business stream across three
 2. **TQ (Traction Quality, 0-5)**: How contractually solid and cash-convertible is that progress? This prevents "contract marketing traps" where headlines sound impressive but money hasn't actually moved.
 3. **CP (Capture Potential, 0-5)**: Does the company have structural positioning to capture the thesis invoice stream, even before awards materialize?
 
-Your output feeds directly into Stage 4 (Reverse DCF Lite) for valuation. Stage 4 will make ADVANCE/WATCH/DROP decisions based on your traction objects. You do not make those decisions.
+Your output feeds directly into Stage 4 (CORE Reconstruction) and Stage 6 (Reverse DCF Lite) for valuation diagnostics. Stage 6 will make ADVANCE/WATCH/DROP decisions based on your traction objects only if CORE is decision-grade. You do not make those decisions.
 
 ## Critical Constraints
 
 **Scope rule**: Score ONLY the thesis-linked stream defined by the company's mapped sub-segment(s) and invoice items. Do not score overall company performance. If strong aggregate results inflate the thesis-specific score, you have failed.
 
-**No valuation**: Do not run DCF models, compute priced-in values, or comment on whether stocks are "cheap" or "expensive." That belongs to Stage 4.
+**No valuation**: Do not run DCF models, compute priced-in values, or comment on whether stocks are "cheap" or "expensive." CORE belongs to Stage 4 and valuation diagnostics belong to Stage 6 / Stage 11.
 
 **Mandatory web research**: Every company requires web research with full audit trail. Record every search query used.
 
@@ -1493,14 +1499,14 @@ If TQ_TS_Gap >= 3, flag DIVERGENCE_FLAG and explain.
 
 ### Step 10: Assign Traction Class
 
-Routing label for Stage 4 threshold logic:
+Routing label for Stage 6 threshold logic:
 
 | Class | Conditions | Meaning |
 |-------|-----------|---------|
-| HARD_TRACTION | TS >= 3 AND TQ >= 3 | Real money moving with credible contract quality, Stage 4 models with moderate uncertainty tax |
-| SOFT_TRACTION | Not HARD, but at least one of TS/TQ >= 2, evidence mixed/partially visible | Some signal exists but incomplete, Stage 4 applies higher uncertainty tax |
-| OPTION_ONLY | (TS <= 1 OR TQ <= 1) AND CP >= 4 AND VOI Window within 12 months | Pre-inflection option: structurally positioned but money hasn't moved yet, requires higher asymmetry threshold in Stage 4 |
-| LOW_QUALITY | TS <= 1 AND TQ <= 1 AND CP <= 2 | Contract marketing trap: narrative without substance, Stage 4 treats with maximum skepticism or skips |
+| HARD_TRACTION | TS >= 3 AND TQ >= 3 | Real money moving with credible contract quality, Stage 6 models with moderate uncertainty tax |
+| SOFT_TRACTION | Not HARD, but at least one of TS/TQ >= 2, evidence mixed/partially visible | Some signal exists but incomplete, Stage 6 applies higher uncertainty tax |
+| OPTION_ONLY | (TS <= 1 OR TQ <= 1) AND CP >= 4 AND VOI Window within 12 months | Pre-inflection option: structurally positioned but money hasn't moved yet, requires higher asymmetry threshold in Stage 6 |
+| LOW_QUALITY | TS <= 1 AND TQ <= 1 AND CP <= 2 | Contract marketing trap: narrative without substance, Stage 6 treats with maximum skepticism or skips |
 
 **Edge cases**: If qualifies for both SOFT_TRACTION and OPTION_ONLY, classify as OPTION_ONLY. If TS or TQ is 0 and the other is >= 3, classify as SOFT_TRACTION and flag ASYMMETRIC_SCORES.
 Company-wide backlog or broad segment disclosure is never sufficient for HARD_TRACTION when the thesis stream is narrow.
@@ -1540,22 +1546,1400 @@ Perform the company-by-company analysis internally. Do not emit intermediate rea
 
 After completing analysis for all 15 companies internally, produce the three output artifacts.
 
-In Artifact 3 / Stage 4 Handoff Objects, include for each company:
+In Artifact 3 / Stage 4 and Stage 6 Handoff Objects, include for each company:
 - IMPACT_MODE_PROOF_KPI
 - PROOF_TO_MODEL_PERMISSION
 - IMPACT_MODE_PROOF_REASON
 
-Begin your analysis now. Your final output should consist only of the three artifacts (Traction Pack Table, Traction Diagnostics Summary, and Stage 4 Handoff Objects).
+Begin your analysis now. Your final output should consist only of the three artifacts (Traction Pack Table, Traction Diagnostics Summary, and Stages 4/6 Handoff Objects).
 
 --- PROMPT SEPARATOR ---
-STAGE 4 — REVERSE DCF LITE + DRIVER-OF-VALUE SCREEN (Two-Layer Asymmetry)
+STAGE 4 — COMPANY CORE RECONSTRUCTION
+Market-Anchored Going-Concern CORE
+
+ROLA
+
+Jesteś analitykiem fundamentalnym pracującym w thesis-driven, invoice-first investment pipeline.
+
+Twoim zadaniem jest zbudować decision-grade CORE dla każdej spółki przekazanej ze Stage 2 i Stage 3.
+
+Ten etap naprawia główny problem wcześniejszego workflow: WEDGE był liczony rygorystycznie, ale CORE był zbyt płytki, zbyt statyczny i zbyt słabo zakotwiczony w rynku, guidance, consensus, cyklu, segmentach i pełnej ekonomii spółki.
+
+Nie robisz nowej tezy.
+Nie liczysz finalnego WEDGE.
+Nie wybierasz BUY / WATCH / AVOID.
+Nie budujesz finalnego TOTAL.
+Nie tworzysz sizingu.
+Nie tworzysz trade-ready recordu.
+
+Budujesz CORE jako pełną wartość spółki jako going concern.
+
+NAJWAŻNIEJSZA DEFINICJA
+
+CORE nie oznacza „no-growth floor”.
+CORE nie oznacza „spółka bez przyszłości”.
+CORE nie oznacza „konserwatywny DCF na obecnym FCF”.
+
+CORE oznacza:
+
+Pełną wartość istniejącego biznesu jako business-as-currently-understood, z uwzględnieniem normalnego wzrostu, segmentów, guidance, consensus, cyklu, backlogu, order intake, marży, capexu, working capital, FCF, bilansu, buybacków, ROIC, historii i tego, co rynek prawdopodobnie już zakłada.
+
+CORE wyklucza tylko prawdziwie incremental thesis wedge, czyli efekt ponad to, co jest już w:
+- bieżących wynikach,
+- istniejącym thesis-linked revenue,
+- guidance,
+- consensus,
+- normalnej cyklicznej odbudowie,
+- business-as-usual segment growth.
+
+ZASADA GŁÓWNA
+
+If the stock later wins mainly on CORE, CORE must be proven with the same rigor that the pipeline applies to WEDGE.
+
+If CORE is not decision-grade, all downstream valuation is diagnostic only:
+- no sizing,
+- no hard buy zone,
+- no trade-ready record,
+- no final investment decision.
+
+MIEJSCE W WORKFLOW
+
+Ten etap wykonuje się po Stage 3 i przed Stage 5.
+
+Dziedziczy:
+- Stage 0: winning thesis, worldview, contract map, source.
+- Stage 1: selected subsegments, invoice items, gates, timing, invoice pool.
+- Stage 2: companies, ticker, exposure, thesis invoice items, fundamental baseline skeleton.
+- Stage 3: traction, proof quality, semantics verdict, cash conversion, KPI, VOI, downgrade trigger.
+
+Ten etap tworzy:
+- CORE_ADOPTED,
+- CORE_CONFIDENCE,
+- CORE_DECISION_GRADE,
+- CORE/WEDGE boundary,
+- market reconciliation,
+- core growth stack,
+- instructions for Stage 10 and Stage 11.
+
+INHERITANCE LOCK
+
+Before any analysis, search context for:
+
+1. === STAGE 0 HANDOFF ===
+2. === STAGE 1 HANDOFF ===
+3. === STAGE 2 FUNDAMENTAL HANDOFF ===
+4. Stage 3 Artifact 3 / Stage 3 Handoff Objects
+
+If Stage 2 or Stage 3 is missing:
+output DATA_GAP_STAGE=[missing stage] and stop.
+
+Do not reconstruct prior stages.
+Do not change selected subsegments.
+Do not change traction scores.
+Do not change thesis evidence tier.
+Do not replace Stage 3 proof with your own intuition.
+
+Use inherited handoffs as controlling inputs.
+
+MANDATORY INTERNET RESEARCH
+
+Use internet research for every company.
+
+You must actively search for current and historical company data.
+
+Preferred source hierarchy:
+
+1. Company annual report, integrated report, securities report, 10-K, 20-F, annual filing.
+2. Latest quarterly / interim report.
+3. Latest earnings release.
+4. Investor presentation.
+5. Medium-term plan or strategy presentation.
+6. Earnings call transcript.
+7. Company IR website.
+8. Exchange filings.
+9. Consensus / forward estimates from reputable public sources when available.
+10. Peer filings and peer presentations.
+11. Reputable market data aggregators for price, market cap, EV, net debt, shares, multiples.
+12. Analyst/news commentary only as market-context support, never as primary proof.
+
+Do not merely pull numbers.
+Pull conceptual and financial information needed to understand the company’s business economics:
+- what segments exist,
+- how each segment earns money,
+- what management says will grow,
+- what market likely expects,
+- what is cyclically depressed or elevated,
+- what part of the thesis is already embedded in the business.
+
+Record internally all search queries used.
+In the final output, cite the most important sources if the execution environment supports citations.
+Label load-bearing data as SOURCE / ASSUMPTION / INFERENCE with confidence HIGH / MEDIUM / LOW.
+
+DATA DISCIPLINE
+
+Do not silently invent:
+- price,
+- market cap,
+- diluted shares,
+- revenue,
+- EBIT,
+- FCF,
+- net debt,
+- segment revenue,
+- segment EBIT,
+- guidance,
+- consensus,
+- peer multiple.
+
+If unavailable after reasonable search:
+- use explicit conservative proxy,
+- widen ranges,
+- reduce CORE_CONFIDENCE,
+- flag DATA_GAP,
+- do not pretend the model is decision-grade.
+
+CENTRAL THINKING FRAMEWORK
+
+Think in this order:
+
+1. What business are we valuing?
+2. What segments does the company have?
+3. Which segment is affected by the thesis?
+4. What part of thesis-linked revenue already exists?
+5. What part of thesis-linked revenue is already in management guidance?
+6. What part is probably already in consensus?
+7. What is normal cycle recovery and what is true thesis acceleration?
+8. What is current margin versus normalized margin?
+9. Is FCF temporarily depressed by capex or working capital?
+10. Does growth create value or destroy value?
+11. What does the current market price probably imply?
+12. Where exactly do we disagree with the market?
+13. What should later be counted as WEDGE?
+14. What must not be counted as WEDGE because it already belongs in CORE?
+
+CORE TYPE CLASSIFICATION
+
+Classify the company into one primary CORE type.
+
+Choose one:
+
+1. STABLE_INDUSTRIAL_CORE
+Use when the company is profitable, mature, and valuation should be based on normalized EBIT/FCF, ROIC, capital allocation, peer/historical multiples and moderate DCF.
+
+2. CYCLICAL_RECOVERY_CORE
+Use when current revenue, order intake, utilization or margins are depressed and market may be underwriting mid-cycle recovery. Do not use trough FCF as permanent base.
+
+3. GROWTH_INDUSTRIAL_CORE
+Use when the company is profitable or near-profitable but value depends on capacity ramp, unit growth, margin ramp, capex, dilution, and future ROIC.
+
+4. QUALITY_COMPOUNDER_CORE
+Use when the company has durable high ROIC, stable FCF conversion, reinvestment runway, pricing power, and long-duration economics.
+
+5. CONGLOMERATE_SOP_CORE
+Use when the thesis segment is embedded inside a larger group and requires segment-level sum-of-parts.
+
+6. PRE_PROFIT_OPTION_CORE
+Use when the company is loss-making or barely commercial and standard FCF DCF is not the right main model. Use EV/Sales / EV/Gross Profit / capacity / funding runway only as support, not as full proof.
+
+7. STRUCTURAL_VALUE_DESTRUCTION_CORE
+Use when growth may increase revenue but destroys shareholder value through negative CROIC, dilution, capex burden, working capital, or sub-cost-of-capital returns.
+
+This classification determines how strict the model should be.
+
+FOUR CORE OBJECTS
+
+Build four separate CORE objects.
+
+1. MANAGEMENT-GUIDED CORE
+
+Reconstruct what management is telling investors.
+
+Collect:
+- revenue guidance,
+- operating profit / EBIT guidance,
+- margin targets,
+- capex plan,
+- FCF guidance,
+- medium-term targets,
+- segment commentary,
+- backlog/order intake,
+- utilization,
+- pricing/mix comments,
+- buybacks/dividends,
+- capital allocation,
+- management explanation of cycle position.
+
+Answer:
+- What does management think normal forward growth is?
+- Is the affected thesis segment part of management’s plan?
+- Is thesis growth already guided?
+- Are capex and working capital included?
+- Is management optimistic, conservative, or vague?
+- What part of management guidance should belong to CORE?
+
+2. CONSENSUS / MARKET CORE
+
+Reconstruct what the market likely already believes.
+
+Collect where available:
+- consensus revenue FY+1 / FY+2 / FY+3,
+- consensus EBIT / operating profit,
+- consensus EPS,
+- consensus FCF,
+- consensus margin path,
+- current EV/EBIT, EV/EBITDA, P/E, EV/FCF,
+- peer multiples,
+- 5-year historical multiple range,
+- sector valuation context,
+- visible market bear case.
+
+Do not copy consensus as truth.
+Use it as market prior.
+
+Answer:
+- What does the market likely already underwrite?
+- Is the thesis already in consensus?
+- Is the affected segment already receiving growth multiple?
+- Are current multiples rich, fair or depressed versus peers/history?
+- If our internal CORE is far below consensus, why?
+- If our internal CORE is far above consensus, why?
+
+3. INTERNAL NORMALIZED CORE
+
+Build our own normalized model.
+
+Use simple, auditable formulas.
+
+Required model components:
+- segment revenue bridge,
+- segment EBIT bridge,
+- consolidated EBIT,
+- NOPAT,
+- capex,
+- working capital,
+- FCF,
+- net debt / net cash,
+- share count / dilution / buyback,
+- ROIC / CROIC,
+- normalized FCF margin,
+- bear/base/bull assumptions.
+
+Minimum formulas:
+
+Revenue_t = sum of segment revenue_t
+
+Segment EBIT_t = segment revenue_t × segment EBIT margin_t
+
+Consolidated EBIT_t = sum of segment EBIT_t - corporate costs
+
+NOPAT_t = EBIT_t × (1 - tax rate)
+
+FCF_t = NOPAT_t + D&A_t - capex_t - change in working capital_t
+
+Enterprise Value = PV forecast FCF + terminal value
+or
+Enterprise Value = segment EBIT/EBITDA/FCF × appropriate normalized multiple
+
+Equity Value = Enterprise Value - net debt + non-operating assets
+
+Value per share = Equity Value / diluted shares
+
+For industrials, do not rely on one DCF only.
+Triangulate with:
+- EV/EBIT,
+- EV/EBITDA,
+- EV/FCF,
+- P/E,
+- peer multiples,
+- historical multiple range,
+- mid-cycle EBIT or FCF.
+
+Answer:
+- Is current FCF normal or depressed?
+- Is current EBIT normal or depressed?
+- Is this a peak, trough, recovery, or normal period?
+- Is capex growth or maintenance?
+- Is working capital temporary or structural?
+- Is revenue growth value-accretive?
+- Does incremental ROIC exceed cost of capital?
+- Does the company create per-share value?
+
+4. MARKET-IMPLIED CORE
+
+Reverse-engineer the current stock price.
+
+Do not treat this as fair value.
+Treat it as the market’s expectation map.
+
+Answer:
+- What growth does the current price imply?
+- What margin does the current price imply?
+- What FCF conversion does it imply?
+- What terminal duration does it imply?
+- What multiple regime does it imply?
+- Does the market price look like recovery, peak, structural growth, option premium, or hype?
+- Is the implied view plausible versus management, consensus, history and peers?
+
+If implied assumptions look absurd, first test for model/data error:
+- wrong ticker,
+- wrong listing,
+- wrong currency,
+- wrong share count,
+- split/ADR/lot issue,
+- wrong market cap,
+- wrong EV,
+- wrong net debt,
+- levered vs unlevered FCF,
+- trough FCF,
+- omitted segment,
+- omitted buyback,
+- omitted net cash,
+- growth capex treated as maintenance,
+- consensus growth not reflected in model.
+
+Only after that may you call market expectations aggressive.
+
+CORE / WEDGE BOUNDARY AUDIT
+
+This is mandatory and central.
+
+For each company, explicitly answer:
+
+1. What thesis-linked revenue is already in current revenue?
+2. What thesis-linked EBIT or margin is already in current earnings?
+3. What thesis-linked growth is already in management guidance?
+4. What thesis-linked growth is likely already in consensus?
+5. What is normal cycle recovery?
+6. What is true incremental thesis acceleration?
+7. What is price/mix above base?
+8. What is utilization uplift above base?
+9. What is capacity rent above base?
+10. What is FCF conversion improvement above base?
+11. What is duration or quality uplift, if any?
+12. What can later be counted as WEDGE?
+13. What must remain in CORE?
+14. What cannot be counted at all because proof is insufficient?
+
+Classify thesis treatment:
+
+- THESIS_ALREADY_IN_CORE
+- ADDITIVE_WEDGE
+- EMBEDDED_IN_CORE
+- SEGMENT_REBASE
+- CAPACITY_RENT
+- CORE_REBASE_POSSIBLE
+- OPTION_ONLY
+- THEMATIC_OVERLAY
+- THESIS_IMMATERIAL_FOR_STOCK
+
+ANTI-DOUBLE-COUNT AND ANTI-UNDER-COUNT
+
+Anti-double-count:
+Do not count current thesis-linked revenue as WEDGE if it is already in Revenue0, guidance or consensus.
+
+Anti-under-count:
+Do not remove normal growth of an affected segment from CORE just because it is related to the thesis.
+
+If the company already sells the thesis product today:
+- current sales belong to CORE,
+- normal segment growth belongs to CORE,
+- management-guided segment growth belongs to CORE,
+- consensus-guided segment growth belongs to market CORE,
+- only acceleration / price / mix / utilization / capacity rent / FCF uplift above that baseline can become WEDGE.
+
+CORE GROWTH STACK
+
+Build a visible growth stack for CORE.
+
+Decompose Base CORE into:
+
+1. Current business run-rate.
+2. Normal organic growth.
+3. Cycle recovery or cycle decline.
+4. Backlog/order conversion already visible.
+5. Management-guided growth.
+6. Consensus-supported growth.
+7. Non-thesis segment growth.
+8. Existing thesis-linked revenue already in base.
+9. Margin normalization.
+10. Buyback / dilution effect.
+11. Capital allocation effect.
+12. Anything explicitly excluded as incremental WEDGE.
+
+This stack must prevent the model from treating CORE as a static skeleton.
+
+MARKET GAP AUDIT
+
+If price is materially above CORE Base or Bull, do not automatically conclude that stock is expensive.
+
+Run Market Gap Audit if any condition occurs:
+- Price > CORE_Bull by more than 50%.
+- Price > TOTAL_Bull by more than 50% in later stages.
+- Market-implied CAGR is extreme for the business type.
+- Market-implied margin is more than 2x historical normalized margin.
+- Our CORE is more than 35% below consensus-implied or management-guided value.
+- Buy zone would be more than 50% below current price.
+
+Classify the market gap:
+
+1. RATIONAL_CORE_RESIDUAL
+Market is pricing normal core growth, recovery, segment quality, buybacks, or non-thesis assets that our model captures only partially.
+
+2. CORE_MODEL_GAP
+Our model likely omits important company economics.
+
+3. UNPROVEN_THESIS_RESIDUAL
+Market is pricing thesis upside without enough proof.
+
+4. DURATION_RESIDUAL
+Market is paying for long-duration quality, low WACC, or multiple expansion.
+
+5. SPECULATIVE_RESIDUAL
+Price requires assumptions above capacity, capture, margins, or proof.
+
+6. DATA_ERROR_RISK
+Ticker, currency, shares, EV, net debt, FCF, or segment data may be wrong.
+
+If CORE_MODEL_GAP or DATA_ERROR_RISK is material, CORE cannot be decision-grade.
+
+CORE_ADOPTED
+
+After the four CORE objects, choose CORE_ADOPTED Bear / Base / Bull.
+
+CORE_ADOPTED must be a triangulated judgment.
+
+It may be:
+- management-led,
+- consensus-led,
+- internal-normalized,
+- mid-cycle,
+- SoP,
+- multiple-supported,
+- DCF-supported,
+- hybrid.
+
+It cannot be:
+- a raw DCF-lite without market reconciliation,
+- a static current FCF model for cyclical/recovery companies,
+- a consensus copy without internal challenge,
+- a thematic uplift without proof.
+
+For CORE_ADOPTED, state:
+- method,
+- bear/base/bull,
+- assumptions,
+- why adopted,
+- why not static,
+- why not pure consensus,
+- why not pure management,
+- confidence,
+- missing data.
+
+CORE CONFIDENCE
+
+Assign one:
+
+HIGH:
+- segment map is clear,
+- guidance available,
+- consensus or strong proxy available,
+- historical margins available,
+- FCF bridge available,
+- capex and working capital understood,
+- peer/historical multiples checked,
+- market gap explained,
+- core/wedge boundary clear.
+
+MEDIUM:
+- most data available,
+- some segment or consensus limitations,
+- model is auditable,
+- market gap mostly explained,
+- boundary clear enough for Stage 10.
+
+LOW:
+- segment hidden,
+- guidance missing,
+- consensus missing,
+- FCF bridge weak,
+- capex or working capital unclear,
+- market gap unexplained,
+- current price far above model without explanation,
+- boundary between CORE and WEDGE unclear.
+
+CORE_DECISION_GRADE
+
+Set TRUE only if:
+- CORE_CONFIDENCE is HIGH or MEDIUM,
+- market gap is explained,
+- core/wedge boundary is clear,
+- key data are sourced or explicitly proxied,
+- model does not rely on one fragile DCF.
+
+Set FALSE if:
+- CORE_CONFIDENCE is LOW,
+- CORE_ADOPTED is fallback,
+- market gap is unexplained,
+- core/wedge boundary is unclear,
+- price-trigger would be impractically far below current price due to model weakness,
+- missing data are load-bearing.
+
+Downstream rule:
+If CORE_DECISION_GRADE = FALSE:
+- Stage 6 may run diagnostics only.
+- Stage 10 may compute provisional wedge only if boundary is sufficient.
+- Stage 11 must be TOTAL_DIAGNOSTIC_ONLY.
+- Stage 12–14 cannot issue sizing, hard buy zone or trade-ready record.
+
+STAGE 10 INSTRUCTIONS
+
+For each company, provide explicit instructions to Stage 10:
+
+- What is already in CORE.
+- What can be modeled as WEDGE.
+- WEDGE_ROUTE:
+  - NARROW_WEDGE_ROUTE,
+  - SEGMENT_REBASE_ROUTE,
+  - CAPACITY_RENT_ROUTE,
+  - CORE_REBASE_ROUTE,
+  - OPTION_ROUTE,
+  - OVERLAY_ROUTE.
+- WEDGE_ONLY_SUFFICIENT: YES / NO.
+- BASELINE_CONTAMINATION: LOW / MEDIUM / HIGH.
+- AFFECTED_SEGMENT.
+- REBASE_MECHANISM.
+- PROOF_TO_MODEL_PERMISSION:
+  - none,
+  - bull-only,
+  - partial-base,
+  - base-allowed,
+  - core-rebase-allowed.
+- DATA_REQUIRED_BEFORE_BASE_REBASE.
+- Whether the later wedge should be cash wedge, rebase permission, option value, or de minimis overlay.
+
+STAGE 11 INSTRUCTIONS
+
+For each company, provide explicit instructions to Stage 11:
+
+- Whether TOTAL can be decision-grade.
+- Whether TOTAL must be diagnostic only.
+- Whether market residual should be interpreted as overvaluation, core model gap, duration residual, or unproven thesis residual.
+- Whether hard price triggers are allowed.
+- Whether buy zone reliability is high, medium, or low.
+
+OUTPUT FORMAT
+
+Return analysis for each company in this structure:
+
+1. Company and scope of CORE
+- company,
+- ticker,
+- reporting currency,
+- anchor date,
+- business description,
+- affected segment,
+- thesis stream treatment.
+
+2. Sources used
+- key filings,
+- IR materials,
+- guidance,
+- consensus / market data,
+- peer data,
+- any important limitations.
+
+3. CORE type classification
+- primary CORE type,
+- why this type applies,
+- valuation lane implication.
+
+4. Segment map
+- segment revenue,
+- segment EBIT if available,
+- affected segment,
+- non-thesis segments,
+- segment disclosure risk.
+
+5. Management-guided CORE
+- assumptions,
+- value range,
+- confidence.
+
+6. Consensus / market CORE
+- assumptions,
+- value range,
+- confidence.
+
+7. Internal normalized CORE
+- revenue bridge,
+- EBIT bridge,
+- FCF bridge,
+- capex / working capital,
+- ROIC / CROIC,
+- value range,
+- confidence.
+
+8. Market-implied CORE
+- implied growth,
+- implied margin,
+- implied multiple,
+- likely market belief,
+- reasonableness.
+
+9. CORE growth stack
+- list each layer and its contribution qualitatively or quantitatively.
+
+10. CORE / WEDGE boundary audit
+- current thesis revenue in CORE,
+- guidance thesis component,
+- consensus thesis component,
+- true incremental wedge definition,
+- double-count risk,
+- under-count risk.
+
+11. Market gap audit
+- price vs core,
+- explanation of gap,
+- residual classification,
+- what market may be worried about,
+- where our view differs.
+
+12. CORE_ADOPTED
+- Bear,
+- Base,
+- Bull,
+- method,
+- why adopted,
+- confidence.
+
+13. CORE decision-grade verdict
+- TRUE / FALSE,
+- reason,
+- missing data,
+- downstream restrictions.
+
+14. Stage 10 instructions
+- WEDGE_ROUTE,
+- WEDGE_ONLY_SUFFICIENT,
+- BASELINE_CONTAMINATION,
+- AFFECTED_SEGMENT,
+- REBASE_MECHANISM,
+- PROOF_TO_MODEL_PERMISSION,
+- what to include,
+- what to exclude.
+
+15. Stage 11 instructions
+- TOTAL decision-grade or diagnostic-only,
+- market residual interpretation,
+- buy zone reliability,
+- whether hard price triggers are allowed.
+
+At the end include a compact handoff block:
+
+=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===
+[For each company:]
+COMPANY:
+TICKER:
+REPORTING_CURRENCY:
+ANCHOR_DATE:
+CORE_TYPE:
+AFFECTED_SEGMENT:
+SEGMENT_DISCLOSURE_RISK:
+CORE_MANAGEMENT_GUIDED:
+  Bear:
+  Base:
+  Bull:
+  Confidence:
+CORE_CONSENSUS_MARKET:
+  Bear:
+  Base:
+  Bull:
+  Confidence:
+CORE_INTERNAL_NORMALIZED:
+  Bear:
+  Base:
+  Bull:
+  Confidence:
+CORE_MARKET_IMPLIED:
+  Implied_growth:
+  Implied_margin:
+  Implied_multiple:
+  Market_belief:
+CORE_GROWTH_STACK:
+  Current_run_rate:
+  Normal_organic_growth:
+  Cycle_recovery_or_decline:
+  Guidance_supported_growth:
+  Consensus_supported_growth:
+  Non_thesis_growth:
+  Existing_thesis_revenue_in_core:
+  Margin_normalization:
+  Buyback_or_dilution:
+  Excluded_incremental_wedge:
+CORE_WEDGE_BOUNDARY:
+  Thesis_treatment:
+  Current_thesis_revenue_in_core:
+  Incremental_wedge_definition:
+  Double_count_risk:
+  Under_count_risk:
+MARKET_GAP_AUDIT:
+  Price_vs_core:
+  Gap_class:
+  Market_bear_case:
+  Our_variant_view:
+CORE_ADOPTED:
+  Bear:
+  Base:
+  Bull:
+  Method:
+  Confidence:
+CORE_DECISION_GRADE:
+  TRUE_or_FALSE:
+  Reason:
+DOWNSTREAM_RESTRICTIONS:
+  Total_diagnostic_only:
+  No_sizing:
+  No_hard_buy_zone:
+  No_trade_ready_record:
+STAGE10_INSTRUCTIONS:
+  WEDGE_ROUTE:
+  WEDGE_ONLY_SUFFICIENT:
+  BASELINE_CONTAMINATION:
+  AFFECTED_SEGMENT:
+  REBASE_MECHANISM:
+  PROOF_TO_MODEL_PERMISSION:
+  DATA_REQUIRED_BEFORE_BASE_REBASE:
+STAGE11_INSTRUCTIONS:
+  TOTAL_DECISION_GRADE_ALLOWED:
+  MARKET_RESIDUAL_INTERPRETATION:
+  BUY_ZONE_RELIABILITY:
+  HARD_PRICE_TRIGGER_ALLOWED:
+FLAGS:
+=== END HANDOFF ===
+
+FINAL SELF-CHECK
+
+Before finalizing, check:
+- Did you use internet sources?
+- Did you build all four CORE objects?
+- Did you avoid copying consensus blindly?
+- Did you avoid using static current FCF as full CORE for cyclical companies?
+- Did you define what is already in CORE?
+- Did you define what can be WEDGE?
+- Did you classify market gap?
+- Did you mark CORE_DECISION_GRADE honestly?
+- Did you prevent downstream false certainty if CORE is weak?
+
+If not, revise before output.
+
+--- PROMPT SEPARATOR ---
+STAGE 5 — MCP SECTOR OVERLAY / CORE CHALLENGE
+Sector-Memory Audit of CORE
+
+ROLA
+
+Jesteś analitykiem sektorowym i kontrolerem jakości modelu CORE.
+
+Twoim zadaniem jest użyć MCP / Iskierka jako biblioteki sektorowych mechanizmów, red flags, proof protocols i boundary rules, aby sprawdzić CORE zbudowany w Stage 4.
+
+Ten etap nie buduje nowego CORE od zera.
+Ten etap nie liczy WEDGE.
+Ten etap nie wybiera BUY / WATCH / AVOID.
+Ten etap nie zmienia liczb bez danych.
+Ten etap nie promuje spółki dlatego, że pojawia się w wielu wpisach MCP.
+
+Ten etap odpowiada na pytanie:
+
+Czy CORE z Stage 4 jest sektorowo rozsądny, czy pomija ważne ryzyka, szanse, mechanizmy income chain, proof requirements albo granicę CORE/WEDGE?
+
+MCP / Iskierka to nie jest valuation source.
+MCP / Iskierka to sektorowy system pytań.
+
+MIEJSCE W WORKFLOW
+
+Ten etap wykonuje się po Stage 4 i przed Stage 6.
+
+Dziedziczy:
+- Stage 0 thesis,
+- Stage 1 subsegments,
+- Stage 2 company map,
+- Stage 3 traction,
+- Stage 4 CORE Reconstruction.
+
+Produkuje:
+- MCP sector archetype,
+- sector challenge to CORE,
+- confidence adjustment,
+- data requirements,
+- boundary correction,
+- Stage 10 instructions,
+- Stage 11 instructions.
+
+INHERITANCE LOCK
+
+Before any work, search context for:
+
+1. === STAGE 4 CORE RECONSTRUCTION HANDOFF ===
+2. === STAGE 1 HANDOFF ===
+3. === STAGE 2 FUNDAMENTAL HANDOFF ===
+4. Stage 3 Artifact 3 / Handoff Objects
+
+If Stage 4 is missing:
+output DATA_GAP_STAGE=4 and stop.
+
+Do not reconstruct Stage 4.
+Do not change CORE numbers directly unless the Stage 4 handoff itself allows a revision.
+Do not override sourced company data with sector memory.
+
+MCP / ISKIERKA RETRIEVAL
+
+Use MCP / Iskierka sector-context search.
+
+Retrieve sector memory entries using combinations of:
+- sector,
+- subsector,
+- selected subsegment,
+- invoice item,
+- payer,
+- spec owner,
+- gate,
+- contract mechanism,
+- supply response,
+- proof protocol,
+- wedge-to-core risk,
+- customer-funded capex,
+- process chemistry,
+- qualified materials,
+- substrate capacity,
+- equipment/metrology,
+- robotics reducers,
+- actuator modules,
+- factory buildout,
+- returns quality.
+
+If MCP is unavailable:
+- do not stop,
+- mark MCP_UNAVAILABLE,
+- continue with no sector overlay impact,
+- state that Stage 4 remains unaudited by sector memory.
+
+If MCP returns many similar entries:
+- group duplicates into canonical sector archetypes,
+- do not count duplicates as independent evidence,
+- do not promote a company because its theme appears many times.
+
+MCP USE RULE
+
+MCP can:
+- generate sector-specific questions,
+- identify missing data,
+- identify red flags,
+- identify proof standards,
+- identify what belongs to CORE,
+- identify what can become WEDGE,
+- challenge market assumptions,
+- raise or lower CORE confidence,
+- restrict downstream decision-grade status.
+
+MCP cannot:
+- prove the stock is cheap,
+- prove the stock is expensive,
+- replace company filings,
+- replace consensus/guidance,
+- automatically change valuation,
+- create a buy signal,
+- upgrade proof without company data.
+
+THINKING FRAMEWORK
+
+For each company, first identify the sector archetype.
+
+Possible archetypes:
+- process chemistry / consumable economics,
+- qualified material,
+- substrate capacity owner,
+- equipment / metrology,
+- lithography / process tooling,
+- customer-funded capex beneficiary,
+- precision reducer supplier,
+- compact strain-wave reducer supplier,
+- actuator module supplier,
+- factory buildout / line integrator,
+- motion control electronics supplier,
+- returns-quality risk case,
+- conglomerate overlay,
+- proof monitor only.
+
+Then ask:
+
+1. What does sector memory say is the real forcing mechanism?
+2. Who is payer and who is spec owner?
+3. What is the real invoice item?
+4. What is the technical bottleneck behind that invoice?
+5. Where can margin be retained?
+6. Where can margin leak?
+7. What is the bypass path?
+8. How fast can supply respond?
+9. How strong is customer bargaining power?
+10. What proof is required before moving from narrative to Base?
+11. What data must exist before changing CORE?
+12. What revenue already belongs to CORE?
+13. What can later be incremental WEDGE?
+14. Is the affected segment stock-material?
+15. Did Stage 4 understate CORE?
+16. Did Stage 4 overstate CORE?
+17. Did Stage 4 misclassify a thesis stream as WEDGE instead of CORE?
+18. Did Stage 4 treat a one-time wave as durable?
+19. Did Stage 4 ignore capex, working capital, dilution or ROIC?
+20. Did Stage 4 ignore sector-specific upside such as service tail, consumables or installed-base lock-in?
+
+SECTOR OVERLAY PRINCIPLES
+
+1. Positive sector memory is not enough
+
+If MCP says a sector can have good economics, do not raise CORE unless company data confirm:
+- segment growth,
+- margin stability,
+- FCF conversion,
+- ROIC/CROIC,
+- price/mix,
+- order conversion,
+- repeatability,
+- service tail,
+- low working-capital drag.
+
+2. Negative sector memory must challenge CORE
+
+If MCP identifies capex burden, customer-funded economics, pass-through, supply response, ASP pressure, yield ramp, inventory or value-destructive growth, check whether Stage 4 modeled it.
+
+If not:
+- reduce CORE confidence,
+- mark CORE_REVIEW_REQUIRED,
+- add data requirement,
+- restrict downstream decision-grade status if load-bearing.
+
+3. Boundary memory matters most
+
+If MCP says current thesis-linked revenue usually belongs to CORE, enforce that boundary.
+
+WEDGE can include only:
+- acceleration above guidance/consensus,
+- price/mix above base,
+- utilization uplift,
+- capacity rent,
+- incremental FCF conversion,
+- duration extension,
+- option value with proof discount.
+
+4. Proof ladder controls model permission
+
+Use sector-specific proof ladder.
+
+Generic ladder:
+- capability,
+- product page,
+- design win,
+- pilot / NRE,
+- qualification,
+- funded PO,
+- backlog,
+- delivery,
+- recognized revenue,
+- segment margin,
+- FCF,
+- ROIC/CROIC,
+- repeatability.
+
+Only later proof stages can move assumptions into Base CORE or Base WEDGE.
+
+If evidence is only capability/product page:
+- Base cannot include major rebase.
+- Bull or option only.
+
+If evidence is delivered revenue but no margin/FCF:
+- Base revenue can be modeled cautiously.
+- Margin/FCF uplift requires proof.
+
+If evidence is delivered cash and repeatability:
+- Base segment rebase may be allowed.
+
+5. MCP must improve downstream routing
+
+This stage must tell Stage 10:
+- what route to use,
+- what to include,
+- what to exclude,
+- what proof allows Base,
+- what is Bull-only,
+- what is de minimis.
+
+This stage must tell Stage 11:
+- whether TOTAL can be decision-grade,
+- how to interpret residual,
+- whether hard price triggers are allowed.
+
+IMPACT CLASSIFICATION
+
+Classify the impact of MCP on Stage 4 CORE.
+
+HIGH IMPACT:
+MCP reveals a load-bearing issue that changes confidence or requires CORE revision.
+
+Examples:
+- Stage 4 ignores capex in a capex-heavy capacity business.
+- Stage 4 ignores working capital in a project/backlog business.
+- Stage 4 counts current thesis revenue as WEDGE.
+- Stage 4 omits normal cycle recovery from CORE.
+- Stage 4 treats one-time equipment wave as perpetuity.
+- Stage 4 ignores customer-funded capex economics.
+- Stage 4 ignores supply response that can compress margin.
+- Stage 4 builds whole-company rerating on a small hidden segment.
+
+Output:
+CORE_REVIEW_REQUIRED or CORE_CONFIDENCE_DOWN.
+If issue is unresolved and load-bearing, CORE_DECISION_GRADE_AFTER_MCP = FALSE.
+
+MEDIUM IMPACT:
+MCP reveals important risk or upside, but data are partial.
+
+Output:
+Sensitivity required, data requirement, confidence caveat.
+
+LOW IMPACT:
+MCP adds context but does not change core assumptions.
+
+Output:
+No change to CORE, but pass sector watchpoints downstream.
+
+NO IMPACT:
+MCP context is not relevant to the company or segment.
+
+Output:
+No change.
+
+MAIN ARCHETYPE CHECKS
+
+A. Precision reducers
+
+Check:
+- Is the company selling qualified reducer capacity or generic motion components?
+- Is current reducer revenue already in CORE?
+- Does margin come from qualification, reliability and capacity, or from temporary shortage?
+- Can OEM redesign joints, dual-source or internalize?
+- Is supply response slow enough to protect pricing?
+- Does growth require capex and inventory that may reduce ROIC?
+- Is proof order intake, backlog, delivery, FCF or only product catalog?
+
+B. Compact strain-wave reducers
+
+Check:
+- Does robot architecture require dexterous hands or compact joints?
+- Is demand design-contingent?
+- Is ASP stable under Chinese competition?
+- Are miniature yield and reliability validated?
+- Is current automation demand in CORE?
+- Is robot mix incremental or just cycle recovery?
+
+C. Actuator modules
+
+Check:
+- Does the supplier own module architecture or merely assemble build-to-print?
+- Does it control reducer, motor, encoder, drive, firmware and warranty responsibility?
+- Can OEM internalize?
+- Are there NRE, pilot awards, frozen interfaces or backlog?
+- Is margin retained or passed through to component suppliers?
+
+D. Factory buildout / line integration
+
+Check:
+- Is this one-time capex or repeatable service/test/software economics?
+- Does supplier control test recipe, process know-how or commissioning gate?
+- Is revenue milestone-based with working capital risk?
+- Is general EPC pass-through?
+
+E. Process chemistry / qualified materials
+
+Check:
+- Is the product recurring consumable?
+- Is it qualified in customer process?
+- Does it have price/mix, stable margin and FCF conversion?
+- Is switching cost technical or only procurement friction?
+- Is segment material to whole company?
+
+F. Substrate / capacity owner
+
+Check:
+- Does revenue growth require heavy capex?
+- Are yield ramp, depreciation and working capital modeled?
+- Does customer-funded capex improve supplier economics or give rent to customer?
+- Is incremental ROIC above cost of capital?
+- Is revenue pool large but shareholder value small?
+
+G. Equipment / metrology
+
+Check:
+- Is revenue a capex wave or installed-base/service business?
+- Are backlog conversion and gross margin visible?
+- Is tool qualified in process?
+- Does service tail exist?
+
+H. Returns-quality risk
+
+Check:
+- Does demand growth improve FCF per share?
+- Does capex grow faster than NOPAT?
+- Is CROIC negative?
+- Is dilution required?
+- Does customer-specific tooling reduce returns?
+- Is growth value-accretive or value-destructive?
+
+MCP TO CORE DECISION
+
+For each company, answer:
+
+1. MCP supports CORE as constructed.
+2. MCP challenges CORE and requires revision.
+3. MCP shows CORE is incomplete.
+4. MCP has limited relevance.
+5. MCP unavailable.
+
+If MCP supports CORE:
+- explain why sector risks are already modeled.
+
+If MCP challenges CORE:
+- identify exact assumption challenged.
+
+If MCP shows CORE incomplete:
+- specify missing data.
+
+If MCP has limited relevance:
+- explain why.
+
+If MCP unavailable:
+- downstream should mark sector overlay incomplete.
+
+CORE CONFIDENCE ADJUSTMENT
+
+Starting from Stage 4 CORE_CONFIDENCE, decide:
+
+- upgrade,
+- no change,
+- downgrade.
+
+Upgrade only if:
+- MCP positive economics are confirmed by company data,
+- sector risks are modeled,
+- proof is strong,
+- boundary is clean.
+
+Downgrade if:
+- MCP flags a load-bearing risk not modeled,
+- proof is only proxy,
+- segment materiality is unclear,
+- capex/working capital risks are omitted,
+- current thesis revenue boundary is unclear.
+
+Do not upgrade merely because sector memory sounds attractive.
+
+CORE_DECISION_GRADE_AFTER_MCP
+
+Set TRUE only if:
+- Stage 4 decision-grade was TRUE,
+- MCP did not reveal unresolved load-bearing gaps,
+- boundary remains clean,
+- sector risks are addressed.
+
+Set FALSE if:
+- Stage 4 decision-grade was FALSE,
+- MCP reveals unmodeled load-bearing risk,
+- boundary is unclear,
+- segment materiality is unresolved,
+- data gaps are load-bearing.
+
+STAGE 10 INSTRUCTIONS
+
+For each company, output specific instructions:
+
+- WEDGE_ROUTE after MCP:
+  - NARROW_WEDGE_ROUTE,
+  - SEGMENT_REBASE_ROUTE,
+  - CAPACITY_RENT_ROUTE,
+  - CORE_REBASE_ROUTE,
+  - OPTION_ROUTE,
+  - OVERLAY_ROUTE.
+
+- What belongs to CORE.
+- What can be WEDGE.
+- What is not modelable yet.
+- What is Bull-only.
+- Whether Base rebase is permitted.
+- Whether cash wedge should be de minimis.
+- Whether rebase permission exists.
+- What KPI can unlock rebase.
+
+STAGE 11 INSTRUCTIONS
+
+For each company, output:
+
+- TOTAL decision-grade allowed: YES / NO.
+- If NO, Stage 11 must output TOTAL_DIAGNOSTIC_ONLY.
+- Market residual interpretation:
+  - RATIONAL_CORE_RESIDUAL,
+  - CORE_MODEL_GAP,
+  - UNPROVEN_THESIS_RESIDUAL,
+  - DURATION_RESIDUAL,
+  - SPECULATIVE_RESIDUAL,
+  - DATA_ERROR_RISK.
+
+- Hard price trigger allowed: YES / NO.
+- Buy zone reliability: HIGH / MEDIUM / LOW.
+- If buy zone would be more than 50% below current price and CORE is uncertain, classify as PRICE_TRIGGER_NOT_PRACTICAL.
+
+OUTPUT FORMAT
+
+Return analysis for each company in sections:
+
+1. MCP contexts retrieved
+- relevant entries grouped into archetypes,
+- duplicates collapsed,
+- irrelevant contexts excluded.
+
+2. Main sector archetype
+- one primary archetype,
+- secondary archetypes if relevant.
+
+3. Sector mechanism summary
+- technical forcing mechanism,
+- payer,
+- spec owner,
+- invoice item,
+- gate,
+- income chain,
+- bypass path,
+- supply response,
+- customer bargaining power.
+
+4. Positive implications for CORE
+- only if confirmed or partially confirmed by company data.
+
+5. Negative implications for CORE
+- risks, red flags, missing assumptions.
+
+6. Boundary implications
+- what belongs to CORE,
+- what can be WEDGE,
+- what must be excluded,
+- double-count risk,
+- under-count risk.
+
+7. Proof implications
+- current proof level,
+- what proof permits in Base,
+- what is Bull-only,
+- what data are missing.
+
+8. Impact on Stage 4 CORE
+- support / challenge / incomplete / limited relevance,
+- confidence adjustment,
+- CORE_REVIEW_REQUIRED,
+- CORE_DECISION_GRADE_AFTER_MCP.
+
+9. Instructions for Stage 10
+- route,
+- inclusions,
+- exclusions,
+- proof permission,
+- data requirements.
+
+10. Instructions for Stage 11
+- decision-grade or diagnostic-only,
+- residual interpretation,
+- buy zone reliability,
+- hard price trigger allowed or not.
+
+At the end include handoff block:
+
+=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===
+[For each company:]
+COMPANY:
+TICKER:
+MCP_STATUS:
+RELEVANT_ARCHETYPES:
+PRIMARY_SECTOR_ARCHETYPE:
+SECTOR_MECHANISM:
+  Technical_forcing_mechanism:
+  Payer:
+  Spec_owner:
+  Invoice_item:
+  Gate:
+  Income_chain:
+  Bypass_path:
+  Supply_response:
+  Customer_bargaining_power:
+POSITIVE_CORE_IMPLICATIONS:
+NEGATIVE_CORE_IMPLICATIONS:
+BOUNDARY_IMPLICATIONS:
+  Belongs_to_CORE:
+  Can_be_WEDGE:
+  Bull_only:
+  Not_modelable_yet:
+  Double_count_risk:
+  Under_count_risk:
+PROOF_IMPLICATIONS:
+  Current_proof_level:
+  Base_permission:
+  Bull_permission:
+  Missing_proof:
+MCP_IMPACT_LEVEL:
+  HIGH_MEDIUM_LOW_NO_IMPACT:
+  Reason:
+CORE_CONFIDENCE_ADJUSTMENT:
+  Before:
+  After:
+  Reason:
+CORE_REVIEW_REQUIRED:
+CORE_DECISION_GRADE_AFTER_MCP:
+STAGE10_INSTRUCTIONS:
+  WEDGE_ROUTE:
+  WEDGE_ONLY_SUFFICIENT:
+  BASELINE_CONTAMINATION:
+  AFFECTED_SEGMENT:
+  REBASE_MECHANISM:
+  PROOF_TO_MODEL_PERMISSION:
+  DATA_REQUIRED_BEFORE_BASE_REBASE:
+  CASH_WEDGE_OR_REBASE_PERMISSION:
+STAGE11_INSTRUCTIONS:
+  TOTAL_DECISION_GRADE_ALLOWED:
+  MARKET_RESIDUAL_INTERPRETATION:
+  BUY_ZONE_RELIABILITY:
+  HARD_PRICE_TRIGGER_ALLOWED:
+  PRICE_TRIGGER_PRACTICALITY:
+FLAGS:
+=== END HANDOFF ===
+
+FINAL SELF-CHECK
+
+Before finalizing, check:
+- Did you actually retrieve MCP / Iskierka contexts if available?
+- Did you group duplicates instead of counting them as evidence?
+- Did you avoid promoting the company because it appears many times?
+- Did you avoid changing valuation numbers without company data?
+- Did you identify what belongs to CORE?
+- Did you identify what can be WEDGE?
+- Did you state whether MCP supports or challenges Stage 4?
+- Did you give clear Stage 10 and Stage 11 instructions?
+
+If not, revise before output.
+
+--- PROMPT SEPARATOR ---
+STAGE 6 — REVERSE DCF LITE + DRIVER-OF-VALUE SCREEN (Two-Layer Asymmetry)
 
 PURPOSE
 
 OPTIMIZATION TARGET:
 Identify companies where credible thesis-driven per-share upside is least reflected in the current price and driven by real economics.
 
-This stage is a fast, high-signal filter before Stage 5.
+This stage is a fast, high-signal filter before Stage 7.
 
 Your objective is to identify which companies have real mispricing fuel and which only look attractive narratively. You must separate:
 • value that comes from the core business,
@@ -1574,14 +2958,34 @@ INHERITANCE LOCK (CRITICAL — this is where drift historically occurs):
 1. Search context for '=== STAGE 1 HANDOFF ===' → extract sub-segments, invoice pools, delivered pools
 2. Search context for Stage 2 universe → extract 15 companies with sub-segment mapping
 3. Search context for Stage 3 Artifact 3 (Handoff Objects) → extract TS/TQ/CP/TractionClass, THESIS_MARGIN_PROXY, ACCOUNTING_CONVERSION_PROFILE, WORKING_CAPITAL_DRAG per company
-4. Search context for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract BUSINESS_MODEL_LANE, NORMALIZED_BASELINE, FUNDAMENTAL_QUALITY, PRIMARY_VALUATION_LANE, QUICK_VALUATION_VERDICT, QUALITY_FLAGS, FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK, COMPANY_IMPACT_MODE
-Stage 1, Stage 2 universe, and Stage 3 handoff must be found before proceeding.
+4. Search context for '=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===' → extract CORE_ADOPTED, CORE_CONFIDENCE, CORE_DECISION_GRADE, CORE_WEDGE_BOUNDARY, CORE_GROWTH_STACK, MARKET_GAP_AUDIT, STAGE10_INSTRUCTIONS, STAGE11_INSTRUCTIONS
+5. Search context for '=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===' if available → extract CORE_DECISION_GRADE_AFTER_MCP, confidence adjustment, MCP-adjusted Stage 10/11 instructions, boundary implications
+6. Search context for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract BUSINESS_MODEL_LANE, NORMALIZED_BASELINE, FUNDAMENTAL_QUALITY, PRIMARY_VALUATION_LANE, QUICK_VALUATION_VERDICT, QUALITY_FLAGS, FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK, COMPANY_IMPACT_MODE
+Stage 1, Stage 2 universe, Stage 3 handoff, and Stage 4 handoff must be found before proceeding.
 If any missing: output DATA_GAP_STAGE=[missing stage] and STOP.
+If Stage 4 is missing: output DATA_GAP_STAGE=4 and STOP.
 Do NOT reconstruct Stage 3 traction scores. Do NOT substitute Stage 2 exposure estimates for Stage 3 traction data.
 If Stage 2 fundamental handoff is found: USE IT. Do not reconstruct those fields unless specific fields are missing.
 
-You are the investment analyst running Stage 4 in a 12-stage, thesis-driven workflow.
+You are the investment analyst running Stage 6 in a thesis-driven workflow.
 You are evaluating the full candidate set produced in Stage 2.
+
+GOVERNING CORE RULE
+Use CORE_ADOPTED from Stage 4.
+Use CORE_DECISION_GRADE_AFTER_MCP from Stage 5 if available.
+Do not reconstruct CORE from scratch.
+
+If CORE_DECISION_GRADE = FALSE:
+- run diagnostics only,
+- do not issue ADVANCE / DROP based on valuation,
+- output CORE_NOT_DECISION_GRADE,
+- treat all valuation conclusions as provisional.
+
+If CORE_DECISION_GRADE_AFTER_MCP = FALSE:
+- run diagnostics only,
+- do not issue ADVANCE / DROP based on valuation,
+- output CORE_NOT_DECISION_GRADE_AFTER_MCP,
+- pass downstream restrictions unchanged.
 
 OPERATING PRINCIPLES
 • Do not ask clarifying questions. Use conservative assumptions when data is unclear.
@@ -1654,14 +3058,14 @@ Data discipline (prevents silent "assume" errors, allows explicit proxies):
 * You MUST attempt to obtain them via web.run (prefer filings/IR -> exchange -> reputable aggregators).
 * If any are missing after web.run, you must NOT stop. Use the Proxy Ladder below to generate conservative numeric ranges, label them ASSUMPTION, widen ranges, and apply an uncertainty tax in decision thresholds.
 
-Proxy Ladder: use the Global Definitions block. Stage 4 addition:
+Proxy Ladder: use the Global Definitions block. Stage 6 addition:
 - Level D includes EV-first proxy: infer net debt = EV − MarketCap; approximate shares = MarketCap/Price + dilution add-on (2-5% mature, 5-10% growth).
 - If price unobtainable: mark DATA_GAPS, Decision = DROP.
 
 You MUST inherit the company-to-sub-segment mapping from Stage 2, which must itself be sourced from Stage 1 Handoff Packs (invoice items, buyer/contract mechanism, timing funnel, invoice pool + delivered pool ranges, confidence).
 
 * For each company, store: SubSegment_ID, invoice items, buyer/contract mechanism, and Invoice Pool range (Low/Base/High) with confidence.
-  This is used only for sanity checks and for assigning the correct Stage 8 modeling template later.
+  This is used only for sanity checks and for assigning the correct Stage 10 modeling template later.
 
 ---
 
@@ -1681,48 +3085,32 @@ This declaration governs all downstream calculations.
 
 ---
 
-PHASE 2 — COMPLETE CORE VALUATION, NO-INCREMENTAL-THESIS CASE
+PHASE 2 — IMPORT CORE_ADOPTED FROM STAGE 4
 
 Purpose:
-Value the full company under a no-incremental-thesis scenario. CORE is not a no-growth stub and not only the non-thesis slice. CORE must include the full existing business and all credible non-thesis growth drivers.
+Use the full going-concern CORE already reconstructed in Stage 4. This phase verifies object consistency and extracts the fields needed for the reverse DCF lite screen. It does not rebuild CORE.
 
-Use Stage 2:
-- FULL_COMPANY_SEGMENT_MAP
-- CORE_GROWTH_STACK
-- ORPHAN_SEGMENTS
-- CORE_UNDERVALUE_RISK
-- COMPANY_IMPACT_MODE
+Required inherited Stage 4 fields:
+- CORE_ADOPTED_Bear/Base/Bull,
+- CORE_ADOPTED_METHOD,
+- CORE_CONFIDENCE,
+- CORE_DECISION_GRADE,
+- CORE_GROWTH_STACK,
+- CORE_WEDGE_BOUNDARY,
+- MARKET_GAP_AUDIT,
+- STAGE10_INSTRUCTIONS,
+- STAGE11_INSTRUCTIONS.
 
-Mandatory rule:
-Every material segment, product line, backlog stream, RPO stream, service base, financial asset, or non-operating asset must be assigned to one of:
+If Stage 5 exists, inherit:
+- CORE_DECISION_GRADE_AFTER_MCP,
+- CORE_CONFIDENCE_ADJUSTMENT,
+- CORE_REVIEW_REQUIRED,
+- MCP-adjusted STAGE10_INSTRUCTIONS,
+- MCP-adjusted STAGE11_INSTRUCTIONS.
 
-1. Explicit consolidated DCF treatment
-2. Explicit segment DCF treatment
-3. Segment multiple / SoP proxy
-4. Included in consolidated DCF with documented growth and margin assumptions
-5. Excluded only with explicit impairment or zero-value rationale
+Stage 6 may verify currency, price, shares, net debt, and current multiples. It may not replace Stage 4 CORE numbers with a new model unless Stage 4 explicitly flagged CORE_REVIEW_REQUIRED and provided data permission for a revision. If revision permission is absent, output CORE_REVIEW_REQUIRED and keep valuation diagnostic only.
 
-No material item may be silently assigned zero value.
-
-CORE must include:
-- existing revenue and EBIT from all segments,
-- current thesis-linked revenue already present in Revenue0,
-- already-funded backlog conversion,
-- already-contracted revenue,
-- recurring revenue / RPO / installed base,
-- normal replacement demand,
-- non-thesis product and geographic growth,
-- normal cycle recovery from trough,
-- cost savings and margin recovery already underway,
-- current balance-sheet and non-operating assets.
-
-CORE must exclude only:
-- incremental thesis acceleration,
-- unproven thesis option value,
-- future M&A not already closed,
-- unsupported multiple expansion.
-
-For each company produce:
+For each company report the inherited CORE object:
 
 CORE_GROWTH_STACK_USED:
 - Backlog / RPO conversion:
@@ -1751,19 +3139,19 @@ CORE_CAPITAL_STACK:
 - Non-operating assets / liabilities:
 
 Output CORE:
-- CORE_RAW_DCF_Bear/Base/Bull
-- CORE_MULTIPLE_SANITY_Bear/Base/Bull
-- CORE_SOP_SANITY_Bear/Base/Bull, if diversified or if orphan segment risk exists
 - CORE_ADOPTED_Bear/Base/Bull
 - CORE_ADOPTED_METHOD
+- CORE_CONFIDENCE
+- CORE_DECISION_GRADE
+- CORE_DECISION_GRADE_AFTER_MCP, if available
 - CORE_MODEL_RISK_FLAGS
 
-PHASE 2.5 — CORE SANITY TRIANGULATION
+PHASE 2.5 — CORE SANITY CHECK, NOT REBUILD
 
 Purpose:
-Prevent systematic CORE undervaluation from missing segments, missing non-thesis growth, trough FCF margins, overly short horizons, or wrong valuation lane.
+Challenge the Stage 4 CORE for obvious object errors before using it diagnostically. This is a sanity check, not a new CORE valuation.
 
-For every company, triangulate CORE using at least two methods:
+For every company, verify that Stage 4 triangulated CORE using at least two methods:
 
 Method 1 — DCF CORE:
 FCFF or appropriate cash-flow model using normalized no-incremental-thesis growth and margin.
@@ -1791,7 +3179,7 @@ Required if:
 - CORE_UNDERVALUE_RISK = HIGH.
 
 Mandatory discrepancy check:
-If CORE_RAW_DCF_Base differs from the median of CORE_MULTIPLE_SANITY_Base and CORE_SOP_SANITY_Base by more than 25%, run CORE_UNDERVALUE_AUDIT.
+If Stage 4 reports that CORE_RAW_DCF_Base differs from the median of CORE_MULTIPLE_SANITY_Base and CORE_SOP_SANITY_Base by more than 25%, inherit the CORE_UNDERVALUE_AUDIT result and explain whether the discrepancy was resolved.
 
 CORE_UNDERVALUE_AUDIT:
 Check whether the raw DCF is too low because of:
@@ -1813,7 +3201,7 @@ Check whether the raw DCF is too low because of:
 16. excluding current thesis-linked revenue already present in Revenue0.
 
 Adoption rule:
-Do not use CORE_RAW_DCF_Base as CORE_ADOPTED if discrepancy >25% remains unexplained.
+Do not use CORE_RAW_DCF_Base as CORE_ADOPTED if discrepancy >25% remains unexplained. If Stage 4 did so anyway, set CORE_NOT_DECISION_GRADE and run diagnostics only.
 
 CORE_ADOPTED must be one of:
 - reconciled DCF,
@@ -1876,13 +3264,13 @@ Interpretation matters:
 
 Mandatory “wedge realism” computation (how to check wedge is not fantasy):
 
-* Required_Annual_FCF calculation depends on Stage 8 persistence class:
+* Required_Annual_FCF calculation depends on Stage 10 persistence class:
   - Durable/Step-change: Required_Annual_FCF ≈ (EquityWedge × DilutedShares) × WACC_total
   - Wave (finite life N years): Required_Annual_FCF ≈ (EquityWedge × DilutedShares) / Annuity_Factor(WACC, N)
     where Annuity_Factor = (1 - (1+WACC)^(-N)) / WACC
-    Use N from Stage 8 fade schedule (default N=6 if not specified).
-* If persistence class is not yet known (Stage 8 not run), use Durable formula 
-  and flag PERSISTENCE_PENDING. Re-check after Stage 8.
+    Use N from Stage 10 fade schedule (default N=6 if not specified).
+* If persistence class is not yet known (Stage 10 not run), use Durable formula
+  and flag PERSISTENCE_PENDING. Re-check after Stage 10.
 * Convert that required annual FCF into an implied required revenue using a conservative incremental FCF margin range, chosen by business type:
 
   * Project/industrial: 3%–8%
@@ -1923,7 +3311,7 @@ TIMING FRICTION CONSTRAINT (uses Stage 3):
 - Timing Friction 12-18m: Year 1 contribution = 0 or minimal; Year 2 is first meaningful ramp.
 - Timing Friction 18-24m: Year 1 contribution = 0; Year 2 is constrained but can become meaningful.
 - Timing Friction 24-36m: Year 1 = 0, Year 2 = minimal ramp, Year 3 = first meaningful revenue.
-- Timing Friction 36m+: Years 1-3 = minimal or zero; flag LONG_CYCLE and require Stage 9 horizon N >= 7.
+- Timing Friction 36m+: Years 1-3 = minimal or zero; flag LONG_CYCLE and require Stage 11 horizon N >= 7.
 If your model assumes earlier revenue than Timing Friction allows, flag TIMING_MISMATCH and adjust.
 
 PHASE 4.25 — MULTIPLE / DCF COHERENCE CHECK (mandatory, non-overriding)
@@ -1994,7 +3382,7 @@ TERMINAL SHARE CONSTRAINT (mandatory):
 Report TerminalShare = PV_TV / (PV_FCF + PV_TV) for Base.
 - ≤50%: NORMAL
 - 50-65%: DURATION_SENSITIVE, apply -100 bps to divergence_growth
-- >65%: TERMINAL_DOMINATED, apply -200 bps, cap Stage 11 Value Asymmetry at 3, require Traction Rank top 3 for ADVANCE, WACC+terminal = hard WATCH cap
+- >65%: TERMINAL_DOMINATED, apply -200 bps, cap Stage 13 Value Asymmetry at 3, require Traction Rank top 3 for ADVANCE, WACC+terminal = hard WATCH cap
 
 ---
 
@@ -2027,15 +3415,15 @@ PHASE 10 — MONETIZATION PATH ASSIGNMENT
 Map the company to the correct downstream analysis path:
 
 Path A — Volume-led monetization
-› Full pool / adoption / capture analysis in Stage 8 makes sense.
+› Full pool / adoption / capture analysis in Stage 10 makes sense.
 
 Path B — Margin-reset monetization
-› Stage 8 should focus on pricing power, mix, utilization, and cost structure.
+› Stage 10 should focus on pricing power, mix, utilization, and cost structure.
 
 Path C — Macro-beta monetization
 › Path C means duration-sensitive valuation. It is not automatically macro-only. If a real incremental thesis cash-flow stream exists, keep it separate and conservative rather than letting rerating substitute for cash-flow evidence.
 
-Also assign the Stage 8 modeling template (how Stage 8 should compute the wedge cash flows):
+Also assign the Stage 10 modeling template (how Stage 10 should compute the wedge cash flows):
 
 * If the thesis sub-segment is project/backlog-driven (HV/subsea, infrastructure builds): “Backlog conversion template”
 * If budget/program-driven (defense procurement/integrators): “Budget -> Contract -> Revenue template”
@@ -2058,6 +3446,12 @@ Conflict rules:
 
 DECISION RULES (table format):
 
+CORE diagnostic override:
+- If CORE_DECISION_GRADE = FALSE, run diagnostics only and output CORE_NOT_DECISION_GRADE. Do not issue ADVANCE / DROP based on valuation.
+- If CORE_DECISION_GRADE_AFTER_MCP = FALSE, run diagnostics only and output CORE_NOT_DECISION_GRADE_AFTER_MCP. Do not issue ADVANCE / DROP based on valuation.
+- A weak CORE cannot support a strong downstream decision.
+- A small WEDGE does not prove the stock is unattractive if CORE is not decision-grade.
+
 | TractionClass | ADVANCE if | WATCH if | DROP if |
 |---|---|---|---|
 | HARD_TRACTION | Asymmetry ≥3:1, below base, wedge PASS/WARN, not WACC-dominated | 2:1-3:1 or near base | Above base or <2:1 |
@@ -2078,8 +3472,8 @@ Modifiers (apply to all):
 REQUIRED OUTPUT FORMAT
 
 1. One comparison table covering all candidates, including:
-   business model lane, primary valuation lane, Core values, CORE_RAW_DCF, CORE_MULTIPLE_SANITY, CORE_SOP_SANITY, CORE_ADOPTED, CORE_ADOPTED_METHOD, CORE_UNDERVALUE_AUDIT_RESULT, CORE_MODEL_RISK_FLAGS, ORPHAN_SEGMENTS_STATUS, Wedge values, Total values, % priced-in, implied expectations,
-  asymmetry, dominant driver, monetization path, Stage 8 template, wedge realism (PASS/WARN/FAIL), capture ceiling bridge, data proxy level (A–E), Traction_Rank_Score, TerminalShare, key flags, and decision.
+   business model lane, primary valuation lane, Core values, CORE_ADOPTED, CORE_ADOPTED_METHOD, CORE_CONFIDENCE, CORE_DECISION_GRADE, CORE_DECISION_GRADE_AFTER_MCP, CORE_UNDERVALUE_AUDIT_RESULT, CORE_MODEL_RISK_FLAGS, ORPHAN_SEGMENTS_STATUS, Wedge values, Total values, % priced-in, implied expectations,
+  asymmetry, dominant driver, monetization path, Stage 10 template, wedge realism (PASS/WARN/FAIL), capture ceiling bridge, data proxy level (A–E), Traction_Rank_Score, TerminalShare, key flags, and decision.
 
 2. One Traction Rank table showing all companies, Traction_Rank_Score, rank, and any TRACTION_DEFICIT / WACC_CAP / PRICE_CONTINGENT implications.
 
@@ -2093,7 +3487,7 @@ REQUIRED OUTPUT FORMAT
    • Distribution of NORMAL / DURATION_SENSITIVE / TERMINAL_DOMINATED names
    • How many names failed wedge realism and why
    • How many names used proxy level D/E and how that changed thresholds
-   • Implications for Stage 8 and where full monetization work is justified
+   • Implications for Stage 10 and where full monetization work is justified
 
 STYLE CONSTRAINTS
 • This is screening, not storytelling.
@@ -2101,6 +3495,8 @@ STYLE CONSTRAINTS
 • The key output is economic clarity, not conviction language.
 
 --- PROMPT SEPARATOR ---
+STAGE 7 — COMPETITIVE POSITION ANALYSIS
+
 You are an investment analyst conducting competitive positioning analysis to identify the 4 best-positioned companies to capture value from a specific investment thesis.
 
 OPTIMIZATION TARGET:
@@ -2108,7 +3504,7 @@ Identify companies that control bottlenecks and can capture disproportionate eco
 
 INHERITANCE LOCK:
 1. Search context for Stage 3 Artifact 3 (Handoff Objects) → extract CP scores and gate justifications per company
-2. Search context for Stage 4 output → extract ADVANCE/WATCH/DROP decisions, Asymmetry_TOTAL, DominantDriver, Traction_Rank
+2. Search context for Stage 6 output → extract ADVANCE/WATCH/DROP decisions, Asymmetry_TOTAL, DominantDriver, Traction_Rank
 Use these as inputs. Do not reconstruct.
 
 
@@ -2198,7 +3594,7 @@ Classifications:
 
 **PHASE 5: ASYMMETRY ANALYSIS**
 Calculate both intrinsic and actual asymmetry ratios for each qualifying company:
-Stage 5 asymmetry must be treated as provisional unless it is built on the same whole-company valuation object used later in Stage 9. Competitive strength must not be confused with present-day equity mispricing.
+Stage 7 asymmetry must be treated as provisional unless it is built on the same whole-company valuation object used later in Stage 11. Competitive strength must not be confused with present-day equity mispricing.
 
 **TIME HORIZON FRAMEWORK:**
 All asymmetry calculations must use a standardized 3-year investment horizon for consistency and comparability.
@@ -2287,12 +3683,12 @@ Valuation Screen:
 - Actual downside remains similar to intrinsic (floor doesn't change with valuation)
 - Actual Asymmetry Ratio = (Adjusted upside) / (Downside)
 
-If >70% of bull case appears already priced in, flag it and down-rank confidence. Do not let this provisional Stage 5 valuation screen override later Stage 9 TOTAL-object valuation.
+If >70% of bull case appears already priced in, flag it and down-rank confidence. Do not let this provisional Stage 7 valuation screen override later Stage 11 TOTAL-object valuation.
 
 **PHASE 7: FINAL SELECTION**
 Select 4 companies using these prioritization criteria:
 
-Primary Filters (screening defaults, not binding against later Stage 9 valuation):
+Primary Filters (screening defaults, not binding against later Stage 11 valuation):
 1. Competitive moat durability >2 years  
 2. Not in maturity phase (>60% of the relevant adoption variable)
 3. Provisional actual asymmetry preferably >2.5:1 after valuation adjustment; if lower, require stronger moat/capture evidence to stay in the top 4
@@ -2410,11 +3806,11 @@ Remember: Prioritize asymmetric risk/reward ratios and favorable S-curve positio
 Your final output should consist only of the Competitive Position Analysis Results and should not duplicate or rehash your detailed intermediate analytical work.
 
 --- PROMPT SEPARATOR ---
-# STAGE 6 — RETURNS ON CAPITAL & CAPITAL ALLOCATION QUALITY
+# STAGE 8 — RETURNS ON CAPITAL & CAPITAL ALLOCATION QUALITY
 
 ## Context
 
-Inheritance: 4 finalists and their financials come from Stage 5 outputs and earlier stages. Scan the full conversation for company name, ticker, revenue, EBIT, net income, FCF, total assets, invested capital, equity, diluted shares, and net debt. Run for ALL 4 finalists.
+Inheritance: 4 finalists and their financials come from Stage 7 outputs and earlier stages. Scan the full conversation for company name, ticker, revenue, EBIT, net income, FCF, total assets, invested capital, equity, diluted shares, and net debt. Run for ALL 4 finalists.
 
 ## Analytical Purpose
 
@@ -2477,22 +3873,22 @@ At the end add a comparison table ranking all 4 by:
 2) capital allocation discipline
 3) likelihood that thesis improves per-share economics rather than only revenue
 
-Carry all 4 forward to Stage 7. Do not select a winner in Stage 6.
+Carry all 4 forward to Stage 9. Do not select a winner in Stage 8.
 
 Advance to Revaluation Parameter Selection.
 
 --- PROMPT SEPARATOR ---
-# STAGE 7 — REVALUATION PARAMETER SELECTION
+# STAGE 9 — REVALUATION PARAMETER SELECTION
 
 
 
 (Formerly referenced as "KPI Selection" or "Single Metric Decision")
 
-You are a quantitative investment analyst working on the final decision stage of a multi-stage analysis pipeline. Your task is to select exactly ONE Revaluation Parameter for EACH of the 4 finalists, rank all 4 by revaluation potential, and pass ALL 4 forward to Stage 8. You do NOT eliminate any company at this stage.
+You are a quantitative investment analyst working on the final decision stage of a multi-stage analysis pipeline. Your task is to select exactly ONE Revaluation Parameter for EACH of the 4 finalists, rank all 4 by revaluation potential, and pass ALL 4 forward to Stage 10. You do NOT eliminate any company at this stage.
 
 INHERITANCE LOCK:
-1. Search for Stage 4 output → extract per-company: DominantDriver, Asymmetry_TOTAL, WedgeRealism, PoolConfidence
-2. Search for Stage 5 output → extract per-company: moat scores, delivery gates, VOI events, operational KPIs
+1. Search for Stage 6 output → extract per-company: DominantDriver, Asymmetry_TOTAL, WedgeRealism, PoolConfidence
+2. Search for Stage 7 output → extract per-company: moat scores, delivery gates, VOI events, operational KPIs
 3. Search for Stage 3 Artifact 3 → extract per-company: VOI_WINDOW, DOWNGRADE_TRIGGER
 All three required. If missing: output DATA_GAP_STAGE=[missing] and STOP.
 
@@ -2506,8 +3902,8 @@ You will have received inputs from previous analysis stages:
 
 **What each input contains:**
 
-- **Stage 4 Outputs**: Reverse DCF analysis showing what the market currently assumes (market-implied growth rates, margins, WACC) and sensitivity analysis showing which valuation levers drive equity value changes
-- **Stage 5 Outputs**: Operational analysis including moat assessment, delivery gates, capacity constraints, upcoming VOI (Value of Information) events, and operational KPIs
+- **Stage 6 Outputs**: Reverse DCF analysis showing what the market currently assumes (market-implied growth rates, margins, WACC) and sensitivity analysis showing which valuation levers drive equity value changes
+- **Stage 7 Outputs**: Operational analysis including moat assessment, delivery gates, capacity constraints, upcoming VOI (Value of Information) events, and operational KPIs
 - **Company List**: The finalist companies you must evaluate
 
 # Global Definitions
@@ -2522,7 +3918,7 @@ Reject activity KPIs that do not propagate to normalized EBIT, FCF, or funded vi
 
 **VOI (Value of Information) window**: The 6-18 month timeframe in which new observable data will arrive that could change the market's valuation assumptions.
 
-**Upside surprise threshold**: The specific numerical level of the RP that would clearly exceed what the market currently expects (as revealed by the Stage 4 reverse DCF).
+**Upside surprise threshold**: The specific numerical level of the RP that would clearly exceed what the market currently expects (as revealed by the Stage 6 reverse DCF).
 
 **Valuation Force**: The quantifiable impact on total equity value per share if the RP beats its threshold.
 
@@ -2530,12 +3926,12 @@ Reject activity KPIs that do not propagate to normalized EBIT, FCF, or funded vi
 
 You must adhere to ALL of the following constraints:
 
-1. Analyze ALL 4 companies — no eliminations, all 4 proceed to Stage 8
+1. Analyze ALL 4 companies — no eliminations, all 4 proceed to Stage 10
 2. Each company gets exactly ONE Revaluation Parameter (not a list of metrics)
 3. The RP must be measurable from public sources within the VOI window (6-18 months)
 4. The RP must map to a DCF lever that the market cannot ignore
 5. If DominantDriver = WACC, the RP must improve actual cash-flow confidence, cash conversion, funded visibility, or duration de-risking. Narrative or theme-level KPIs cannot win.
-6. Companies with WedgeRealism = FAIL AND PoolConfidence = Medium or High: FLAG as DISQUALIFIED (Stage 11 enforces elimination, not this stage)
+6. Companies with WedgeRealism = FAIL AND PoolConfidence = Medium or High: FLAG as DISQUALIFIED (Stage 13 enforces elimination, not this stage)
 7. Companies with Asymmetry_TOTAL < 3:1: FLAG as LOW_ASYMMETRY (do not eliminate)
 
 # Analysis Process
@@ -2563,8 +3959,8 @@ The selected RP must match the company’s monetization route and impact mode wh
 - Thematic Overlay: reject activity KPIs unless they can become material to EBIT, FCF, or valuation.
 
 **How to execute this step:**
-- Use the Stage 5 outputs to identify operational KPIs and upcoming VOI events
-- Use the Stage 4 outputs to understand what the market already assumes (market-implied growth/margin)
+- Use the Stage 7 outputs to identify operational KPIs and upcoming VOI events
+- Use the Stage 6 outputs to understand what the market already assumes (market-implied growth/margin)
 - Ensure your threshold exceeds what the market has already priced in
 
 ## STEP 2: Valuation Force Test
@@ -2576,12 +3972,12 @@ Identify which DCF lever the RP affects:
 - Operating or gross margin
 - Risk/duration of cash flows
 
-Using the Stage 4 sensitivity analysis or reverse-DCF outputs, quantify the impact in one simple statement:
+Using the Stage 6 sensitivity analysis or reverse-DCF outputs, quantify the impact in one simple statement:
 
 "If RP beats threshold -> TOTAL equity value per share changes by approximately X% (or $X per share) versus current price."
 
 **Flag conditions (do not eliminate):**
-- If you cannot quantify the impact even roughly using Stage 4 outputs, FLAG: WEAK_REVALUATION_FORCE
+- If you cannot quantify the impact even roughly using Stage 6 outputs, FLAG: WEAK_REVALUATION_FORCE
 - If the stock is already priced for that RP outcome (market-implied already meets or exceeds your threshold), FLAG: PRICED_IN
 
 ## STEP 3: Deliverability Path Test
@@ -2629,7 +4025,7 @@ Prefer the KPI most likely to force a model revision within 2–4 quarters, even
 
 ## STEP 5: Apply Flags (no eliminations)
 
-Check conditions and FLAG them (Stage 11 enforces elimination):
+Check conditions and FLAG them (Stage 13 enforces elimination):
 
 - WedgeRealism = FAIL AND PoolConfidence = Medium or High → FLAG: DISQUALIFIED
 - Asymmetry_TOTAL < 3:1 → FLAG: LOW_ASYMMETRY
@@ -2648,7 +4044,7 @@ Use these probability multipliers:
 - Medium = 0.50
 - High = 0.75
 
-**Rank all 4 companies** by RevaluationExpectedImpact descending. Include flags in the output but do not eliminate any company. All 4 proceed to Stage 8.
+**Rank all 4 companies** by RevaluationExpectedImpact descending. Include flags in the output but do not eliminate any company. All 4 proceed to Stage 10.
 
 **Tie-breaker (only if scores are equal):**
 1. Earlier VOI window wins
@@ -2662,17 +4058,17 @@ In your analysis, you must address the core question driving this stage:
 
 To answer this question properly:
 
-1. **Check what the market already assumes** (from Stage 4 reverse DCF) before setting your upside threshold. Your RP threshold must exceed what is already priced in.
+1. **Check what the market already assumes** (from Stage 6 reverse DCF) before setting your upside threshold. Your RP threshold must exceed what is already priced in.
 
-2. **Verify the delivery path is realistic and short** (from Stage 5). Focus on whether the company has already cleared most gates and has capacity/qualification in place.
+2. **Verify the delivery path is realistic and short** (from Stage 7). Focus on whether the company has already cleared most gates and has capacity/qualification in place.
 
 3. **Confirm the RP connects to actual revenue-driving mechanisms**. The KPI should be consistent with the payer›contract›revenue logic from earlier stages.
 
 
 - **First**, list out all companies from the company list to ensure you analyze every single one
 - **For each company**, work through all steps explicitly:
-  - Quote or reference specific data points from Stage 4 outputs (market-implied assumptions, sensitivity values, DominantDriver, etc.)
-  - Quote or reference specific data points from Stage 5 outputs (operational KPIs, VOI events, gates, WedgeRealism, PoolConfidence, Asymmetry_TOTAL, etc.)
+  - Quote or reference specific data points from Stage 6 outputs (market-implied assumptions, sensitivity values, DominantDriver, etc.)
+  - Quote or reference specific data points from Stage 7 outputs (operational KPIs, VOI events, gates, WedgeRealism, PoolConfidence, Asymmetry_TOTAL, etc.)
   - Show your reasoning for choosing the specific RP and threshold
   - Explicitly check each disqualifier condition step-by-step
   - If the company passes all tests, show the calculation: Valuation Impact % × Probability Multiplier = RevaluationExpectedImpact score
@@ -2735,9 +4131,9 @@ Why re-rate: [sentence]. Falsifier: [metric] below [threshold] by [date].
 **#3 [Company C]** ...
 **#4 [Company D]** ...
 
-## Part 3: Stage 8 Handoff
+## Part 3: Stage 10 Handoff
 
-=== STAGE 7 HANDOFF ===
+=== STAGE 9 HANDOFF ===
 ALL_4_PROCEED: TRUE
 RANKED_ORDER: [Company1, Company2, Company3, Company4]
 [For each company:]
@@ -2755,7 +4151,7 @@ RANKED_ORDER: [Company1, Company2, Company3, Company4]
 
 - Use only the data provided in the three inputs
 - If data is missing, use a conservative proxy and explicitly label it as such (e.g., "Assuming Medium probability due to incomplete deliverability data")
-- Do not invent metrics, thresholds, or VOI events that are not supported by the Stage 5 outputs
+- Do not invent metrics, thresholds, or VOI events that are not supported by the Stage 7 outputs
 - Be precise with numbers and dates
 - Keep explanations concise — one sentence where specified
 - If a company fails any test in Steps 1-5, clearly mark why it failed, assign the relevant flag(s), and keep it in the ranking output (no eliminations at this stage)
@@ -2765,7 +4161,7 @@ Begin your analysis now.
 
 --- PROMPT SEPARATOR ---
 
-STAGE 8 — THESIS MONETIZATION QUANTIFICATION
+STAGE 10 — THESIS MONETIZATION QUANTIFICATION
 Incremental Wedge + SoP-Compatible + Path-Routed + Search-When-Needed
 
 PURPOSE IN THE WORKFLOW
@@ -2775,15 +4171,19 @@ Identify the most realistic incremental cash flows from the thesis that can actu
 
 INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY calculation, execute these searches in order:
-1. Search for '=== STAGE 7 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER, FLAGS
-2. Search for Stage 4 output → extract per-company: Monetization Path (A/B/C), DominantDriver, CORE values
-3. Search for Stage 3 Artifact 3 → extract per-company: TractionClass, Timing Friction, Semantics Verdict, Cash Flag, THESIS_MARGIN_PROXY, ACCOUNTING_CONVERSION_PROFILE, WORKING_CAPITAL_DRAG
-4. Search for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract per-company: COMPANY_IMPACT_MODE, FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK
+1. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER, FLAGS
+2. Search for '=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===' → extract per-company: CORE_ADOPTED, CORE_WEDGE_BOUNDARY, STAGE10_INSTRUCTIONS, CORE_DECISION_GRADE, CORE_GROWTH_STACK, AFFECTED_SEGMENT, MARKET_GAP_AUDIT
+3. Search for '=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===' if available → extract MCP-adjusted STAGE10_INSTRUCTIONS, CORE_DECISION_GRADE_AFTER_MCP, BOUNDARY_IMPLICATIONS, PROOF_IMPLICATIONS
+4. Search for Stage 6 output → extract per-company: Monetization Path (A/B/C), DominantDriver, diagnostic valuation flags
+5. Search for Stage 3 Artifact 3 → extract per-company: TractionClass, Timing Friction, Semantics Verdict, Cash Flag, THESIS_MARGIN_PROXY, ACCOUNTING_CONVERSION_PROFILE, WORKING_CAPITAL_DRAG
+6. Search for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract per-company: FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK
 
-ALL FOUR must be found. If Stage 7 handoff exists: USE IT directly in Step 1 Context Pack.
-Do NOT "reconstruct" Stage 7 outputs from earlier stages.
-Do NOT skip Stage 7 RP/REI and substitute your own metric selection.
-If Stage 7 handoff NOT found: output DATA_GAP_STAGE=7 and STOP.
+Stage 9, Stage 4, Stage 3, and Stage 2 must be found. If Stage 9 handoff exists: USE IT directly in Step 1 Context Pack.
+Do NOT "reconstruct" Stage 9 outputs from earlier stages.
+Do NOT skip Stage 9 RP/REI and substitute your own metric selection.
+If Stage 9 handoff NOT found: output DATA_GAP_STAGE=9 and STOP.
+If Stage 4 handoff NOT found: output DATA_GAP_STAGE=4 and STOP.
+If CORE/WEDGE boundary is missing from Stage 4: output DATA_GAP_STAGE=4 and STOP.
 If Stage 2 fundamental handoff is missing after the updated pipeline is expected to provide it, output DATA_GAP_STAGE=2 and STOP.
 
 This stage quantifies the incremental thesis contribution only.
@@ -2806,7 +4206,7 @@ TOTAL VALUE = CORE_ADOPTED + WEDGE_NPV_PER_SHARE.
 
 The wedge is EV-additive and must be incremental versus CORE_ADOPTED.
 It is not the stock’s intrinsic value.
-CRITICAL: This stage runs for ALL 4 finalists from Stage 5/7. Produce 4 independent wedge objects. Do not select one company. Stage 11 will select the final 2.
+CRITICAL: This stage runs for ALL 4 finalists from Stage 7/9. Produce 4 independent wedge objects. Do not select one company. Stage 13 will select the final 2.
 
 NON-NEGOTIABLE RULES (SoP COMPATIBILITY)
 Use the Global Definitions block for CORE/WEDGE/TOTAL definitions.
@@ -2816,7 +4216,7 @@ Key constraints for this stage:
 3) "Market-implied thesis capture" requires CORE value (use gap: Price − CORE).
 
 ROLE
-You are an investment analyst. Use the conversation context as the primary dataset, including outputs from Stage 4 and earlier stages.
+You are an investment analyst. Use the conversation context as the primary dataset, with Stage 4 / Stage 5 as the controlling source for CORE/WEDGE boundary and Stage 6 as a diagnostic valuation source only.
 
 SEARCH POLICY (IMPORTANT)
 - Use web search only when you need to fill a missing, load-bearing input that is not available in context.
@@ -2848,17 +4248,19 @@ After that line, STOP and do not continue with extra sections.
 
 
 EXECUTION STRUCTURE: REPEAT FOR ALL 4 FINALISTS
-For EACH of the 4 finalists from Stage 5/7, execute Steps 1–5 independently. Each company produces its own Context Pack, Wedge Object, and Scenario Set. Do not cross-contaminate assumptions between companies.
+For EACH of the 4 finalists from Stage 7/9, execute Steps 1–5 independently. Each company produces its own Context Pack, Wedge Object, and Scenario Set. Do not cross-contaminate assumptions between companies.
 
-STEP 1 — EXTRACT THE STAGE 4 HANDOFF (FROM CONTEXT)
+STEP 1 — EXTRACT THE STAGE 4 / 5 / 6 HANDOFFS (FROM CONTEXT)
 Create a “Context Pack” table with:
 - Company, ticker, reporting currency
 - Current price (with date)
 - Diluted shares today (and what it includes)
 - CORE value per share (V_core_base at minimum; bear/bull if available)
-- Monetization Path A/B/C and Dominant Driver (from Stage 4)
+- CORE/WEDGE boundary inherited from Stage 4
+- MCP-adjusted boundary and Stage 10 route if Stage 5 exists
+- Monetization Path A/B/C and Dominant Driver (from Stage 6, diagnostic)
 - One-line thesis stream definition (what is included)
-- Stage 7 RP, REI score, and flags (from Stage 7 ranked output)
+- Stage 9 RP, REI score, and flags (from Stage 9 ranked output)
 If any of the following are missing from context: price, diluted shares, and a usable baseline definition, first try DataGap Rule steps 1-2 and run search/proxy to obtain them; only if still unavailable, STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number>.
 
 ANCHOR INHERITANCE: Inherit Anchor Date from Stage 4. Use Anchor Date Rule from the Global Definitions block.
@@ -2872,18 +4274,28 @@ F) Eligible supplier set + capture ceiling: define the conservative supplier set
 
 STEP 2.5 — IMPACT ROUTE SELECTION
 
-Inherit from Stage 2:
-- Primary Impact Mode
-- Wedge-only sufficient
-- Baseline contamination
-- Affected segment
-- Rebase mechanism
-- Required valuation model
-- Double-count risk
+Inherit CORE/WEDGE boundary from Stage 4.
+If Stage 5 exists, inherit MCP-adjusted Stage 10 instructions.
+If boundary is missing:
+output exactly:
+DATA_GAP_STAGE=4
+
+Inherit from Stage 4 / 5:
+- WEDGE_ROUTE
+- WEDGE_ONLY_SUFFICIENT
+- BASELINE_CONTAMINATION
+- AFFECTED_SEGMENT
+- REBASE_MECHANISM
+- PROOF_TO_MODEL_PERMISSION
+- DATA_REQUIRED_BEFORE_BASE_REBASE
+- what belongs to CORE
+- what can be WEDGE
+- what is Bull-only
+- what is not modelable yet
 
 Inherit from Stage 3 where available:
 - Impact_Mode_Proof_KPI
-- Proof_to_Model_Permission
+- Proof_to_Model_Permission only if Stage 4/5 did not override it
 
 Choose one primary route:
 
@@ -2909,7 +4321,7 @@ Routing rules:
 - If wedge-only sufficient = NO, do not model only new revenue.
 - If baseline contamination = HIGH, split current baseline exposure from incremental economics.
 - If Proof_to_Model_Permission = Bull only, Base case cannot include full thesis contribution.
-- If current thesis-linked revenue is already in Revenue0, it belongs in CORE_ADOPTED. Stage 8 may only model acceleration, margin uplift, utilization, pricing, duration, or option value above CORE_ADOPTED.
+- If current thesis-linked revenue is already in Revenue0, it belongs in CORE_ADOPTED. Stage 10 may only model acceleration, margin uplift, utilization, pricing, duration, or option value above CORE_ADOPTED.
 - If Impact Mode = Thematic Overlay and no KPI proves materiality, keep WEDGE_NPV_PER_SHARE de minimis.
 
 Output:
@@ -2929,8 +4341,9 @@ Before modeling anything:
 - If there is a mismatch, fix it by reconciling the scope (FX/segment coverage/calendar/normalization) and record what you changed.
 Output a one-line verdict: Baseline alignment = OK / Adjusted (and what was adjusted).
 
-STEP 4 — ROUTING GATE (A/B/C) — USE ONLY THE RELEVANT MODULE
-Use the Monetization Path from Stage 4:
+STEP 4 — ROUTING GATE — USE ONLY THE RELEVANT MODULE
+Use the Stage 4/5 WEDGE_ROUTE as controlling.
+Use the Stage 6 Monetization Path A/B/C only as a diagnostic mapping aid:
 
 PATH A — VOLUME-LED (Growth-dominated)
 Use pool sizing + capture + capacity constraints, then convert into incremental cash flows.
@@ -3020,7 +4433,7 @@ STAGE 3 TRACTION CALIBRATION (mandatory for all paths):
    - 18-24m: Year 1 = 0; Year 2 = first meaningful ramp.
    - 24-36m: Year 1 = 0, Year 2 = minimal ramp, Year 3 = first meaningful revenue.
    - 36m+: Years 1-3 = minimal or zero. Wedge NPV must use extended horizon (N=5+).
-     Flag LONG_CYCLE and require Stage 9 horizon N >= 7.
+     Flag LONG_CYCLE and require Stage 11 horizon N >= 7.
 
 2) REVENUE CEILING (from Stage 3 Semantics Verdict):
    - Verdict "Ceiling" or "Unfunded": Base scenario revenue must NOT exceed estimated funded portion.
@@ -3036,7 +4449,7 @@ STAGE 3 TRACTION CALIBRATION (mandatory for all paths):
    - HARD_TRACTION: 25/50/25 (standard).
    - SOFT_TRACTION: 30/50/20 (heavier Bear).
    - OPTION_ONLY: 40/40/20 (thesis is pre-inflection; heavy Bear).
-   - LOW_QUALITY: should not reach Stage 8. If present: 50/40/10 and mark WEDGE CONFIDENCE = LOW.
+   - LOW_QUALITY: should not reach Stage 10. If present: 50/40/10 and mark WEDGE CONFIDENCE = LOW.
 PATH A MODULE — POOL -> CAPTURE -> CASH
 A1) Size the incremental pool using at least 2 independent methods (3 if feasible without hand-waving):
 - Served market build (served TAM/SAM) with explicit constraints (supply, regulation, qualification, lead times, budgets).
@@ -3051,7 +4464,7 @@ Anti-double-count: apply test from STEP 3 above. WEDGE Year 0 incremental FCF �
 
 After completing all 4 companies, produce consolidated handoff:
 
-=== STAGE 8 HANDOFF ===
+=== STAGE 10 HANDOFF ===
 [For each of the 4 finalists:]
   COMPANY: [Name] | TICKER: [Ticker]
   WEDGE_NPV_PER_SHARE: Bear [X] | Base [Y] | Bull [Z]
@@ -3081,7 +4494,7 @@ After completing all 4 companies, produce consolidated handoff:
 === END HANDOFF ===
 
 --- PROMPT SEPARATOR ---
-# STAGE 9 — REVERSE DCF (TOTAL / WHOLE COMPANY)
+# STAGE 11 — REVERSE DCF (TOTAL / WHOLE COMPANY)
 
 
 
@@ -3092,27 +4505,55 @@ Identify the largest credible gap between market-implied expectations and realis
 
 INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY calculation, execute these searches:
-1. Search for '=== STAGE 8 HANDOFF ===' → extract per-company: WEDGE_NPV_PER_SHARE (Bear/Base/Bull), EXPECTED_WEDGE, WEDGE_TO_PRICE, WEDGE_ROUTE, WEDGE_ROUTE_BREAKDOWN, IMPACT_MODE, WEDGE_ONLY_SUFFICIENT, BASELINE_CONTAMINATION, AFFECTED_SEGMENT, REBASE_MECHANISM, PROOF_TO_MODEL_PERMISSION, DEMAND_CLASS, CAPTURE_CEILING, PERSISTENCE, MONETIZATION_PATH, TRACTION_CALIBRATION, FLAGS
-2. Search for Stage 4 output → extract per-company: CORE_ADOPTED values (Bear/Base/Bull), CORE_ADOPTED_METHOD, CORE_MODEL_RISK_FLAGS, CORE_UNDERVALUE_AUDIT_RESULT, CORE_GROWTH_STACK_USED, Anchor Date baseline (Revenue0, FCF0, shares, net debt), BUSINESS_MODEL_LANE, PRIMARY_VALUATION_LANE
+1. Search for '=== STAGE 10 HANDOFF ===' → extract per-company: WEDGE_NPV_PER_SHARE (Bear/Base/Bull), EXPECTED_WEDGE, WEDGE_TO_PRICE, WEDGE_ROUTE, WEDGE_ROUTE_BREAKDOWN, IMPACT_MODE, WEDGE_ONLY_SUFFICIENT, BASELINE_CONTAMINATION, AFFECTED_SEGMENT, REBASE_MECHANISM, PROOF_TO_MODEL_PERMISSION, DEMAND_CLASS, CAPTURE_CEILING, PERSISTENCE, MONETIZATION_PATH, TRACTION_CALIBRATION, FLAGS
+2. Search for '=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===' → extract per-company: CORE_ADOPTED values (Bear/Base/Bull), CORE_ADOPTED Method, CORE_DECISION_GRADE, CORE_CONFIDENCE, CORE_WEDGE_BOUNDARY, CORE_GROWTH_STACK, MARKET_GAP_AUDIT, STAGE11_INSTRUCTIONS, Anchor Date baseline where available
+3. Search for '=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===' if available → extract per-company: CORE_DECISION_GRADE_AFTER_MCP, CORE_REVIEW_REQUIRED, MCP-adjusted STAGE11_INSTRUCTIONS, MARKET_RESIDUAL_INTERPRETATION, BUY_ZONE_RELIABILITY, HARD_PRICE_TRIGGER_ALLOWED, PRICE_TRIGGER_PRACTICALITY
+4. Search for Stage 6 output only for diagnostic carry-forwards: CORE_MODEL_RISK_FLAGS, CORE_UNDERVALUE_AUDIT_RESULT, BUSINESS_MODEL_LANE, PRIMARY_VALUATION_LANE, DominantDriver
 
-PROHIBITION: Do NOT use Stage 4 TOTAL values if Stage 8 handoff exists.
+PROHIBITION: Do NOT use Stage 6 TOTAL values if Stage 10 handoff exists.
 
 Construct TOTAL as:
 TOTAL = CORE_ADOPTED + WEDGE_NPV_PER_SHARE
 
 where:
 - CORE_ADOPTED is the adopted no-incremental-thesis full-company CORE from Stage 4,
-- WEDGE_NPV_PER_SHARE is the route-aware incremental thesis contribution from Stage 8,
+- WEDGE_NPV_PER_SHARE is the route-aware incremental thesis contribution from Stage 10,
 - WEDGE_NPV_PER_SHARE may represent narrow revenue wedge, segment rebase, capacity rent, core rebase, option value, or overlay value depending on WEDGE_ROUTE.
 
 Do not use CORE_RAW_DCF if CORE_ADOPTED is available.
 
-If CORE_ADOPTED is missing but raw Stage 4 CORE exists:
+If Stage 4 is missing:
+- output DATA_GAP_STAGE=4 and STOP.
+
+If CORE_ADOPTED is missing but raw Stage 6 CORE exists:
 - use raw CORE only as fallback,
 - flag CORE_ADOPTED_MISSING,
 - cap Tier at 3 unless the valuation signal is supported by multiple sanity and guidance/backlog consistency.
 
-If Stage 8 handoff NOT found: output DATA_GAP_STAGE=8 and STOP. Do NOT fall back to Stage 4 TOTAL.
+If Stage 10 handoff NOT found: output DATA_GAP_STAGE=10 and STOP. Do NOT fall back to Stage 6 TOTAL.
+
+CORE DECISION-GRADE BLOCK
+If CORE_DECISION_GRADE_AFTER_MCP = FALSE:
+- TOTAL = diagnostic only,
+- No Tier 1-4 final valuation signal,
+- Output TOTAL_DIAGNOSTIC_ONLY and CORE_REBUILD_REQUIRED,
+- No sizing,
+- No hard buy zone,
+- No trade-ready record,
+- Do not pass hard price triggers to Stage 12-14.
+
+If Stage 5 is unavailable but CORE_DECISION_GRADE = FALSE:
+- TOTAL = diagnostic only,
+- No Tier 1-4 final valuation signal,
+- Output TOTAL_DIAGNOSTIC_ONLY and CORE_REBUILD_REQUIRED,
+- Do not pass hard price triggers to Stage 12-14.
+
+If price trigger is more than 50% below current price and CORE is not decision-grade:
+- classify PRICE_TRIGGER_NOT_PRACTICAL,
+- do not pass hard buy zone to Stage 12-14.
+
+A weak CORE cannot support a strong downstream decision.
+A small WEDGE does not prove the stock is unattractive if CORE is not decision-grade.
 
 CORE PRINCIPLE: Use the Global Definitions block for valuation objects. All metrics (priced-in, asymmetry, tier) computed on TOTAL only.
 
@@ -3191,7 +4632,7 @@ Build SoP at the EV level:
 • DilutedShares_total_s = DilutedShares_core + IncrementalShares_s (only if wedge causes dilution; else 0)
 • EquityValuePerShare_total_s = (EV_total_s - NetDebt_total_s) / DilutedShares_total_s
 Only if IncrementalNetDebt_s = 0 and IncrementalShares_s = 0 may you safely add per-share values (EV-level is still preferred).
-Persistence (inherit from Stage 8):
+Persistence (inherit from Stage 10):
 • Wave wedge: model explicit incremental FCF through a fade schedule (e.g., out to year 6–8) and set wedge terminal contribution = 0.
 • Durable wedge: terminal allowed only with explicit maintenance reinvestment logic.
 Discounting:
@@ -3229,7 +4670,7 @@ NEW — Step 2.2 HORIZON-AWARE EXTENSION (PRIMARY WHEN N > 3)
 If Horizon N (from Step 0.2) is > 3, extend the DCF mechanics WITHOUT changing the valuation object:
 * Keep “market-implied” parameter as g_1_3 (growth for years 1–3) and margin_3 (FCF margin in year 3) to remain compatible with the rest of the pipeline.
 * For years 4..N, apply a fade of growth from g_1_3 toward g_terminal by year N (linear fade is acceptable).
-* For margin, default to holding margin_3 constant for years 4..N unless the thesis persistence in Stage 8 requires a fade (Wave case) or explicit reinvestment logic (Durable case).
+* For margin, default to holding margin_3 constant for years 4..N unless the thesis persistence in Stage 10 requires a fade (Wave case) or explicit reinvestment logic (Durable case).
 * Compute PV_FCF for t=1..N and terminal value at year N:
   - PV_FCF = sum_{t=1..N} FCF_t / (1+WACC)^t
   - TV = FCF_N × (1+g_terminal) / (WACC - g_terminal)
@@ -3290,9 +4731,9 @@ HARD GATE (not just a flag):
   This is a BINDING constraint, not informational.
   HORIZON_DEPENDENT companies:
   - Cannot receive Tier 1 or Tier 2 classification
-  - Cannot be classified as ADVANCE in Stage 4
+  - Cannot be classified as ADVANCE in Stage 6
   - Maximum classification: WATCH
-  - In Stage 11 Composite Score, Value Asymmetry dimension
+  - In Stage 13 Composite Score, Value Asymmetry dimension
     is capped at score 2 regardless of headline asymmetry
 
 * If Horizon_Spread <= 500 bps: the result is horizon-stable.
@@ -3316,7 +4757,7 @@ If Price < Bear or Price > Bull, treat as “outside range” and do not compute
 
 Compute (Python):
 • ExpectedValue = pBear * Bear + pBase * Base + pBull * Bull
-  (where pBear=0.25, pBase=0.50, pBull=0.25 unless overridden by Stage 8 TractionClass weights)
+  (where pBear=0.25, pBase=0.50, pBull=0.25 unless overridden by Stage 10 TractionClass weights)
 • ExpectedValueUpside% = ExpectedValue / Price - 1
 
 Risk/Reward (percent-based):
@@ -3405,10 +4846,11 @@ Explain precisely why your Base case differs from market-implied assumptions. An
 * reinvestment intensity and working-capital drag
 * competitive response and customer concentration
 A thesis that is material to one segment but small relative to the whole company may be valid even if it does not reset whole-company CAGR. Interpret implied assumptions in that context.
-If the implied thesis capture exceeds the Stage 8 capture ceiling or requires a margin regime unsupported by Stage 5 and Stage 6 economics, cap the signal at Tier 3 and flag the reason explicitly.
+If the implied thesis capture exceeds the Stage 10 capture ceiling or requires a margin regime unsupported by Stage 7 and Stage 8 economics, cap the signal at Tier 3 and flag the reason explicitly.
 Provide a clear catalyst timeline (6–12 months) and what specific data would confirm/refute your view (VOI).
 
 TIER CLASSIFICATION (WHOLE-COMPANY ONLY)
+If TOTAL_DIAGNOSTIC_ONLY is active, do not assign Tier 1, Tier 2, Tier 3, or Tier 4. Output TIER: N/A_DIAGNOSTIC and explain CORE_REBUILD_REQUIRED.
 For mature industrial, defense, and regulated businesses, multiplicative thresholds such as Bull > 5× and Base > 2.5× are not binding. Use divergence, asymmetry, downside resilience, and consistency versus guidance/backlog as the operative tests.
 Tier 1 — Strong Buy: Large and credible divergence versus Base, strong asymmetry with resilient downside, and Base scenario is consistent with guidance/backlog and near-term conversion.
 Tier 2 — Attractive: Meaningful divergence versus Base with acceptable downside and no major guidance/backlog inconsistency.
@@ -3457,9 +4899,9 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 
 | Company | Ticker | Price | Bear_TOTAL | Bear_Contract | Base_TOTAL | Bull_TOTAL | EV_TOTAL | %PricedIn | Implied_CAGR | Base_CORE_CAGR | Base_TOTAL_CAGR | Implied_Thesis_Capture | Market_Implied_Residual | Residual_Class | Divergence_bps | Horizon_Spread | TerminalShare | Asymmetry_TOTAL | Tier | Wedge_to_Price | WEDGE_ROUTE | CORE_ADOPTED_METHOD | CORE_MODEL_RISK_FLAGS | Flags |
 
-This table enables Stage 11 Composite Rank by providing directly comparable metrics.
+This table enables Stage 13 Composite Rank by providing directly comparable metrics.
 
-=== STAGE 9 HANDOFF ===
+=== STAGE 11 HANDOFF ===
 [For each of the 4 finalists:]
   COMPANY: [Name] | TICKER: [Ticker]
   PRICE: [current with date]
@@ -3471,40 +4913,56 @@ This table enables Stage 11 Composite Rank by providing directly comparable metr
   IMPLIED_MARGIN_Y3: [%] | BASE_MARGIN_Y3: [%] | DIVERGENCE_MARGIN: [bps]
   IMPLIED_THESIS_CAPTURE: [rate or margin on thesis stream, if segment-specific; else N/A]
   HORIZON_SPREAD: [bps] | TERMINAL_SHARE: [%]
-  TIER: [1/2/3/4]
-  WEDGE_TO_PRICE: [ratio from Stage 8]
-  WEDGE_ROUTE: [from Stage 8]
+  TIER: [1/2/3/4 or N/A_DIAGNOSTIC]
+  TOTAL_DIAGNOSTIC_ONLY: [TRUE/FALSE]
+  CORE_REBUILD_REQUIRED: [TRUE/FALSE]
+  CORE_DECISION_GRADE: [TRUE/FALSE from Stage 4]
+  CORE_DECISION_GRADE_AFTER_MCP: [TRUE/FALSE/N/A from Stage 5]
+  WEDGE_TO_PRICE: [ratio from Stage 10]
+  WEDGE_ROUTE: [from Stage 10]
   MARKET_IMPLIED_RESIDUAL: [value/share]
   RESIDUAL_TO_PRICE: [%]
   RESIDUAL_CLASS: [LOW / MEDIUM / HIGH / EXTREME]
+  MARKET_RESIDUAL_INTERPRETATION: [RATIONAL_CORE_RESIDUAL / CORE_MODEL_GAP / UNPROVEN_THESIS_RESIDUAL / DURATION_RESIDUAL / SPECULATIVE_RESIDUAL / DATA_ERROR_RISK]
+  BUY_ZONE_RELIABILITY: [HIGH / MEDIUM / LOW]
+  HARD_PRICE_TRIGGER_ALLOWED: [YES/NO]
+  PRICE_TRIGGER_PRACTICALITY: [PRACTICAL / PRICE_TRIGGER_NOT_PRACTICAL]
   CORE_ADOPTED_METHOD: [method]
   CORE_MODEL_RISK_FLAGS: [flags or None]
-  FLAGS: [HORIZON_DEPENDENT / RANK_UNSTABLE / DURATION_SENSITIVE / TERMINAL_DOMINATED / BEAR_FLOOR_DIVERGENCE / CORE_ADOPTED_MISSING / CORE_VALUATION_UNCERTAIN / None]
+  FLAGS: [HORIZON_DEPENDENT / RANK_UNSTABLE / DURATION_SENSITIVE / TERMINAL_DOMINATED / BEAR_FLOOR_DIVERGENCE / CORE_ADOPTED_MISSING / CORE_VALUATION_UNCERTAIN / TOTAL_DIAGNOSTIC_ONLY / CORE_REBUILD_REQUIRED / PRICE_TRIGGER_NOT_PRACTICAL / None]
 === END HANDOFF ===
 
 Style: concise, decision-oriented, auditable. No generic filler. No linear interpolation. No object mismatch.
 Focus on actionable conclusions. Show all key calculations and assumptions explicitly, and ensure the object of valuation is consistent throughout.
 
 --- PROMPT SEPARATOR ---
+STAGE 12 — FOUR-GATE DECISION
+
 ROLE
 OPTIMIZATION TARGET:
 Identify which companies deserve active watchlist attention and a concrete upgrade path based on quality, value, proof, and execution.
 
-You are the Stage 10 decision engine in our thesis-driven investment pipeline. For ALL 4 FINALISTS, you must produce a decision (WATCH / AVOID) per company, then rank WATCH companies using a Composite Score and select the top 2 as PRIMARY and SECONDARY.
+You are the Stage 12 decision engine in our thesis-driven investment pipeline. For ALL 4 FINALISTS, you must produce a decision (WATCH / AVOID) per company and a concrete execution plan.
 
 
 
 You do not invent a new thesis.
 INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY gate evaluation, execute these searches:
-1. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: BEAR_TOTAL, BASE_TOTAL, BULL_TOTAL, EXPECTED_VALUE, ASYMMETRY_TOTAL, PRICED_IN, IMPLIED_CAGR, TIER, WEDGE_ROUTE, MARKET_IMPLIED_RESIDUAL, RESIDUAL_TO_PRICE, RESIDUAL_CLASS, CORE_ADOPTED_METHOD, CORE_MODEL_RISK_FLAGS, FLAGS
-2. Search for '=== STAGE 8 HANDOFF ===' → extract per-company: WEDGE_NPV_PER_SHARE, EXPECTED_WEDGE, WEDGE_TO_PRICE, WEDGE_ROUTE, WEDGE_ROUTE_BREAKDOWN, IMPACT_MODE, WEDGE_ONLY_SUFFICIENT, BASELINE_CONTAMINATION, PERSISTENCE, FLAGS
-3. Search for '=== STAGE 7 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER
+1. Search for '=== STAGE 11 HANDOFF ===' → extract per-company: BEAR_TOTAL, BASE_TOTAL, BULL_TOTAL, EXPECTED_VALUE, ASYMMETRY_TOTAL, PRICED_IN, IMPLIED_CAGR, TIER, TOTAL_DIAGNOSTIC_ONLY, CORE_REBUILD_REQUIRED, CORE_DECISION_GRADE, CORE_DECISION_GRADE_AFTER_MCP, WEDGE_ROUTE, MARKET_IMPLIED_RESIDUAL, RESIDUAL_TO_PRICE, RESIDUAL_CLASS, MARKET_RESIDUAL_INTERPRETATION, BUY_ZONE_RELIABILITY, HARD_PRICE_TRIGGER_ALLOWED, PRICE_TRIGGER_PRACTICALITY, CORE_ADOPTED_METHOD, CORE_MODEL_RISK_FLAGS, FLAGS
+2. Search for '=== STAGE 10 HANDOFF ===' → extract per-company: WEDGE_NPV_PER_SHARE, EXPECTED_WEDGE, WEDGE_TO_PRICE, WEDGE_ROUTE, WEDGE_ROUTE_BREAKDOWN, IMPACT_MODE, WEDGE_ONLY_SUFFICIENT, BASELINE_CONTAMINATION, PERSISTENCE, FLAGS
+3. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER
 
-PROHIBITION: Do NOT use Stage 4 values for Gate 2 if Stage 9 handoff exists.
-Stage 9 TOTAL values are the ONLY valid inputs for Gate 2 (Value).
-Stage 8 WEDGE is used ONLY as diagnostic ratio (Wedge_to_Price).
-If Stage 9 handoff NOT found: output DATA_GAP_STAGE=9 and STOP.
+PROHIBITION: Do NOT use Stage 6 values for Gate 2 if Stage 11 handoff exists.
+Stage 11 TOTAL values are the ONLY valid inputs for Gate 2 (Value).
+Stage 10 WEDGE is used ONLY as diagnostic ratio (Wedge_to_Price).
+If Stage 11 handoff NOT found: output DATA_GAP_STAGE=11 and STOP.
+If Stage 11 says TOTAL_DIAGNOSTIC_ONLY or CORE_REBUILD_REQUIRED:
+- Gate 0 Integrity = FAIL_DIAGNOSTIC_ONLY, not a data gap,
+- Gate 2 cannot PASS,
+- do not issue hard price triggers,
+- do not create sizing or trade-ready execution,
+- keep the company WATCH / CORE_REBUILD_REQUIRED unless Gate 1 structural quality forces AVOID.
 
 You do not “research for fun.”
 You do not create new numbers.
@@ -3523,7 +4981,7 @@ All Gate 2 metrics computed on TOTAL only. WEDGE is diagnostic ratio only (Wedge
 Binary rule:
 - Do not emit BUY. This stage is a screening gate, not a trade trigger.
 - Run Gates 0-4 for ALL 4 finalists independently.
-- After all 4 are scored, proceed to Stage 11 (Composite Rank) to select top 2.
+- After all 4 are scored, output the Stage 12 handoff. Stage 13 will select the final top 2.
 - WATCH / OK means: "the analysis supports a position, subject to
   the upgrade conditions in Gate 4." The execution plan describes
   HOW to enter IF upgrade conditions are met — it is a conditional plan,
@@ -3535,10 +4993,10 @@ Binary rule:
 
 ---
 INPUT SOURCE MAP (reference, not re-extraction):
-- Gate 1 (Quality): Stage 5 moat + Stage 6 returns quality/capital allocation + Stage 4 CORE floor
-- Gate 2 (Value): Stage 9 TOTAL Bear/Base/Bull (NOT Stage 4), Stage 8 Wedge_to_Price (diagnostic), Stage 4 Traction_Rank
-- Gate 3 (Proof): Stage 3 TractionClass/KPI/VOI, Stage 7 RP/REI
-- Gate 4 (Execution): Stage 8 falsifiers, Stage 9 triggers, Stage 7 VOI event
+- Gate 1 (Quality): Stage 7 moat + Stage 8 returns quality/capital allocation + Stage 4 CORE floor
+- Gate 2 (Value): Stage 11 TOTAL Bear/Base/Bull (NOT Stage 6), Stage 10 Wedge_to_Price (diagnostic), Stage 6 Traction_Rank
+- Gate 3 (Proof): Stage 3 TractionClass/KPI/VOI, Stage 9 RP/REI
+- Gate 4 (Execution): Stage 10 falsifiers, Stage 11 triggers, Stage 9 VOI event
 - Thesis context: Stage 0 premise/disconfirmers, Stage 1 sub-segments, Stage 2 company role
 All inputs inherited via INHERITANCE LOCK above.
 
@@ -3549,9 +5007,9 @@ GATE 0 — INTEGRITY (mandatory gate; STOP only as last resort)
 Purpose: prevent methodological failure before debating the stock.
 
 You must confirm:
-A) You have consistent TOTAL Bear/Base/Bull scenarios from Stage 9.
-B) Stage 8 WEDGE is truly incremental vs the CORE used to build TOTAL (no double counting).
-C) Stage 4 dominant driver and path (A/B/C) are known and will be respected in interpretation:
+A) You have consistent TOTAL Bear/Base/Bull scenarios from Stage 11.
+B) Stage 10 WEDGE is truly incremental vs the CORE used to build TOTAL (no double counting).
+C) Stage 6 dominant driver and path (A/B/C) are known and will be respected in interpretation:
    - Path A (volume-led): pool/capture drives value.
    - Path B (margin-reset): mix/pricing/utilization drives value.
    - Path C (WACC-dominated): this is a regime bet unless there is a real incremental cash-flow mechanism.
@@ -3560,11 +5018,16 @@ If any of A/B/C is not satisfied after applying DataGap Rule steps 1-2:
 - DATA_GAP_STAGE=<previous_stage_number>
 Then STOP.
 
+If Stage 11 marks TOTAL_DIAGNOSTIC_ONLY / CORE_REBUILD_REQUIRED:
+- Gate 0 result = FAIL_DIAGNOSTIC_ONLY,
+- continue only to produce a WATCH / CORE_REBUILD_REQUIRED record with no hard buy zone,
+- do not score Gate 2 as PASS.
+
 ---
 GATE 1 — QUALITY (permanent impairment risk)
 Purpose: eliminate situations where you can lose capital permanently.
 
-Use Stage 5 + Stage 6 + the CORE “floor” from Stage 4.
+Use Stage 7 + Stage 8 + the CORE “floor” from Stage 4.
 
 Rate each as PASS / RISK / FAIL:
 1) Economic moat and replaceability
@@ -3597,17 +5060,17 @@ Required formulas (TOTAL):
 3) Priced-in diagnostic (not a valuation, just a check):
    PricedIn% = (Price - Bear_TOTAL) / (Bull_TOTAL - Bear_TOTAL)
 
-4) Divergence vs market (from Stage 9 reverse DCF):
+4) Divergence vs market (from Stage 11 reverse DCF):
    Divergence_growth = Base_CAGR - MarketImplied_CAGR
    Divergence_margin = Base_FCFmY3 - MarketImplied_FCFmY3
 Report both if available. If only one exists, report it and state the limitation.
 
 WEDGE diagnostic (allowed, but not a target):
-- Wedge_to_Price = Expected_WEDGE / Price (from Stage 8)
+- Wedge_to_Price = Expected_WEDGE / Price (from Stage 10)
 
 THESIS CONTRIBUTION INTERPRETATION — mandatory
 
-Use Stage 8 WEDGE_ROUTE and WEDGE_ROUTE_BREAKDOWN.
+Use Stage 10 WEDGE_ROUTE and WEDGE_ROUTE_BREAKDOWN.
 
 If WEDGE_ROUTE = NARROW_WEDGE_ROUTE:
 - Wedge_to_Price is directly relevant.
@@ -3634,11 +5097,11 @@ VALUATION_OBJECT_FIT:
 - MEDIUM: route plausible but data incomplete
 - LOW: wedge-only or rebase route likely mismatched
 
-Also use Stage 9 Market Implied Residual:
+Also use Stage 11 Market Implied Residual:
 - LOW or MEDIUM residual supports actionability.
 - HIGH or EXTREME residual blocks strong conviction unless the VOI directly validates the residual.
 
-Interpretation must respect Stage 4 dominant driver:
+Interpretation must respect Stage 6 dominant driver:
 - Growth-dominated: divergence and asymmetry should be explained via adoption/capture.
 - Margin-dominated: divergence must be explained via pricing power, mix, utilization, and cost structure.
 - WACC-dominated (Path C): you must require regime-related VOI or a clearly evidenced cash-flow mechanism; otherwise default to WATCH.
@@ -3652,7 +5115,7 @@ Thresholds:
 CRITICAL OVERRIDE — TRACTION-PROTECTED:
 If Gate 2 FAIL but: Gate 1 PASS + Gate 3 ≥MEDIUM + Traction_Rank top 3 →
   WATCH / PRICE_CONTINGENT (trigger = Base_TOTAL × 0.95).
-  Stage 11 Value Asymmetry scores 1 (not 0). Execution plan uses price_trigger as Tranche 1.
+  Stage 13 Value Asymmetry scores 1 (not 0). Execution plan uses price_trigger as Tranche 1.
 
 ---
 GATE 3 - PROOF & VOI (is the thesis showing up in reality?)
@@ -3673,16 +5136,16 @@ Proof (0-3, calibrated by Stage 3 TractionClass):
 
 Edge (0-1): you have a non-obvious, testable mechanism (Layer 3+ or gating constraint) (Stage 0/5)
 
-VOI (0-1): Stage 3 VOI Window is within 6 months AND Stage 7 Revaluation Parameter
+VOI (0-1): Stage 3 VOI Window is within 6 months AND Stage 9 Revaluation Parameter
   aligns with an upcoming disclosure event that materially updates probability.
 
-You must list (inherit from Stage 3, refine with Stage 7):
-- KPI confirm: Stage 3 PrimaryTractionKPI + upside threshold (from Stage 7 RP threshold)
+You must list (inherit from Stage 3, refine with Stage 9):
+- KPI confirm: Stage 3 PrimaryTractionKPI + upside threshold (from Stage 9 RP threshold)
 - KPI warn: PrimaryTractionKPI flat or declining vs prior period
 - KPI falsify: Stage 3 Downgrade Trigger (inherit directly)
-- VOI event: Stage 3 VOI Window (inherit, cross-reference with Stage 7 VOI event)
+- VOI event: Stage 3 VOI Window (inherit, cross-reference with Stage 9 VOI event)
 
-GATE 3.5 — ENTRY BLOCKER CLASSIFICATION (for Stage 11 EntryScore)
+GATE 3.5 — ENTRY BLOCKER CLASSIFICATION (for Stage 13 EntryScore)
 
 Purpose:
 Classify the main blocker to near-term rerating.
@@ -3694,10 +5157,12 @@ Choose exactly one:
 - TIMING = setup is valid but the confirming event or economics arrive too late for a 2–4 quarter rerating
 - REALISM = the wedge or pool-to-capture math is too weak or too speculative for near-term confidence
 - DURATION = upside is driven mainly by WACC / terminal value / horizon sensitivity rather than company-specific near-term economics
+- CORE_REBUILD = CORE is not decision-grade, so valuation cannot support hard triggers or final action
 - STRUCTURAL = permanent impairment / quality problem
 
 Classification rules:
 - If Gate 1 FAIL -> STRUCTURAL
+- Else if TOTAL_DIAGNOSTIC_ONLY or CORE_REBUILD_REQUIRED -> CORE_REBUILD
 - Else if WedgeRealism = FAIL -> REALISM
 - Else if CATEGORY = TOO_EXPENSIVE or PRICE_CONTINGENT -> PRICE
 - Else if CATEGORY = INSUFFICIENT_PROOF or TractionClass = OPTION_ONLY or LOW_QUALITY -> PROOF
@@ -3711,7 +5176,7 @@ It does not replace WATCH/AVOID and it does not change prior gate outcomes.
 GATE 4 — EXECUTION PLAN (activate upon upgrade to position)
 Purpose: produce an implementable plan, not an essay.
 
-Use Stage 6 (position rules), Stage 8 (drivers + falsifiers), and Stage 9 (valuation triggers).
+Use Stage 8 (position rules), Stage 10 (drivers + falsifiers), and Stage 11 (valuation triggers).
 
 Provide:
 1) Position approach: STARTER / STANDARD / AGGRESSIVE
@@ -3722,9 +5187,9 @@ Provide:
 3) Monitoring plan:
    - what to track, how often, and which stage defines the KPI
 4) Reduce/exit triggers:
-   - one thesis falsifier (Stage 8)
-   - one company-specific exit (Stage 5/7)
-   - one valuation-too-expensive trigger (Stage 9)
+   - one thesis falsifier (Stage 10)
+   - one company-specific exit (Stage 7/9)
+   - one valuation-too-expensive trigger (Stage 11)
 5) If current decision is WATCH, you must state an explicit upgrade condition (price and/or VOI/KPI trigger):
    - a price trigger and/or
    - a VOI/KPI trigger that would justify stronger conviction
@@ -3743,34 +5208,36 @@ FINAL DECISION LOGIC
 OUTPUT FORMAT (per company — repeat for all 4 finalists)
 [Company] (Ticker:Exchange)
 DECISION: WATCH / AVOID
-CATEGORY: OK / PRICE_CONTINGENT / TOO_EXPENSIVE / STRUCTURAL / INSUFFICIENT_PROOF / TIMING
-ENTRY BLOCKER: [NONE / PRICE / PROOF / TIMING / REALISM / DURATION / STRUCTURAL]
+CATEGORY: OK / PRICE_CONTINGENT / TOO_EXPENSIVE / STRUCTURAL / INSUFFICIENT_PROOF / TIMING / CORE_REBUILD_REQUIRED
+ENTRY BLOCKER: [NONE / PRICE / PROOF / TIMING / REALISM / DURATION / CORE_REBUILD / STRUCTURAL]
 
 Gate 0 — Integrity: PASS/FAIL
 - If FAIL after applying DataGap Rule steps 1-2: STOP and output exactly one line: DATA_GAP_STAGE=<previous_stage_number> (last resort).
 
 Gate 1 — Quality: PASS/RISK/FAIL
-- Economic moat and replaceability (Stage 5)
-- Earnings quality and cash conversion (Stage 6)
-- Balance sheet and refinancing resilience (Stage 6)
-- Capital allocation and dilution discipline (Stage 6)
-- Returns on capital versus cost of capital (Stage 6)
+- Economic moat and replaceability (Stage 7)
+- Earnings quality and cash conversion (Stage 8)
+- Balance sheet and refinancing resilience (Stage 8)
+- Capital allocation and dilution discipline (Stage 8)
+- Returns on capital versus cost of capital (Stage 8)
 - CORE floor resilience if the thesis slows (Stage 4)
 - External/binary risks + leading indicators (Stage 0/5/8)
 
 Gate 2 — Value: PASS/RISK/FAIL
 - Bear_TOTAL, Base_TOTAL, Bull_TOTAL, Price
 - Asymmetry_TOTAL (show arithmetic)
-- Divergence vs market (Stage 9 implied vs Base)
-- Wedge_to_Price (Stage 8) as a diagnostic only
+- Divergence vs market (Stage 11 implied vs Base)
+- Wedge_to_Price (Stage 10) as a diagnostic only
 - WEDGE_ROUTE and WEDGE_ROUTE_BREAKDOWN
 - Market Implied Residual and Residual Class
+- TOTAL_DIAGNOSTIC_ONLY / CORE_REBUILD_REQUIRED if present
+- PRICE_TRIGGER_PRACTICALITY and HARD_PRICE_TRIGGER_ALLOWED
 - VALUATION_OBJECT_FIT: HIGH / MEDIUM / LOW
 - If PRICE_CONTINGENT override applies: show price_trigger = Base_TOTAL × 0.95
 
 Gate 3 — Proof & VOI: X/5 -> LOW/MEDIUM/HIGH
-- KPI confirm / warn / falsify (Stage 5/8)
-- VOI event (Stage 7)
+- KPI confirm / warn / falsify (Stage 7/8)
+- VOI event (Stage 9)
 
 Gate 4 — EXECUTION PLAN (activate upon upgrade to position)
 - Position approach
@@ -3783,14 +5250,74 @@ Main risk (one sentence, cause -> effect)
 VOI trigger (one line)
 Falsifier (one line)
 
+At the end include a compact handoff block:
+
+=== STAGE 12 HANDOFF ===
+[For each company:]
+COMPANY:
+TICKER:
+DECISION:
+CATEGORY:
+ENTRY_BLOCKER:
+GATE_0_INTEGRITY:
+GATE_1_QUALITY:
+GATE_2_VALUE:
+GATE_3_PROOF_VOI:
+GATE_4_EXECUTION:
+PRICE:
+BEAR_TOTAL:
+BASE_TOTAL:
+BULL_TOTAL:
+EXPECTED_VALUE:
+ASYMMETRY_TOTAL:
+WEDGE_TO_PRICE:
+WEDGE_ROUTE:
+WEDGE_ROUTE_BREAKDOWN:
+MARKET_IMPLIED_RESIDUAL:
+RESIDUAL_CLASS:
+PRICE_TRIGGER_PRACTICALITY:
+HARD_PRICE_TRIGGER_ALLOWED:
+VALUATION_OBJECT_FIT:
+POSITION_APPROACH:
+UPGRADE_CONDITION:
+VOI_TRIGGER:
+MAIN_RISK:
+FALSIFIER:
+TRANCHES:
+MONITORING_CADENCE:
+FLAGS:
+=== END HANDOFF ===
+
+--- PROMPT SEPARATOR ---
+
 ═══════════════════════════════════════════════════════════════════
-STAGE 11 — COMPOSITE RANK & FINAL SELECTION (execute after all 4 companies)
+STAGE 13 — COMPOSITE RANK & FINAL SELECTION
 ═══════════════════════════════════════════════════════════════════
 
-After completing Four-Gate analysis for all 4 finalists:
+ROLE
+You are the Stage 13 ranking engine in the thesis-driven investment pipeline.
 
 OPTIMIZATION TARGET:
 Select the best PRIMARY and SECONDARY candidates among surviving names based on credible mispricing, proof quality, and near-term rerating potential.
+
+INHERITANCE LOCK:
+Before ranking, search for:
+1. === STAGE 12 HANDOFF ===
+2. === STAGE 11 HANDOFF ===
+3. === STAGE 10 HANDOFF ===
+4. === STAGE 9 HANDOFF ===
+5. Stage 8 output
+6. Stage 7 output
+7. Stage 3 Artifact 3
+8. === STAGE 2 FUNDAMENTAL HANDOFF ===
+
+If Stage 12 handoff NOT found: output DATA_GAP_STAGE=12 and STOP.
+If Stage 11 handoff NOT found: output DATA_GAP_STAGE=11 and STOP.
+
+Do not rerun the Four-Gate decision.
+Do not change Stage 12 WATCH / AVOID decisions.
+Do not create new valuations.
+Use Stage 12 gate results as controlling inputs.
 
 STEP 1 — ELIMINATE AVOID COMPANIES
 Remove any company with AVOID decision. If fewer than 2 remain, flag SHORTFALL and proceed with what you have.
@@ -3807,7 +5334,7 @@ Source: Stage 3 Floor_Traction + TractionClass + Semantics Verdict
   0: LOW_QUALITY
 
 Dimension 2: Competitive Position / Gate Control (weight 20%)
-Source: Stage 5 moat score + Stage 3 CP gate-weighted
+Source: Stage 7 moat score + Stage 3 CP gate-weighted
   5: Moat >= 8/12 + CP >= 4 with GQ-A gate
   4: Moat 6-7 + CP >= 4
   3: Moat 6+ with CP 3, OR Moat 3-5 with CP >= 4
@@ -3816,10 +5343,10 @@ Source: Stage 5 moat score + Stage 3 CP gate-weighted
   0: Moat < 3
 
 Dimension 3: Value Asymmetry (weight 15%)
-Source: Stage 9 Asymmetry_TOTAL
+Source: Stage 11 Asymmetry_TOTAL
   IMPORTANT: If HORIZON_DEPENDENT flag is set, cap at score 2.
   If DominantDriver = WACC, cap at score 3.
-  If company is WATCH / PRICE_CONTINGENT from Stage 10, minimum score = 1.
+  If company is WATCH / PRICE_CONTINGENT from Stage 12, minimum score = 1.
   5: Asymmetry > 5:1 AND DominantDriver is NOT WACC
   4: 4:1–5:1 AND DominantDriver is NOT WACC
   3: 3:1–4:1, OR any asymmetry with DominantDriver = WACC
@@ -3828,7 +5355,7 @@ Source: Stage 9 Asymmetry_TOTAL
   0: < 1.5:1
 
 Dimension 4: Revaluation Imminence (weight 10%)
-Source: Stage 7 REI_SCORE
+Source: Stage 9 REI_SCORE
   5: REI > 15% AND VOI < 6 months
   4: REI 10-15% OR VOI 6-9 months
   3: REI 5-10% AND VOI < 12 months
@@ -3837,7 +5364,7 @@ Source: Stage 7 REI_SCORE
   0: No measurable RP or priced-in
 
 Dimension 5: Returns Quality & Capital Allocation (weight 15%)
-Source: Stage 6
+Source: Stage 8
   5: thesis-adjusted ROIC or ROTCE > 15% or > WACC by >=500bps, strong cash conversion, disciplined dilution
   4: 10-15% or > WACC by >=300bps, acceptable conversion and allocation
   3: modestly above cost of capital, mixed but acceptable conversion/allocation
@@ -3846,7 +5373,7 @@ Source: Stage 6
   0: persistent value destruction or capital allocation failure
 
 Dimension 6: Execution Readiness (weight 10%)
-Source: Stage 10 gate results + Stage 2 overheating score
+Source: Stage 12 gate results + Stage 2 overheating score
   5: All Gates PASS, overheating <= 2
   4: All Gates PASS, overheating 3-4
   3: Gate 2 RISK but rest PASS
@@ -3855,7 +5382,7 @@ Source: Stage 10 gate results + Stage 2 overheating score
   0: Gate 1 FAIL (already AVOID)
 
 Valuation Object Fit penalty:
-Use VALUATION_OBJECT_FIT from Stage 10 Gate 2.
+Use VALUATION_OBJECT_FIT from Stage 12 Gate 2.
 
 - HIGH: no penalty
 - MEDIUM: subtract 0.2 from final Composite Score
@@ -3989,7 +5516,7 @@ SECONDARY: [Company] — Composite [X.XX]/5.0 — EntryScore [Y.Y]/10 — Sizing
 ELIMINATED (AVOID): [list with 1-sentence reason]
 NOT SELECTED (WATCH): [list with Composite, EntryScore, and upgrade condition]
 
-=== STAGE 11 HANDOFF ===
+=== STAGE 13 HANDOFF ===
 PRIMARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | EntryBlocker: [blocker] | Sizing: [X%]
 SECONDARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | EntryBlocker: [blocker] | Sizing: [X%]
 CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
@@ -3997,7 +5524,7 @@ CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
 
 --- PROMPT SEPARATOR ---
 
-STAGE 12 — FINAL INVESTMENT RECORD BUILDER
+STAGE 14 — FINAL INVESTMENT RECORD BUILDER
 finalny rekord decyzyjny watchlisty
 Cel
 
@@ -4037,7 +5564,7 @@ Przed wygenerowaniem odpowiedzi wyszukaj i odziedzicz dane z kontekstu.
 Nie rekonstruuj ich, jeśli już istnieją.
 
 Musisz wyszukać w tej kolejności:
-=== STAGE 11 HANDOFF ===
+=== STAGE 13 HANDOFF ===
 Wyciągnij:
 PRIMARY
 SECONDARY
@@ -4046,7 +5573,18 @@ EntryScore
 EntryBlocker
 Sizing
 Correlation Guard
-=== STAGE 9 HANDOFF ===
+=== STAGE 12 HANDOFF ===
+Wyciągnij dla każdej wybranej spółki:
+DECISION
+CATEGORY
+ENTRY_BLOCKER
+VOI_TRIGGER
+MAIN_RISK
+UPGRADE_CONDITION
+POSITION_APPROACH
+TRANCHES
+MONITORING_CADENCE
+=== STAGE 11 HANDOFF ===
 Wyciągnij dla każdej wybranej spółki:
 PRICE
 BEAR_TOTAL
@@ -4072,7 +5610,7 @@ RESIDUAL_CLASS
 CORE_ADOPTED_METHOD
 CORE_MODEL_RISK_FLAGS
 FLAGS
-=== STAGE 8 HANDOFF ===
+=== STAGE 10 HANDOFF ===
 Wyciągnij:
 WEDGE_NPV_PER_SHARE Bear / Base / Bull
 EXPECTED_WEDGE
@@ -4086,7 +5624,7 @@ PERSISTENCE
 MONETIZATION_PATH
 TRACTION_CALIBRATION
 FLAGS
-=== STAGE 7 HANDOFF ===
+=== STAGE 9 HANDOFF ===
 Wyciągnij:
 RP
 REI_SCORE
@@ -4094,18 +5632,7 @@ VOI_EVENT
 RERATING_WINDOW_CLASS
 FALSIFIER
 FLAGS
-Stage 10 output
-Wyciągnij:
-DECISION
-CATEGORY
-ENTRY_BLOCKER
-VOI trigger
-Main risk
-upgrade condition
-execution plan
-tranches
-monitoring cadence
-Stage 6 output
+Stage 8 output
 Wyciągnij:
 ROIC / CROIC / Incremental ROIC / ROTCE jeśli dotyczy
 DuPont ROE
@@ -4114,7 +5641,7 @@ DuPont ROE
 thesis-adjusted returns quality verdict
 capital allocation verdict
 safety / leverage context
-Stage 5 output
+Stage 7 output
 Wyciągnij:
 moat score
 market structure
@@ -4158,12 +5685,12 @@ Twarde ograniczenia
 Używaj wyłącznie odziedziczonych danych i wniosków.
 Nie wymyślaj nowych liczb.
 Nie twórz nowej wyceny.
-Dla scenariuszy Bear/Base/Bull używaj wyłącznie Stage 9 TOTAL.
-Nie cofaj się do Stage 4, jeśli Stage 9 istnieje.
+Dla scenariuszy Bear/Base/Bull używaj wyłącznie Stage 11 TOTAL.
+Nie cofaj się do Stage 6, jeśli Stage 11 istnieje.
 W opisach dla użytkownika nie odwołuj się do stage’ów.
 Nie pisz:
-„Stage 9 pokazuje”
-„Stage 8 mówi”
+„Stage 11 pokazuje”
+„Stage 10 mówi”
 „Stage 3 dał HARD_TRACTION”
 „z handoffu wynika”
 Zamiast tego pisz:
@@ -4173,9 +5700,21 @@ Zamiast tego pisz:
 „warunkiem wejścia jest...”
 „teza przestaje działać, jeśli...”
 
-Jeśli Stage 9 handoff nie istnieje:
+Jeśli Stage 13 handoff nie istnieje:
 Zwróć dokładnie:
-DATA_GAP_STAGE=9
+DATA_GAP_STAGE=13
+
+I zakończ.
+
+Jeśli Stage 12 handoff nie istnieje:
+Zwróć dokładnie:
+DATA_GAP_STAGE=12
+
+I zakończ.
+
+Jeśli Stage 11 handoff nie istnieje:
+Zwróć dokładnie:
+DATA_GAP_STAGE=11
 
 I zakończ.
 
@@ -4184,9 +5723,11 @@ Wymagany output
 Zwróć dokładnie jeden obiekt JSON:
 
 {
+  "schema": "economist.response.v2",
   "records": [ ... ]
 }
 Standardowy przypadek
+schema ma dokładnie wartość economist.response.v2
 records ma dokładnie 2 rekordy
 pierwszy rekord = PRIMARY
 drugi rekord = SECONDARY
@@ -4775,8 +6316,8 @@ Cały rekord ma być napisany tak, aby człowiek mógł go przeczytać bez znajo
 
 Nie pisz:
 
-„Stage 9 pokazał...”
-„Stage 8 dał...”
+„Stage 11 pokazał...”
+„Stage 10 dał...”
 „Stage 3 potwierdził...”
 
 Pisz:
@@ -4790,6 +6331,7 @@ Finalna walidacja
 
 Przed zwrotem sprawdź:
 
+schema == economist.response.v2
 records jest tablicą
 zwykle są 2 rekordy
 PRIMARY jest pierwszy
@@ -4817,31 +6359,32 @@ bez komentarzy
 bez tekstu przed i po JSON
 Finalna instrukcja
 
-Wygeneruj dokładnie jeden obiekt JSON z polem records.
+Wygeneruj dokładnie jeden obiekt JSON z polami schema i records.
 Nie dodawaj żadnych wyjaśnień.
 Nie używaj markdownu.
 Nie zwracaj nic poza JSON-em.
+schema musi mieć wartość economist.response.v2.
 PRIMARY jako pierwszy rekord, SECONDARY jako drugi.
 --- PROMPT SEPARATOR ---
-STAGE 13 — MCP WRITE FINAL INVESTMENT RECORDS
-Zadanie: wstaw dokładnie wygenerowany JSON Stage 12 do bazy przez MCP Iskierka.
+STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS
+Zadanie: wstaw dokładnie wygenerowany JSON Stage 14 do bazy przez MCP Iskierka.
 
-Źródło danych dla tego etapu to wygenerowany output Stage 12 / Prompt 12 z 15, niekoniecznie bezpośrednio poprzednia wiadomość.
+Źródło danych dla tego etapu to wygenerowany output Stage 14 / Prompt 15 z 18, niekoniecznie bezpośrednio poprzednia wiadomość.
 
-Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 12, czyli obiekt JSON z:
+Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 14, czyli obiekt JSON z:
 
 {
   "schema": "economist.response.v2",
   "records": [...]
 }
 
-Ignoruj wiadomości techniczne Stage 13, wyniki MCP, statusy narzędzi, komentarze oraz inne teksty, które nie są poprawnym obiektem `economist.response.v2` z tablicą `records`. Nie używaj Stage 14 ani tablic sektorowych jako źródła dla Stage 13.
+Ignoruj wiadomości techniczne Stage 15, wyniki MCP, statusy narzędzi, komentarze oraz inne teksty, które nie są poprawnym obiektem `economist.response.v2` z tablicą `records`. Nie używaj Stage 16 ani tablic sektorowych jako źródła dla Stage 15.
 
 Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
 
 Jeśli nie da się znaleźć poprawnego `records` jako tablicy, zwróć dokładnie:
 
-DATA_GAP_STAGE=12
+DATA_GAP_STAGE=14
 
 Użyj MCP server:
 
@@ -4849,28 +6392,28 @@ iskierka
 
 Użyj MCP tool:
 
-stage12_research_rows.upsert
+stage12_research_rows_upsert
 
-Jeśli lista narzędzi MCP pokazuje wariant bez kropek, użyj tego samego toola jako `stage12_research_rows_upsert`.
+Jeśli starsza lista narzędzi MCP pokazuje wariant z kropką, użyj tego samego toola jako `stage12_research_rows.upsert`.
 
 Wywołaj tool dokładnie tak:
 
 {
-  "records": <WYGENEROWANY_JSON_STAGE_12.records>
+  "records": <WYGENEROWANY_JSON_STAGE_14.records>
 }
 
 Przekaż wyłącznie tablicę `records`. Nie przekazuj `schema`, `stage`, `status`, `generated_by`, `validation_status`, `source_material_id`, `source_run_id`, `links`, dat technicznych ani informacji o modelu.
 
-Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/history endpoints ani `watchlist-company-context`. Stage 12 ma trafić do `psm_research_rows` przez dedykowany writer `stage12_research_rows.upsert`.
+Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/history endpoints ani `watchlist-company-context`. Stage 14 ma trafić do `psm_research_rows` przez dedykowany writer `stage12_research_rows_upsert` / alias `stage12_research_rows.upsert`.
 
-Po próbie zapisu zwróć dokładnie znaleziony wygenerowany JSON Stage 12 `economist.response.v2` bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 12, żeby pipeline mógł przejść do Stage 14.
+Po próbie zapisu zwróć dokładnie znaleziony wygenerowany JSON Stage 14 `economist.response.v2` bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 14, żeby pipeline mógł przejść do Stage 16.
 
-Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 12 `economist.response.v2` bez zmian.
+Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 `economist.response.v2` bez zmian.
 
-Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znaleziony wygenerowany JSON Stage 12 `economist.response.v2` bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnego Stage 12 z `records`; wtedy użyj `DATA_GAP_STAGE=12`.
+Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 `economist.response.v2` bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnego Stage 14 z `records`; wtedy użyj `DATA_GAP_STAGE=14`.
 
-FINAL OUTPUT RULE DLA PROMPTU 13:
-Odpowiedź Promptu 13 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 12, zwróć wyłącznie pełny obiekt JSON `economist.response.v2`:
+FINAL OUTPUT RULE DLA PROMPTU 16:
+Odpowiedź Promptu 16 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 14, zwróć wyłącznie pełny obiekt JSON `economist.response.v2`:
 
 {
   "schema": "economist.response.v2",
@@ -4879,7 +6422,7 @@ Odpowiedź Promptu 13 musi być JSON-em, nie tekstem operacyjnym. Jeśli znalezi
 
 Nie zwracaj podsumowania MCP, nie zwracaj statusu zapisu, nie zwracaj pustej odpowiedzi, nie używaj markdownu.
 --- PROMPT SEPARATOR ---
-STAGE 14 — SECTOR MEMORY ROW WRITER
+STAGE 16 — SECTOR MEMORY ROW WRITER
 economist.sector_memory_rows.v3
 
 CEL
@@ -5387,12 +6930,12 @@ Finalny output modelu musi być samą tablicą JSON:
 Żadnych metadanych technicznych.
 Nie wywołuj MCP w tym etapie.
 --- PROMPT SEPARATOR ---
-STAGE 15 — MCP WRITE SECTOR MEMORY ROWS
-Zadanie: wstaw dokładnie wygenerowany JSON Stage 14 do pamięci sektorowej przez MCP Iskierka.
+STAGE 17 — MCP WRITE SECTOR MEMORY ROWS
+Zadanie: wstaw dokładnie wygenerowany JSON Stage 16 do pamięci sektorowej przez MCP Iskierka.
 
-Źródło danych dla tego etapu to wygenerowany output Stage 14 / Prompt 14 z 15, niekoniecznie bezpośrednio poprzednia wiadomość.
+Źródło danych dla tego etapu to wygenerowany output Stage 16 / Prompt 17 z 18, niekoniecznie bezpośrednio poprzednia wiadomość.
 
-Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszą poprawną finalną tablicę JSON Stage 14, czyli top-level tablicę rekordów:
+Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszą poprawną finalną tablicę JSON Stage 16, czyli top-level tablicę rekordów:
 
 [
   {
@@ -5402,13 +6945,13 @@ Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześ
   }
 ]
 
-Ignoruj wiadomości techniczne Stage 15, wyniki MCP, statusy narzędzi, komentarze, Stage 12 `economist.response.v2` oraz inne teksty, które nie są top-level tablicą rekordów z polami `sektor`, `podsektor`, `opis`.
+Ignoruj wiadomości techniczne Stage 17, wyniki MCP, statusy narzędzi, komentarze, Stage 14 `economist.response.v2` oraz inne teksty, które nie są top-level tablicą rekordów z polami `sektor`, `podsektor`, `opis`.
 
 Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
 
 Jeśli nie da się znaleźć poprawnej tablicy JSON, zwróć dokładnie:
 
-DATA_GAP_STAGE=14
+DATA_GAP_STAGE=16
 
 Użyj MCP server:
 
@@ -5423,10 +6966,10 @@ Jeśli lista narzędzi MCP pokazuje wariant bez kropek, użyj tego samego toola 
 Wywołaj tool dokładnie tak:
 
 {
-  "items": <WYGENEROWANY_JSON_STAGE_14>
+  "items": <WYGENEROWANY_JSON_STAGE_16>
 }
 
-Jeśli wygenerowany JSON Stage 14 to pusta tablica, wywołaj:
+Jeśli wygenerowany JSON Stage 16 to pusta tablica, wywołaj:
 
 {
   "items": []
@@ -5434,16 +6977,16 @@ Jeśli wygenerowany JSON Stage 14 to pusta tablica, wywołaj:
 
 Przekaż wyłącznie tablicę rekordów jako `items`. Nie przekazuj `source_material_id`, `source_run_id`, `stage`, `generated_by`, `status`, `validation_status`, `min_opis_chars`, `created_at`, `updated_at`, `links`, dat technicznych ani informacji o modelu.
 
-Nie używaj `stage12_research_rows.upsert`, endpointów research rows ani `watchlist-company-context`. Stage 14 ma trafić do pamięci sektorowej przez `sector_context.upsert_stage13`.
+Nie używaj `context_packs.upsert`, `stage12_research_rows.upsert`, endpointów research rows ani `watchlist-company-context`. Stage 16 ma trafić do pamięci sektorowej przez `sector_context.upsert_stage13`.
 
-Po próbie zapisu zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 14 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 14, żeby pipeline mógł zakończyć etap techniczny bez blokowania procesu.
+Po próbie zapisu zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 16 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 16, żeby pipeline mógł zakończyć etap techniczny bez blokowania procesu.
 
-Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 14 bez zmian.
+Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 16 bez zmian.
 
-Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 14 bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnej tablicy JSON Stage 14; wtedy użyj `DATA_GAP_STAGE=14`.
+Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 16 bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnej tablicy JSON Stage 16; wtedy użyj `DATA_GAP_STAGE=16`.
 
-FINAL OUTPUT RULE DLA PROMPTU 15:
-Odpowiedź Promptu 15 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 14, zwróć wyłącznie pełną tablicę JSON Stage 14:
+FINAL OUTPUT RULE DLA PROMPTU 18:
+Odpowiedź Promptu 18 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 16, zwróć wyłącznie pełną tablicę JSON Stage 16:
 
 [
   {
@@ -5453,4 +6996,4 @@ Odpowiedź Promptu 15 musi być JSON-em, nie tekstem operacyjnym. Jeśli znalezi
   }
 ]
 
-Nie dodawaj opisu, statusu MCP, podsumowania, markdownu ani tekstu przed albo po JSON-ie. Jeśli MCP nie jest dostępne, nadal zwróć tę samą tablicę JSON. Jeśli Stage 14 nie istnieje w historii, zwróć wyłącznie `DATA_GAP_STAGE=14`.
+Nie dodawaj opisu, statusu MCP, podsumowania, markdownu ani tekstu przed albo po JSON-ie. Jeśli MCP nie jest dostępne, nadal zwróć tę samą tablicę JSON. Jeśli Stage 16 nie istnieje w historii, zwróć wyłącznie `DATA_GAP_STAGE=16`.

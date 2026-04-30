@@ -245,7 +245,7 @@ async function main() {
       return value.length.toString(16).padStart(8, '0');
     },
     buildResponseContractValidation() {
-      return { valid: true, kind: 'current' };
+      return { valid: true, kind: 'economist.response.v2' };
     },
     extractLatestStage12InvestmentResponseFromTab: async () => ({
       text: '',
@@ -286,9 +286,9 @@ async function main() {
     status: 'running',
     lifecycleStatus: 'running',
     phase: 'prompt_send',
-    currentPrompt: 15,
-    totalPrompts: 15,
-    stageIndex: 14,
+    currentPrompt: 18,
+    totalPrompts: 18,
+    stageIndex: 17,
     tabId: 55,
     title: 'Alpha Corp',
     analysisType: 'company',
@@ -305,7 +305,7 @@ async function main() {
   assert.strictEqual(saved[0][0], '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}');
   assert.strictEqual(saved[0][3], 'run-final');
   assert.strictEqual(saved[0][4], 'run-final_p15_00000054');
-  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_recovery');
+  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_stage14_last_message');
   assert.strictEqual(saved[0][5].selected_response_prompt, 15);
   assert.strictEqual(saved[0][6], 'https://chatgpt.com/c/test');
   assert(
@@ -331,10 +331,10 @@ async function main() {
   });
   const stage12HistoryProcess = {
     ...process,
-    id: 'run-final-stage12-history',
-    currentPrompt: 15,
-    totalPrompts: 15,
-    stageIndex: 14,
+    id: 'run-final-stage14-history',
+    currentPrompt: 18,
+    totalPrompts: 18,
+    stageIndex: 17,
     lastProgressAt: nowTs - (12 * 60 * 1000)
   };
 
@@ -342,10 +342,10 @@ async function main() {
   assert.strictEqual(historyResult.success, true);
   assert.strictEqual(saved.length, 1);
   assert.strictEqual(saved[0][0], recoveredStage12Json);
-  assert.strictEqual(saved[0][4], 'run-final-stage12-history_p12_00000054');
-  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_stage12_dom_history');
-  assert.strictEqual(saved[0][5].selected_response_prompt, 12);
-  assert.strictEqual(saved[0][5].selected_response_stage_index, 11);
+  assert.strictEqual(saved[0][4], 'run-final-stage14-history_p15_00000054');
+  assert.strictEqual(saved[0][5].selected_response_reason, 'stale_final_prompt_stage14_dom_history');
+  assert.strictEqual(saved[0][5].selected_response_prompt, 15);
+  assert.strictEqual(saved[0][5].selected_response_stage_index, 14);
 
   console.log('test-stale-final-prompt-recovery.js: ok');
 }

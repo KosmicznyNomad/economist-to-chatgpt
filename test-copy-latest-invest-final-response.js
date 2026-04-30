@@ -135,7 +135,7 @@ function buildVmContext(overrides = {}) {
     CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'www.chatgpt.com', 'chat.openai.com', 'www.chat.openai.com']),
     INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
     INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
-    PROMPTS_COMPANY: new Array(15).fill('prompt'),
+    PROMPTS_COMPANY: new Array(18).fill('prompt'),
     processRegistry: new Map(),
     normalizeWatchlistVerifyState(value) {
       return typeof value === 'string' ? value.trim().toLowerCase() : '';
@@ -966,9 +966,9 @@ async function testCopyLatestInvestDirectSaveUsesStage12DomHistoryBeforeLastMess
   assert.strictEqual(result.persistence.success, true);
   assert.strictEqual(saveCalls.length, 1, 'manual copy should save the recovered Stage 12 JSON');
   assert.strictEqual(saveCalls[0][0], stage12Json);
-  assert.strictEqual(saveCalls[0][5].selected_response_reason, 'manual_copy_stage12_dom_history');
-  assert.strictEqual(saveCalls[0][5].selected_response_prompt, 12);
-  assert.strictEqual(saveCalls[0][5].selected_response_stage_index, 11);
+  assert.strictEqual(saveCalls[0][5].selected_response_reason, 'manual_copy_stage14_dom_history');
+  assert.strictEqual(saveCalls[0][5].selected_response_prompt, 15);
+  assert.strictEqual(saveCalls[0][5].selected_response_stage_index, 14);
   assert.strictEqual(lastAssistantReadCount, 0, 'copy flow should not read the last assistant message when Stage 12 JSON is found');
   assert.ok(eventCalls.length > 0, 'copy flow should emit telemetry for Stage 12 history recovery');
 }
@@ -1132,8 +1132,8 @@ async function testResolveCopyLatestInvestPrefersStage12DomHistoryForProcessFall
   assert.strictEqual(result.responseText, stage12Json);
   assert.strictEqual(result.resolutionMode, 'process_stage12_dom_history');
   assert.strictEqual(result.fromDom, true);
-  assert.strictEqual(result.selectedPrompt, 12);
-  assert.strictEqual(result.selectedResponseReason, 'manual_copy_stage12_dom_history');
+  assert.strictEqual(result.selectedPrompt, 15);
+  assert.strictEqual(result.selectedResponseReason, 'manual_copy_stage14_dom_history');
   assert.strictEqual(result.processPatch.completedResponseText, stage12Json);
   assert.strictEqual(stage12ScanCalls, 1, 'process fallback should scan assistant history once');
   assert.strictEqual(lastAssistantReadCount, 0, 'process fallback should not use the last assistant text when Stage 12 JSON is found');
@@ -1196,28 +1196,28 @@ async function testReplayPreservesStage12CopySelectionMetadata() {
 
   const result = await context.replayCompletedResponseForProcess(
     {
-      id: 'run-stage12-replay',
-      title: 'Stage 12 replay',
+      id: 'run-stage14-replay',
+      title: 'Stage 14 replay',
       analysisType: 'company',
       currentPrompt: 15,
       stageIndex: 14,
-      chatUrl: 'https://chatgpt.com/c/stage12-replay'
+      chatUrl: 'https://chatgpt.com/c/stage14-replay'
     },
     {
       force: true,
-      selectedPrompt: 12,
-      selectedStageIndex: 11,
-      selectedResponseReason: 'manual_copy_stage12_dom_history'
+      selectedPrompt: 15,
+      selectedStageIndex: 14,
+      selectedResponseReason: 'manual_copy_stage14_dom_history'
     }
   );
 
   assert.strictEqual(result.success, true);
   assert.strictEqual(saveCalls.length, 1, 'replay should save the selected Stage 12 response once');
   assert.strictEqual(saveCalls[0][0], stage12Json);
-  assert.strictEqual(saveCalls[0][4], `run-stage12-replay_p12_${stage12Json.length}`);
-  assert.strictEqual(saveCalls[0][5].selected_response_prompt, 12);
-  assert.strictEqual(saveCalls[0][5].selected_response_stage_index, 11);
-  assert.strictEqual(saveCalls[0][5].selected_response_reason, 'manual_copy_stage12_dom_history');
+  assert.strictEqual(saveCalls[0][4], `run-stage14-replay_p15_${stage12Json.length}`);
+  assert.strictEqual(saveCalls[0][5].selected_response_prompt, 15);
+  assert.strictEqual(saveCalls[0][5].selected_response_stage_index, 14);
+  assert.strictEqual(saveCalls[0][5].selected_response_reason, 'manual_copy_stage14_dom_history');
 }
 
 async function testResolveCopyLatestInvestPassesThroughProcessPatchFromStrictResolution() {

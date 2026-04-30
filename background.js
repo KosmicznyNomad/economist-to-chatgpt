@@ -116,6 +116,9 @@ const WATCHLIST_DISPATCH = {
   retryAlarmImmediateDelayMs: 1000,
   alarmPeriodMinutes: 2
 };
+const SECTOR_MEMORY_INTAKE_PATH = "/api/v1/intake/sector-memory-rows";
+const SECTOR_MEMORY_COPY_STORAGE_KEY = "watchlist_sector_memory_copies";
+const SECTOR_MEMORY_COPY_MAX_ITEMS = 500;
 function computeFinalResponseSaveTimeoutMs() {
   const sendTimeoutMs = Number.isInteger(WATCHLIST_DISPATCH.timeoutMs) && WATCHLIST_DISPATCH.timeoutMs > 0
     ? WATCHLIST_DISPATCH.timeoutMs
@@ -4269,7 +4272,7 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
     const recoveredFromStage12History = !!stage12DomResponse?.text;
     const recoveredInvestmentJson = recoveredFromStage12History || contract?.kind === 'economist.response.v2';
     const promptNumber = recoveredInvestmentJson
-      ? 12
+      ? 15
       : (Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
         ? process.currentPrompt
         : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0));
@@ -4281,8 +4284,8 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
       stageMeta.selected_response_stage_index = promptNumber - 1;
     }
     stageMeta.selected_response_reason = recoveredFromStage12History
-      ? 'stale_final_prompt_stage12_dom_history'
-      : (recoveredInvestmentJson ? 'stale_final_prompt_stage12_last_message' : 'stale_final_prompt_recovery');
+      ? 'stale_final_prompt_stage14_dom_history'
+      : (recoveredInvestmentJson ? 'stale_final_prompt_stage14_last_message' : 'stale_final_prompt_recovery');
     const source = typeof process?.title === 'string' && process.title.trim()
       ? process.title.trim()
       : 'Stale final prompt recovery';
@@ -12950,7 +12953,7 @@ let promptsCompanyHashCacheKey = '';
 
 // Jedno źródło prawdy dla etapów company chain.
 // Kolejność musi być zsynchronizowana z prompts-company.txt (po separatorze).
-const STAGE_METADATA_COMPANY = [
+const DEFAULT_STAGE_METADATA_COMPANY = [
   {
     promptIndex: 0,
     promptNumber: 1,
@@ -12983,83 +12986,105 @@ const STAGE_METADATA_COMPANY = [
     promptIndex: 4,
     promptNumber: 5,
     stageId: '4',
-    stageName: "Stage 4: Reverse DCF Lite + Driver Screen",
-    description: "Core vs wedge vs total, asymmetry pre-filter, dominant valuation driver."
+    stageName: "Stage 4: Company CORE Reconstruction",
+    description: "Market-anchored going-concern CORE, CORE/WEDGE boundary, and downstream restrictions."
   },
   {
     promptIndex: 5,
     promptNumber: 6,
     stageId: '5',
-    stageName: "Stage 5: Competitive Position (4 finalists)",
-    description: "Replaceability, moat durability, and finalist selection from the advanced set."
+    stageName: "Stage 5: MCP Sector Overlay / CORE Challenge",
+    description: "Iskierka sector-memory audit of CORE, boundary, proof standards, and decision-grade status."
   },
   {
     promptIndex: 6,
     promptNumber: 7,
     stageId: '6',
-    stageName: "Stage 6: Returns on Capital & Capital Allocation",
-    description: "ROIC, CROIC, incremental returns, and value-destructive growth checks."
+    stageName: "Stage 6: Valuation Diagnostics / Reverse DCF Lite",
+    description: "Diagnostic reverse DCF lite using Stage 4 CORE_ADOPTED and MCP-adjusted CORE confidence."
   },
   {
     promptIndex: 7,
     promptNumber: 8,
     stageId: '7',
-    stageName: "Stage 7: Revaluation Parameter Selection",
-    description: "Single KPI with VOI window and measurable re-rate force."
+    stageName: "Stage 7: Competitive Position (4 finalists)",
+    description: "Replaceability, moat durability, and finalist selection from the advanced set."
   },
   {
     promptIndex: 8,
     promptNumber: 9,
     stageId: '8',
-    stageName: "Stage 8: Thesis Monetization Quantification",
-    description: "Incremental wedge cash flows (Bear/Base/Bull), capture ceilings, and NPV blocks."
+    stageName: "Stage 8: Returns on Capital & Capital Allocation",
+    description: "ROIC, CROIC, incremental returns, and value-destructive growth checks."
   },
   {
     promptIndex: 9,
     promptNumber: 10,
     stageId: '9',
-    stageName: "Stage 9: Reverse DCF (TOTAL)",
-    description: "Market-implied growth/margin extraction and divergence diagnostics."
+    stageName: "Stage 9: Revaluation Parameter Selection",
+    description: "Single KPI with VOI window and measurable re-rate force."
   },
   {
     promptIndex: 10,
     promptNumber: 11,
     stageId: '10',
-    stageName: "Stage 10: Four-Gate Decision + Stage 11 Composite Rank",
-    description: "Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection."
+    stageName: "Stage 10: Thesis Monetization Quantification",
+    description: "Incremental wedge cash flows (Bear/Base/Bull), capture ceilings, and NPV blocks."
   },
   {
     promptIndex: 11,
     promptNumber: 12,
-    stageId: '12',
-    stageName: "Stage 12: Final Investment Record Builder",
-    description: "Final structured watchlist records for downstream ingestion."
+    stageId: '11',
+    stageName: "Stage 11: Reverse DCF (TOTAL)",
+    description: "Market-implied growth/margin extraction and divergence diagnostics."
   },
   {
     promptIndex: 12,
     promptNumber: 13,
-    stageId: '13',
-    stageName: "Stage 13: MCP Write Final Investment Records",
-    description: "Persist the generated Stage 12 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 12 JSON forward."
+    stageId: '12',
+    stageName: "Stage 12: Four-Gate Decision",
+    description: "Per-company WATCH/AVOID gates, integrity checks, value/proof gates, and execution plan handoff."
   },
   {
     promptIndex: 13,
     promptNumber: 14,
-    stageId: '14',
-    stageName: "Stage 14: Sector Memory Row Writer",
-    description: "Reusable sector-memory rows for future company analyses."
+    stageId: '13',
+    stageName: "Stage 13: Composite Rank",
+    description: "Cross-company composite ranking with PRIMARY/SECONDARY selection."
   },
   {
     promptIndex: 14,
     promptNumber: 15,
+    stageId: '14',
+    stageName: "Stage 14: Final Investment Record Builder",
+    description: "Final structured watchlist records for downstream ingestion."
+  },
+  {
+    promptIndex: 15,
+    promptNumber: 16,
     stageId: '15',
-    stageName: "Stage 15: MCP Write Sector Memory Rows",
-    description: "Persist the generated Stage 14 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 14 JSON forward."
+    stageName: "Stage 15: MCP Write Final Investment Records",
+    description: "Persist the generated Stage 14 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 14 JSON forward."
+  },
+  {
+    promptIndex: 16,
+    promptNumber: 17,
+    stageId: '16',
+    stageName: "Stage 16: Sector Memory Row Writer",
+    description: "Reusable sector-memory rows for future company analyses."
+  },
+  {
+    promptIndex: 17,
+    promptNumber: 18,
+    stageId: '17',
+    stageName: "Stage 17: MCP Write Sector Memory Rows",
+    description: "Persist the generated Stage 16 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 16 JSON forward."
   }
 ];
 
 // Backward-compatible list used by existing UI components.
-const STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
+let STAGE_METADATA_COMPANY = DEFAULT_STAGE_METADATA_COMPANY.map((entry) => ({ ...entry }));
+let STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
 
 // Stage-id hints for dynamic DATA_GAP_STAGE recovery.
 // The map is intentionally explicit because some stage prompts do not expose
@@ -13070,7 +13095,6 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['1', 1],
   ['2', 2],
   ['3', 3],
-  ['3.1', 3], // traction scoring now lives inside the Stage 3 prompt
   ['4', 4],
   ['5', 5],
   ['6', 6],
@@ -13078,16 +13102,13 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['8', 8],
   ['9', 9],
   ['10', 10],
-  ['11', 10], // Stage 11 exists as a section inside the Stage 10 prompt
-  ['12', 11],
-  ['13', 12],
-  ['14', 13],
-  ['15', 14],
-  ['10.5', 10], // legacy alias: old chain used Stage 10.5 for composite rank
-  ['2.5', 4], // legacy alias: old chain used 2.5 for Reverse DCF Lite
-  ['3.2', 4], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
-  ['3.5', 6], // legacy alias now resolves to returns quality
-  ['6.5', 6] // compatibility midpoint alias for returns quality
+  ['11', 11],
+  ['12', 12],
+  ['13', 13],
+  ['14', 14],
+  ['15', 15],
+  ['16', 16],
+  ['17', 17]
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -13096,15 +13117,94 @@ function normalizeCompanyStageIdentifier(rawValue) {
     : String(rawValue ?? '').trim();
   if (!raw) return '';
 
-  const match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+  const compact = raw.replace(/\s+/g, '').toUpperCase();
+  if (compact === 'SETUP') return 'setup';
+  const match = compact.match(/^(\d+)$/);
   if (!match) return '';
+  return String(Number.parseInt(match[1], 10));
+}
 
-  const whole = String(Number.parseInt(match[1], 10));
-  const fractionRaw = typeof match[2] === 'string' ? match[2] : '';
-  if (!fractionRaw) return whole;
+function extractCompanyStageHeadingFromPrompt(promptText) {
+  const head = typeof promptText === 'string' ? promptText.slice(0, 2600) : '';
+  if (!head.trim()) return null;
 
-  const fraction = fractionRaw.replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction}` : whole;
+  const directMatch = head.match(/^\s*#?\s*STAGE\s+(\d+)\s*(?:[—–-]\s*([^\n]+))?/im);
+  if (directMatch) {
+    const stageId = String(Number.parseInt(directMatch[1], 10));
+    const title = typeof directMatch[2] === 'string'
+      ? directMatch[2].trim().replace(/\s+/g, ' ')
+      : '';
+    return { stageId, title };
+  }
+
+  const roleMatch = head.match(/\brole\s*:\s*stage\s+(\d+)\s+([^\n.]+)/i)
+    || head.match(/\brole\s+is\s+stage\s+(\d+)\s*:?\s*([^\n.]+)/i);
+  if (roleMatch) {
+    const stageId = String(Number.parseInt(roleMatch[1], 10));
+    const title = typeof roleMatch[2] === 'string'
+      ? roleMatch[2].trim().replace(/\s+/g, ' ')
+      : '';
+    return { stageId, title };
+  }
+
+  return null;
+}
+
+function buildCompanyStageMetadataFromPrompts(prompts) {
+  const list = Array.isArray(prompts) ? prompts : [];
+  const defaultByPromptIndex = new Map(
+    DEFAULT_STAGE_METADATA_COMPANY.map((entry) => [entry.promptIndex, entry])
+  );
+
+  return list.map((promptText, index) => {
+    const promptNumber = index + 1;
+    const defaultEntry = defaultByPromptIndex.get(index) || null;
+    const heading = extractCompanyStageHeadingFromPrompt(promptText);
+    if (heading && defaultEntry?.stageId === heading.stageId) {
+      return {
+        ...defaultEntry,
+        promptIndex: index,
+        promptNumber
+      };
+    }
+    if (heading && heading.stageId) {
+      const defaultTitle = defaultEntry?.stageName
+        ? defaultEntry.stageName.replace(/^Stage\s+\d+\s*:\s*/i, '').trim()
+        : '';
+      const title = heading.title || defaultTitle || `Prompt ${promptNumber}`;
+      return {
+        promptIndex: index,
+        promptNumber,
+        stageId: heading.stageId,
+        stageName: `Stage ${heading.stageId}: ${title}`,
+        description: defaultEntry?.stageId === heading.stageId && typeof defaultEntry.description === 'string'
+          ? defaultEntry.description
+          : "Autodetected from prompts-company.txt."
+      };
+    }
+
+    if (defaultEntry) {
+      return {
+        ...defaultEntry,
+        promptIndex: index,
+        promptNumber
+      };
+    }
+
+    return {
+      promptIndex: index,
+      promptNumber,
+      stageId: String(index),
+      stageName: `Prompt ${promptNumber}`,
+      description: "Autodetected from prompts-company.txt."
+    };
+  });
+}
+
+function refreshCompanyStageMetadataFromPrompts(prompts) {
+  STAGE_METADATA_COMPANY = buildCompanyStageMetadataFromPrompts(prompts);
+  STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
+  return STAGE_METADATA_COMPANY;
 }
 
 function escapeRegExpLiteral(value) {
@@ -14872,8 +14972,8 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
       attemptCount: 1,
       activated: false,
       resolutionMode: 'stage12_dom_history',
-      selectedPrompt: 12,
-      selectedResponseReason: 'manual_copy_stage12_dom_history',
+      selectedPrompt: 15,
+      selectedResponseReason: 'manual_copy_stage14_dom_history',
       scannedCount: Number.isInteger(firstStage12.scannedCount) ? firstStage12.scannedCount : null,
       sourceIndex: Number.isInteger(firstStage12.sourceIndex) ? firstStage12.sourceIndex : null
     };
@@ -14917,8 +15017,8 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
       attemptCount: 2,
       activated: true,
       resolutionMode: 'stage12_dom_history',
-      selectedPrompt: 12,
-      selectedResponseReason: 'manual_copy_stage12_dom_history',
+      selectedPrompt: 15,
+      selectedResponseReason: 'manual_copy_stage14_dom_history',
       scannedCount: Number.isInteger(secondStage12.scannedCount) ? secondStage12.scannedCount : null,
       sourceIndex: Number.isInteger(secondStage12.sourceIndex) ? secondStage12.sourceIndex : null
     };
@@ -14977,7 +15077,7 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
         selectedPrompt: Number.isInteger(domFallback?.selectedPrompt) ? domFallback.selectedPrompt : null,
         selectedResponseReason: typeof domFallback?.selectedResponseReason === 'string' && domFallback.selectedResponseReason.trim()
           ? domFallback.selectedResponseReason.trim()
-          : (isStage12DomHistory ? 'manual_copy_stage12_dom_history' : 'manual_copy_dom_contract'),
+          : (isStage12DomHistory ? 'manual_copy_stage14_dom_history' : 'manual_copy_dom_contract'),
         processPatch: {
           completedResponseText: domFallbackText,
           completedResponseCapturedAt: Date.now()
@@ -15031,7 +15131,7 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
     selectedResponseReason: typeof directFallback?.selectedResponseReason === 'string' && directFallback.selectedResponseReason.trim()
       ? directFallback.selectedResponseReason.trim()
       : (directFallback?.resolutionMode === 'stage12_dom_history'
-        ? 'manual_copy_stage12_dom_history'
+        ? 'manual_copy_stage14_dom_history'
         : 'manual_copy_fallback')
   };
 }
@@ -26249,15 +26349,17 @@ async function loadPrompts() {
 
     // Parse in a way that tolerates UTF-8 and mojibake separator variants.
     PROMPTS_COMPANY = parsePromptChainText(companyText);
+    refreshCompanyStageMetadataFromPrompts(PROMPTS_COMPANY);
 
     if (PROMPTS_COMPANY.length <= 1 && /PROMPT(?:[ _-]+)SEPARATOR/.test(companyText)) {
       console.warn('[prompts] Separator token found but parsed as a single prompt - verify file encoding.');
     }
 
-    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}`);
+    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}; stages: ${STAGE_METADATA_COMPANY.length}`);
   } catch (error) {
     console.error('[prompts] Failed loading prompts:', error);
     PROMPTS_COMPANY = [];
+    refreshCompanyStageMetadataFromPrompts(PROMPTS_COMPANY);
   }
 }
 
@@ -26588,6 +26690,239 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     });
   }
 });
+
+function extractSectorMemoryJsonFromText(text) {
+  const raw = typeof text === 'string' ? text.trim() : '';
+  if (!raw) {
+    return { jsonText: '', items: [], valid: false, reason: 'empty_text' };
+  }
+
+  const candidates = [raw];
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && typeof fenced[1] === 'string') {
+    candidates.push(fenced[1].trim());
+  }
+  const arrayStart = raw.indexOf('[');
+  const arrayEnd = raw.lastIndexOf(']');
+  if (arrayStart >= 0 && arrayEnd >= arrayStart) {
+    candidates.push(raw.slice(arrayStart, arrayEnd + 1).trim());
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!Array.isArray(parsed)) continue;
+      const items = parsed.map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+        const sektor = typeof item.sektor === 'string' ? item.sektor.trim() : '';
+        const podsektor = typeof item.podsektor === 'string' ? item.podsektor.trim() : '';
+        const opis = typeof item.opis === 'string' ? item.opis.trim() : '';
+        if (!sektor || !podsektor || !opis) return null;
+        return { sektor, podsektor, opis };
+      });
+      if (items.some((item) => !item)) continue;
+      return {
+        jsonText: candidate,
+        items,
+        valid: true,
+        reason: 'sector_memory_array'
+      };
+    } catch (_error) {
+      // Keep trying other candidate shapes.
+    }
+  }
+
+  return { jsonText: '', items: [], valid: false, reason: 'invalid_sector_memory_json' };
+}
+
+function buildSectorMemoryResponseId(runId, responseText, promptNumber = 17) {
+  const normalizedRunId = typeof runId === 'string' && runId.trim()
+    ? runId.trim()
+    : 'no-run';
+  const prompt = Number.isInteger(promptNumber) && promptNumber > 0
+    ? promptNumber
+    : 17;
+  const fingerprint = textFingerprint(responseText || '') || 'nofp';
+  const rawId = `${normalizedRunId}_p${prompt}_sector_${String(responseText || '').length}_${fingerprint}`;
+  return rawId.replace(/[^A-Za-z0-9._:-]+/g, '_').slice(0, 180);
+}
+
+async function appendSectorMemoryLocalCopy(record) {
+  if (!record || typeof record !== 'object') {
+    return { success: false, reason: 'invalid_record' };
+  }
+  if (!chrome?.storage?.local) {
+    return { success: false, reason: 'chrome_storage_unavailable' };
+  }
+  try {
+    const snapshot = await chrome.storage.local.get([SECTOR_MEMORY_COPY_STORAGE_KEY]);
+    const current = Array.isArray(snapshot?.[SECTOR_MEMORY_COPY_STORAGE_KEY])
+      ? snapshot[SECTOR_MEMORY_COPY_STORAGE_KEY]
+      : [];
+    const responseId = typeof record.responseId === 'string' ? record.responseId : '';
+    const filtered = responseId
+      ? current.filter((item) => item?.responseId !== responseId)
+      : current;
+    const next = [...filtered, record].slice(-SECTOR_MEMORY_COPY_MAX_ITEMS);
+    await chrome.storage.local.set({ [SECTOR_MEMORY_COPY_STORAGE_KEY]: next });
+    return { success: true, count: next.length };
+  } catch (error) {
+    return {
+      success: false,
+      reason: 'local_copy_failed',
+      error: error?.message || String(error)
+    };
+  }
+}
+
+async function saveSectorMemoryResponse(
+  responseText,
+  source,
+  runId = null,
+  responseId = null,
+  conversationUrl = null,
+  sourceMeta = null,
+  stageMeta = null
+) {
+  const parsed = extractSectorMemoryJsonFromText(responseText);
+  const normalizedRunId = typeof runId === 'string' && runId.trim() ? runId.trim() : '';
+  const promptNumber = Number.isInteger(stageMeta?.sector_memory_response_prompt)
+    ? stageMeta.sector_memory_response_prompt
+    : (Number.isInteger(stageMeta?.selected_response_prompt) ? stageMeta.selected_response_prompt : 17);
+  const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
+    ? responseId.trim()
+    : buildSectorMemoryResponseId(normalizedRunId, responseText, promptNumber);
+  const copyFingerprint = textFingerprint(responseText || '');
+  const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
+  const normalizedSourceMeta = normalizeResponseSourceMeta(sourceMeta, source);
+  const capturedAt = Date.now();
+  const localRecord = {
+    responseId: normalizedResponseId,
+    runId: normalizedRunId || null,
+    source: typeof source === 'string' ? source : '',
+    sourceTitle: normalizedSourceMeta.sourceTitle || '',
+    sourceName: normalizedSourceMeta.sourceName || '',
+    sourceUrl: normalizedSourceMeta.sourceUrl || '',
+    conversationUrl: normalizedConversationUrl || '',
+    text: typeof responseText === 'string' ? responseText : '',
+    itemCount: parsed.items.length,
+    promptNumber,
+    fingerprint: copyFingerprint,
+    capturedAt
+  };
+  const localCopy = await appendSectorMemoryLocalCopy(localRecord);
+
+  if (!parsed.valid) {
+    return {
+      attempted: false,
+      success: false,
+      reason: parsed.reason || 'invalid_sector_memory_json',
+      responseId: normalizedResponseId,
+      responseLength: typeof responseText === 'string' ? responseText.length : 0,
+      itemCount: 0,
+      localCopy
+    };
+  }
+
+  const payload = {
+    schema: 'economist.sector_memory_rows.v3',
+    responseId: normalizedResponseId,
+    runId: normalizedRunId || null,
+    source: typeof source === 'string' && source.trim() ? source.trim() : 'ChatGPT Stage 16 sector memory',
+    analysisType: 'sector_memory',
+    timestamp: new Date(capturedAt).toISOString(),
+    stage: 'stage_16',
+    generatedBy: 'chatgpt',
+    sourceRunId: normalizedRunId || '',
+    sourceMaterialId: normalizedSourceMeta.sourceUrl || normalizedSourceMeta.sourceTitle || '',
+    status: 'active',
+    validationStatus: 'valid',
+    minOpisChars: 120,
+    items: parsed.items,
+    metadata: {
+      source_title: normalizedSourceMeta.sourceTitle || '',
+      source_name: normalizedSourceMeta.sourceName || '',
+      source_url: normalizedSourceMeta.sourceUrl || '',
+      conversation_url: normalizedConversationUrl || '',
+      captured_prompt: promptNumber,
+      selected_response_reason: typeof stageMeta?.sector_memory_response_reason === 'string' && stageMeta.sector_memory_response_reason.trim()
+        ? stageMeta.sector_memory_response_reason.trim()
+        : 'stage16_sector_memory_json',
+      copy_fingerprint: copyFingerprint,
+      local_copy_saved: localCopy?.success === true
+    }
+  };
+
+  const apiResult = await performSignedIskraApiRequest({
+    method: 'POST',
+    path: SECTOR_MEMORY_INTAKE_PATH,
+    payload,
+    timeoutMs: 20000,
+    retryCount: 2,
+    backoffMs: 1200
+  });
+  const responsePayload = apiResult?.payload && typeof apiResult.payload === 'object'
+    ? apiResult.payload
+    : {};
+  const outcome = {
+    attempted: true,
+    success: apiResult?.success === true,
+    reason: apiResult?.success === true
+      ? 'saved'
+      : (typeof apiResult?.error === 'string' && apiResult.error.trim() ? apiResult.error.trim() : 'sector_memory_save_failed'),
+    responseId: normalizedResponseId,
+    responseLength: typeof responseText === 'string' ? responseText.length : 0,
+    itemCount: parsed.items.length,
+    acceptedCount: Number.isInteger(responsePayload.accepted_count) ? responsePayload.accepted_count : null,
+    rawOutputId: typeof responsePayload.raw_output_id === 'string' ? responsePayload.raw_output_id : '',
+    status: Number.isInteger(apiResult?.status) ? apiResult.status : null,
+    intakeUrl: typeof apiResult?.intakeUrl === 'string' ? apiResult.intakeUrl : '',
+    localCopy
+  };
+  if (normalizedRunId) {
+    await upsertProcess(normalizedRunId, {
+      sectorMemoryPersistence: outcome,
+      sectorMemoryResponseSaved: outcome.success,
+      sectorMemoryResponseCapturedAt: capturedAt,
+      sectorMemoryResponseLength: typeof responseText === 'string' ? responseText.length : 0,
+      sectorMemoryResponseItemCount: parsed.items.length,
+      timestamp: Date.now()
+    });
+  }
+  console[outcome.success ? 'log' : 'warn']('[sector-memory] fallback save result', outcome);
+  return outcome;
+}
+
+async function persistSectorMemoryResponseFromResult(result, options = {}) {
+  const responseText = typeof result?.sectorMemoryResponse === 'string'
+    ? result.sectorMemoryResponse
+    : '';
+  if (!responseText.trim()) {
+    return { attempted: false, reason: 'missing_sector_memory_response' };
+  }
+  const promptNumber = Number.isInteger(result?.sectorMemoryResponsePrompt)
+    ? result.sectorMemoryResponsePrompt
+    : 17;
+  const responseId = buildSectorMemoryResponseId(options?.runId || '', responseText, promptNumber);
+  return saveSectorMemoryResponse(
+    responseText,
+    options?.source || 'ChatGPT Stage 16 sector memory',
+    options?.runId || null,
+    responseId,
+    options?.conversationUrl || null,
+    options?.sourceMeta || null,
+    {
+      sector_memory_response_prompt: promptNumber,
+      sector_memory_response_stage_index: Number.isInteger(result?.sectorMemoryResponseStageIndex)
+        ? result.sectorMemoryResponseStageIndex
+        : (promptNumber > 0 ? promptNumber - 1 : null),
+      sector_memory_response_reason: typeof result?.sectorMemoryResponseReason === 'string'
+        ? result.sectorMemoryResponseReason
+        : 'stage16_sector_memory_json'
+    }
+  );
+}
 
 // Funkcja zapisująca odpowiedź do storage
 async function saveResponse(
@@ -29238,8 +29573,13 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ? result.lastResponse
       : '';
     const hasResultLastResponse = resultLastResponse.trim().length > 0;
+    const resultSectorMemoryResponse = typeof result?.sectorMemoryResponse === 'string'
+      ? result.sectorMemoryResponse
+      : '';
+    const hasResultSectorMemoryResponse = resultSectorMemoryResponse.trim().length > 0;
     const MAX_COMPLETED_RESPONSE_CHARS = 180000;
     let completedResponsePatch = {};
+    let sectorMemoryResponsePatch = {};
     let persistencePatch = null;
     if (isInjectRateLimitBlockedResult(result)) {
       const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
@@ -29290,6 +29630,27 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         completedResponseSaved: false
       };
     }
+    if (hasResultSectorMemoryResponse) {
+      const sectorMemoryResponseTruncated = resultSectorMemoryResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+      sectorMemoryResponsePatch = {
+        sectorMemoryResponseText: sectorMemoryResponseTruncated
+          ? resultSectorMemoryResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+          : resultSectorMemoryResponse,
+        sectorMemoryResponseLength: resultSectorMemoryResponse.length,
+        sectorMemoryResponseTruncated,
+        sectorMemoryResponseCapturedAt: Date.now(),
+        sectorMemoryResponseSaved: false,
+        sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
+          ? result.sectorMemoryResponsePrompt
+          : 17,
+        sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
+          ? result.sectorMemoryResponseStageIndex
+          : 16,
+        sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
+          ? result.sectorMemoryResponseReason
+          : 'stage16_sector_memory_json'
+      };
+    }
 
     if (result && result.success && hasResultLastResponse) {
       const stageMeta = {};
@@ -29331,6 +29692,27 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
           }
         );
+      const sectorMemoryPersistence = hasResultSectorMemoryResponse
+        ? await persistSectorMemoryResponseFromResult(result, {
+          source: title,
+          runId: processId,
+          conversationUrl: conversationUrl || null,
+          sourceMeta: {
+            sourceTitle: title,
+            sourceName: resolveSupportedSourceNameFromUrl(
+              typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+            ),
+            sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+          }
+        })
+        : null;
+      if (sectorMemoryPersistence?.attempted) {
+        sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
+        sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
+        sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
+          ? sectorMemoryPersistence.itemCount
+          : null;
+      }
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: true,
         saveResult,
@@ -29507,6 +29889,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(persistencePatch ? persistencePatch : {}),
       ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
       ...(Object.keys(completedResponsePatch).length > 0 ? completedResponsePatch : {}),
+      ...(Object.keys(sectorMemoryResponsePatch).length > 0 ? sectorMemoryResponsePatch : {}),
       ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
         ? {
           currentPrompt: processTotalPrompts,
@@ -30024,8 +30407,13 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         ? result.lastResponse
         : '';
       const hasResultLastResponse = resultLastResponse.trim().length > 0;
+      const resultSectorMemoryResponse = typeof result?.sectorMemoryResponse === 'string'
+        ? result.sectorMemoryResponse
+        : '';
+      const hasResultSectorMemoryResponse = resultSectorMemoryResponse.trim().length > 0;
       const MAX_COMPLETED_RESPONSE_CHARS = 180000;
       let completedResponsePatch = {};
+      let sectorMemoryResponsePatch = {};
       let persistencePatch = null;
       if (isInjectRateLimitBlockedResult(result)) {
         const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
@@ -30075,6 +30463,27 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           completedResponseTruncated,
           completedResponseCapturedAt: Date.now(),
           completedResponseSaved: false
+        };
+      }
+      if (hasResultSectorMemoryResponse) {
+        const sectorMemoryResponseTruncated = resultSectorMemoryResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+        sectorMemoryResponsePatch = {
+          sectorMemoryResponseText: sectorMemoryResponseTruncated
+            ? resultSectorMemoryResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+            : resultSectorMemoryResponse,
+          sectorMemoryResponseLength: resultSectorMemoryResponse.length,
+          sectorMemoryResponseTruncated,
+          sectorMemoryResponseCapturedAt: Date.now(),
+          sectorMemoryResponseSaved: false,
+          sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
+            ? result.sectorMemoryResponsePrompt
+            : 17,
+          sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
+            ? result.sectorMemoryResponseStageIndex
+            : 16,
+          sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
+            ? result.sectorMemoryResponseReason
+            : 'stage16_sector_memory_json'
         };
       }
       
@@ -30134,6 +30543,25 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
               sourceUrl
             }
           );
+        const sectorMemoryPersistence = hasResultSectorMemoryResponse
+          ? await persistSectorMemoryResponseFromResult(result, {
+            source: title,
+            runId: processId,
+            conversationUrl: conversationUrl || null,
+            sourceMeta: {
+              sourceTitle: title,
+              sourceName,
+              sourceUrl
+            }
+          })
+          : null;
+        if (sectorMemoryPersistence?.attempted) {
+          sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
+          sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
+          sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
+            ? sectorMemoryPersistence.itemCount
+            : null;
+        }
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
           saveResult,
@@ -30334,6 +30762,9 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
         ...(Object.keys(completedResponsePatch).length > 0
           ? completedResponsePatch
+          : {}),
+        ...(Object.keys(sectorMemoryResponsePatch).length > 0
+          ? sectorMemoryResponsePatch
           : {}),
         ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
           ? {
@@ -31342,7 +31773,7 @@ async function injectToChat(
     let dataGapRewindState = null;
 
     const runTag = `runId=${runId || 'n/a'}`;
-    const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i;
+    const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i;
     const DATA_GAP_MAX_REPLAYS_PER_STAGE = 2;
     const dataGapReplayCountsByStage = new Map();
 
@@ -31456,13 +31887,10 @@ async function injectToChat(
     function normalizeDataGapStageId(value) {
       const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
       if (!raw) return '';
-      const match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+      const compact = raw.replace(/\s+/g, '').toUpperCase();
+      const match = compact.match(/^(\d+)$/);
       if (!match) return '';
-      const whole = String(Number.parseInt(match[1], 10));
-      const fractionRaw = typeof match[2] === 'string' ? match[2] : '';
-      if (!fractionRaw) return whole;
-      const fraction = fractionRaw.replace(/0+$/, '');
-      return fraction ? `${whole}.${fraction}` : whole;
+      return String(Number.parseInt(match[1], 10));
     }
 
     function parseDataGapDirectiveResponse(text) {
@@ -32433,7 +32861,7 @@ async function injectToChat(
       const raw = typeof promptText === 'string' ? promptText : '';
       if (!raw.trim()) return [];
       const scoped = raw.slice(0, 3200);
-      const nextStageMatch = scoped.match(/This will help for the next stage:\s*Stage\s*([0-9]+(?:\.[0-9]+)?)/i);
+      const nextStageMatch = scoped.match(/This will help for the next stage:\s*Stage\s*([0-9]+)/i);
       if (nextStageMatch && nextStageMatch[1]) {
         const normalizedNextStage = normalizeDataGapStageId(nextStageMatch[1]);
         if (normalizedNextStage) {
@@ -32441,7 +32869,7 @@ async function injectToChat(
         }
       }
       const stageIds = [];
-      const stagePattern = /\bstage\s*([0-9]+(?:\.[0-9]+)?)(?![0-9.])/gi;
+      const stagePattern = /\bstage\s*([0-9]+)(?![0-9A-Z_.])/gi;
       let match;
       while ((match = stagePattern.exec(scoped)) !== null) {
         const normalized = normalizeDataGapStageId(match[1]);
@@ -36294,12 +36722,26 @@ async function injectToChat(
       if (!candidate) continue;
       try {
         const parsed = JSON.parse(candidate);
+        const schema = typeof parsed?.schema === 'string'
+          ? parsed.schema.trim().toLowerCase()
+          : '';
+        const records = Array.isArray(parsed?.records) ? parsed.records : [];
+        const recordsLookLikeFinalRows = records.length > 0 && records.every((record) => (
+          record
+          && typeof record === 'object'
+          && !Array.isArray(record)
+          && (
+            record.decision_role
+            || record.decisionRole
+            || (record.fields && typeof record.fields === 'object' && !Array.isArray(record.fields))
+          )
+        ));
         if (
           parsed
           && typeof parsed === 'object'
           && !Array.isArray(parsed)
-          && parsed.schema === 'economist.response.v2'
-          && Array.isArray(parsed.records)
+          && (!schema || schema === 'economist.response.v2')
+          && recordsLookLikeFinalRows
         ) {
           return candidate;
         }
@@ -36313,7 +36755,7 @@ async function injectToChat(
   function rememberStage12InvestmentJson(promptNumber, responseText) {
     const candidate = extractStage12InvestmentJsonText(responseText);
     if (!candidate) return false;
-    const canonicalStage12Prompt = 12;
+    const canonicalStage12Prompt = 15;
     const hasExistingStage12 = typeof window._stage12ResponseToSave === 'string'
       && window._stage12ResponseToSave.trim();
     if (hasExistingStage12 && Number.isInteger(promptNumber) && promptNumber > canonicalStage12Prompt) {
@@ -36326,6 +36768,64 @@ async function injectToChat(
     window._stage12ResponsePrompt = canonicalStage12Prompt;
     console.log(
       `[copy-flow] [capture:stage12-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalStage12Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+    );
+    return true;
+  }
+
+  function extractStage16SectorMemoryJsonText(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return '';
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const arrayStart = raw.indexOf('[');
+    const arrayEnd = raw.lastIndexOf(']');
+    if (arrayStart >= 0 && arrayEnd >= arrayStart) {
+      candidates.push(raw.slice(arrayStart, arrayEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!Array.isArray(parsed)) continue;
+        const validItems = parsed.every((item) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+          const sektor = typeof item.sektor === 'string' ? item.sektor.trim() : '';
+          const podsektor = typeof item.podsektor === 'string' ? item.podsektor.trim() : '';
+          const opis = typeof item.opis === 'string' ? item.opis.trim() : '';
+          return !!(sektor && podsektor && opis);
+        });
+        if (validItems) {
+          return candidate;
+        }
+      } catch (_error) {
+        // Keep trying other candidate shapes.
+      }
+    }
+    return '';
+  }
+
+  function rememberStage16SectorMemoryJson(promptNumber, responseText) {
+    const candidate = extractStage16SectorMemoryJsonText(responseText);
+    if (!candidate) return false;
+    const canonicalStage14Prompt = 17;
+    const hasExistingStage14 = typeof window._stage16SectorMemoryResponseToSave === 'string'
+      && window._stage16SectorMemoryResponseToSave.trim();
+    if (hasExistingStage14 && Number.isInteger(promptNumber) && promptNumber > canonicalStage14Prompt) {
+      console.log(
+        `[copy-flow] [capture:stage16-sector-json-skip-copy] prompt=${promptNumber} keptPrompt=${window._stage16SectorMemoryResponsePrompt || canonicalStage14Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+      );
+      return true;
+    }
+    window._stage16SectorMemoryResponseToSave = candidate;
+    window._stage16SectorMemoryResponsePrompt = canonicalStage14Prompt;
+    console.log(
+      `[copy-flow] [capture:stage16-sector-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalStage14Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
     );
     return true;
   }
@@ -37961,6 +38461,7 @@ async function injectToChat(
         const stageValidated = validateResponse(responseText);
         registerStageCompletion(absoluteCurrentPrompt, responseText, stageValidated);
         rememberStage12InvestmentJson(absoluteCurrentPrompt, responseText);
+        rememberStage16SectorMemoryJson(absoluteCurrentPrompt, responseText);
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -38015,22 +38516,33 @@ async function injectToChat(
           : Math.max(counterCurrent, 1);
         updateCounter(counter, counterCurrent, counterTotal, 'Prompt chain zakonczony. Trwa zapis do bazy...');
         
-        // Zwróć wygenerowany Stage 12 JSON do zapisu inwestycyjnego.
-        // Ostatni prompt obecnego chaina może być Stage 15 (sector memory MCP write), więc nie zapisujemy go jako watchlist final.
+        // Zwróć wygenerowany Stage 14 JSON do zapisu inwestycyjnego.
+        // Ostatni prompt obecnego chaina może być Stage 17 (sector memory MCP write), więc nie zapisujemy go jako watchlist final.
         const lastPromptResponse = window._lastResponseToSave || '';
         const stage12Response = window._stage12ResponseToSave || '';
         const stage12ResponsePrompt = Number.isInteger(window._stage12ResponsePrompt)
           ? window._stage12ResponsePrompt
           : null;
+        const stage16SectorMemoryResponse = window._stage16SectorMemoryResponseToSave || '';
+        const stage16SectorMemoryResponsePrompt = Number.isInteger(window._stage16SectorMemoryResponsePrompt)
+          ? window._stage16SectorMemoryResponsePrompt
+          : null;
         const selectedResponseReason = stage12Response
-          ? 'stage12_investment_json'
+          ? 'stage14_investment_json'
           : 'last_prompt';
         const lastResponse = stage12Response || lastPromptResponse;
         delete window._lastResponseToSave;
         delete window._stage12ResponseToSave;
         delete window._stage12ResponsePrompt;
+        delete window._stage16SectorMemoryResponseToSave;
+        delete window._stage16SectorMemoryResponsePrompt;
         console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków, reason=${selectedResponseReason})`);
         console.log(`[copy-flow] [capture:return] prompt=${stage12Response ? stage12ResponsePrompt : completedPrompt} completedPrompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)} reason=${selectedResponseReason}`);
+        if (stage16SectorMemoryResponse) {
+          console.log(
+            `[copy-flow] [capture:return-sector-memory] prompt=${stage16SectorMemoryResponsePrompt || 17} completedPrompt=${completedPrompt} len=${stage16SectorMemoryResponse.length} fp=${computeCopyFingerprint(stage16SectorMemoryResponse)} reason=stage16_sector_memory_json`
+          );
+        }
         const selectedPrompt = stage12Response && Number.isInteger(stage12ResponsePrompt)
           ? stage12ResponsePrompt
           : completedPrompt;
@@ -38179,7 +38691,17 @@ async function injectToChat(
           responseId,
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
-          selectedResponseReason: 'last_prompt',
+          selectedResponseReason,
+          sectorMemoryResponse: stage16SectorMemoryResponse,
+          sectorMemoryResponsePrompt: stage16SectorMemoryResponse
+            ? (stage16SectorMemoryResponsePrompt || 17)
+            : null,
+          sectorMemoryResponseStageIndex: stage16SectorMemoryResponse
+            ? ((stage16SectorMemoryResponsePrompt || 17) - 1)
+            : null,
+          sectorMemoryResponseReason: stage16SectorMemoryResponse
+            ? 'stage16_sector_memory_json'
+            : '',
           persistedViaMessage,
           persistedSaveResult,
           persistedSaveError,
@@ -38287,11 +38809,3 @@ function waitForTabComplete(tabId) {
     });
   });
 }
-
-
-
-
-
-
-
-
