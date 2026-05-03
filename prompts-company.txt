@@ -6374,6 +6374,19 @@ DATA_GAP_STAGE=11
 
 I zakończ.
 
+Jeśli Stage 13 zwraca PRIMARY: ENTRY_SHORTFALL i SECONDARY: ENTRY_SHORTFALL:
+zwróć dokładnie jeden obiekt JSON:
+
+{
+  "schema": "economist.response.v2",
+  "records": [],
+  "extras": {
+    "shortfall_reason": "Żadna spółka nie przeszła progu jakości i actionability. Pipeline kończy się bez PRIMARY i SECONDARY."
+  }
+}
+
+Następnie zakończ. Nie twórz rekordów zastępczych.
+
 Wymagany output
 
 Zwróć dokładnie jeden obiekt JSON:
@@ -6384,7 +6397,7 @@ Zwróć dokładnie jeden obiekt JSON:
 }
 Standardowy przypadek
 schema ma dokładnie wartość economist.response.v2
-Always generate records for the PRIMARY and SECONDARY slots from Stage 13, including ENTRY_SHORTFALL records; return records: [] only if Stage 13 has no surviving WATCH companies.
+records ma 0–2 rekordy zależnie od liczby spółek, które przeszły próg jakości i actionability
 pierwszy rekord = PRIMARY
 drugi rekord = SECONDARY
 Kształt rekordu
@@ -7032,7 +7045,8 @@ Przed zwrotem sprawdź:
 schema == economist.response.v2
 top-level object has schema == "economist.response.v2"
 records jest tablicą
-Always generate records for the PRIMARY and SECONDARY slots from Stage 13, including ENTRY_SHORTFALL records; return records: [] only if Stage 13 has no surviving WATCH companies.
+records ma 0–2 rekordy zależnie od liczby spółek, które przeszły próg jakości i actionability
+jeśli records jest puste, top-level extras.shortfall_reason musi istnieć
 PRIMARY jest pierwszy
 każdy rekord ma:
 decision_role
