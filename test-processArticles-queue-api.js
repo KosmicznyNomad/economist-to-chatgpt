@@ -224,10 +224,16 @@ function buildContext() {
         liveSlots: 1,
         startingSlots: 1
       };
-    }
+    },
+    sanitizePromptChainSnapshot: (promptChain) => Array.isArray(promptChain)
+      ? promptChain.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
+      : []
   };
 
   vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'normalizeSourceMaterialLength'), context, {
+    filename: 'background.js'
+  });
   vm.runInContext(extractFunctionSource(backgroundSource, 'processArticles'), context, {
     filename: 'background.js'
   });
@@ -279,6 +285,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     sourceWindowId: null,
     sourceUrl: 'manual://source',
     chatUrl: 'https://chat.example',
+    promptChainSnapshot: ['p1'],
     queueBatchId: 'batch-1',
     manualPdfBatchId: 'pdf-batch-1',
     manualPdfProviderId: 'provider-1'
@@ -293,6 +300,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     sourceWindowId: 9,
     sourceUrl: 'manual://pdf',
     chatUrl: 'https://chat.example',
+    promptChainSnapshot: ['p1'],
     queueBatchId: 'batch-1',
     manualPdfBatchId: 'pdf-batch-1',
     manualPdfProviderId: 'provider-1'

@@ -320,6 +320,7 @@ function buildPriorityContext() {
     reportAnalysisQueueEvent: async () => true,
     ensureAnalysisQueuePauseReady: async () => false,
     getAnalysisQueuePaused: async () => false,
+    normalizeSourceMaterialLength: (value) => Number.isInteger(value) && value >= 0 ? value : null,
     requestAnalysisQueueReconcile: () => {},
     requestRemoteRunnerCycle: () => {},
     buildStaleQueueReleasePatch: async () => null,

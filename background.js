@@ -1,4 +1,5 @@
 const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/project";
+const PORTFOLIO_CHAT_URL = "https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project";
 const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const CHAT_GPT_HOSTS = new Set([
@@ -40,6 +41,8 @@ const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
 const PROCESS_WINDOW_AUTO_MINIMIZE_DELAY_MS = 1200;
 const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
+const ANALYSIS_TYPE_COMPANY = 'company';
+const ANALYSIS_TYPE_PORTFOLIO = 'portfolio';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
@@ -117,6 +120,10 @@ const WATCHLIST_DISPATCH = {
   alarmPeriodMinutes: 2
 };
 const SECTOR_MEMORY_INTAKE_PATH = "/api/v1/intake/sector-memory-rows";
+const SOURCE_MATERIALS_API_PATH = "/api/v1/source-materials";
+const EXTENSION_SERVICE_WORKER_STARTED_AT = Date.now();
+const EXTENSION_HEARTBEAT_STORAGE_KEY = "iskra_extension_heartbeat";
+const EXTENSION_FEATURE_REVISION = "source-materials-heartbeat-v1";
 const SECTOR_MEMORY_COPY_STORAGE_KEY = "watchlist_sector_memory_copies";
 const SECTOR_MEMORY_COPY_MAX_ITEMS = 500;
 function computeFinalResponseSaveTimeoutMs() {
@@ -152,7 +159,8 @@ const ISKRA_REMOTE_RUNNER = {
   alarmPeriodMinutes: 1,
   requestTimeoutMs: 20000,
   retryCount: 2,
-  backoffMs: 1500
+  backoffMs: 1500,
+  rescueRetryMs: 15000
 };
 
 const AUTO_RESTORE_WINDOWS = {
@@ -292,6 +300,7 @@ let watchlistConnectionLogLastTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerCycleInProgress = false;
 let remoteRunnerCycleRequested = false;
+let remoteRunnerRescueTimer = null;
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -1857,6 +1866,22 @@ function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   };
   if (Number.isInteger(rawTab.windowId)) snapshot.windowId = rawTab.windowId;
   if (Number.isInteger(rawTab.index)) snapshot.index = rawTab.index;
+  if (typeof rawTab.sourceUrl === 'string' && rawTab.sourceUrl.trim()) {
+    snapshot.sourceUrl = rawTab.sourceUrl.trim();
+  }
+  if (typeof rawTab.sourceKind === 'string' && rawTab.sourceKind.trim()) {
+    snapshot.sourceKind = rawTab.sourceKind.trim();
+  }
+  if (typeof rawTab.sourceMaterialId === 'string' && rawTab.sourceMaterialId.trim()) {
+    snapshot.sourceMaterialId = rawTab.sourceMaterialId.trim();
+  }
+  if (typeof rawTab.sourceMaterialHash === 'string' && rawTab.sourceMaterialHash.trim()) {
+    snapshot.sourceMaterialHash = rawTab.sourceMaterialHash.trim();
+  }
+  const sourceMaterialLength = normalizeSourceMaterialLength(rawTab.sourceMaterialLength);
+  if (Number.isInteger(sourceMaterialLength)) snapshot.sourceMaterialLength = sourceMaterialLength;
+  if (rawTab.sourceMaterialStored === true) snapshot.sourceMaterialStored = true;
+  if (rawTab.sourceMaterialNeedsProcessLink === true) snapshot.sourceMaterialNeedsProcessLink = true;
   const manualTextSourceId = sanitizeManualTextSourceId(rawTab.manualTextSourceId);
   if (manualTextSourceId) snapshot.manualTextSourceId = manualTextSourceId;
   if (typeof rawTab.manualText === 'string') snapshot.manualText = rawTab.manualText;
@@ -1891,7 +1916,16 @@ function sanitizeRemoteAnalysisQueueJobMetadata(rawRemote) {
       : (typeof rawRemote.runnerId === 'string' ? rawRemote.runnerId.trim() : ''),
     controllerId: typeof rawRemote.controllerId === 'string' ? rawRemote.controllerId.trim() : '',
     batchId: typeof rawRemote.batchId === 'string' ? rawRemote.batchId.trim() : '',
-    submissionId: typeof rawRemote.submissionId === 'string' ? rawRemote.submissionId.trim() : ''
+    submissionId: typeof rawRemote.submissionId === 'string' ? rawRemote.submissionId.trim() : '',
+    sourceMaterialId: typeof rawRemote.sourceMaterialId === 'string'
+      ? rawRemote.sourceMaterialId.trim()
+      : (typeof rawRemote.source_material_id === 'string' ? rawRemote.source_material_id.trim() : ''),
+    sourceMaterialHash: typeof rawRemote.sourceMaterialHash === 'string'
+      ? rawRemote.sourceMaterialHash.trim()
+      : (typeof rawRemote.source_material_hash === 'string' ? rawRemote.source_material_hash.trim() : ''),
+    sourceMaterialLength: normalizeSourceMaterialLength(
+      rawRemote.sourceMaterialLength ?? rawRemote.source_material_length
+    ) ?? null
   };
 }
 
@@ -1921,6 +1955,10 @@ function sanitizeAnalysisQueueJob(rawJob) {
     manualPdfBatchId: typeof rawJob.manualPdfBatchId === 'string' ? rawJob.manualPdfBatchId.trim() : '',
     manualPdfProviderId: typeof rawJob.manualPdfProviderId === 'string' ? rawJob.manualPdfProviderId.trim() : '',
     sourceUrl: typeof rawJob.sourceUrl === 'string' ? rawJob.sourceUrl.trim() : '',
+    sourceMaterialId: typeof rawJob.sourceMaterialId === 'string' ? rawJob.sourceMaterialId.trim() : '',
+    sourceMaterialHash: typeof rawJob.sourceMaterialHash === 'string' ? rawJob.sourceMaterialHash.trim() : '',
+    sourceMaterialLength: normalizeSourceMaterialLength(rawJob.sourceMaterialLength) ?? null,
+    sourceMaterialStored: rawJob.sourceMaterialStored === true,
     chatUrl: typeof rawJob.chatUrl === 'string' ? rawJob.chatUrl.trim() : '',
     startedAt: Number.isInteger(rawJob.startedAt) ? rawJob.startedAt : null,
     slotReservedAt: Number.isInteger(rawJob.slotReservedAt) ? rawJob.slotReservedAt : null,
@@ -3155,6 +3193,56 @@ async function performSignedIskraApiRequest(options = {}) {
   };
 }
 
+async function submitSourceMaterialForProcess(source = {}, options = {}) {
+  const text = typeof source?.text === 'string' ? source.text : '';
+  if (!text.trim()) {
+    return { success: false, skipped: true, reason: 'source_material_text_empty', payload: null };
+  }
+  const runId = typeof source?.runId === 'string' ? source.runId.trim() : '';
+  const jobId = typeof source?.jobId === 'string' ? source.jobId.trim() : '';
+  const batchId = typeof source?.batchId === 'string' ? source.batchId.trim() : '';
+  const submissionId = typeof source?.submissionId === 'string' ? source.submissionId.trim() : '';
+  const runnerId = typeof source?.runnerId === 'string' ? source.runnerId.trim() : '';
+  const processId = typeof source?.processId === 'string' && source.processId.trim()
+    ? source.processId.trim()
+    : (jobId || runId);
+  const process = processId
+    ? {
+      processKind: typeof source?.processKind === 'string' && source.processKind.trim()
+        ? source.processKind.trim()
+        : 'analysis_process',
+      processId,
+      jobId,
+      runId,
+      batchId,
+      submissionId,
+      runnerId,
+      relation: typeof source?.relation === 'string' && source.relation.trim()
+        ? source.relation.trim()
+        : 'process_input',
+      metadata: source?.processMetadata && typeof source.processMetadata === 'object'
+        ? source.processMetadata
+        : {}
+    }
+    : null;
+  const payload = {
+    text,
+    title: typeof source?.title === 'string' ? source.title : '',
+    sourceKind: typeof source?.sourceKind === 'string' ? source.sourceKind : '',
+    sourceUrl: typeof source?.sourceUrl === 'string' ? source.sourceUrl : '',
+    metadata: source?.metadata && typeof source.metadata === 'object' ? source.metadata : {}
+  };
+  if (process) payload.process = process;
+  return performSignedIskraApiRequest({
+    method: 'POST',
+    path: SOURCE_MATERIALS_API_PATH,
+    payload,
+    timeoutMs: Number.isInteger(options?.timeoutMs) ? options.timeoutMs : 15000,
+    retryCount: Number.isInteger(options?.retryCount) ? options.retryCount : 0,
+    backoffMs: Number.isInteger(options?.backoffMs) ? options.backoffMs : 1000
+  });
+}
+
 async function listRemoteRunnersViaApi(options = {}) {
   return performSignedIskraApiRequest({
     method: 'GET',
@@ -3258,12 +3346,174 @@ function buildRemoteQueueJobLikeFromProcess(process) {
   };
 }
 
+function trimRemoteRunnerSnapshotText(value, maxLength = 180) {
+  const safeValue = typeof value === 'string' ? value.trim() : '';
+  if (!safeValue) return '';
+  if (typeof trimProblemLogText === 'function') {
+    return trimProblemLogText(safeValue, maxLength);
+  }
+  if (!Number.isInteger(maxLength) || maxLength <= 0 || safeValue.length <= maxLength) {
+    return safeValue;
+  }
+  return `${safeValue.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function readRemoteRunnerSnapshotTimestamp(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function getRemoteRunnerSnapshotProcessStatus(process) {
+  const rawStatus = typeof process?.status === 'string' && process.status.trim()
+    ? process.status.trim()
+    : (typeof process?.queueState === 'string' ? process.queueState.trim() : '');
+  if (typeof normalizeProcessStatus === 'function') {
+    return normalizeProcessStatus(rawStatus || 'running');
+  }
+  return rawStatus || 'running';
+}
+
+function buildRemoteRunnerLocalProcessItem(process, activity = null) {
+  if (!process || typeof process !== 'object') return null;
+  const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  if (!runId) return null;
+  const remote = process?.remote && typeof process.remote === 'object' ? process.remote : null;
+  const remoteJobId = typeof remote?.remoteJobId === 'string' ? remote.remoteJobId.trim() : '';
+  const lastActivityAt = typeof getProcessLastActivityTimestamp === 'function'
+    ? getProcessLastActivityTimestamp(process)
+    : (
+      readRemoteRunnerSnapshotTimestamp(process?.lastActivityAt)
+      || readRemoteRunnerSnapshotTimestamp(process?.timestamp)
+      || readRemoteRunnerSnapshotTimestamp(process?.startedAt)
+      || 0
+    );
+  return {
+    kind: 'local_process',
+    runId,
+    jobId: typeof process?.queueJobId === 'string' && process.queueJobId.trim()
+      ? process.queueJobId.trim()
+      : remoteJobId,
+    title: trimRemoteRunnerSnapshotText(
+      typeof process?.title === 'string' && process.title.trim()
+        ? process.title.trim()
+        : 'Lokalny proces',
+      180
+    ),
+    status: getRemoteRunnerSnapshotProcessStatus(process),
+    queueState: typeof process?.queueState === 'string' ? process.queueState.trim() : '',
+    phase: typeof process?.phase === 'string' ? trimRemoteRunnerSnapshotText(process.phase, 80) : '',
+    sourceKind: typeof process?.sourceKind === 'string' ? process.sourceKind.trim() : '',
+    sourceUrl: typeof process?.sourceUrl === 'string' ? trimRemoteRunnerSnapshotText(process.sourceUrl, 240) : '',
+    chatUrl: typeof process?.chatUrl === 'string' ? trimRemoteRunnerSnapshotText(process.chatUrl, 240) : '',
+    currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null,
+    totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null,
+    startedAt: readRemoteRunnerSnapshotTimestamp(process?.startedAt),
+    updatedAt: lastActivityAt || readRemoteRunnerSnapshotTimestamp(process?.timestamp),
+    lastActivityAt: lastActivityAt || null,
+    remoteJobId,
+    remoteAttemptId: typeof remote?.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '',
+    remoteRunnerId: typeof remote?.remoteRunnerId === 'string' ? remote.remoteRunnerId.trim() : '',
+    controllerId: typeof remote?.controllerId === 'string' ? remote.controllerId.trim() : '',
+    batchId: typeof remote?.batchId === 'string' ? remote.batchId.trim() : '',
+    submissionId: typeof remote?.submissionId === 'string' ? remote.submissionId.trim() : '',
+    live: activity?.live === true,
+    contextKey: typeof activity?.contextKey === 'string' ? activity.contextKey : ''
+  };
+}
+
+function buildRemoteRunnerLocalQueueItem(job, queueState = 'waiting') {
+  if (!job || typeof job !== 'object') return null;
+  const runId = typeof job?.runId === 'string' ? job.runId.trim() : '';
+  const jobId = typeof job?.jobId === 'string' ? job.jobId.trim() : '';
+  if (!runId && !jobId) return null;
+  const remote = job?.remote && typeof job.remote === 'object' ? job.remote : null;
+  return {
+    kind: 'local_queue_job',
+    runId,
+    jobId,
+    title: trimRemoteRunnerSnapshotText(
+      typeof job?.title === 'string' && job.title.trim()
+        ? job.title.trim()
+        : 'Lokalny job',
+      180
+    ),
+    status: queueState === 'waiting' ? 'queued' : 'starting',
+    queueState,
+    phase: queueState === 'waiting' ? 'waiting' : 'slot_reserved',
+    sourceKind: typeof job?.sourceKind === 'string' ? job.sourceKind.trim() : '',
+    sourceUrl: typeof job?.sourceUrl === 'string' ? trimRemoteRunnerSnapshotText(job.sourceUrl, 240) : '',
+    currentPrompt: null,
+    totalPrompts: null,
+    startedAt: readRemoteRunnerSnapshotTimestamp(job?.startedAt),
+    updatedAt: readRemoteRunnerSnapshotTimestamp(job?.startedAt) || readRemoteRunnerSnapshotTimestamp(job?.createdAt),
+    lastActivityAt: readRemoteRunnerSnapshotTimestamp(job?.startedAt) || readRemoteRunnerSnapshotTimestamp(job?.createdAt),
+    remoteJobId: typeof remote?.remoteJobId === 'string' ? remote.remoteJobId.trim() : '',
+    remoteAttemptId: typeof remote?.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '',
+    remoteRunnerId: typeof remote?.remoteRunnerId === 'string' ? remote.remoteRunnerId.trim() : '',
+    controllerId: typeof remote?.controllerId === 'string' ? remote.controllerId.trim() : '',
+    batchId: typeof remote?.batchId === 'string' ? remote.batchId.trim() : '',
+    submissionId: typeof remote?.submissionId === 'string' ? remote.submissionId.trim() : '',
+    live: false,
+    contextKey: ''
+  };
+}
+
+function buildRemoteRunnerLocalProcessSnapshot(localState, options = {}) {
+  const limit = Number.isInteger(options?.limit)
+    ? Math.max(0, Math.min(50, options.limit))
+    : 25;
+  if (limit === 0) return [];
+  const items = [];
+  const seen = new Set();
+  const addItem = (item) => {
+    if (!item || typeof item !== 'object') return;
+    const key = item.remoteJobId
+      ? `remote:${item.remoteJobId}`
+      : (item.runId ? `run:${item.runId}` : (item.jobId ? `job:${item.jobId}` : ''));
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  };
+
+  const activeLocalProcesses = Array.isArray(localState?.activeLocalProcesses)
+    ? localState.activeLocalProcesses
+    : [];
+  for (const entry of activeLocalProcesses) {
+    addItem(buildRemoteRunnerLocalProcessItem(entry?.process, entry?.activity || null));
+  }
+
+  const activeJobs = Array.isArray(localState?.queueState?.activeJobs)
+    ? localState.queueState.activeJobs
+    : [];
+  for (const job of activeJobs) {
+    addItem(buildRemoteRunnerLocalQueueItem(job, 'active'));
+  }
+
+  const waitingJobs = Array.isArray(localState?.queueState?.waitingJobs)
+    ? localState.queueState.waitingJobs
+    : [];
+  for (const job of waitingJobs) {
+    addItem(buildRemoteRunnerLocalQueueItem(job, 'waiting'));
+  }
+
+  return items
+    .sort((left, right) => {
+      const leftUpdatedAt = Number.isInteger(left?.updatedAt) ? left.updatedAt : 0;
+      const rightUpdatedAt = Number.isInteger(right?.updatedAt) ? right.updatedAt : 0;
+      if (leftUpdatedAt !== rightUpdatedAt) return rightUpdatedAt - leftUpdatedAt;
+      return String(left?.runId || left?.jobId || '').localeCompare(String(right?.runId || right?.jobId || ''));
+    })
+    .slice(0, limit);
+}
+
 async function getRemoteRunnerLocalState() {
   const [queueSnapshot, queueState] = await Promise.all([
     getAnalysisQueueStatusSnapshot().catch(() => null),
     getAnalysisQueueSnapshot().catch(() => createEmptyAnalysisQueueState()),
     ensureProcessRegistryReady().catch(() => null)
   ]);
+  const activeLocalProcesses = typeof collectAnalysisQueueActiveProcesses === 'function'
+    ? await collectAnalysisQueueActiveProcesses().catch(() => [])
+    : [];
   const activeRemoteJob = findRemoteAnalysisQueueJob(queueState?.activeJobs);
   const queuedWaitingRemoteJob = findRemoteAnalysisQueueJob(queueState?.waitingJobs);
   const activeRemoteProcess = findActiveRemoteProcessRecord();
@@ -3283,6 +3533,7 @@ async function getRemoteRunnerLocalState() {
     queueState,
     activeRemoteJob: activeRemoteJob || processBackedRemoteJob,
     activeRemoteProcess,
+    activeLocalProcesses,
     queuedRemoteJob,
     localBusy: totalJobsWithProcess > 0,
     localQueueSize: totalJobsWithProcess
@@ -3444,19 +3695,35 @@ async function enqueueClaimedRemoteJob(job) {
     throw new Error('remote_job_prompt_chain_missing');
   }
 
+  const remoteSourceKind = typeof remoteJob.sourceKind === 'string' && remoteJob.sourceKind.trim()
+    ? remoteJob.sourceKind.trim()
+    : 'manual_text';
+  const remoteSourceUrl = typeof remoteJob.sourceUrl === 'string' && remoteJob.sourceUrl.trim()
+    ? remoteJob.sourceUrl.trim()
+    : 'manual://source';
+  const remoteAnalysisType = normalizeAnalysisTypeForPromptChain(remoteJob.analysisType);
+  const remoteChatUrl = typeof remoteJob.chatUrl === 'string' && remoteJob.chatUrl.trim()
+    ? remoteJob.chatUrl.trim()
+    : getChatUrlForAnalysisType(remoteAnalysisType);
+  const sourceMaterialId = typeof remoteJob.sourceMaterialId === 'string' ? remoteJob.sourceMaterialId.trim() : '';
+  const sourceMaterialHash = typeof remoteJob.sourceMaterialHash === 'string' ? remoteJob.sourceMaterialHash.trim() : '';
+  const sourceMaterialLength = normalizeSourceMaterialLength(remoteJob.sourceMaterialLength);
+
   const localJob = {
     kind: ANALYSIS_QUEUE_KIND_ARTICLE,
     jobId: remoteJob.jobId.trim(),
     runId: remoteJob.runId.trim(),
-    analysisType: typeof remoteJob.analysisType === 'string' && remoteJob.analysisType.trim()
-      ? remoteJob.analysisType.trim()
-      : 'company',
+    analysisType: remoteAnalysisType,
     title: typeof remoteJob.submittedTitle === 'string' && remoteJob.submittedTitle.trim()
       ? remoteJob.submittedTitle.trim()
       : 'Remote manual source',
-    sourceKind: 'manual_text',
-    sourceUrl: 'manual://source',
-    chatUrl: CHAT_URL,
+    sourceKind: remoteSourceKind,
+    sourceUrl: remoteSourceUrl,
+    sourceMaterialId,
+    sourceMaterialHash,
+    sourceMaterialLength: Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : null,
+    sourceMaterialStored: !!sourceMaterialId,
+    chatUrl: remoteChatUrl,
     queueBatchId: typeof remoteJob.batchId === 'string' ? remoteJob.batchId.trim() : '',
     promptChainSnapshot,
     promptHash: typeof remoteJob.promptHash === 'string' ? remoteJob.promptHash.trim() : '',
@@ -3466,7 +3733,10 @@ async function enqueueClaimedRemoteJob(job) {
       remoteRunnerId: typeof remoteJob.runnerId === 'string' ? remoteJob.runnerId.trim() : '',
       controllerId: typeof remoteJob.controllerId === 'string' ? remoteJob.controllerId.trim() : '',
       batchId: typeof remoteJob.batchId === 'string' ? remoteJob.batchId.trim() : '',
-      submissionId: typeof remoteJob.submissionId === 'string' ? remoteJob.submissionId.trim() : ''
+      submissionId: typeof remoteJob.submissionId === 'string' ? remoteJob.submissionId.trim() : '',
+      sourceMaterialId,
+      sourceMaterialHash,
+      sourceMaterialLength: Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : null
     },
     tabSnapshot: {
       id: `remote-${remoteJob.jobId.trim()}`,
@@ -3474,6 +3744,12 @@ async function enqueueClaimedRemoteJob(job) {
         ? remoteJob.submittedTitle.trim()
         : 'Remote manual source',
       url: 'manual://source',
+      sourceUrl: remoteSourceUrl,
+      sourceKind: remoteSourceKind,
+      sourceMaterialId,
+      sourceMaterialHash,
+      sourceMaterialLength: Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : null,
+      sourceMaterialStored: !!sourceMaterialId,
       manualText: text
     }
   };
@@ -3654,6 +3930,12 @@ async function sendRemoteRunnerHeartbeat(options = {}) {
   const activeRemoteJobId = typeof localState?.queuedRemoteJob?.remote?.remoteJobId === 'string'
     ? localState.queuedRemoteJob.remote.remoteJobId
     : '';
+  const localProcessSnapshot = typeof buildRemoteRunnerLocalProcessSnapshot === 'function'
+    ? buildRemoteRunnerLocalProcessSnapshot(localState, { limit: 25 })
+    : [];
+  const queueSnapshot = localState?.queueSnapshot && typeof localState.queueSnapshot === 'object'
+    ? localState.queueSnapshot
+    : {};
   return performSignedIskraApiRequest({
     method: 'POST',
     path: getIskraApiPath('runnerHeartbeat'),
@@ -3672,7 +3954,17 @@ async function sendRemoteRunnerHeartbeat(options = {}) {
       activeJobId: activeRemoteJobId || undefined,
       capabilities: {
         remoteManualTextV1: true,
-        promptChainSnapshotV1: true
+        promptChainSnapshotV1: true,
+        localProcessSnapshotV1: true,
+        localProcesses: localProcessSnapshot,
+        localQueueSnapshot: {
+          totalJobs: Number.isInteger(queueSnapshot?.totalJobs) ? queueSnapshot.totalJobs : localProcessSnapshot.length,
+          queueSize: Number.isInteger(queueSnapshot?.queueSize) ? queueSnapshot.queueSize : 0,
+          activeSlots: Number.isInteger(queueSnapshot?.activeSlots) ? queueSnapshot.activeSlots : 0,
+          reservedSlots: Number.isInteger(queueSnapshot?.reservedSlots) ? queueSnapshot.reservedSlots : 0,
+          liveSlots: Number.isInteger(queueSnapshot?.liveSlots) ? queueSnapshot.liveSlots : 0,
+          updatedAt: Date.now()
+        }
       }
     },
     timeoutMs: options?.timeoutMs
@@ -3755,7 +4047,28 @@ function requestRemoteRunnerCycle(reason = 'manual') {
   remoteRunnerCycleRequested = true;
   Promise.resolve().then(() => runRemoteRunnerCycle(normalizedReason)).catch((error) => {
     console.warn('[remote-runner] cycle failed:', error?.message || String(error));
+    if (typeof scheduleRemoteRunnerRescueCycle === 'function') {
+      scheduleRemoteRunnerRescueCycle(`request_failed:${normalizedReason}`);
+    }
   });
+}
+
+function clearRemoteRunnerRescueTimer() {
+  if (remoteRunnerRescueTimer === null) return;
+  if (typeof clearTimeout === 'function') clearTimeout(remoteRunnerRescueTimer);
+  remoteRunnerRescueTimer = null;
+}
+
+function scheduleRemoteRunnerRescueCycle(reason = 'cycle_failed', delayMs = ISKRA_REMOTE_RUNNER.rescueRetryMs) {
+  if (typeof setTimeout !== 'function') return;
+  if (remoteRunnerRescueTimer !== null) return;
+  const safeDelay = Number.isInteger(delayMs)
+    ? Math.max(1000, Math.min(5 * 60 * 1000, delayMs))
+    : ISKRA_REMOTE_RUNNER.rescueRetryMs;
+  remoteRunnerRescueTimer = setTimeout(() => {
+    remoteRunnerRescueTimer = null;
+    requestRemoteRunnerCycle(`rescue:${reason}`);
+  }, safeDelay);
 }
 
 async function runRemoteRunnerCycle(reason = 'manual') {
@@ -3772,7 +4085,17 @@ async function runRemoteRunnerCycle(reason = 'manual') {
     remoteRunnerCycleRequested = false;
     const runnerEnabled = await getStoredRemoteRunnerEnabled();
     if (!runnerEnabled) {
+      if (typeof clearRemoteRunnerRescueTimer === 'function') clearRemoteRunnerRescueTimer();
       return { success: true, skipped: true, reason: 'runner_disabled' };
+    }
+
+    if (typeof syncRemoteRunnerAlarm === 'function') {
+      await syncRemoteRunnerAlarm().catch((error) => {
+        console.warn('[remote-runner] alarm sync failed:', {
+          reason: normalizedReason,
+          error: error?.message || String(error)
+        });
+      });
     }
 
     await sendRemoteRunnerHeartbeat().catch((error) => {
@@ -3819,6 +4142,20 @@ async function runRemoteRunnerCycle(reason = 'manual') {
     return pollAndClaimRemoteJob({
       origin: normalizedReason
     });
+  } catch (error) {
+    console.warn('[remote-runner] cycle failed:', {
+      reason: normalizedReason,
+      error: error?.message || String(error)
+    });
+    if (typeof scheduleRemoteRunnerRescueCycle === 'function') {
+      scheduleRemoteRunnerRescueCycle(`cycle_failed:${normalizedReason}`);
+    }
+    return {
+      success: false,
+      skipped: true,
+      reason: 'remote_runner_cycle_failed',
+      error: error?.message || String(error)
+    };
   } finally {
     remoteRunnerCycleInProgress = false;
     if (remoteRunnerCycleRequested) {
@@ -3956,7 +4293,10 @@ async function buildPreparedAnalysisBatch(tabs, promptChain, analysisType, optio
       controllerId,
       runnerId: typeof options?.runnerId === 'string' ? options.runnerId.trim() : '',
       analysisType,
+      chatUrl: getChatUrlForAnalysisType(analysisType),
       sourceMode: 'manual_text',
+      sourceKind: 'desktop_tab',
+      sourceUrl: typeof prepared.sourceUrl === 'string' ? prepared.sourceUrl : '',
       submittedTitle: prepared.title,
       text: prepared.text,
       instanceIndex: index + 1,
@@ -4055,7 +4395,8 @@ async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, option
     ? statusResult.payload.runner
     : null;
   const runnerState = typeof runnerStatus?.state === 'string' ? runnerStatus.state.trim().toLowerCase() : '';
-  if (!runnerStatus || runnerStatus.queueable !== true || runnerState !== 'ready') {
+  const runnerAcceptsQueuedWork = runnerStatus?.queueable === true && (runnerState === 'ready' || runnerState === 'busy');
+  if (!runnerStatus || !runnerAcceptsQueuedWork) {
     return {
       success: false,
       error: runnerState ? `runner_${runnerState}` : 'runner_blocked',
@@ -10153,10 +10494,18 @@ function generateAnalysisQueueJobId(sequence = 0) {
   return `aq-${Date.now()}-${safeSequence}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function resolvePromptCountForQueuedJob(job) {
+  if (Array.isArray(job?.promptChainSnapshot) && job.promptChainSnapshot.length > 0) {
+    return job.promptChainSnapshot.length;
+  }
+  const promptChain = getPromptChainForAnalysisType(job?.analysisType || ANALYSIS_TYPE_COMPANY);
+  return Array.isArray(promptChain) ? promptChain.length : 0;
+}
+
 function buildQueuedProcessPatchForJob(job) {
   const safeJob = sanitizeAnalysisQueueJob(job);
   if (!safeJob) return null;
-  const totalPrompts = Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0;
+  const totalPrompts = resolvePromptCountForQueuedJob(safeJob);
   const patch = {
     title: safeJob.title,
     analysisType: safeJob.analysisType || 'company',
@@ -10184,8 +10533,24 @@ function buildQueuedProcessPatchForJob(job) {
   };
 
   if (safeJob.kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
-    const sourceUrl = typeof safeJob?.tabSnapshot?.url === 'string' ? safeJob.tabSnapshot.url : '';
+    const sourceUrl = typeof safeJob?.sourceUrl === 'string' && safeJob.sourceUrl.trim()
+      ? safeJob.sourceUrl.trim()
+      : (typeof safeJob?.tabSnapshot?.sourceUrl === 'string' && safeJob.tabSnapshot.sourceUrl.trim()
+        ? safeJob.tabSnapshot.sourceUrl.trim()
+        : (typeof safeJob?.tabSnapshot?.url === 'string' ? safeJob.tabSnapshot.url : ''));
     patch.sourceUrl = sourceUrl;
+    if (safeJob.sourceKind) patch.sourceKind = safeJob.sourceKind;
+    const sourceMaterialId = safeJob.sourceMaterialId || safeJob.tabSnapshot?.sourceMaterialId || '';
+    const sourceMaterialHash = safeJob.sourceMaterialHash || safeJob.tabSnapshot?.sourceMaterialHash || '';
+    const sourceMaterialLength = normalizeSourceMaterialLength(
+      safeJob.sourceMaterialLength ?? safeJob.tabSnapshot?.sourceMaterialLength
+    );
+    if (sourceMaterialId) patch.sourceMaterialId = sourceMaterialId;
+    if (sourceMaterialHash) patch.sourceMaterialHash = sourceMaterialHash;
+    if (Number.isInteger(sourceMaterialLength)) patch.sourceMaterialLength = sourceMaterialLength;
+    if (safeJob.sourceMaterialStored === true || safeJob.tabSnapshot?.sourceMaterialStored === true || sourceMaterialId) {
+      patch.sourceMaterialStored = true;
+    }
   } else {
     const startIndex = Number.isInteger(safeJob.resumeStartIndex) ? safeJob.resumeStartIndex : 0;
     const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(startIndex, totalPrompts);
@@ -10719,12 +11084,13 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         return;
       }
 
+      const scheduledAnalysisType = scheduledJob.analysisType || ANALYSIS_TYPE_COMPANY;
+      if (!(Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0)) {
+        await ensurePromptChainReadyForAnalysisType(scheduledAnalysisType);
+      }
       const promptChain = Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0
         ? scheduledJob.promptChainSnapshot
-        : PROMPTS_COMPANY;
-      if (!(Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0)) {
-        await ensureCompanyPromptsReady();
-      }
+        : getPromptChainForAnalysisType(scheduledAnalysisType);
       if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
         await reportRemoteJobEvent(
           scheduledJob.remote.remoteJobId,
@@ -10749,8 +11115,8 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         promptChain,
         typeof scheduledJob.chatUrl === 'string' && scheduledJob.chatUrl.trim()
           ? scheduledJob.chatUrl.trim()
-          : CHAT_URL,
-        scheduledJob.analysisType || 'company',
+          : getChatUrlForAnalysisType(scheduledAnalysisType),
+        scheduledAnalysisType,
         {
           invocationWindowId: Number.isInteger(scheduledJob.invocationWindowId) ? scheduledJob.invocationWindowId : null,
           runId: scheduledJob.runId,
@@ -12948,6 +13314,7 @@ async function handleProcessDecisionAllMessage(message) {
 
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
+let PROMPTS_PORTFOLIO = [];
 let promptsCompanyHashCache = '';
 let promptsCompanyHashCacheKey = '';
 
@@ -18697,6 +19064,20 @@ async function ensureCompanyPromptsReady() {
   return Array.isArray(PROMPTS_COMPANY) && PROMPTS_COMPANY.length > 0;
 }
 
+async function ensurePortfolioPromptsReady() {
+  if (Array.isArray(PROMPTS_PORTFOLIO) && PROMPTS_PORTFOLIO.length > 0) {
+    return true;
+  }
+  await loadPrompts();
+  return Array.isArray(PROMPTS_PORTFOLIO) && PROMPTS_PORTFOLIO.length > 0;
+}
+
+async function ensurePromptChainReadyForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+    ? ensurePortfolioPromptsReady()
+    : ensureCompanyPromptsReady();
+}
+
 function buildCompanyPromptChainForResume(startIndex) {
   if (!Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
     return [];
@@ -22001,6 +22382,21 @@ function normalizeWatchlistDispatchPayload(response) {
   if (sourceMeta.sourceUrl) {
     payload.sourceUrl = sourceMeta.sourceUrl;
   }
+  if (sourceMeta.sourceMaterialId) {
+    payload.sourceMaterialId = sourceMeta.sourceMaterialId;
+  }
+  if (sourceMeta.sourceMaterialHash) {
+    payload.sourceMaterialHash = sourceMeta.sourceMaterialHash;
+  }
+  if (Number.isInteger(sourceMeta.sourceMaterialLength)) {
+    payload.sourceMaterialLength = sourceMeta.sourceMaterialLength;
+  }
+  if (sourceMeta.sourceMaterialStored) {
+    payload.sourceMaterialStored = true;
+  }
+  if (!sourceMeta.sourceMaterialId && typeof sourceMeta.sourceMaterialText === 'string' && sourceMeta.sourceMaterialText.trim()) {
+    payload.sourceMaterialText = sourceMeta.sourceMaterialText;
+  }
   if (structuredPayload?.schemaVersion) {
     payload.schema_version = structuredPayload.schemaVersion;
   }
@@ -22186,6 +22582,21 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   }
   if (sourceMeta.sourceUrl) {
     payload.sourceUrl = sourceMeta.sourceUrl;
+  }
+  if (sourceMeta.sourceMaterialId) {
+    payload.sourceMaterialId = sourceMeta.sourceMaterialId;
+  }
+  if (sourceMeta.sourceMaterialHash) {
+    payload.sourceMaterialHash = sourceMeta.sourceMaterialHash;
+  }
+  if (Number.isInteger(sourceMeta.sourceMaterialLength)) {
+    payload.sourceMaterialLength = sourceMeta.sourceMaterialLength;
+  }
+  if (sourceMeta.sourceMaterialStored) {
+    payload.sourceMaterialStored = true;
+  }
+  if (!sourceMeta.sourceMaterialId && typeof sourceMeta.sourceMaterialText === 'string' && sourceMeta.sourceMaterialText.trim()) {
+    payload.sourceMaterialText = sourceMeta.sourceMaterialText;
   }
   if (structuredResponse?.schemaVersion) {
     payload.schema_version = structuredResponse.schemaVersion;
@@ -23850,6 +24261,185 @@ async function getWatchlistDispatchStatus(forceReload = false) {
     latestOutboxError,
     latestOutboxErrorTrace
   };
+}
+
+function buildExtensionHeartbeatCheck(name, ok, detail = '') {
+  return {
+    name: typeof name === 'string' ? name : '',
+    ok: ok === true,
+    detail: typeof detail === 'string' ? detail : ''
+  };
+}
+
+function sanitizeExtensionHeartbeatWatchlistStatus(status) {
+  const raw = status && typeof status === 'object' ? status : {};
+  return {
+    enabled: raw.enabled !== false,
+    configured: raw.configured === true,
+    hasToken: raw.hasToken === true,
+    ready: raw.configured === true && raw.hasToken === true,
+    reason: typeof raw.reason === 'string' ? raw.reason : '',
+    intakeUrl: typeof raw.intakeUrl === 'string' ? raw.intakeUrl : '',
+    keyId: typeof raw.keyId === 'string' ? raw.keyId : '',
+    tokenSource: typeof raw.tokenSource === 'string' ? raw.tokenSource : 'missing',
+    intakeUrlSource: typeof raw.intakeUrlSource === 'string' ? raw.intakeUrlSource : 'missing',
+    keyIdSource: typeof raw.keyIdSource === 'string' ? raw.keyIdSource : 'missing',
+    queueSize: Number.isInteger(raw.queueSize) ? raw.queueSize : 0,
+    flushInProgress: raw.flushInProgress === true,
+    historySize: Number.isInteger(raw.historySize) ? raw.historySize : 0,
+    nextRetryAt: Number.isInteger(raw.nextRetryAt) ? raw.nextRetryAt : null,
+    latestOutboxError: typeof raw.latestOutboxError === 'string' ? raw.latestOutboxError : '',
+    supportId: typeof raw.supportId === 'string' ? raw.supportId : ''
+  };
+}
+
+function sanitizeExtensionHeartbeatQueueStatus(queue) {
+  const raw = queue && typeof queue === 'object' ? queue : {};
+  return {
+    success: raw.success !== false,
+    paused: raw.paused === true,
+    maxConcurrent: Number.isInteger(raw.maxConcurrent) ? raw.maxConcurrent : ANALYSIS_QUEUE_MAX_CONCURRENT,
+    activeSlots: Number.isInteger(raw.activeSlots) ? raw.activeSlots : 0,
+    reservedSlots: Number.isInteger(raw.reservedSlots) ? raw.reservedSlots : 0,
+    liveSlots: Number.isInteger(raw.liveSlots) ? raw.liveSlots : 0,
+    startingSlots: Number.isInteger(raw.startingSlots) ? raw.startingSlots : 0,
+    queueSize: Number.isInteger(raw.queueSize) ? raw.queueSize : 0,
+    waitingJobs: Number.isInteger(raw.waitingJobs) ? raw.waitingJobs : 0,
+    activeJobs: Number.isInteger(raw.activeJobs) ? raw.activeJobs : 0,
+    totalJobs: Number.isInteger(raw.totalJobs) ? raw.totalJobs : 0,
+    error: typeof raw.error === 'string' ? raw.error : ''
+  };
+}
+
+async function persistExtensionHeartbeatStatus(heartbeat) {
+  try {
+    if (typeof chrome !== 'undefined' && chrome?.storage?.local?.set) {
+      await chrome.storage.local.set({ [EXTENSION_HEARTBEAT_STORAGE_KEY]: heartbeat });
+    }
+  } catch {
+    // Heartbeat must stay read-only from the caller perspective.
+  }
+}
+
+async function buildExtensionHeartbeatStatus(options = {}) {
+  const generatedAt = Date.now();
+  const manifest = (() => {
+    try {
+      return typeof chrome !== 'undefined' && typeof chrome?.runtime?.getManifest === 'function'
+        ? chrome.runtime.getManifest()
+        : {};
+    } catch {
+      return {};
+    }
+  })();
+  const extensionId = (() => {
+    try {
+      return typeof chrome !== 'undefined' && typeof chrome?.runtime?.id === 'string' ? chrome.runtime.id : '';
+    } catch {
+      return '';
+    }
+  })();
+
+  const [watchlistRaw, queueRaw, supportId] = await Promise.all([
+    getWatchlistDispatchStatus(Boolean(options?.forceReload)).catch((error) => ({
+      success: false,
+      configured: false,
+      hasToken: false,
+      reason: 'watchlist_status_failed',
+      error: error?.message || String(error)
+    })),
+    options?.includeQueue === false
+      ? Promise.resolve(null)
+      : getAnalysisQueueStatusSnapshot().catch((error) => ({
+        success: false,
+        error: error?.message || String(error)
+      })),
+    ensureExtensionInstallationId().catch(() => '')
+  ]);
+
+  const watchlist = sanitizeExtensionHeartbeatWatchlistStatus(watchlistRaw);
+  const queue = queueRaw ? sanitizeExtensionHeartbeatQueueStatus(queueRaw) : null;
+  const companyPromptCount = Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0;
+  const portfolioPromptCount = Array.isArray(PROMPTS_PORTFOLIO) ? PROMPTS_PORTFOLIO.length : 0;
+  const sourceMaterialsSubmitLoaded = typeof submitSourceMaterialForProcess === 'function';
+  const manualSourceQueueSubmitLoaded = typeof submitManualSourceMaterialForQueue === 'function';
+  const signedApiRequestLoaded = typeof performSignedIskraApiRequest === 'function';
+  const watchlistApiLoaded = typeof WatchlistApiUtils?.buildSignedJsonRequest === 'function';
+  const sourceMaterialsApiPathReady = SOURCE_MATERIALS_API_PATH === '/api/v1/source-materials';
+  const portfolioAutoCompany = typeof shouldRunPortfolioAlongsideCompany === 'function'
+    && shouldRunPortfolioAlongsideCompany(ANALYSIS_TYPE_COMPANY) === true;
+  const portfolioChatUrlReady = PORTFOLIO_CHAT_URL === 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project';
+  const queueAvailable = queue ? queue.success !== false : true;
+  const readyForDb = sourceMaterialsSubmitLoaded
+    && manualSourceQueueSubmitLoaded
+    && signedApiRequestLoaded
+    && watchlistApiLoaded
+    && sourceMaterialsApiPathReady
+    && watchlist.ready;
+
+  const checks = [
+    buildExtensionHeartbeatCheck('background_loaded', true, 'service_worker_active'),
+    buildExtensionHeartbeatCheck('company_prompts_loaded', companyPromptCount > 0, String(companyPromptCount)),
+    buildExtensionHeartbeatCheck('portfolio_prompts_loaded', portfolioPromptCount > 0, String(portfolioPromptCount)),
+    buildExtensionHeartbeatCheck('watchlist_signing_available', watchlistApiLoaded && signedApiRequestLoaded, 'hmac_client_loaded'),
+    buildExtensionHeartbeatCheck('watchlist_dispatch_configured', watchlist.ready, watchlist.reason || watchlist.tokenSource),
+    buildExtensionHeartbeatCheck('source_materials_api_path', sourceMaterialsApiPathReady, SOURCE_MATERIALS_API_PATH),
+    buildExtensionHeartbeatCheck('source_materials_submit_loaded', sourceMaterialsSubmitLoaded, 'submitSourceMaterialForProcess'),
+    buildExtensionHeartbeatCheck('manual_source_queue_submit_loaded', manualSourceQueueSubmitLoaded, 'submitManualSourceMaterialForQueue'),
+    buildExtensionHeartbeatCheck('manual_source_fail_closed', true, 'manual launch blocked when source save fails'),
+    buildExtensionHeartbeatCheck('portfolio_auto_company', portfolioAutoCompany, 'company launch always queues portfolio analysis'),
+    buildExtensionHeartbeatCheck('portfolio_chat_url', portfolioChatUrlReady, PORTFOLIO_CHAT_URL),
+    buildExtensionHeartbeatCheck('analysis_queue_available', queueAvailable, queue?.error || '')
+  ];
+
+  const heartbeat = {
+    success: true,
+    ok: checks.every((check) => check.ok === true),
+    readyForDb,
+    generatedAt,
+    generatedAtIso: new Date(generatedAt).toISOString(),
+    serviceWorkerStartedAt: EXTENSION_SERVICE_WORKER_STARTED_AT,
+    serviceWorkerStartedAtIso: new Date(EXTENSION_SERVICE_WORKER_STARTED_AT).toISOString(),
+    uptimeMs: Math.max(0, generatedAt - EXTENSION_SERVICE_WORKER_STARTED_AT),
+    extensionName: typeof manifest?.name === 'string' ? manifest.name : 'Iskra',
+    manifestVersion: typeof manifest?.version === 'string' ? manifest.version : '',
+    extensionId,
+    supportId: typeof supportId === 'string' && supportId ? supportId : watchlist.supportId,
+    featureRevision: EXTENSION_FEATURE_REVISION,
+    features: {
+      sourceMaterialsApiPath: SOURCE_MATERIALS_API_PATH,
+      sourceMaterialsEndpointConfigured: sourceMaterialsApiPathReady,
+      sourceMaterialsSubmitFunction: sourceMaterialsSubmitLoaded,
+      manualSourceQueueSubmitFunction: manualSourceQueueSubmitLoaded,
+      manualSourceFailClosed: true,
+      signedApiRequestFunction: signedApiRequestLoaded,
+      watchlistApiUtils: watchlistApiLoaded,
+      processContractUtils: Object.keys(ProcessContractUtils || {}).length > 0,
+      decisionContractUtils: Object.keys(DecisionContractUtils || {}).length > 0,
+      responseStorageUtils: Object.keys(ResponseStorageUtils || {}).length > 0,
+      dispatchShapeUtils: Object.keys(WatchlistDispatchShapeUtils || {}).length > 0,
+      portfolioAutoCompany,
+      portfolioChatUrl: PORTFOLIO_CHAT_URL,
+      companyChatUrl: CHAT_URL
+    },
+    prompts: {
+      companyCount: companyPromptCount,
+      portfolioCount: portfolioPromptCount,
+      companyLoaded: companyPromptCount > 0,
+      portfolioLoaded: portfolioPromptCount > 0
+    },
+    sourceMaterial: {
+      apiPath: SOURCE_MATERIALS_API_PATH,
+      requiredBeforeManualLaunch: true,
+      processLinkingEnabled: true
+    },
+    watchlist,
+    queue,
+    checks
+  };
+
+  await persistExtensionHeartbeatStatus(heartbeat);
+  return heartbeat;
 }
 
 function summarizeWatchlistDispatchStatusForLog(status) {
@@ -26338,27 +26928,136 @@ function parsePromptChainText(rawText) {
   return [normalizedText.trim()];
 }
 
+function normalizeAnalysisTypeForPromptChain(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === ANALYSIS_TYPE_PORTFOLIO || normalized === 'portfolio_analysis') {
+    return ANALYSIS_TYPE_PORTFOLIO;
+  }
+  return ANALYSIS_TYPE_COMPANY;
+}
+
+function getPromptChainForAnalysisType(analysisType) {
+  const normalized = normalizeAnalysisTypeForPromptChain(analysisType);
+  if (normalized === ANALYSIS_TYPE_PORTFOLIO) {
+    return Array.isArray(PROMPTS_PORTFOLIO) ? PROMPTS_PORTFOLIO : [];
+  }
+  return Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY : [];
+}
+
+function getChatUrlForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+    ? PORTFOLIO_CHAT_URL
+    : CHAT_URL;
+}
+
+function shouldRunPortfolioAlongsideCompany(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_COMPANY;
+}
+
+function getAnalysisLaunchQueuedCount(result, fallback = 0) {
+  if (Number.isInteger(result?.queuedCount)) return Math.max(0, result.queuedCount);
+  if (Number.isInteger(result?.queued)) return Math.max(0, result.queued);
+  if (Number.isInteger(result?.submittedCount)) return Math.max(0, result.submittedCount);
+  return Math.max(0, Number.isInteger(fallback) ? fallback : 0);
+}
+
+function pickAnalysisLaunchMetric(primaryResult, portfolioResult, key, fallback = 0) {
+  if (Number.isInteger(portfolioResult?.[key])) return portfolioResult[key];
+  if (Number.isInteger(primaryResult?.[key])) return primaryResult[key];
+  return fallback;
+}
+
+function mergeAnalysisLaunchResults(primaryResult, portfolioResult = null, options = {}) {
+  const primaryFallbackQueued = Number.isInteger(options?.primaryFallbackQueued)
+    ? options.primaryFallbackQueued
+    : 0;
+  const primaryQueuedCount = getAnalysisLaunchQueuedCount(primaryResult, primaryFallbackQueued);
+  const portfolioQueuedCount = getAnalysisLaunchQueuedCount(portfolioResult, 0);
+  const portfolioQueued = !!portfolioResult && portfolioQueuedCount > 0;
+  const primarySuccess = primaryResult?.success !== false;
+  const portfolioSuccess = !portfolioResult || portfolioResult.success !== false;
+  const queuedCount = primaryQueuedCount + portfolioQueuedCount;
+  const merged = {
+    ...(primaryResult && typeof primaryResult === 'object' ? primaryResult : {}),
+    success: primarySuccess && portfolioSuccess,
+    analysisType: typeof options?.analysisType === 'string' && options.analysisType.trim()
+      ? options.analysisType.trim()
+      : (typeof primaryResult?.analysisType === 'string' ? primaryResult.analysisType : ANALYSIS_TYPE_COMPANY),
+    extraPortfolioQueued: portfolioQueued,
+    companyQueuedCount: primaryQueuedCount,
+    portfolioQueuedCount,
+    portfolioResult,
+    queued: queuedCount,
+    queuedCount,
+    queueSize: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'queueSize', 0),
+    activeSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'activeSlots', 0),
+    reservedSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'reservedSlots', 0),
+    liveSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'liveSlots', 0),
+    startingSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'startingSlots', 0)
+  };
+
+  if (typeof options?.mode === 'string' && options.mode.trim()) {
+    merged.mode = options.mode.trim();
+  }
+  if (Number.isInteger(primaryResult?.maxConcurrent) || Number.isInteger(portfolioResult?.maxConcurrent)) {
+    merged.maxConcurrent = pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'maxConcurrent', null);
+  }
+  if (Number.isInteger(primaryResult?.submittedCount) || Number.isInteger(portfolioResult?.submittedCount)) {
+    const primarySubmittedCount = Number.isInteger(primaryResult?.submittedCount)
+      ? Math.max(0, primaryResult.submittedCount)
+      : primaryQueuedCount;
+    const portfolioSubmittedCount = Number.isInteger(portfolioResult?.submittedCount)
+      ? Math.max(0, portfolioResult.submittedCount)
+      : portfolioQueuedCount;
+    merged.companySubmittedCount = primarySubmittedCount;
+    merged.portfolioSubmittedCount = portfolioSubmittedCount;
+    merged.submittedCount = primarySubmittedCount + portfolioSubmittedCount;
+  }
+  if (!merged.success) {
+    merged.error = primaryResult?.error || portfolioResult?.error || 'analysis_launch_failed';
+  }
+  return merged;
+}
+
+function getPromptFileNameForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+    ? 'prompts-portfolio.txt'
+    : 'prompts-company.txt';
+}
+
 // Load prompts from txt files.
 async function loadPrompts() {
   try {
     console.log('[prompts] Loading prompts from files...');
 
     const companyUrl = chrome.runtime.getURL('prompts-company.txt');
-    const companyResponse = await fetch(companyUrl);
-    const companyText = await companyResponse.text();
+    const portfolioUrl = chrome.runtime.getURL('prompts-portfolio.txt');
+    const [companyResponse, portfolioResponse] = await Promise.all([
+      fetch(companyUrl),
+      fetch(portfolioUrl)
+    ]);
+    const [companyText, portfolioText] = await Promise.all([
+      companyResponse.text(),
+      portfolioResponse.text()
+    ]);
 
     // Parse in a way that tolerates UTF-8 and mojibake separator variants.
     PROMPTS_COMPANY = parsePromptChainText(companyText);
+    PROMPTS_PORTFOLIO = parsePromptChainText(portfolioText);
     refreshCompanyStageMetadataFromPrompts(PROMPTS_COMPANY);
 
     if (PROMPTS_COMPANY.length <= 1 && /PROMPT(?:[ _-]+)SEPARATOR/.test(companyText)) {
       console.warn('[prompts] Separator token found but parsed as a single prompt - verify file encoding.');
     }
+    if (PROMPTS_PORTFOLIO.length <= 1 && /PROMPT(?:[ _-]+)SEPARATOR/.test(portfolioText)) {
+      console.warn('[prompts] Portfolio separator token found but parsed as a single prompt - verify file encoding.');
+    }
 
-    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}; stages: ${STAGE_METADATA_COMPANY.length}`);
+    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}; portfolio prompts: ${PROMPTS_PORTFOLIO.length}; stages: ${STAGE_METADATA_COMPANY.length}`);
   } catch (error) {
     console.error('[prompts] Failed loading prompts:', error);
     PROMPTS_COMPANY = [];
+    PROMPTS_PORTFOLIO = [];
     refreshCompanyStageMetadataFromPrompts(PROMPTS_COMPANY);
   }
 }
@@ -26452,6 +27151,144 @@ function resolveSupportedSourceNameFromUrl(rawUrl) {
   }
 }
 
+function normalizeSourceMaterialLength(value) {
+  if (value === null || typeof value === 'undefined' || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+function normalizeSourceMaterialSubmitFailure(result = null, fallback = 'source_material_submit_failed') {
+  const candidates = [
+    result?.error,
+    result?.reason,
+    result?.payload?.detail,
+    result?.payload?.reason,
+    fallback
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      const trimmed = candidate.trim();
+      return typeof trimProblemLogText === 'function'
+        ? trimProblemLogText(trimmed, 160)
+        : trimmed.slice(0, 160);
+    }
+  }
+  return fallback;
+}
+
+async function reportManualSourceMaterialSaveEvent(eventName, options = {}) {
+  if (typeof reportAnalysisQueueEvent !== 'function') return null;
+  const level = normalizeProblemLogLevel(options?.level || 'info');
+  const status = trimProblemLogText(options?.status || (level === 'error' ? 'failed' : 'ok'), 40);
+  const reason = trimProblemLogText(options?.reason || eventName || 'source_material', 140);
+  const title = trimProblemLogText(options?.title || 'Manual source material', 160);
+  const manualTextSourceId = trimProblemLogText(options?.manualTextSourceId || '', 120);
+  const statusText = trimProblemLogText(options?.statusText || '', 240);
+  return reportAnalysisQueueEvent(eventName || 'source_material', {
+    level,
+    status,
+    reason,
+    title: `Source material: ${eventName || status}`,
+    runId: manualTextSourceId,
+    analysisType: normalizeAnalysisTypeForPromptChain(options?.analysisType),
+    sourceUrl: 'manual://source',
+    statusText,
+    message: trimProblemLogText(options?.message || statusText || reason, 260),
+    signature: trimProblemLogText([
+      'manual-source-material',
+      eventName,
+      manualTextSourceId,
+      status,
+      reason,
+      Date.now(),
+      Math.random().toString(36).slice(2, 8)
+    ].join('|'), 380)
+  });
+}
+
+async function submitManualSourceMaterialForQueue(text, title, options = {}) {
+  const safeText = typeof text === 'string' ? text : '';
+  if (!safeText.trim()) return {};
+  if (typeof submitSourceMaterialForProcess !== 'function') {
+    throw new Error('source_material_submit_unavailable');
+  }
+
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
+  const manualTextSourceId = typeof options?.manualTextSourceId === 'string' ? options.manualTextSourceId.trim() : '';
+  const analysisType = normalizeAnalysisTypeForPromptChain(options?.analysisType);
+  const processId = manualTextSourceId || `manual-source-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await reportManualSourceMaterialSaveEvent('save_start', {
+    level: 'info',
+    status: 'starting',
+    reason: typeof options?.reason === 'string' ? options.reason : 'manual_source_enqueue',
+    title: safeTitle,
+    manualTextSourceId,
+    analysisType,
+    statusText: `textLength=${safeText.length} | includesPortfolio=${options?.includesPortfolio === true ? 'yes' : 'no'}`
+  }).catch(() => null);
+  const materialResult = await submitSourceMaterialForProcess({
+    text: safeText,
+    title: safeTitle,
+    sourceKind: 'manual_text',
+    sourceUrl: 'manual://source',
+    processKind: 'manual_source_enqueue',
+    processId,
+    runId: processId,
+    relation: 'manual_source_input',
+    metadata: {
+      analysis_type: analysisType,
+      manual_text_source_id: manualTextSourceId,
+      requested_instances: Number.isInteger(options?.instances) ? options.instances : null,
+      includes_portfolio: options?.includesPortfolio === true,
+      reason: typeof options?.reason === 'string' ? options.reason : ''
+    }
+  }, { retryCount: 1, timeoutMs: 15000 });
+
+  const payload = materialResult?.payload && typeof materialResult.payload === 'object'
+    ? materialResult.payload
+    : {};
+  if (materialResult?.success !== true || !payload.sourceMaterialId) {
+    const failureReason = normalizeSourceMaterialSubmitFailure(materialResult, 'source_material_enqueue_submit_failed');
+    console.warn('[source-material] manual enqueue submit failed; analysis launch blocked', {
+      reason: failureReason,
+      status: Number.isInteger(materialResult?.status) ? materialResult.status : null
+    });
+    await reportManualSourceMaterialSaveEvent('save_failed', {
+      level: 'error',
+      status: 'failed',
+      reason: failureReason,
+      title: safeTitle,
+      manualTextSourceId,
+      analysisType,
+      statusText: `status=${Number.isInteger(materialResult?.status) ? materialResult.status : 'n/a'} | textLength=${safeText.length}`,
+      message: `Nie uruchamiam analizy, bo material zrodlowy nie zostal zapisany: ${failureReason}`
+    }).catch(() => null);
+    throw new Error(failureReason);
+  }
+
+  const sourceMaterialId = typeof payload.sourceMaterialId === 'string' ? payload.sourceMaterialId.trim() : '';
+  const sourceMaterialHash = typeof payload.sourceMaterialHash === 'string' ? payload.sourceMaterialHash.trim() : '';
+  const sourceMaterialLength = normalizeSourceMaterialLength(payload.sourceMaterialLength);
+  await reportManualSourceMaterialSaveEvent('save_ok', {
+    level: 'info',
+    status: 'stored',
+    reason: 'source_material_stored',
+    title: safeTitle,
+    manualTextSourceId,
+    analysisType,
+    statusText: `sourceMaterialId=${sourceMaterialId.slice(0, 96)} | length=${Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : safeText.length}`
+  }).catch(() => null);
+
+  return {
+    sourceMaterialId,
+    sourceMaterialHash,
+    sourceMaterialLength,
+    sourceMaterialStored: true,
+    sourceMaterialNeedsProcessLink: true
+  };
+}
+
 function normalizeResponseSourceMeta(sourceMeta = null, fallbackSource = '') {
   const raw = sourceMeta && typeof sourceMeta === 'object' ? sourceMeta : {};
   const sourceTitle = trimProblemLogText(
@@ -26472,10 +27309,35 @@ function normalizeResponseSourceMeta(sourceMeta = null, fallbackSource = '') {
     140
   );
   const sourceName = explicitSourceName || resolveSupportedSourceNameFromUrl(sourceUrl);
+  const sourceMaterialId = trimProblemLogText(
+    typeof raw.sourceMaterialId === 'string'
+      ? raw.sourceMaterialId
+      : (typeof raw.source_material_id === 'string' ? raw.source_material_id : ''),
+    260
+  );
+  const sourceMaterialHash = trimProblemLogText(
+    typeof raw.sourceMaterialHash === 'string'
+      ? raw.sourceMaterialHash
+      : (typeof raw.source_material_hash === 'string' ? raw.source_material_hash : ''),
+    180
+  );
+  const sourceMaterialLength = normalizeSourceMaterialLength(
+    raw.sourceMaterialLength ?? raw.source_material_length
+  );
+  const sourceMaterialText = typeof raw.sourceMaterialText === 'string'
+    ? raw.sourceMaterialText
+    : (typeof raw.source_material_text === 'string' ? raw.source_material_text : '');
   return {
     sourceTitle,
     sourceName,
-    sourceUrl
+    sourceUrl,
+    sourceMaterialId,
+    sourceMaterialHash,
+    sourceMaterialLength,
+    sourceMaterialStored: raw.sourceMaterialStored === true
+      || raw.source_material_stored === true
+      || !!sourceMaterialId,
+    sourceMaterialText
   };
 }
 
@@ -26668,9 +27530,7 @@ if (chrome?.alarms?.onAlarm) {
     }
 
     if (alarm.name === ISKRA_REMOTE_RUNNER.alarmName) {
-      runRemoteRunnerCycle('remote_runner_alarm').catch((error) => {
-        console.warn('[remote-runner] cycle alarm failed:', error);
-      });
+      requestRemoteRunnerCycle('remote_runner_alarm');
       return;
     }
 
@@ -26835,7 +27695,7 @@ async function saveSectorMemoryResponse(
     stage: 'stage_16',
     generatedBy: 'chatgpt',
     sourceRunId: normalizedRunId || '',
-    sourceMaterialId: normalizedSourceMeta.sourceUrl || normalizedSourceMeta.sourceTitle || '',
+    sourceMaterialId: normalizedSourceMeta.sourceMaterialId || '',
     status: 'active',
     validationStatus: 'valid',
     minOpisChars: 120,
@@ -26844,6 +27704,8 @@ async function saveSectorMemoryResponse(
       source_title: normalizedSourceMeta.sourceTitle || '',
       source_name: normalizedSourceMeta.sourceName || '',
       source_url: normalizedSourceMeta.sourceUrl || '',
+      source_material_id: normalizedSourceMeta.sourceMaterialId || '',
+      source_material_hash: normalizedSourceMeta.sourceMaterialHash || '',
       conversation_url: normalizedConversationUrl || '',
       captured_prompt: promptNumber,
       selected_response_reason: typeof stageMeta?.sector_memory_response_reason === 'string' && stageMeta.sector_memory_response_reason.trim()
@@ -26993,6 +27855,12 @@ async function saveResponse(
           normalizedResponseId
         )
       : null;
+    const skipWatchlistDispatch = saveOptions.skipWatchlistDispatch === true
+      || normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO;
+    const skipWatchlistDispatchReason = saveOptions.skipWatchlistDispatchReason
+      || (normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+        ? 'portfolio_analysis_saved_locally'
+        : 'dispatch_skipped_by_options');
     if (normalizedRunId) {
       await upsertProcess(normalizedRunId, {
         lifecycleStatus: 'finalizing',
@@ -27040,6 +27908,18 @@ async function saveResponse(
     }
     if (normalizedSourceMeta.sourceUrl) {
       newResponse.sourceUrl = normalizedSourceMeta.sourceUrl;
+    }
+    if (normalizedSourceMeta.sourceMaterialId) {
+      newResponse.sourceMaterialId = normalizedSourceMeta.sourceMaterialId;
+    }
+    if (normalizedSourceMeta.sourceMaterialHash) {
+      newResponse.sourceMaterialHash = normalizedSourceMeta.sourceMaterialHash;
+    }
+    if (Number.isInteger(normalizedSourceMeta.sourceMaterialLength)) {
+      newResponse.sourceMaterialLength = normalizedSourceMeta.sourceMaterialLength;
+    }
+    if (normalizedSourceMeta.sourceMaterialStored) {
+      newResponse.sourceMaterialStored = true;
     }
     if (normalizedRunId) {
       newResponse.runId = normalizedRunId;
@@ -27172,8 +28052,36 @@ async function saveResponse(
     );
 
     try {
+      if (skipWatchlistDispatch) {
+        dispatchOutcome.queueSkipped = true;
+        dispatchOutcome.queueSkipReason = skipWatchlistDispatchReason;
+        dispatchOutcome.failureStage = 'queue';
+        dispatchOutcome.failureReason = skipWatchlistDispatchReason;
+        appendDispatchProcessLog('queue_result', 'skipped', `reason=${skipWatchlistDispatchReason}`);
+        console.log(
+          `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${skipWatchlistDispatchReason}`
+        );
+      } else {
       appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
-      const dispatchQueueResult = await enqueueWatchlistDispatch(lastSaved || newResponse, copyTrace);
+      const dispatchResponse = {
+        ...((lastSaved && typeof lastSaved === 'object') ? lastSaved : newResponse)
+      };
+      if (normalizedSourceMeta.sourceMaterialId) {
+        dispatchResponse.sourceMaterialId = normalizedSourceMeta.sourceMaterialId;
+      }
+      if (normalizedSourceMeta.sourceMaterialHash) {
+        dispatchResponse.sourceMaterialHash = normalizedSourceMeta.sourceMaterialHash;
+      }
+      if (Number.isInteger(normalizedSourceMeta.sourceMaterialLength)) {
+        dispatchResponse.sourceMaterialLength = normalizedSourceMeta.sourceMaterialLength;
+      }
+      if (normalizedSourceMeta.sourceMaterialStored) {
+        dispatchResponse.sourceMaterialStored = true;
+      }
+      if (!normalizedSourceMeta.sourceMaterialId && typeof normalizedSourceMeta.sourceMaterialText === 'string' && normalizedSourceMeta.sourceMaterialText.trim()) {
+        dispatchResponse.sourceMaterialText = normalizedSourceMeta.sourceMaterialText;
+      }
+      const dispatchQueueResult = await enqueueWatchlistDispatch(dispatchResponse, copyTrace);
       if (dispatchQueueResult?.queued) {
         dispatchOutcome.queued = true;
         dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
@@ -27256,6 +28164,7 @@ async function saveResponse(
         });
       } else {
         appendDispatchProcessLog('queue_result', 'unknown', 'enqueue_returned_unexpected_payload');
+      }
       }
       appendDispatchProcessLog(
         'dispatch_final',
@@ -27412,6 +28321,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true, ts: Date.now() });
     return false;
   }
+  if (message.type === 'GET_EXTENSION_HEARTBEAT' || message.type === 'PING_EXTENSION_HEARTBEAT') {
+    buildExtensionHeartbeatStatus({
+      forceReload: message?.forceReload === true,
+      includeQueue: message?.includeQueue !== false
+    })
+      .then((heartbeat) => sendResponse(heartbeat))
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          ok: false,
+          readyForDb: false,
+          error: error?.message || 'extension_heartbeat_failed',
+          generatedAt: Date.now(),
+          featureRevision: EXTENSION_FEATURE_REVISION
+        });
+      });
+    return true;
+  }
   if (message.type === 'SAVE_RESPONSE') {
     saveResponse(
       message.text,
@@ -27424,7 +28351,12 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       {
         sourceTitle: message.sourceTitle || message.source || '',
         sourceName: message.sourceName || '',
-        sourceUrl: message.sourceUrl || ''
+        sourceUrl: message.sourceUrl || '',
+        sourceMaterialId: message.sourceMaterialId || '',
+        sourceMaterialHash: message.sourceMaterialHash || '',
+        sourceMaterialLength: message.sourceMaterialLength,
+        sourceMaterialStored: message.sourceMaterialStored === true,
+        sourceMaterialText: message.sourceMaterialText || ''
       },
       {
         deferDispatchFlush: true,
@@ -27822,17 +28754,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
     const mode = message?.mode === 'pdf' ? 'pdf' : 'text';
-    const normalizedInstances = normalizeManualInstances(message?.instances);
+    const analysisType = normalizeAnalysisTypeForPromptChain(message?.analysisType);
+    const autoPortfolioAnalysis = shouldRunPortfolioAlongsideCompany(analysisType);
+    const normalizedInstances = analysisType === ANALYSIS_TYPE_PORTFOLIO
+      ? 1
+      : normalizeManualInstances(message?.instances);
+    const requestedRemote = message?.remote === true || normalizeRemoteExecutionMode(message?.executionMode) === 'remote';
     console.log('[manual-source] MANUAL_SOURCE_SUBMIT:', {
       mode,
+      analysisType,
+      autoPortfolioAnalysis,
+      remote: requestedRemote,
       titleLength: typeof message?.title === 'string' ? message.title.length : 0,
       textLength: typeof message?.text === 'string' ? message.text.length : 0,
       instances: normalizedInstances,
+      runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
       pdfProviderId: typeof message?.pdfProviderId === 'string' ? message.pdfProviderId : '',
       pdfFiles: Array.isArray(message?.pdfFiles) ? message.pdfFiles.length : 0
     });
 
     if (mode === 'pdf') {
+      if (requestedRemote) {
+        sendResponse({ success: false, error: 'remote_pdf_not_supported' });
+        return true;
+      }
       const providerId = typeof message?.pdfProviderId === 'string' ? message.pdfProviderId.trim() : '';
       const pdfFiles = Array.isArray(message?.pdfFiles) ? message.pdfFiles : [];
       if (!providerId || pdfFiles.length === 0) {
@@ -27841,8 +28786,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       (async () => {
-        const promptsReady = await ensureCompanyPromptsReady();
-        if (!promptsReady) {
+        const promptsReady = await ensurePromptChainReadyForAnalysisType(analysisType);
+        const portfolioPromptsReady = autoPortfolioAnalysis
+          ? await ensurePromptChainReadyForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
+          : true;
+        if (!promptsReady || !portfolioPromptsReady) {
           sendResponse({ success: false, error: 'prompts_not_loaded' });
           return;
         }
@@ -27851,7 +28799,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           title: typeof message?.title === 'string' ? message.title : '',
           instances: normalizedInstances,
           providerId,
-          pdfFiles
+          pdfFiles,
+          analysisType
         });
         sendResponse(queueResult);
       })().catch((error) => {
@@ -27861,23 +28810,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     (async () => {
-      const promptsReady = await ensureCompanyPromptsReady();
-      if (!promptsReady) {
+      const promptsReady = await ensurePromptChainReadyForAnalysisType(analysisType);
+      const portfolioPromptsReady = autoPortfolioAnalysis
+        ? await ensurePromptChainReadyForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
+        : true;
+      if (!promptsReady || !portfolioPromptsReady) {
         sendResponse({ success: false, error: 'prompts_not_loaded' });
         return;
       }
 
-      const queueResult = await runManualSourceAnalysis(message.text, message.title, normalizedInstances);
+      if (requestedRemote) {
+        const remoteRunnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
+          ? message.runnerId.trim()
+          : (typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId.trim() : '');
+        const remoteResult = await submitManualSourceAnalysisToRemoteRunner(
+          message.text,
+          message.title,
+          normalizedInstances,
+          remoteRunnerId,
+          {
+            timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
+            retryCount: 1,
+            analysisType,
+            promptChain: getPromptChainForAnalysisType(analysisType)
+          }
+        );
+        const portfolioRemoteResult = autoPortfolioAnalysis
+          ? await submitManualSourceAnalysisToRemoteRunner(
+              message.text,
+              message.title,
+              1,
+              remoteRunnerId,
+              {
+                timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
+                retryCount: 1,
+                analysisType: ANALYSIS_TYPE_PORTFOLIO,
+                promptChain: getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
+              }
+            )
+          : null;
+        const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
+          analysisType,
+          mode: 'remote_text',
+          primaryFallbackQueued: normalizedInstances
+        });
+        sendResponse({
+          ...mergedRemoteResult,
+          mode: 'remote_text',
+          analysisType,
+          remote: true,
+          runnerId: remoteRunnerId || mergedRemoteResult?.runnerId || ''
+        });
+        return;
+      }
+
+      const queueResult = autoPortfolioAnalysis
+        ? await runManualSourceAnalysisWithPortfolio(message.text, message.title, normalizedInstances, analysisType)
+        : await runManualSourceAnalysis(message.text, message.title, normalizedInstances, analysisType);
       sendResponse({
-        success: true,
+        ...queueResult,
+        success: queueResult?.success !== false,
         mode: 'text',
-        queued: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : normalizedInstances,
-        queuedCount: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : normalizedInstances,
-        queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
-        activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
-        reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
-        liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
-        startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0
+        analysisType
       });
     })().catch((error) => {
       sendResponse({ success: false, error: error?.message || 'manual_source_start_failed' });
@@ -29215,7 +30209,29 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
     const isManualSource = manualUrl.startsWith('manual://');
     const isManualPdf = manualUrl === 'manual://pdf';
-    const sourceUrl = isManualSource ? (manualUrl || 'manual://source') : (typeof tab?.url === 'string' ? tab.url : '');
+    const explicitSourceUrl = typeof tab?.sourceUrl === 'string' && tab.sourceUrl.trim()
+      ? tab.sourceUrl.trim()
+      : '';
+    const sourceUrl = explicitSourceUrl || (isManualSource ? (manualUrl || 'manual://source') : (typeof tab?.url === 'string' ? tab.url : ''));
+    const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
+      ? options.sourceKind.trim()
+      : (typeof tab?.sourceKind === 'string' && tab.sourceKind.trim()
+        ? tab.sourceKind.trim()
+        : (isManualPdf ? 'manual_pdf' : (isManualSource ? 'manual_text' : 'article')));
+    const sourceName = isManualSource
+      ? (isManualPdf ? 'Manual PDF' : (sourceKind === 'desktop_tab'
+        ? (resolveSupportedSourceNameFromUrl(sourceUrl) || 'Desktop Tab')
+        : 'Manual Source'))
+      : (resolveSupportedSourceNameFromUrl(sourceUrl) || 'Unknown');
+    let sourceMaterialId = typeof tab?.sourceMaterialId === 'string' && tab.sourceMaterialId.trim()
+      ? tab.sourceMaterialId.trim()
+      : (typeof remoteJobContext?.sourceMaterialId === 'string' ? remoteJobContext.sourceMaterialId.trim() : '');
+    let sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' && tab.sourceMaterialHash.trim()
+      ? tab.sourceMaterialHash.trim()
+      : (typeof remoteJobContext?.sourceMaterialHash === 'string' ? remoteJobContext.sourceMaterialHash.trim() : '');
+    let sourceMaterialLength = normalizeSourceMaterialLength(
+      tab?.sourceMaterialLength ?? remoteJobContext?.sourceMaterialLength
+    );
     const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
       ? tab.manualPdfAttachment
       : null;
@@ -29231,8 +30247,13 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       needsAction: false,
       startedAt: Date.now(),
       timestamp: Date.now(),
+      sourceKind,
+      sourceName,
       sourceUrl,
       chatUrl,
+      ...(sourceMaterialId ? { sourceMaterialId } : {}),
+      ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+      ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
       ...(invocationWindowId !== null ? { invocationWindowId } : {}),
       ...(sourceWindowId !== null ? { sourceWindowId } : {}),
       ...(queueManaged
@@ -29332,6 +30353,94 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
 
     const title = tab.title || 'Bez tytułu';
     processTitle = title;
+    const shouldSubmitSourceMaterialForProcess = extractedText.trim()
+      && (!sourceMaterialId || tab?.sourceMaterialNeedsProcessLink === true);
+    if (shouldSubmitSourceMaterialForProcess) {
+      const materialResult = await submitSourceMaterialForProcess({
+        text: extractedText,
+        title,
+        sourceKind,
+        sourceUrl,
+        runId: processId,
+        jobId: queueJobId,
+        batchId: remoteJobContext?.batchId || '',
+        submissionId: remoteJobContext?.submissionId || '',
+        runnerId: remoteJobContext?.remoteRunnerId || '',
+        relation: 'process_input',
+        metadata: {
+          analysis_type: analysisType,
+          source_name: sourceName,
+          queue_job_id: queueJobId,
+          remote_job_id: remoteJobContext?.remoteJobId || ''
+        }
+      }, { retryCount: 0, timeoutMs: 15000 });
+      const materialPayload = materialResult?.payload && typeof materialResult.payload === 'object'
+        ? materialResult.payload
+        : {};
+      if (materialResult?.success === true && typeof materialPayload.sourceMaterialId === 'string' && materialPayload.sourceMaterialId.trim()) {
+        sourceMaterialId = materialPayload.sourceMaterialId.trim();
+        sourceMaterialHash = typeof materialPayload.sourceMaterialHash === 'string' ? materialPayload.sourceMaterialHash.trim() : sourceMaterialHash;
+        sourceMaterialLength = normalizeSourceMaterialLength(materialPayload.sourceMaterialLength) ?? sourceMaterialLength;
+      } else {
+        const failureReason = normalizeSourceMaterialSubmitFailure(materialResult, 'source_material_submit_failed');
+        console.warn('[source-material] pre-submit failed', {
+          processId,
+          reason: failureReason,
+          status: Number.isInteger(materialResult?.status) ? materialResult.status : null
+        });
+        if (!sourceMaterialId) {
+          await reportAnalysisQueueEvent('source_material_save_failed', {
+            level: 'error',
+            status: 'failed',
+            reason: failureReason,
+            runId: processId,
+            jobId: queueJobId,
+            analysisType,
+            title,
+            sourceUrl,
+            currentPrompt: 0,
+            totalPrompts: promptChainSafe.length,
+            statusText: `status=${Number.isInteger(materialResult?.status) ? materialResult.status : 'n/a'} | sourceKind=${sourceKind}`,
+            message: `Nie uruchamiam procesu, bo material zrodlowy nie zostal zapisany: ${failureReason}`
+          }).catch(() => null);
+          await upsertProcess(processId, {
+            title,
+            analysisType,
+            status: 'failed',
+            needsAction: false,
+            statusText: 'Material zrodlowy nie zostal zapisany',
+            reason: 'source_material_submit_failed',
+            error: failureReason,
+            autoRecovery: null,
+            finishedAt: Date.now(),
+            timestamp: Date.now(),
+            sourceKind,
+            sourceName,
+            sourceUrl,
+            sourceMaterialStored: false
+          });
+          return {
+            success: false,
+            title,
+            reason: 'source_material_submit_failed',
+            error: failureReason
+          };
+        }
+      }
+    }
+    await upsertProcess(processId, {
+      title,
+      analysisType,
+      sourceKind,
+      sourceName,
+      sourceUrl,
+      sourceTextLength: extractedText.length,
+      ...(sourceMaterialId ? { sourceMaterialId } : {}),
+      ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+      ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
+      sourceMaterialStored: !!sourceMaterialId,
+      timestamp: Date.now()
+    });
     const firstPrompt = promptChainSafe[0] || '';
     let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
     const restOfPrompts = promptChainSafe.slice(1);
@@ -29347,8 +30456,14 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       totalPrompts: processTotalPrompts,
       needsAction: false,
       timestamp: Date.now(),
+      sourceKind,
+      sourceName,
       sourceUrl,
-      chatUrl
+      chatUrl,
+      ...(sourceMaterialId ? { sourceMaterialId } : {}),
+      ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+      ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
+      sourceMaterialStored: !!sourceMaterialId
     });
 
     const referenceWindow = await resolveReferenceWindowForChatCreation(
@@ -29432,7 +30547,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         {
           persistFinalResponseViaMessage: true,
           mode: 'runtime_message',
-          saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS
+          saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS,
+          sourceTitle: title,
+          sourceName,
+          sourceUrl,
+          sourceMaterialId,
+          sourceMaterialHash,
+          sourceMaterialLength,
+          sourceMaterialStored: !!sourceMaterialId,
+          sourceMaterialText: sourceMaterialId ? '' : extractedText
         },
         manualPdfAttachmentContext
       ];
@@ -29686,10 +30809,13 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           conversationUrl || null,
           {
             sourceTitle: title,
-            sourceName: resolveSupportedSourceNameFromUrl(
-              typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
-            ),
-            sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+            sourceName,
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId,
+            sourceMaterialText: sourceMaterialId ? '' : extractedText
           }
         );
       const sectorMemoryPersistence = hasResultSectorMemoryResponse
@@ -29699,10 +30825,12 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           conversationUrl: conversationUrl || null,
           sourceMeta: {
             sourceTitle: title,
-            sourceName: resolveSupportedSourceNameFromUrl(
-              typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
-            ),
-            sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+            sourceName,
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId
           }
         })
         : null;
@@ -29948,6 +31076,7 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       return getAnalysisQueueStatusSnapshot();
     }
 
+    const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
     const invocationWindowId = Number.isInteger(options?.invocationWindowId)
       ? options.invocationWindowId
       : null;
@@ -29958,7 +31087,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         : (sourceUrl === 'manual://pdf'
           ? 'manual_pdf'
           : (sourceUrl.startsWith('manual://') ? 'manual_text' : 'article'));
-      return {
+      const sourceMaterialId = typeof tab?.sourceMaterialId === 'string' ? tab.sourceMaterialId.trim() : '';
+      const sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' ? tab.sourceMaterialHash.trim() : '';
+      const sourceMaterialLength = normalizeSourceMaterialLength(tab?.sourceMaterialLength);
+      const job = {
         kind: ANALYSIS_QUEUE_KIND_ARTICLE,
         analysisType,
         title: typeof tab?.title === 'string' && tab.title.trim() ? tab.title.trim() : 'Bez tytulu',
@@ -29968,10 +31100,16 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         sourceWindowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
         sourceUrl,
         chatUrl: typeof chatUrl === 'string' ? chatUrl : '',
+        promptChainSnapshot,
         queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
         manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
         manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : ''
       };
+      if (sourceMaterialId) job.sourceMaterialId = sourceMaterialId;
+      if (sourceMaterialHash) job.sourceMaterialHash = sourceMaterialHash;
+      if (Number.isInteger(sourceMaterialLength)) job.sourceMaterialLength = sourceMaterialLength;
+      if (tab?.sourceMaterialStored === true || sourceMaterialId) job.sourceMaterialStored = true;
+      return job;
     });
 
     return enqueueAnalysisJobs(jobs, {
@@ -30064,6 +31202,35 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       const sourceName = isManualSource
         ? (isManualPdf ? "Manual PDF" : "Manual Source")
         : (resolveSupportedSourceNameFromUrl(sourceUrl) || "Unknown");
+      const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
+        ? options.sourceKind.trim()
+        : (isManualPdf ? 'manual_pdf' : (isManualSource ? 'manual_text' : 'article'));
+      let sourceMaterialId = typeof tab?.sourceMaterialId === 'string' ? tab.sourceMaterialId.trim() : '';
+      let sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' ? tab.sourceMaterialHash.trim() : '';
+      let sourceMaterialLength = normalizeSourceMaterialLength(tab?.sourceMaterialLength);
+      if (!sourceMaterialId && typeof extractedText === 'string' && extractedText.trim()) {
+        const materialResult = await submitSourceMaterialForProcess({
+          text: extractedText,
+          title,
+          sourceKind,
+          sourceUrl,
+          runId: processId,
+          relation: 'process_input',
+          metadata: {
+            analysis_type: analysisType,
+            source_name: sourceName,
+            origin: 'legacy_direct_executor'
+          }
+        }, { retryCount: 0, timeoutMs: 15000 });
+        const materialPayload = materialResult?.payload && typeof materialResult.payload === 'object'
+          ? materialResult.payload
+          : {};
+        if (materialResult?.success === true && typeof materialPayload.sourceMaterialId === 'string' && materialPayload.sourceMaterialId.trim()) {
+          sourceMaterialId = materialPayload.sourceMaterialId.trim();
+          sourceMaterialHash = typeof materialPayload.sourceMaterialHash === 'string' ? materialPayload.sourceMaterialHash.trim() : sourceMaterialHash;
+          sourceMaterialLength = normalizeSourceMaterialLength(materialPayload.sourceMaterialLength) ?? sourceMaterialLength;
+        }
+      }
 
       // Wyciągnij treść pierwszego prompta z promptChain
       const firstPrompt = promptChain[0] || '';
@@ -30085,8 +31252,14 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
+        sourceKind,
+        sourceName,
         sourceUrl,
         chatUrl,
+        ...(sourceMaterialId ? { sourceMaterialId } : {}),
+        ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+        ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
+        sourceMaterialStored: !!sourceMaterialId,
         ...(invocationWindowId !== null ? { invocationWindowId } : {}),
         ...(sourceWindowId !== null ? { sourceWindowId } : {}),
         messages: []
@@ -30176,7 +31349,12 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS,
             sourceTitle: title,
             sourceName,
-            sourceUrl
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId,
+            sourceMaterialText: sourceMaterialId ? '' : extractedText
           },
           manualPdfAttachmentContext
         ];
@@ -30540,7 +31718,12 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             {
               sourceTitle: title,
               sourceName,
-              sourceUrl
+              sourceUrl,
+              sourceMaterialId,
+              sourceMaterialHash,
+              sourceMaterialLength,
+              sourceMaterialStored: !!sourceMaterialId,
+              sourceMaterialText: sourceMaterialId ? '' : extractedText
             }
           );
         const sectorMemoryPersistence = hasResultSectorMemoryResponse
@@ -30551,7 +31734,11 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             sourceMeta: {
               sourceTitle: title,
               sourceName,
-              sourceUrl
+              sourceUrl,
+              sourceMaterialId,
+              sourceMaterialHash,
+              sourceMaterialLength,
+              sourceMaterialStored: !!sourceMaterialId
             }
           })
           : null;
@@ -30929,6 +32116,12 @@ async function runAnalysis(options = {}) {
       return { success: false, error: 'prompts_not_loaded' };
     }
     console.log(`✅ Analiza spółki: ${PROMPTS_COMPANY.length} promptów`);
+    const portfolioPromptsReady = await ensurePortfolioPromptsReady();
+    if (!portfolioPromptsReady || PROMPTS_PORTFOLIO.length === 0) {
+      console.error("❌ Brak promptów dla Portfolio Analysis w prompts-portfolio.txt");
+      return { success: false, error: 'portfolio_prompts_not_loaded' };
+    }
+    console.log(`✅ Portfolio Analysis: ${PROMPTS_PORTFOLIO.length} promptów`);
     
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
@@ -30941,9 +32134,10 @@ async function runAnalysis(options = {}) {
 
     console.log(`✅ Znaleziono ${orderedTabs.length} artykułów łącznie`);
     
-    // KROK 3: Uruchom analizę company dla wszystkich znalezionych artykułów
-    console.log("\n🚀 Krok 3: Uruchamianie analizy company");
+    // KROK 3: Uruchom analizę company i automatyczny portfolio dla wszystkich znalezionych artykułów
+    console.log("\n🚀 Krok 3: Uruchamianie analizy company + portfolio");
     console.log(`   - Analiza spółki: ${orderedTabs.length} artykułów`);
+    console.log(`   - Portfolio Analysis: ${orderedTabs.length} artykułów`);
 
     if (executionMode === 'remote') {
       if (!selectedRunnerId) {
@@ -30961,30 +32155,54 @@ async function runAnalysis(options = {}) {
           totalTabs: orderedTabs.length
         };
       }
+      const preparedPortfolioBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_PORTFOLIO, ANALYSIS_TYPE_PORTFOLIO, {
+        runnerId: selectedRunnerId
+      });
+      if (preparedPortfolioBatch?.success !== true) {
+        return {
+          success: false,
+          error: preparedPortfolioBatch?.error || 'portfolio_remote_prepare_failed',
+          skippedCount: Array.isArray(preparedPortfolioBatch?.skipped) ? preparedPortfolioBatch.skipped.length : 0,
+          totalTabs: orderedTabs.length
+        };
+      }
 
       const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, selectedRunnerId, {
         invocationWindowId
       });
+      const portfolioRemoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedPortfolioBatch, selectedRunnerId, {
+        invocationWindowId
+      });
+      const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
+        analysisType: ANALYSIS_TYPE_COMPANY,
+        mode: 'remote_tabs',
+        primaryFallbackQueued: orderedTabs.length
+      });
       return {
-        ...remoteResult,
-        queuedCount: Number.isInteger(remoteResult?.submittedCount) ? remoteResult.submittedCount : 0
+        ...mergedRemoteResult,
+        remote: true,
+        runnerId: selectedRunnerId,
+        totalTabs: orderedTabs.length
       };
     }
 
-    const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+    const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, getChatUrlForAnalysisType(ANALYSIS_TYPE_COMPANY), 'company', {
       invocationWindowId,
       reason: 'run_analysis_enqueue'
+    });
+    const portfolioQueueResult = await processArticles(orderedTabs, PROMPTS_PORTFOLIO, getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
+      invocationWindowId,
+      reason: 'run_analysis_portfolio_enqueue'
+    });
+    const mergedQueueResult = mergeAnalysisLaunchResults(queueResult, portfolioQueueResult, {
+      analysisType: ANALYSIS_TYPE_COMPANY,
+      mode: 'local_tabs',
+      primaryFallbackQueued: orderedTabs.length
     });
 
     console.log("\n✅ ZAKOŃCZONO URUCHAMIANIE PROCESÓW");
     return {
-      success: true,
-      queuedCount: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : orderedTabs.length,
-      queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
-      activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
-      reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
-      liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
-      startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0,
+      ...mergedQueueResult,
       totalTabs: orderedTabs.length
     };
 
@@ -31002,6 +32220,104 @@ function normalizeManualInstances(instances) {
 function buildManualPdfPayload(fileName) {
   const safeName = typeof fileName === 'string' && fileName.trim() ? fileName.trim() : 'source.pdf';
   return `Nazwa pliku: ${safeName}\nPrzeanalizuj zalaczony PDF.`;
+}
+
+async function buildPreparedManualSourceRemoteBatch(text, title, instances, options = {}) {
+  const safeText = typeof text === 'string' ? text.trim() : '';
+  if (!safeText) {
+    return { success: false, error: 'manual_source_text_empty', items: [], skipped: [] };
+  }
+  const analysisType = normalizeAnalysisTypeForPromptChain(options?.analysisType);
+  const sourcePromptChain = Array.isArray(options?.promptChain)
+    ? options.promptChain
+    : getPromptChainForAnalysisType(analysisType);
+  const promptChainSnapshot = sanitizePromptChainSnapshot(sourcePromptChain);
+  if (promptChainSnapshot.length === 0) {
+    return { success: false, error: 'prompts_empty', items: [], skipped: [] };
+  }
+
+  const [controllerId, promptHash] = await Promise.all([
+    ensureExtensionInstallationId(),
+    computePromptChainHash(promptChainSnapshot)
+  ]);
+  if (!promptHash) {
+    return { success: false, error: 'prompt_hash_unavailable', items: [], skipped: [] };
+  }
+
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
+  const safeInstances = analysisType === ANALYSIS_TYPE_PORTFOLIO ? 1 : normalizeManualInstances(instances);
+  const batchId = createRemoteExecutionId('manual-remote-batch');
+  const submissionId = createRemoteExecutionId('manual-remote-submit');
+  const runnerId = typeof options?.runnerId === 'string' ? options.runnerId.trim() : '';
+  const createdAt = Date.now();
+  const items = [];
+  for (let index = 0; index < safeInstances; index += 1) {
+    const instanceIndex = index + 1;
+    items.push({
+      schema: 'iskra.remote_job.v1',
+      jobId: createRemoteExecutionId(`manual-${analysisType}-job`),
+      runId: createRemoteExecutionId(`manual-${analysisType}-run`),
+      batchId,
+      submissionId,
+      requestDedupeKey: `${submissionId}:${instanceIndex}`,
+      controllerId,
+      runnerId,
+      analysisType,
+      chatUrl: getChatUrlForAnalysisType(analysisType),
+      sourceMode: 'manual_text',
+      sourceKind: 'manual_text',
+      sourceUrl: 'manual://source',
+      submittedTitle: safeInstances > 1
+        ? `${safeTitle} [instancja ${instanceIndex}/${safeInstances}]`
+        : safeTitle,
+      text: safeText,
+      instanceIndex,
+      instanceTotal: safeInstances,
+      promptChainSnapshot,
+      promptHash,
+      usesRunnerPrompts: false,
+      createdAt
+    });
+  }
+
+  return {
+    success: true,
+    controllerId,
+    batchId,
+    submissionId,
+    promptChainSnapshot,
+    promptHash,
+    analysisType,
+    items,
+    skipped: []
+  };
+}
+
+async function submitManualSourceAnalysisToRemoteRunner(text, title, instances, runnerId, options = {}) {
+  const safeRunnerId = typeof runnerId === 'string' && runnerId.trim()
+    ? runnerId.trim()
+    : await getStoredSelectedRemoteRunnerId();
+  const preparedBatch = await buildPreparedManualSourceRemoteBatch(text, title, instances, {
+    runnerId: safeRunnerId,
+    analysisType: options?.analysisType,
+    promptChain: options?.promptChain
+  });
+  if (preparedBatch?.success !== true) {
+    return {
+      success: false,
+      remote: true,
+      runnerId: safeRunnerId,
+      error: preparedBatch?.error || 'manual_remote_prepare_failed',
+      submittedCount: 0,
+      queuedCount: 0,
+      failedCount: normalizeManualInstances(instances)
+    };
+  }
+  const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, safeRunnerId, options);
+  return {
+    ...remoteResult,
+    queuedCount: Number.isInteger(remoteResult?.submittedCount) ? remoteResult.submittedCount : 0
+  };
 }
 
 function normalizeManualPdfFiles(rawFiles) {
@@ -31143,13 +32459,22 @@ async function requestManualPdfProviderChunk({ providerId, token, offset = 0, ch
 }
 
 // Funkcja uruchamiajaca analize z recznie wklejonego zrodla
-async function runManualSourceAnalysis(text, title, instances) {
+async function runManualSourceAnalysis(text, title, instances, analysisType = ANALYSIS_TYPE_COMPANY) {
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const promptChain = getPromptChainForAnalysisType(normalizedAnalysisType);
   const safeText = typeof text === 'string' ? text : '';
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
-  const safeInstances = normalizeManualInstances(instances);
+  const safeInstances = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO ? 1 : normalizeManualInstances(instances);
   const timestamp = Date.now();
   const manualTextSourceId = generateManualTextSourceId('manual-text');
   const manualTextSource = buildManualTextSourceRecord(manualTextSourceId, safeText, safeTitle);
+  const sourceMaterialMeta = await submitManualSourceMaterialForQueue(safeText, safeTitle, {
+    manualTextSourceId,
+    analysisType: normalizedAnalysisType,
+    instances: safeInstances,
+    includesPortfolio: false,
+    reason: 'manual_source_enqueue'
+  });
   const pseudoTabs = [];
 
   for (let i = 0; i < safeInstances; i += 1) {
@@ -31157,20 +32482,92 @@ async function runManualSourceAnalysis(text, title, instances) {
       id: `manual-${timestamp}-${i}`,
       title: safeTitle,
       url: 'manual://source',
-      manualTextSourceId
+      manualTextSourceId,
+      ...sourceMaterialMeta
     });
   }
 
-  return processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+  return processArticles(pseudoTabs, promptChain, getChatUrlForAnalysisType(normalizedAnalysisType), normalizedAnalysisType, {
     manualTextSources: manualTextSource ? [manualTextSource] : [],
     sourceKind: 'manual_text',
     reason: 'manual_source_enqueue'
   });
 }
 
-async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFiles }) {
-  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+async function runManualSourceAnalysisWithPortfolio(text, title, instances, analysisType = ANALYSIS_TYPE_COMPANY) {
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  if (!shouldRunPortfolioAlongsideCompany(normalizedAnalysisType)) {
+    return runManualSourceAnalysis(text, title, instances, normalizedAnalysisType);
+  }
+
+  const safeText = typeof text === 'string' ? text : '';
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
   const safeInstances = normalizeManualInstances(instances);
+  const timestamp = Date.now();
+  const manualTextSourceId = generateManualTextSourceId('manual-text');
+  const manualTextSource = buildManualTextSourceRecord(manualTextSourceId, safeText, safeTitle);
+  const manualTextSources = manualTextSource ? [manualTextSource] : [];
+  const sourceMaterialMeta = await submitManualSourceMaterialForQueue(safeText, safeTitle, {
+    manualTextSourceId,
+    analysisType: ANALYSIS_TYPE_COMPANY,
+    instances: safeInstances,
+    includesPortfolio: true,
+    reason: 'manual_source_company_portfolio_enqueue'
+  });
+  const companyTabs = [];
+  for (let i = 0; i < safeInstances; i += 1) {
+    companyTabs.push({
+      id: `manual-${timestamp}-company-${i}`,
+      title: safeTitle,
+      url: 'manual://source',
+      manualTextSourceId,
+      ...sourceMaterialMeta
+    });
+  }
+  const portfolioTabs = [{
+    id: `manual-${timestamp}-portfolio-0`,
+    title: safeTitle,
+    url: 'manual://source',
+    manualTextSourceId,
+    ...sourceMaterialMeta
+  }];
+
+  const queueResult = await processArticles(companyTabs, getPromptChainForAnalysisType(ANALYSIS_TYPE_COMPANY), getChatUrlForAnalysisType(ANALYSIS_TYPE_COMPANY), ANALYSIS_TYPE_COMPANY, {
+    manualTextSources,
+    sourceKind: 'manual_text',
+    reason: 'manual_source_enqueue'
+  });
+  const portfolioQueueResult = await processArticles(portfolioTabs, getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
+    manualTextSources,
+    sourceKind: 'manual_text',
+    reason: 'manual_source_portfolio_enqueue'
+  });
+  return mergeAnalysisLaunchResults(queueResult, portfolioQueueResult, {
+    analysisType: ANALYSIS_TYPE_COMPANY,
+    mode: 'text',
+    primaryFallbackQueued: safeInstances
+  });
+}
+
+async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFiles, analysisType = ANALYSIS_TYPE_COMPANY }) {
+  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const safeInstances = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO ? 1 : normalizeManualInstances(instances);
+  const includePortfolio = shouldRunPortfolioAlongsideCompany(normalizedAnalysisType);
+  const analysisPlans = [{
+    analysisType: normalizedAnalysisType,
+    promptChainSnapshot: sanitizePromptChainSnapshot(getPromptChainForAnalysisType(normalizedAnalysisType)),
+    chatUrl: getChatUrlForAnalysisType(normalizedAnalysisType),
+    instances: safeInstances
+  }];
+  if (includePortfolio) {
+    analysisPlans.push({
+      analysisType: ANALYSIS_TYPE_PORTFOLIO,
+      promptChainSnapshot: sanitizePromptChainSnapshot(getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)),
+      chatUrl: getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO),
+      instances: 1
+    });
+  }
   const normalizedFiles = normalizeManualPdfFiles(pdfFiles);
 
   if (!safeProviderId) {
@@ -31196,47 +32593,58 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
 
   const batchId = `manual-pdf-batch-${safeProviderId}-${Date.now()}`;
   const queueJobs = [];
+  let companyJobCount = 0;
+  let portfolioJobCount = 0;
   let jobIndex = 0;
   for (const file of normalizedFiles) {
-    for (let instanceIndex = 1; instanceIndex <= safeInstances; instanceIndex += 1) {
-      const isMultiInstance = safeInstances > 1;
-      const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : file.name;
-      const runTitle = isMultiInstance
-        ? `${baseTitle} [${file.name}] [instancja ${instanceIndex}/${safeInstances}]`
-        : `${baseTitle} [${file.name}]`;
-      queueJobs.push({
-        kind: ANALYSIS_QUEUE_KIND_ARTICLE,
-        analysisType: 'company',
-        title: runTitle,
-        sourceKind: 'manual_pdf',
-        manualPdfBatchId: batchId,
-        manualPdfProviderId: safeProviderId,
-        queueBatchId: batchId,
-        tabSnapshot: {
-          id: `manual-pdf-${Date.now()}-${jobIndex}`,
+    for (const plan of analysisPlans) {
+      for (let instanceIndex = 1; instanceIndex <= plan.instances; instanceIndex += 1) {
+        const isMultiInstance = plan.instances > 1;
+        const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : file.name;
+        const runTitle = isMultiInstance
+          ? `${baseTitle} [${file.name}] [instancja ${instanceIndex}/${plan.instances}]`
+          : `${baseTitle} [${file.name}]`;
+        queueJobs.push({
+          kind: ANALYSIS_QUEUE_KIND_ARTICLE,
+          analysisType: plan.analysisType,
           title: runTitle,
-          url: 'manual://pdf',
-          manualText: buildManualPdfPayload(file.name),
-          manualPdfAttachment: {
-            enabled: true,
-            providerId: safeProviderId,
-            token: file.token,
-            name: file.name,
-            mimeType: 'application/pdf',
-            size: file.size,
-            instanceIndex,
-            instanceTotal: safeInstances
+          sourceKind: 'manual_pdf',
+          manualPdfBatchId: batchId,
+          manualPdfProviderId: safeProviderId,
+          queueBatchId: batchId,
+          chatUrl: plan.chatUrl,
+          promptChainSnapshot: plan.promptChainSnapshot,
+          tabSnapshot: {
+            id: `manual-pdf-${Date.now()}-${jobIndex}`,
+            title: runTitle,
+            url: 'manual://pdf',
+            manualText: buildManualPdfPayload(file.name),
+            manualPdfAttachment: {
+              enabled: true,
+              providerId: safeProviderId,
+              token: file.token,
+              name: file.name,
+              mimeType: 'application/pdf',
+              size: file.size,
+              instanceIndex,
+              instanceTotal: plan.instances
+            }
           }
+        });
+        if (plan.analysisType === ANALYSIS_TYPE_PORTFOLIO) {
+          portfolioJobCount += 1;
+        } else {
+          companyJobCount += 1;
         }
-      });
-      jobIndex += 1;
+        jobIndex += 1;
+      }
     }
   }
 
   await notifyManualPdfProviderStatus(
     safeProviderId,
     'running',
-    `Zakolejkowano ${queueJobs.length} zadan PDF (${normalizedFiles.length} plikow x ${safeInstances} instancji).`,
+    `Zakolejkowano ${queueJobs.length} zadan PDF.`,
     {
       totalJobs: queueJobs.length,
       completedJobs: 0,
@@ -31251,6 +32659,10 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
   return {
     success: true,
     mode: 'pdf',
+    analysisType: normalizedAnalysisType,
+    extraPortfolioQueued: portfolioJobCount > 0,
+    companyQueuedCount: companyJobCount,
+    portfolioQueuedCount: portfolioJobCount,
     queued: enqueueResult?.queuedCount || 0,
     queuedCount: enqueueResult?.queuedCount || 0,
     maxConcurrent: Number.isInteger(enqueueResult?.maxConcurrent) ? enqueueResult.maxConcurrent : null,
@@ -31711,6 +33123,34 @@ async function injectToChat(
     const sourceUrlForSave = typeof persistenceMeta.sourceUrl === 'string'
       ? persistenceMeta.sourceUrl.trim()
       : '';
+    const sourceMaterialIdForSave = typeof persistenceMeta.sourceMaterialId === 'string'
+      ? persistenceMeta.sourceMaterialId.trim()
+      : '';
+    const sourceMaterialHashForSave = typeof persistenceMeta.sourceMaterialHash === 'string'
+      ? persistenceMeta.sourceMaterialHash.trim()
+      : '';
+    const sourceMaterialLengthForSave = (() => {
+      const rawLength = persistenceMeta.sourceMaterialLength;
+      if (rawLength === null || typeof rawLength === 'undefined' || rawLength === '') return null;
+      const parsed = Number(rawLength);
+      return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+    })();
+    const sourceMaterialStoredForSave = persistenceMeta.sourceMaterialStored === true || !!sourceMaterialIdForSave;
+    const sourceMaterialTextForSave = typeof persistenceMeta.sourceMaterialText === 'string'
+      ? persistenceMeta.sourceMaterialText
+      : '';
+
+    function applySourceMaterialMetaForSave(target, options = {}) {
+      if (!target || typeof target !== 'object') return target;
+      if (sourceMaterialIdForSave) target.sourceMaterialId = sourceMaterialIdForSave;
+      if (sourceMaterialHashForSave) target.sourceMaterialHash = sourceMaterialHashForSave;
+      if (Number.isInteger(sourceMaterialLengthForSave)) target.sourceMaterialLength = sourceMaterialLengthForSave;
+      if (sourceMaterialStoredForSave) target.sourceMaterialStored = true;
+      if (options.includeText === true && !sourceMaterialIdForSave && sourceMaterialTextForSave.trim()) {
+        target.sourceMaterialText = sourceMaterialTextForSave;
+      }
+      return target;
+    }
 
     if (chrome?.runtime?.onMessage?.addListener) {
       forceStopListener = (message, sender, sendResponse) => {
@@ -32337,6 +33777,11 @@ async function injectToChat(
             sourceTitle: typeof item.sourceTitle === 'string' ? item.sourceTitle : '',
             sourceName: typeof item.sourceName === 'string' ? item.sourceName : '',
             sourceUrl: typeof item.sourceUrl === 'string' ? item.sourceUrl : '',
+            sourceMaterialId: typeof item.sourceMaterialId === 'string' ? item.sourceMaterialId : '',
+            sourceMaterialHash: typeof item.sourceMaterialHash === 'string' ? item.sourceMaterialHash : '',
+            sourceMaterialLength: Number.isInteger(item.sourceMaterialLength) ? item.sourceMaterialLength : null,
+            sourceMaterialStored: item.sourceMaterialStored === true,
+            sourceMaterialText: typeof item.sourceMaterialText === 'string' ? item.sourceMaterialText : '',
             analysisType: typeof item.analysisType === 'string' ? item.analysisType : '',
             runId: typeof item.runId === 'string' ? item.runId : '',
             conversationUrl: typeof item.conversationUrl === 'string' ? item.conversationUrl : '',
@@ -32486,6 +33931,7 @@ async function injectToChat(
         lastError: typeof options?.lastError === 'string' ? options.lastError.trim() : '',
         attempts: Number.isInteger(options?.attempts) ? options.attempts : 0
       };
+      applySourceMaterialMetaForSave(record, { includeText: true });
       applyInjectedChatGptComputationStatePatch(
         record,
         typeof detectChatGptComputationState === 'function'
@@ -32520,6 +33966,11 @@ async function injectToChat(
           sourceTitle: item.sourceTitle || item.source || '',
           sourceName: item.sourceName || '',
           sourceUrl: item.sourceUrl || '',
+          sourceMaterialId: item.sourceMaterialId || '',
+          sourceMaterialHash: item.sourceMaterialHash || '',
+          sourceMaterialLength: item.sourceMaterialLength,
+          sourceMaterialStored: item.sourceMaterialStored === true,
+          sourceMaterialText: item.sourceMaterialText || '',
           analysisType: item.analysisType || analysisType,
           runId: item.runId || '',
           responseId: item.responseId || '',
@@ -32596,6 +34047,7 @@ async function injectToChat(
       if (sourceUrlForSave) {
         responseRecord.sourceUrl = sourceUrlForSave;
       }
+      applySourceMaterialMetaForSave(responseRecord, { includeText: false });
       if (normalizedRunId) {
         responseRecord.runId = normalizedRunId;
       }
@@ -32646,6 +34098,11 @@ async function injectToChat(
 
       const dispatchPayload = normalizeWatchlistDispatchPayload({
         ...(savedResponse && typeof savedResponse === 'object' ? savedResponse : responseRecord),
+        ...(() => {
+          const material = {};
+          applySourceMaterialMetaForSave(material, { includeText: true });
+          return material;
+        })(),
         text: typeof savedResponse?.text === 'string' && savedResponse.text.trim()
           ? savedResponse.text
           : normalizedText,
@@ -33400,6 +34857,7 @@ async function injectToChat(
         stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
         conversationUrl: typeof location?.href === 'string' ? location.href : ''
       };
+      applySourceMaterialMetaForSave(messagePayload, { includeText: true });
 
       const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);
       if (!saveAttempt.ok) {

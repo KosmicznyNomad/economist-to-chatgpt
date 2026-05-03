@@ -75,11 +75,12 @@ Required auth headers:
 - `reload-resume-monitor.html` / `reload-resume-monitor.js` - monitored reload/resume workflow
 - `unfinished-processes.html` / `unfinished-processes.js` - recovery helper for incomplete runs
 - `prompts-company.txt` - active company prompt chain
+- `prompts-portfolio.txt` - active portfolio prompt chain for one-process article portfolio review
 - `COMPANY_CHAIN_STAGE_MAP.md` - readable stage map for the company chain
 - `REMOTE_RUNNER_MVP_TEST.md` - hands-on smoke test for the remote runner MVP
 
 ## Notes
-- `prompts-portfolio.txt` may still exist in the repo as a legacy artifact; it is not part of the current documented runtime flow.
+- `Portfolio Analysis` runs automatically as one extra process whenever `Prompt Company` is queued, and opens in its dedicated ChatGPT project URL.
 - Shared helper scripts are loaded by extension pages and the worker; the manifest no longer exposes them broadly via `web_accessible_resources`.
 
 ## Quick validation

@@ -92,6 +92,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '(') {
       parenDepth += 1;
       continue;
@@ -182,6 +183,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '{') depth += 1;
     if (char === '}') {
       depth -= 1;
@@ -194,134 +196,112 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-function buildContext(overrides = {}) {
+function buildContext() {
+  const stored = {};
   const context = {
     console,
-    createCalls: [],
-    getRemoteRunnerStatusViaApi: async () => ({
-      success: true,
-      payload: {
-        runner: {
-          runnerId: 'runner-1',
-          state: 'ready',
-          queueable: true
-        }
-      }
-    }),
-    createRemoteJobViaApi: async (payload) => {
-      context.createCalls.push(payload);
-      return {
-        success: true,
-        payload: {
-          success: true,
-          created: true,
-          idempotent: false,
-          job: {
-            jobId: payload.jobId,
-            runnerId: payload.runnerId,
-            status: 'queued'
+    Date,
+    Math,
+    Object,
+    Promise,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
+    ANALYSIS_TYPE_COMPANY: 'company',
+    CHAT_URL: 'https://chatgpt.com/company',
+    EXTENSION_FEATURE_REVISION: 'source-materials-heartbeat-v1',
+    EXTENSION_HEARTBEAT_STORAGE_KEY: 'iskra_extension_heartbeat',
+    EXTENSION_SERVICE_WORKER_STARTED_AT: Date.now() - 1000,
+    PORTFOLIO_CHAT_URL: 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project',
+    PROMPTS_COMPANY: ['company prompt'],
+    PROMPTS_PORTFOLIO: ['portfolio prompt'],
+    SOURCE_MATERIALS_API_PATH: '/api/v1/source-materials',
+    ProcessContractUtils: { loaded: true },
+    DecisionContractUtils: { loaded: true },
+    ResponseStorageUtils: { loaded: true },
+    WatchlistDispatchShapeUtils: { loaded: true },
+    WatchlistApiUtils: { buildSignedJsonRequest: async () => ({}) },
+    chrome: {
+      runtime: {
+        id: 'extension-id',
+        getManifest: () => ({ name: 'Iskra', version: '1.2.3' })
+      },
+      storage: {
+        local: {
+          set: async (payload) => {
+            Object.assign(stored, payload);
           }
         }
-      };
+      }
     },
-    ...overrides
+    ensureExtensionInstallationId: async () => 'ext-test-support',
+    getAnalysisQueueStatusSnapshot: async () => ({
+      success: true,
+      maxConcurrent: 7,
+      activeSlots: 1,
+      queueSize: 2,
+      waitingJobs: 2,
+      totalJobs: 3
+    }),
+    getWatchlistDispatchStatus: async () => ({
+      enabled: true,
+      configured: true,
+      hasToken: true,
+      tokenSource: 'inline_config',
+      intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+      keyId: 'extension-primary',
+      queueSize: 0,
+      supportId: 'ext-test-support'
+    }),
+    performSignedIskraApiRequest: async () => ({ success: true }),
+    shouldRunPortfolioAlongsideCompany: () => true,
+    submitManualSourceMaterialForQueue: async () => ({ success: true }),
+    submitSourceMaterialForProcess: async () => ({ success: true }),
+    stored
   };
-
   vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'submitPreparedAnalysisBatchToRemoteRunner'), context, {
-    filename: 'background.js'
+  [
+    'buildExtensionHeartbeatCheck',
+    'sanitizeExtensionHeartbeatWatchlistStatus',
+    'sanitizeExtensionHeartbeatQueueStatus',
+    'persistExtensionHeartbeatStatus',
+    'buildExtensionHeartbeatStatus'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
   });
   return context;
 }
 
-async function testRejectsBusyRunnerBeforeSubmittingJobs() {
-  const context = buildContext({
-    getRemoteRunnerStatusViaApi: async () => ({
-      success: true,
-      payload: {
-        runner: {
-          runnerId: 'runner-1',
-          state: 'busy',
-          queueable: false,
-          reason: 'local_busy'
-        }
-      }
-    })
-  });
-
-  const result = await context.submitPreparedAnalysisBatchToRemoteRunner({
-    items: [
-      { jobId: 'job-1', runId: 'run-1' },
-      { jobId: 'job-2', runId: 'run-2' }
-    ],
-    skipped: []
-  }, 'runner-1');
-
-  assert.strictEqual(result.success, false);
-  assert.strictEqual(result.error, 'runner_busy');
-  assert.strictEqual(result.submittedCount, 0);
-  assert.strictEqual(result.failedCount, 2);
-  assert.strictEqual(context.createCalls.length, 0);
-}
-
-async function testSubmitsBatchWhenRunnerReady() {
-  const context = buildContext();
-  const result = await context.submitPreparedAnalysisBatchToRemoteRunner({
-    batchId: 'batch-1',
-    submissionId: 'submit-1',
-    items: [
-      { jobId: 'job-1', runId: 'run-1' },
-      { jobId: 'job-2', runId: 'run-2' }
-    ],
-    skipped: [{ title: 'Skipped source' }]
-  }, 'runner-1');
-
-  assert.strictEqual(result.success, true);
-  assert.strictEqual(result.runnerId, 'runner-1');
-  assert.strictEqual(result.submittedCount, 2);
-  assert.strictEqual(result.createdCount, 2);
-  assert.strictEqual(result.failedCount, 0);
-  assert.strictEqual(result.skippedCount, 1);
-  assert.strictEqual(context.createCalls.length, 2);
-  assert.strictEqual(context.createCalls[0].runnerId, 'runner-1');
-  assert.strictEqual(context.createCalls[1].runnerId, 'runner-1');
-}
-
-async function testSubmitsBatchWhenRunnerBusyButQueueable() {
-  const context = buildContext({
-    getRemoteRunnerStatusViaApi: async () => ({
-      success: true,
-      payload: {
-        runner: {
-          runnerId: 'runner-1',
-          state: 'busy',
-          queueable: true,
-          reason: 'local_busy'
-        }
-      }
-    })
-  });
-
-  const result = await context.submitPreparedAnalysisBatchToRemoteRunner({
-    batchId: 'batch-busy',
-    submissionId: 'submit-busy',
-    items: [
-      { jobId: 'job-1', runId: 'run-1' }
-    ],
-    skipped: []
-  }, 'runner-1');
-
-  assert.strictEqual(result.success, true);
-  assert.strictEqual(result.submittedCount, 1);
-  assert.strictEqual(context.createCalls.length, 1);
-  assert.strictEqual(context.createCalls[0].runnerId, 'runner-1');
-}
-
 async function main() {
-  await testRejectsBusyRunnerBeforeSubmittingJobs();
-  await testSubmitsBatchWhenRunnerReady();
-  await testSubmitsBatchWhenRunnerBusyButQueueable();
-  console.log('remote runner submit test: ok');
+  const context = buildContext();
+  const heartbeat = await context.buildExtensionHeartbeatStatus({ forceReload: true });
+
+  assert.strictEqual(heartbeat.success, true);
+  assert.strictEqual(heartbeat.ok, true);
+  assert.strictEqual(heartbeat.readyForDb, true);
+  assert.strictEqual(heartbeat.featureRevision, 'source-materials-heartbeat-v1');
+  assert.strictEqual(heartbeat.features.sourceMaterialsSubmitFunction, true);
+  assert.strictEqual(heartbeat.features.manualSourceQueueSubmitFunction, true);
+  assert.strictEqual(heartbeat.features.manualSourceFailClosed, true);
+  assert.strictEqual(heartbeat.features.portfolioAutoCompany, true);
+  assert.strictEqual(heartbeat.prompts.companyCount, 1);
+  assert.strictEqual(heartbeat.prompts.portfolioCount, 1);
+  assert.strictEqual(heartbeat.watchlist.ready, true);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(heartbeat.watchlist, 'secret'), false);
+  assert.ok(context.stored.iskra_extension_heartbeat);
+
+  context.getWatchlistDispatchStatus = async () => ({
+    enabled: true,
+    configured: false,
+    hasToken: false,
+    reason: 'missing_dispatch_credentials'
+  });
+  const notReady = await context.buildExtensionHeartbeatStatus({ forceReload: true });
+  assert.strictEqual(notReady.ok, false);
+  assert.strictEqual(notReady.readyForDb, false);
+  assert.ok(notReady.checks.some((check) => check.name === 'watchlist_dispatch_configured' && check.ok === false));
+
+  console.log('extension heartbeat test: ok');
 }
 
 main().catch((error) => {

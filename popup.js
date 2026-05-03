@@ -119,6 +119,8 @@ const watchlistSecretInput = document.getElementById('watchlistSecretInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
+const extensionHeartbeatBtn = document.getElementById('extensionHeartbeatBtn');
+const extensionHeartbeatStatus = document.getElementById('extensionHeartbeatStatus');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const copyLatestInvestFinalResponseBtn = document.getElementById('copyLatestInvestFinalResponseBtn');
 const copyLatestInvestFinalResponseStatus = document.getElementById('copyLatestInvestFinalResponseStatus');
@@ -138,6 +140,7 @@ const openRemoteIntakeBtn = document.getElementById('openRemoteIntakeBtn');
 const remoteIntakeStatus = document.getElementById('remoteIntakeStatus');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
+let extensionHeartbeatBusy = false;
 let analysisQueueStatusSnapshot = null;
 let remoteRunnerConfigSnapshot = null;
 const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
@@ -195,6 +198,10 @@ function setAnalysisQueueStatus(text, isError = false) {
 
 function setDispatchStatus(text, isError = false) {
   setStatusElement(watchlistDispatchStatus, text, isError);
+}
+
+function setExtensionHeartbeatStatus(text, isError = false) {
+  setStatusElement(extensionHeartbeatStatus, text, isError);
 }
 
 function setCopyLatestInvestFinalResponseStatus(text, isError = false) {
@@ -879,6 +886,7 @@ function applyDispatchButtonsState() {
   if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
   if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
   if (flushWatchlistDispatchBtn) flushWatchlistDispatchBtn.disabled = dispatchButtonsBusy;
+  if (extensionHeartbeatBtn) extensionHeartbeatBtn.disabled = extensionHeartbeatBusy;
 }
 
 function applyWatchlistCredentialsUi(status) {
@@ -928,6 +936,73 @@ async function refreshDispatchStatus(forceReload = false) {
   } catch (error) {
     applyDispatchStatusSnapshot(null);
     setDispatchStatus(`Intake status: ${error?.message || String(error)}`, true);
+  }
+}
+
+function formatExtensionHeartbeatStatus(heartbeat) {
+  if (!heartbeat || typeof heartbeat !== 'object') {
+    return 'Heartbeat: brak danych.';
+  }
+  if (heartbeat.success === false) {
+    return `Heartbeat: blad (${heartbeat.error || 'unknown'}).`;
+  }
+  const prompts = heartbeat.prompts && typeof heartbeat.prompts === 'object' ? heartbeat.prompts : {};
+  const features = heartbeat.features && typeof heartbeat.features === 'object' ? heartbeat.features : {};
+  const watchlist = heartbeat.watchlist && typeof heartbeat.watchlist === 'object' ? heartbeat.watchlist : {};
+  const queue = heartbeat.queue && typeof heartbeat.queue === 'object' ? heartbeat.queue : null;
+  const failedChecks = Array.isArray(heartbeat.checks)
+    ? heartbeat.checks
+      .filter((check) => check && check.ok !== true)
+      .map((check) => check.name || 'unknown')
+      .slice(0, 5)
+    : [];
+  const statusLabel = heartbeat.ok === true ? 'OK' : 'UWAGA';
+  const sourceLabel = features.sourceMaterialsSubmitFunction && features.manualSourceQueueSubmitFunction
+    ? 'source OK'
+    : 'source NIE';
+  const dbLabel = heartbeat.readyForDb === true ? 'DB OK' : 'DB NIE';
+  const tokenLabel = watchlist.hasToken === true ? `token=${watchlist.tokenSource || 'ok'}` : 'token=brak';
+  const queueLabel = queue
+    ? `kolejka=${queue.activeSlots || 0}/${queue.maxConcurrent || 0}, wait=${queue.queueSize || 0}`
+    : 'kolejka=brak';
+  const supportId = typeof heartbeat.supportId === 'string' && heartbeat.supportId
+    ? `support=${heartbeat.supportId}`
+    : '';
+  const revision = typeof heartbeat.featureRevision === 'string' && heartbeat.featureRevision
+    ? `build=${heartbeat.featureRevision}`
+    : '';
+  const failedLabel = failedChecks.length > 0 ? `fail=${failedChecks.join(',')}` : '';
+  return [
+    `Heartbeat ${statusLabel}`,
+    sourceLabel,
+    dbLabel,
+    tokenLabel,
+    `prompty C:${prompts.companyCount || 0} P:${prompts.portfolioCount || 0}`,
+    `portfolio-auto=${features.portfolioAutoCompany ? 'OK' : 'NIE'}`,
+    queueLabel,
+    revision,
+    supportId,
+    failedLabel
+  ].filter(Boolean).join(' | ');
+}
+
+async function refreshExtensionHeartbeatStatus(forceReload = false) {
+  if (!extensionHeartbeatStatus) return;
+  extensionHeartbeatBusy = true;
+  applyDispatchButtonsState();
+  setExtensionHeartbeatStatus('Heartbeat: sprawdzam...', false);
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_EXTENSION_HEARTBEAT',
+      forceReload,
+      includeQueue: true
+    });
+    setExtensionHeartbeatStatus(formatExtensionHeartbeatStatus(response), response?.ok !== true);
+  } catch (error) {
+    setExtensionHeartbeatStatus(`Heartbeat: ${error?.message || String(error)}`, true);
+  } finally {
+    extensionHeartbeatBusy = false;
+    applyDispatchButtonsState();
   }
 }
 
@@ -2631,6 +2706,18 @@ if (flushWatchlistDispatchBtn) {
   });
 }
 
+if (extensionHeartbeatBtn) {
+  extensionHeartbeatBtn.addEventListener('click', async () => {
+    const originalText = extensionHeartbeatBtn.textContent;
+    extensionHeartbeatBtn.textContent = 'Heartbeat...';
+    try {
+      await refreshExtensionHeartbeatStatus(true);
+    } finally {
+      extensionHeartbeatBtn.textContent = originalText;
+    }
+  });
+}
+
 if (chrome?.runtime?.onMessage?.addListener) {
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== 'AUTO_RESTORE_STATUS_UPDATED') return;
@@ -2642,6 +2729,7 @@ installPopupRuntimeProblemLogging();
 
 void Promise.all([
   refreshDispatchStatus(true),
+  refreshExtensionHeartbeatStatus(true),
   refreshAutoRestoreStatus(true),
   refreshAnalysisQueueStatus(),
   refreshRemoteRunnerStatus(),
@@ -2651,4 +2739,5 @@ setInterval(() => {
   void refreshAutoRestoreStatus(false);
   void refreshAnalysisQueueStatus();
   void refreshRemoteRunnerStatus();
+  void refreshExtensionHeartbeatStatus(false);
 }, 15000);

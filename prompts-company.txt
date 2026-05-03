@@ -2832,7 +2832,25 @@ MCP / ISKIERKA RETRIEVAL
 
 Use MCP / Iskierka sector-context search.
 
-Retrieve sector memory entries using combinations of:
+Do not send one overloaded query with every concept at once. Retrieval must use
+a query ladder:
+
+1. exact sector / company_family terms from the company records,
+2. short anchor queries, one at a time, for the actual mechanism
+   (examples: SOCAMM, HBM, rack-scale, N3 wafer allocation, EUV,
+   working-capital pass-through),
+3. pairwise 2-3 token queries only if the short anchor is too broad,
+4. broad sector fallback only after the mechanism queries are attempted.
+
+Use both Polish and English aliases when obvious:
+- Semiconductors / Półprzewodniki,
+- Manufacturing / Produkcja przemysłowa,
+- Technology Hardware / Sprzęt technologiczny,
+- memory / pamięć,
+- foundry / foundry / produkcja układów,
+- WFE / sprzęt półprzewodnikowy.
+
+Retrieve sector memory entries using short combinations of:
 - sector,
 - subsector,
 - selected subsegment,
@@ -2854,9 +2872,28 @@ Retrieve sector memory entries using combinations of:
 - factory buildout,
 - returns quality.
 
-If MCP is unavailable:
+Classify MCP retrieval state precisely:
+
+- MCP_TOOL_UNAVAILABLE: the tool/server is not callable.
+- MCP_ALIAS_NOT_FOUND: only the requested alias/name is missing; try the visible
+  equivalent before giving up.
+- MCP_SCHEMA_MISMATCH: the tool returns a shape that is not sector memory.
+- MCP_QUERY_RETURNED_EMPTY: the tool is callable but this query returned zero
+  active rows.
+
+Do not call an empty result MCP_UNAVAILABLE.
+
+If all retrieval attempts are MCP_QUERY_RETURNED_EMPTY:
 - do not stop,
-- mark MCP_UNAVAILABLE,
+- mark MCP_QUERY_RETURNED_EMPTY,
+- continue with model-generated sector overlay only,
+- label it explicitly as MODEL_GENERATED_NOT_MCP_RETRIEVED,
+- state that Stage 4 remains unaudited by retrieved sector memory.
+
+If MCP_TOOL_UNAVAILABLE / MCP_ALIAS_NOT_FOUND / MCP_SCHEMA_MISMATCH remains after
+trying visible equivalents:
+- do not stop,
+- mark the precise status,
 - continue with no sector overlay impact,
 - state that Stage 4 remains unaudited by sector memory.
 
@@ -6096,9 +6133,7 @@ If the thesis wedge is operationally real but immaterial to the stock, do not re
 Eligibility guidance:
 - PRIMARY normally requires ENTRY_SCORE_0_10 >= 7.5
 - SECONDARY normally requires ENTRY_SCORE_0_10 >= 6.5
-- Select up to 2 as PRIMARY and SECONDARY if they meet the required quality and entry-actionability standard.
-- If fewer than 2 meet the standard, output fewer and flag ENTRY_SHORTFALL.
-- Do not select a company solely to fill the PRIMARY / SECONDARY slots.
+- PRIMARY and SECONDARY must always be assigned to the top surviving WATCH companies; if actionability threshold is not met, set sizing = 0% and category/status = ENTRY_SHORTFALL.
 
 Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap in invoice items:
 - Replace #2 with #3 if available
@@ -6106,8 +6141,9 @@ Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap i
 
 STEP 4 — ASSIGN ROLES AND SIZING
 
-#1 = PRIMARY (larger position, earlier entry) if it meets the standard
-#2 = SECONDARY (smaller position or conditional on VOI from PRIMARY) if it meets the standard
+#1 = PRIMARY (larger position, earlier entry)
+#2 = SECONDARY (smaller position or conditional on VOI from PRIMARY)
+If a slot's actionability threshold is not met, keep the role assignment and set sizing = 0% and category/status = ENTRY_SHORTFALL.
 
 Sizing:
   Composite 4.0-5.0: PRIMARY 3-5%, SECONDARY 2-3%
@@ -6348,12 +6384,9 @@ Zwróć dokładnie jeden obiekt JSON:
 }
 Standardowy przypadek
 schema ma dokładnie wartość economist.response.v2
-records ma 1–2 rekordy zależnie od liczby spółek, które przeszły próg jakości i actionability
+Always generate records for the PRIMARY and SECONDARY slots from Stage 13, including ENTRY_SHORTFALL records; return records: [] only if Stage 13 has no surviving WATCH companies.
 pierwszy rekord = PRIMARY
-jeśli istnieje drugi rekord = SECONDARY
-Jeśli tylko jedna spółka przeszła
-zwróć 1 rekord
-dodaj extras.shortfall_reason
+drugi rekord = SECONDARY
 Kształt rekordu
 
 Każdy rekord musi mieć dokładnie te sekcje:
@@ -6999,7 +7032,7 @@ Przed zwrotem sprawdź:
 schema == economist.response.v2
 top-level object has schema == "economist.response.v2"
 records jest tablicą
-records ma 1–2 rekordy zależnie od liczby spółek, które przeszły próg jakości i actionability
+Always generate records for the PRIMARY and SECONDARY slots from Stage 13, including ENTRY_SHORTFALL records; return records: [] only if Stage 13 has no surviving WATCH companies.
 PRIMARY jest pierwszy
 każdy rekord ma:
 decision_role
@@ -7030,14 +7063,14 @@ Nie dodawaj żadnych wyjaśnień.
 Nie używaj markdownu.
 Nie zwracaj nic poza JSON-em.
 schema musi mieć wartość economist.response.v2.
-PRIMARY jako pierwszy rekord, SECONDARY jako drugi tylko jeśli istnieje drugi rekord.
+PRIMARY jako pierwszy rekord, SECONDARY jako drugi rekord; records: [] tylko jeśli Stage 13 nie ma surviving WATCH companies.
 --- PROMPT SEPARATOR ---
 STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS
 Zadanie: wstaw dokładnie wygenerowany JSON Stage 14 do bazy przez MCP Iskierka.
 
 Źródło danych dla tego etapu to wygenerowany output Stage 14 / Prompt 15 z 18, niekoniecznie bezpośrednio poprzednia wiadomość.
 
-Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 14, czyli obiekt JSON z polem records będącym tablicą.
+Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 14, czyli obiekt JSON z polem `"schema": "economist.response.v2"` oraz polem records będącym tablicą.
 
 Ignoruj wiadomości techniczne Stage 15, wyniki MCP, statusy narzędzi, komentarze oraz inne teksty, które nie są obiektem JSON z polem records będącym tablicą. Nie używaj Stage 16 ani tablic sektorowych jako źródła dla Stage 15.
 
@@ -7070,6 +7103,8 @@ Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/hist
 Po próbie zapisu zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 14, żeby pipeline mógł przejść do Stage 16.
 
 Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian.
+
+Jeśli interfejs lub host narzędzi zwróci komunikat operacyjny typu „Zatrzymano rozmawianie z domeną iskierka”, „tool call interrupted”, „domain stopped”, timeout albo podobny sygnał przerwania rozmowy z MCP, potraktuj to jako błąd techniczny zapisu. Nie cytuj tego komunikatu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian.
 
 Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian, chyba że w historii rozmowy w ogóle nie było obiektu JSON z polem records będącym tablicą; wtedy użyj DATA_GAP_STAGE=14.
 

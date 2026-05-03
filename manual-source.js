@@ -4,13 +4,19 @@ const titleInput = document.getElementById('titleInput');
 const sourceInput = document.getElementById('sourceInput');
 const pdfInput = document.getElementById('pdfInput');
 const pdfList = document.getElementById('pdfList');
+const remoteModeInput = document.getElementById('remoteModeInput');
+const remoteControls = document.getElementById('remoteControls');
+const remoteRunnerSelect = document.getElementById('remoteRunnerSelect');
+const remoteRefreshBtn = document.getElementById('remoteRefreshBtn');
+const remoteInfo = document.getElementById('remoteInfo');
 const providerStatus = document.getElementById('providerStatus');
+const instancesInfo = document.getElementById('instancesInfo');
 const instancePresetButtons = Array.from(document.querySelectorAll('[data-instances]'));
 const submitBtn = document.getElementById('submitBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 
 const DEFAULT_INSTANCES = 5;
-const ALLOWED_INSTANCE_COUNTS = new Set([5, 10, 20]);
+const ALLOWED_INSTANCE_COUNTS = new Set([1, 5, 10, 20]);
 const MANUAL_SOURCE_PREFILL_STORAGE_KEY = 'manual_source_prefill_draft';
 const MANUAL_SOURCE_PREFILL_MAX_AGE_MS = 5 * 60 * 1000;
 const DEFAULT_CHUNK_SIZE = 512 * 1024;
@@ -23,6 +29,9 @@ const pdfFileByToken = new Map();
 let selectedPdfFiles = [];
 let providerPort = null;
 let providerKeepaliveTimer = null;
+let remoteRunners = [];
+let remoteRunnerLoading = false;
+let remoteConfigHydrated = false;
 
 const urlParams = new URLSearchParams(window.location.search);
 const presetTitle = urlParams.get('title') || '';
@@ -36,6 +45,126 @@ function setProviderStatus(text, tone = 'info') {
   providerStatus.className = 'provider-status';
   if (tone) {
     providerStatus.classList.add(tone);
+  }
+}
+
+function getRemoteModeEnabled() {
+  return remoteModeInput?.checked === true;
+}
+
+function getSelectedRemoteRunnerId() {
+  return typeof remoteRunnerSelect?.value === 'string' ? remoteRunnerSelect.value.trim() : '';
+}
+
+function formatRemoteRunnerOption(runner) {
+  const runnerId = typeof runner?.runnerId === 'string' ? runner.runnerId.trim() : '';
+  const runnerName = typeof runner?.runnerName === 'string' && runner.runnerName.trim()
+    ? runner.runnerName.trim()
+    : runnerId;
+  const state = typeof runner?.state === 'string' && runner.state.trim() ? runner.state.trim() : 'unknown';
+  const busySuffix = runner?.localBusy === true ? ' busy' : '';
+  return `${runnerName} (${state}${busySuffix})`;
+}
+
+function renderRemoteRunnerOptions(preferredRunnerId = '') {
+  if (!remoteRunnerSelect) return;
+  const currentRunnerId = preferredRunnerId || getSelectedRemoteRunnerId();
+  remoteRunnerSelect.innerHTML = '';
+
+  if (remoteRunners.length === 0) {
+    const option = document.createElement('option');
+    option.value = '';
+    option.textContent = remoteRunnerLoading ? 'Ladowanie runnerow...' : 'Brak runnerow';
+    remoteRunnerSelect.appendChild(option);
+  } else {
+    remoteRunners.forEach((runner) => {
+      const runnerId = typeof runner?.runnerId === 'string' ? runner.runnerId.trim() : '';
+      if (!runnerId) return;
+      const option = document.createElement('option');
+      option.value = runnerId;
+      option.textContent = formatRemoteRunnerOption(runner);
+      remoteRunnerSelect.appendChild(option);
+    });
+  }
+
+  if (currentRunnerId && remoteRunners.some((runner) => runner?.runnerId === currentRunnerId)) {
+    remoteRunnerSelect.value = currentRunnerId;
+  } else if (remoteRunnerSelect.options.length > 0) {
+    remoteRunnerSelect.selectedIndex = 0;
+  }
+}
+
+function syncRemoteControls() {
+  const remoteEnabled = getRemoteModeEnabled();
+  const hasPdf = selectedPdfFiles.length > 0;
+  const hasRunner = !!getSelectedRemoteRunnerId();
+
+  if (remoteControls) {
+    remoteControls.hidden = !remoteEnabled;
+  }
+  if (remoteRunnerSelect) {
+    remoteRunnerSelect.disabled = queueActive || !remoteEnabled || remoteRunnerLoading || remoteRunners.length === 0;
+  }
+  if (remoteRefreshBtn) {
+    remoteRefreshBtn.disabled = queueActive || remoteRunnerLoading;
+  }
+  if (remoteModeInput) {
+    remoteModeInput.disabled = queueActive;
+  }
+  if (remoteInfo) {
+    if (!remoteEnabled) {
+      remoteInfo.textContent = 'Remote dziala dla tekstu wklejonego w to okno. PDF-y zostaja lokalnie na tym komputerze.';
+    } else if (hasPdf) {
+      remoteInfo.textContent = 'Remote nie obsluguje PDF z tego okna. Usun PDF-y albo wylacz remote.';
+    } else if (!hasRunner) {
+      remoteInfo.textContent = 'Wybierz runnera, zanim wyslesz tekst zdalnie.';
+    } else {
+      remoteInfo.textContent = 'Tekst zostanie dodany do centralnej kolejki wybranego runnera.';
+    }
+  }
+}
+
+async function loadRemoteRunnerOptions(options = {}) {
+  if (remoteRunnerLoading) return;
+  remoteRunnerLoading = true;
+  renderRemoteRunnerOptions();
+  syncRemoteControls();
+  if (options?.silent !== true) {
+    setProviderStatus('Laduje zdalnych runnerow...', 'info');
+  }
+
+  try {
+    const [configResponse, runnersResponse] = await Promise.all([
+      sendRuntimeMessage({ type: 'GET_REMOTE_EXECUTION_CONFIG' }),
+      sendRuntimeMessage({ type: 'LIST_REMOTE_RUNNERS', limit: 20 })
+    ]);
+    const selectedRunnerId = typeof configResponse?.selectedRunnerId === 'string'
+      ? configResponse.selectedRunnerId.trim()
+      : '';
+    if (!remoteConfigHydrated && remoteModeInput) {
+      remoteModeInput.checked = configResponse?.executionMode === 'remote';
+      remoteConfigHydrated = true;
+    }
+    remoteRunners = Array.isArray(runnersResponse?.items)
+      ? runnersResponse.items.filter((runner) => runner && typeof runner === 'object')
+      : [];
+    renderRemoteRunnerOptions(selectedRunnerId);
+    if (getRemoteModeEnabled() && remoteRunners.length === 0 && options?.silent !== true) {
+      setProviderStatus(runnersResponse?.error || 'Nie znaleziono aktywnych runnerow.', 'error');
+    } else if (getRemoteModeEnabled() && options?.silent !== true) {
+      setProviderStatus(`Wczytano ${remoteRunners.length} runnerow.`, 'success');
+    }
+  } catch (error) {
+    remoteRunners = [];
+    renderRemoteRunnerOptions();
+    if (options?.silent !== true) {
+      setProviderStatus(`Nie udalo sie pobrac runnerow: ${error?.message || String(error)}.`, 'error');
+    }
+  } finally {
+    remoteRunnerLoading = false;
+    renderRemoteRunnerOptions(getSelectedRemoteRunnerId());
+    syncRemoteControls();
+    updateSubmitButton();
   }
 }
 
@@ -56,7 +185,12 @@ function buildPdfToken(index, file) {
 function updateSubmitButton() {
   const hasText = sourceInput.value.trim().length > 0;
   const hasPdf = selectedPdfFiles.length > 0;
-  submitBtn.disabled = queueActive || (!hasText && !hasPdf);
+  const remoteEnabled = getRemoteModeEnabled();
+  const remoteBlocked = remoteEnabled && (hasPdf || !hasText || !getSelectedRemoteRunnerId() || remoteRunnerLoading);
+  submitBtn.disabled = queueActive || (!hasText && !hasPdf) || remoteBlocked;
+  if (!queueActive && (submitBtn.textContent === 'Uruchom' || submitBtn.textContent === 'Wyslij remote')) {
+    submitBtn.textContent = remoteEnabled ? 'Wyslij remote' : 'Uruchom';
+  }
 }
 
 function normalizeInstances(value) {
@@ -73,6 +207,9 @@ function updateInstancesDisplay() {
     button.setAttribute('aria-pressed', isActive ? 'true' : 'false');
     button.disabled = queueActive;
   });
+  if (instancesInfo) {
+    instancesInfo.textContent = 'Dla PDF mnozy kazdy plik.';
+  }
 }
 
 function setQueueUiLocked(locked) {
@@ -87,6 +224,7 @@ function setQueueUiLocked(locked) {
   } else {
     updateInstancesDisplay();
   }
+  syncRemoteControls();
 }
 
 function getManualSourcePrefillStorageArea() {
@@ -288,6 +426,8 @@ function syncPdfSelection() {
   pdfInput.value = '';
 
   renderPdfList();
+  syncRemoteControls();
+  updateInstancesDisplay();
   updateSubmitButton();
 
   if (rejectedCount > 0 || duplicateCount > 0) {
@@ -380,7 +520,7 @@ function releasePdfProviderState(releaseMessage = '') {
   setQueueUiLocked(false);
   renderPdfList();
   updateSubmitButton();
-  submitBtn.textContent = 'Uruchom';
+  submitBtn.textContent = getRemoteModeEnabled() ? 'Wyslij remote' : 'Uruchom';
 
   if (releaseMessage) {
     setProviderStatus(releaseMessage, 'success');
@@ -389,8 +529,25 @@ function releasePdfProviderState(releaseMessage = '') {
   }
 }
 
-sourceInput.addEventListener('input', updateSubmitButton);
+sourceInput.addEventListener('input', () => {
+  syncRemoteControls();
+  updateSubmitButton();
+});
 pdfInput.addEventListener('change', syncPdfSelection);
+remoteModeInput?.addEventListener('change', () => {
+  if (getRemoteModeEnabled() && remoteRunners.length === 0) {
+    loadRemoteRunnerOptions().catch(() => {});
+  }
+  syncRemoteControls();
+  updateSubmitButton();
+});
+remoteRunnerSelect?.addEventListener('change', () => {
+  syncRemoteControls();
+  updateSubmitButton();
+});
+remoteRefreshBtn?.addEventListener('click', () => {
+  loadRemoteRunnerOptions().catch(() => {});
+});
 
 instancePresetButtons.forEach((button) => {
   button.addEventListener('click', () => {
@@ -406,18 +563,31 @@ submitBtn.addEventListener('click', async () => {
   const hasPdf = selectedPdfFiles.length > 0;
   const text = sourceInput.value.trim();
   const title = titleInput.value.trim() || 'Recznie wklejony artykul';
+  const remoteEnabled = getRemoteModeEnabled();
+  const remoteRunnerId = getSelectedRemoteRunnerId();
+  const effectiveInstances = instances;
 
   if (!hasPdf && !text) return;
+  if (hasPdf && remoteEnabled) {
+    setProviderStatus('Remote z tego okna obsluguje tylko wklejony tekst. PDF uruchom lokalnie.', 'error');
+    updateSubmitButton();
+    return;
+  }
+  if (remoteEnabled && !remoteRunnerId) {
+    setProviderStatus('Wybierz runnera przed wyslaniem remote.', 'error');
+    updateSubmitButton();
+    return;
+  }
 
   submitBtn.disabled = true;
-  submitBtn.textContent = 'Uruchamiam...';
+  submitBtn.textContent = remoteEnabled ? 'Wysylam...' : 'Uruchamiam...';
 
   const payload = hasPdf
     ? {
       type: 'MANUAL_SOURCE_SUBMIT',
       mode: 'pdf',
       title,
-      instances,
+      instances: effectiveInstances,
       pdfProviderId: providerId,
       pdfFiles: selectedPdfFiles,
     }
@@ -426,7 +596,10 @@ submitBtn.addEventListener('click', async () => {
       mode: 'text',
       text,
       title,
-      instances,
+      instances: effectiveInstances,
+      remote: remoteEnabled,
+      runnerId: remoteEnabled ? remoteRunnerId : '',
+      executionMode: remoteEnabled ? 'remote' : 'local',
     };
 
   if (hasPdf) {
@@ -447,7 +620,7 @@ submitBtn.addEventListener('click', async () => {
   if (!response?.success) {
     const launchError = response?.error || response?.reason || 'unknown';
     const launchMessage = launchError === 'prompts_not_loaded'
-      ? 'Brak promptow company. Odswiez rozszerzenie i sprobuj ponownie.'
+      ? 'Brak promptow company/portfolio. Odswiez rozszerzenie i sprobuj ponownie.'
       : launchError;
     submitBtn.textContent = 'Blad';
     submitBtn.disabled = false;
@@ -476,13 +649,23 @@ submitBtn.addEventListener('click', async () => {
     return;
   }
 
-  submitBtn.textContent = 'Uruchomiono';
-  setProviderStatus(
-    `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz. Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
-    'success'
-  );
+  if (response?.remote === true) {
+    submitBtn.textContent = 'Wyslano';
+    const portfolioSuffix = response?.extraPortfolioQueued ? ' + portfolio 1x' : '';
+    setProviderStatus(
+      `Wyslano ${response?.submittedCount || response?.queuedCount || 0} jobow company${portfolioSuffix} do runnera ${response?.runnerId || remoteRunnerId}.`,
+      'success'
+    );
+  } else {
+    submitBtn.textContent = 'Uruchomiono';
+    const portfolioSuffix = response?.extraPortfolioQueued ? ' + portfolio 1x' : '';
+    setProviderStatus(
+      `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz company${portfolioSuffix}. Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+      'success'
+    );
+  }
   setTimeout(() => {
-    submitBtn.textContent = 'Uruchom';
+    submitBtn.textContent = getRemoteModeEnabled() ? 'Wyslij remote' : 'Uruchom';
     updateSubmitButton();
   }, 900);
 });
@@ -564,6 +747,9 @@ if (runtimeMessageApi?.addListener) {
 }
 
 setQueueUiLocked(false);
+renderRemoteRunnerOptions();
+syncRemoteControls();
 updateSubmitButton();
 updateInstancesDisplay();
 void hydrateClipboardPrefill();
+void loadRemoteRunnerOptions({ silent: true });

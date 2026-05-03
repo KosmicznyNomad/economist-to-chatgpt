@@ -215,6 +215,7 @@ async function main() {
       ...payload,
       schema: 'dispatch.v1'
     }),
+    applySourceMaterialMetaForSave: (target) => target,
     detectChatGptComputationState: () => ({
       composerThinkingEffort: 'heavy',
       chatGptModeKind: 'thinking',

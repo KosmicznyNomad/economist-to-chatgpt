@@ -267,9 +267,25 @@ function testCompanyPromptCatalogIsEighteenPrompts() {
 
 function testMcpWritePromptsUseIskierkaToolNames() {
   const prompts = parsePromptChainText(promptsText);
+  const stage5McpPrompt = prompts.find((prompt) => (
+    prompt.includes('STAGE 5') && prompt.includes('MCP SECTOR OVERLAY')
+  )) || '';
   const stage14RecordPrompt = prompts[14] || '';
   const stage15WritePrompt = prompts[15] || '';
   const stage17WritePrompt = prompts[17] || '';
+
+  assert(
+    stage5McpPrompt.includes('query ladder'),
+    'Stage 5 should use a query ladder instead of overloaded sector-memory queries.'
+  );
+  assert(
+    stage5McpPrompt.includes('MCP_QUERY_RETURNED_EMPTY'),
+    'Stage 5 should distinguish an empty sector-memory result from MCP unavailability.'
+  );
+  assert(
+    stage5McpPrompt.includes('MODEL_GENERATED_NOT_MCP_RETRIEVED'),
+    'Stage 5 fallback overlay should be explicitly marked as model-generated.'
+  );
 
   assert(
     stage14RecordPrompt.includes('"schema": "economist.response.v2"'),
@@ -321,6 +337,10 @@ function testMcpWritePromptsUseIskierkaToolNames() {
     'Stage 15 should explicitly suppress MCP unavailable sentinel output.'
   );
   assert(
+    stage15WritePrompt.includes('Zatrzymano rozmawianie z domeną iskierka'),
+    'Stage 15 should treat interrupted Iskierka domain messages as technical write failures and still copy JSON.'
+  );
+  assert(
     stage15WritePrompt.includes('Nie używaj `context_packs.upsert`'),
     'Stage 15 should explicitly forbid context_packs.upsert as a Stage 14 fallback.'
   );
@@ -369,7 +389,7 @@ function testMcpWritePromptsUseIskierkaToolNames() {
     'Prompt 18 should have an explicit final JSON output rule.'
   );
   assert(
-    !promptsText.includes('MCP_TOOL_UNAVAILABLE'),
+    !stage15WritePrompt.includes('MCP_TOOL_UNAVAILABLE') && !stage17WritePrompt.includes('MCP_TOOL_UNAVAILABLE'),
     'MCP write prompts should not emit unavailable sentinel outputs.'
   );
   assert(
@@ -450,6 +470,12 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     PROMPTS_COMPANY: new Array(18).fill('prompt'),
     sanitizeAnalysisQueueJob(job) {
       return job;
+    },
+    resolvePromptCountForQueuedJob(job) {
+      if (Array.isArray(job?.promptChainSnapshot) && job.promptChainSnapshot.length > 0) {
+        return job.promptChainSnapshot.length;
+      }
+      return 18;
     }
   });
 
