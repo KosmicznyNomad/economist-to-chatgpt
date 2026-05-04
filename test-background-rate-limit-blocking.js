@@ -4,7 +4,7 @@ const path = require('path');
 const vm = require('vm');
 
 const backgroundPath = path.join(__dirname, 'background.js');
-const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
+const backgroundSource = fs.readFileSync(backgroundPath, 'utf8').replace(/\r\n/g, '\n');
 
 function extractFunctionSource(source, functionName) {
   const pattern = new RegExp(`(?:async\\s+)?function\\s+${functionName}\\s*\\(`);
@@ -232,6 +232,10 @@ function testClassifierRecognizesLimitAndRestrictionMessages() {
     false
   );
   assert.strictEqual(
+    context.isChatGptLimitOrRestrictionText("You've hit your limit. Please try again later."),
+    false
+  );
+  assert.strictEqual(
     context.isChatGptLimitOrRestrictionText('Heavy is not available on your current plan.'),
     false
   );
@@ -287,6 +291,28 @@ function testRetryableGenerationErrorClassifier() {
     context.isRetryableChatGptGenerationErrorText('Something went wrong while generating the response.'),
     true
   );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText("You've hit your limit. Please try again later."),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText("You\u2019ve hit your limit. Please try again later."),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Too many requests. Please try again later.'),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Please try again later. Retry'),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText(
+      'This is a longer normal response mentioning that someone may try again later after reviewing context.'
+    ),
+    false
+  );
   assert.strictEqual(context.isRetryableChatGptGenerationErrorText('Network error'), false);
   assert.strictEqual(
     context.isRetryableChatGptGenerationErrorText('Streaming interrupted while waiting for the complete message.'),
@@ -306,6 +332,35 @@ function testInjectKeepsLimitClassifierInsideInjectedScope() {
   assert.doesNotMatch(injectSource, /\bisChatGptLimitOrRestrictionText\s*\(/);
   assert.match(injectSource, /function clickRetryForRetryableGenerationError\s*\(/);
   assert.match(injectSource, /statusCode:\s*'chat\.retry_generation_error'/);
+  assert.match(injectSource, /lastAlert,\s*\n\s*lastAlertText:/);
+  assert.match(injectSource, /isRetryableChatGptGenerationErrorText\(state\.lastAlertText\)/);
+}
+
+function testInjectResendsPromptBeforeManualNoResponseRecovery() {
+  const start = backgroundSource.indexOf('async function injectToChat(');
+  const end = backgroundSource.indexOf('\nfunction sleep(', start);
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error('Could not isolate injectToChat source');
+  }
+  const injectSource = backgroundSource.slice(start, end);
+
+  assert.match(injectSource, /function resendPromptAfterMissingResponse\s*\(/);
+  assert.match(injectSource, /statusCode:\s*'chat\.no_response_resend'/);
+  assert.match(injectSource, /missingResponsePromptResendMaxAttempts/);
+
+  const timeoutResendIndex = injectSource.indexOf("await resendPromptAfterMissingResponse(\n                'timeout'");
+  const timeoutAutoRecoveryIndex = injectSource.indexOf("const autoRecoveryHandoff = maybeTriggerAutoRecovery(\n                'timeout'");
+  assert(timeoutResendIndex > 0, 'timeout branch should resend the previous prompt');
+  assert(timeoutAutoRecoveryIndex > 0, 'timeout branch should keep fallback recovery');
+  assert(
+    timeoutResendIndex < timeoutAutoRecoveryIndex,
+    'timeout resend must run before stopping or external auto recovery'
+  );
+
+  assert(
+    injectSource.includes("await resendPromptAfterMissingResponse(\n                  'empty_response'"),
+    'empty captured response should resend the previous prompt before manual invalid-response handling'
+  );
 }
 
 function main() {
@@ -313,6 +368,7 @@ function main() {
   testBlockedResultHelperAndPatchBuilder();
   testRetryableGenerationErrorClassifier();
   testInjectKeepsLimitClassifierInsideInjectedScope();
+  testInjectResendsPromptBeforeManualNoResponseRecovery();
   console.log('test-background-rate-limit-blocking.js passed');
 }
 

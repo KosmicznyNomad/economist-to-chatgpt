@@ -33200,6 +33200,7 @@ async function injectToChat(
       responseAccepted: 0,
       responseAcceptedEmpty: 0,
       responseDuplicateAccepted: 0,
+      missingResponsePromptResends: 0,
       stageCompleted: 0,
       captureOk: 0,
       captureEmpty: 0
@@ -33210,6 +33211,7 @@ async function injectToChat(
     const stageCompletedPromptIndexes = new Set();
     const responseFingerprintsAccepted = new Map();
     const responseAcceptedByPrompt = new Map();
+    const missingResponsePromptResendAttemptsByPrompt = new Map();
     let dataGapRewindState = null;
 
     const runTag = `runId=${runId || 'n/a'}`;
@@ -33648,6 +33650,14 @@ async function injectToChat(
         ? autoRecoveryContext.reasons.filter((reason) => typeof reason === 'string')
         : []
     );
+    const missingResponsePromptResendMaxAttempts = Number.isInteger(autoRecoveryContext?.missingResponsePromptResendMaxAttempts)
+      && autoRecoveryContext.missingResponsePromptResendMaxAttempts >= 0
+      ? Math.min(autoRecoveryContext.missingResponsePromptResendMaxAttempts, 5)
+      : 2;
+    const missingResponsePromptResendDelayMs = Number.isInteger(autoRecoveryContext?.missingResponsePromptResendDelayMs)
+      && autoRecoveryContext.missingResponsePromptResendDelayMs >= 0
+      ? Math.min(autoRecoveryContext.missingResponsePromptResendDelayMs, 30_000)
+      : 1500;
     const persistenceMode = typeof persistenceContext?.mode === 'string'
       ? persistenceContext.mode.trim()
       : '';
@@ -35535,11 +35545,37 @@ async function injectToChat(
     function isRetryableChatGptGenerationErrorText(text) {
       const lowered = compactText(text || '').toLowerCase();
       if (!lowered) return false;
+      const normalized = lowered.replace(/[\u2018\u2019]/g, "\'");
+      const standaloneRetryInstruction = normalized
+        .replace(/\s+(?:retry|try again|regenerate)\s*$/i, '')
+        .trim();
+      const isShortRetryInstruction =
+        normalized.length <= 180 &&
+        normalized.includes('try again later') &&
+        (
+          normalized.includes("you've hit your limit") ||
+          normalized.includes('you have hit your limit') ||
+          normalized.includes('you hit your limit') ||
+          normalized.includes("you've reached your limit") ||
+          normalized.includes('you have reached your limit') ||
+          normalized.includes('you reached your limit') ||
+          normalized.includes('too many requests') ||
+          standaloneRetryInstruction === 'please try again later.' ||
+          standaloneRetryInstruction === 'please try again later' ||
+          standaloneRetryInstruction === 'try again later.' ||
+          standaloneRetryInstruction === 'try again later'
+        );
       return (
+        isShortRetryInstruction ||
         lowered.includes('something went wrong while generating the response') ||
+        lowered.includes('something went wrong. if this issue persists') ||
         (
           lowered.includes('something went wrong') &&
           lowered.includes('generating the response')
+        ) ||
+        (
+          lowered.includes('something went wrong') &&
+          lowered.includes('help.openai.com')
         ) ||
         (
           lowered.includes('help.openai.com') &&
@@ -35572,6 +35608,7 @@ async function injectToChat(
         lastAssistantText: compactText(lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : ''),
         lastUserTurnText: compactText(lastUserContainer ? (lastUserContainer.innerText || lastUserContainer.textContent || '') : ''),
         lastAssistantTurnText: compactText(lastAssistantContainer ? (lastAssistantContainer.innerText || lastAssistantContainer.textContent || '') : ''),
+        lastAlert,
         lastAlertText: compactText(lastAlert ? (lastAlert.innerText || lastAlert.textContent || '') : ''),
         turnLikelyCurrent: assistantMessages.length >= userMessages.length
       };
@@ -35745,12 +35782,9 @@ async function injectToChat(
       addScope(state.lastAssistant, 3);
       addScope(state.lastAssistantContainer, 2);
 
-      const alerts = [
-        ...document.querySelectorAll('[role="alert"]'),
-        ...document.querySelectorAll('[role="status"]')
-      ];
-      const lastAlert = alerts.length > 0 ? alerts[alerts.length - 1] : null;
-      addScope(lastAlert, 3);
+      if (state.lastAlert && isRetryableChatGptGenerationErrorText(state.lastAlertText)) {
+        addScope(state.lastAlert, 2);
+      }
 
       return scopes.filter((scope) => hasRetryableChatGptGenerationErrorInElement(scope));
     }
@@ -35817,6 +35851,13 @@ async function injectToChat(
         reason: clicked ? 'clicked' : 'click_failed',
         buttonText: elementTextForActionMatch(retryButton)
       };
+    }
+
+    function hasRetryableChatGptGenerationErrorMessage() {
+      if (hasHardGenerationErrorMessage()) {
+        return true;
+      }
+      return collectRetryableErrorScopes().length > 0;
     }
 
     async function detectPromptSentDespiteFailure(snapshot, promptText, maxWaitMs = 6000) {
@@ -37451,7 +37492,7 @@ async function injectToChat(
     let generationErrorRetryAttempts = 0;
     const maxGenerationErrorRetryAttempts = 2;
     const tryRecoverFromGenerationError = async (phase) => {
-      if (!hasHardGenerationErrorMessage()) return false;
+      if (!hasRetryableChatGptGenerationErrorMessage()) return false;
       if (generationErrorRetryAttempts >= maxGenerationErrorRetryAttempts) {
         return false;
       }
@@ -37481,7 +37522,7 @@ async function injectToChat(
         console.warn('[FAZA 1] Wykryto limit/restriction w ChatGPT.');
         return false;
       }
-      if (hasHardGenerationErrorMessage()) {
+      if (hasRetryableChatGptGenerationErrorMessage()) {
         if (await tryRecoverFromGenerationError('phase1')) {
           phase1IdleSince = Date.now();
           responseStarted = false;
@@ -37550,7 +37591,7 @@ async function injectToChat(
         console.warn('[FAZA 2] Wykryto limit/restriction w ChatGPT.');
         return false;
       }
-      if (hasHardGenerationErrorMessage()) {
+      if (hasRetryableChatGptGenerationErrorMessage()) {
         if (await tryRecoverFromGenerationError('phase2')) {
           phase2IdleSince = Date.now();
           lastAssistantChangeAt = Date.now();
@@ -38288,6 +38329,109 @@ async function injectToChat(
     return true;
   }
   
+  // Missing-response recovery: resend the same prompt before manual fallback.
+  async function resendPromptAfterMissingResponse(
+    reason,
+    promptText,
+    counter,
+    absoluteCurrentPrompt,
+    totalPromptsForRun,
+    absoluteStageIndex
+  ) {
+    if (missingResponsePromptResendMaxAttempts <= 0) {
+      return { resent: false, reason: 'disabled', attempts: 0 };
+    }
+
+    const promptKey = normalizePromptMetricIndex(absoluteCurrentPrompt)
+      || (Number.isInteger(absoluteCurrentPrompt) ? absoluteCurrentPrompt : 0)
+      || 0;
+    const previousAttempts = missingResponsePromptResendAttemptsByPrompt.get(promptKey) || 0;
+    if (previousAttempts >= missingResponsePromptResendMaxAttempts) {
+      return {
+        resent: false,
+        reason: 'max_attempts_exhausted',
+        attempts: previousAttempts,
+        maxAttempts: missingResponsePromptResendMaxAttempts
+      };
+    }
+
+    const nextAttempt = previousAttempts + 1;
+    missingResponsePromptResendAttemptsByPrompt.set(promptKey, nextAttempt);
+    runMetrics.missingResponsePromptResends += 1;
+
+    const safePrompt = Number.isInteger(absoluteCurrentPrompt) && absoluteCurrentPrompt > 0
+      ? absoluteCurrentPrompt
+      : 0;
+    const safeStageIndex = Number.isInteger(absoluteStageIndex)
+      ? absoluteStageIndex
+      : (safePrompt > 0 ? safePrompt - 1 : null);
+    const stageName = safePrompt > 0 ? `Prompt ${safePrompt}` : 'Prompt';
+    const statusText = `Brak odpowiedzi - ponawiam prompt ${nextAttempt}/${missingResponsePromptResendMaxAttempts}`;
+
+    console.warn('[no-response-resend] Resending previous prompt', {
+      reason,
+      prompt: safePrompt,
+      attempt: nextAttempt,
+      maxAttempts: missingResponsePromptResendMaxAttempts
+    });
+    updateCounter(counter, safePrompt, totalPromptsForRun, statusText);
+    notifyProcess('PROCESS_PROGRESS', {
+      status: 'running',
+      lifecycleStatus: 'running',
+      currentPrompt: safePrompt,
+      totalPrompts: totalPromptsForRun,
+      ...(safeStageIndex !== null ? { stageIndex: safeStageIndex } : {}),
+      stageName,
+      phase: 'prompt_send',
+      statusCode: 'chat.no_response_resend',
+      statusText,
+      reason: `no_response_resend_${reason || 'missing_response'}`,
+      needsAction: false,
+      timestamp: Date.now()
+    });
+
+    if (missingResponsePromptResendDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, missingResponsePromptResendDelayMs));
+    }
+    if (shouldStopNow()) {
+      return { resent: false, stopped: true, reason: 'force_stopped' };
+    }
+
+    const resendPromptSnapshotBeforeSend = getPromptDomSnapshot();
+    const resent = await sendPromptUntilSuccess(
+      promptText,
+      interfaceReadyWaitMs,
+      counter,
+      safePrompt,
+      totalPromptsForRun,
+      {
+        allowInferSent: true,
+        promptSnapshotBeforeSend: resendPromptSnapshotBeforeSend
+      }
+    );
+    if (shouldStopNow()) {
+      return { resent: false, stopped: true, reason: 'force_stopped' };
+    }
+
+    if (!resent) {
+      const blocker = captureGenerationBlockerState();
+      return {
+        resent: false,
+        reason: blocker ? 'blocked' : 'resend_send_failed',
+        blocker,
+        attempts: nextAttempt,
+        maxAttempts: missingResponsePromptResendMaxAttempts
+      };
+    }
+
+    return {
+      resent: true,
+      reason: 'resent',
+      attempts: nextAttempt,
+      maxAttempts: missingResponsePromptResendMaxAttempts
+    };
+  }
+
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
   async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     if (shouldStopNow()) return false;
@@ -39647,6 +39791,39 @@ async function injectToChat(
                 });
               }
                
+              const resendAfterTimeout = await resendPromptAfterMissingResponse(
+                'timeout',
+                prompt,
+                counter,
+                absoluteCurrentPrompt,
+                totalPromptsForRun,
+                absoluteStageIndex
+              );
+              if (shouldStopNow() || resendAfterTimeout.stopped) {
+                return forceStopResult();
+              }
+              if (resendAfterTimeout.blocker) {
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                return buildGenerationBlockedResult({
+                  blocker: resendAfterTimeout.blocker,
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  phase: 'prompt_send'
+                });
+              }
+              if (resendAfterTimeout.resent) {
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
+                continue;
+              }
+              if (resendAfterTimeout.reason === 'max_attempts_exhausted') {
+                console.warn('[no-response-resend] Prompt resend limit exhausted after timeout', {
+                  prompt: absoluteCurrentPrompt,
+                  attempts: resendAfterTimeout.attempts,
+                  maxAttempts: resendAfterTimeout.maxAttempts
+                });
+              }
+
               const autoRecoveryHandoff = maybeTriggerAutoRecovery(
                 'timeout',
                 i,
@@ -39725,6 +39902,49 @@ async function injectToChat(
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
               console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Odpowiedz za krotka');
+              if (!compactText(responseText)) {
+                const resendAfterEmptyResponse = await resendPromptAfterMissingResponse(
+                  'empty_response',
+                  prompt,
+                  counter,
+                  absoluteCurrentPrompt,
+                  totalPromptsForRun,
+                  absoluteStageIndex
+                );
+                if (shouldStopNow() || resendAfterEmptyResponse.stopped) {
+                  return forceStopResult();
+                }
+                if (resendAfterEmptyResponse.blocker) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                  return buildGenerationBlockedResult({
+                    blocker: resendAfterEmptyResponse.blocker,
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    phase: 'prompt_send'
+                  });
+                }
+                if (resendAfterEmptyResponse.resent) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
+                  await waitForResponse(responseWaitMs, {
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    stageName: `Prompt ${absoluteCurrentPrompt}`
+                  });
+                  if (shouldStopNow()) {
+                    return forceStopResult();
+                  }
+                  continue;
+                }
+                if (resendAfterEmptyResponse.reason === 'max_attempts_exhausted') {
+                  console.warn('[no-response-resend] Prompt resend limit exhausted after empty response', {
+                    prompt: absoluteCurrentPrompt,
+                    attempts: resendAfterEmptyResponse.attempts,
+                    maxAttempts: resendAfterEmptyResponse.maxAttempts
+                  });
+                }
+              }
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
               
               if (action === 'skip') {
