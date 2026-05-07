@@ -2394,6 +2394,17 @@ Price requires assumptions above capacity, capture, margins, or proof.
 6. DATA_ERROR_RISK
 Ticker, currency, shares, EV, net debt, FCF, or segment data may be wrong.
 
+7. PRE_PROFIT_GROWTH_PREMIUM
+Market is pricing forward earnings power that does not yet appear in current FCF or EBIT, but is anchored in disclosed backlog, guided revenue, consensus estimates, and peer-comparable margin trajectories.
+
+This classification is valid only if:
+- backlog/RPO/ARR/guided revenue exists,
+- peer margin comparison has been performed,
+- implied forward multiple at steady-state margin is within 1.5x of mature peer range for the same business model.
+
+PRE_PROFIT_GROWTH_PREMIUM does not block CORE_DECISION_GRADE.
+It requires explicit monitoring: margin trajectory must converge toward peer range within 3-6 quarters, or reclassify as SPECULATIVE_RESIDUAL.
+
 If CORE_MODEL_GAP or DATA_ERROR_RISK is material, CORE cannot be decision-grade.
 
 CORE_ADOPTED
@@ -2418,6 +2429,33 @@ It cannot be:
 - a consensus copy without internal challenge,
 - a thematic uplift without proof.
 
+For PRE_PROFIT_OPTION_CORE and GROWTH_INDUSTRIAL_CORE where internal normalized CORE is weak but consensus and backlog exist:
+
+CORE_ADOPTED should be primarily anchored on:
+1. Consensus forward EBITDA or revenue x peer-comparable multiple range,
+   cross-checked against:
+2. Backlog/RPO/ARR conversion at conservative margin assumptions,
+   and bounded by:
+3. Implied unit economics (revenue per GPU, EBITDA per deployed unit, capex per revenue dollar) compared to mature peers.
+
+Name the specific peers used, their current EBITDA margins, their maturity stage, and why they are comparable.
+
+This is not "consensus copy without internal challenge."
+The internal challenge is: does backlog conversion at peer-comparable margins support the consensus estimate? If yes, consensus-led CORE is admissible.
+If backlog math cannot support consensus, reduce CORE_ADOPTED below consensus and explain the gap.
+
+The model must show the simple math:
+- Guided/consensus revenue Year N
+- x peer-comparable EBITDA margin range (low/base/high)
+- = implied EBITDA range
+- x peer-comparable EV/EBITDA range
+- = implied EV range
+- minus net debt
+- / diluted shares
+- = CORE_ADOPTED range
+
+This is auditable, triangulated, and grounded in observable data even when bottom-up segment EBIT is not disclosed.
+
 For CORE_ADOPTED, state:
 - method,
 - bear/base/bull,
@@ -2431,7 +2469,11 @@ For CORE_ADOPTED, state:
 
 CORE CONFIDENCE
 
-Assign one:
+CORE CONFIDENCE is type-dependent.
+
+Assign one.
+
+For STABLE_INDUSTRIAL_CORE, CYCLICAL_RECOVERY_CORE, QUALITY_COMPOUNDER_CORE, CONGLOMERATE_SOP_CORE, and STRUCTURAL_VALUE_DESTRUCTION_CORE:
 
 HIGH:
 - segment map is clear,
@@ -2460,6 +2502,35 @@ LOW:
 - market gap unexplained,
 - current price far above model without explanation,
 - boundary between CORE and WEDGE unclear.
+
+For PRE_PROFIT_OPTION_CORE and GROWTH_INDUSTRIAL_CORE:
+
+HIGH:
+- guidance available for FY+1 and FY+2,
+- consensus forward estimates exist (revenue + EBITDA or operating income),
+- backlog / RPO / ARR / committed contracts provide volume anchor,
+- peer comparison at similar maturity stage provides margin and multiple anchor,
+- capex trajectory is visible (even if not normalized),
+- core/wedge boundary is clear.
+
+MEDIUM:
+- guidance available for at least FY+1,
+- at least two of: consensus forward estimates, disclosed backlog/RPO/ARR, or committed contract value,
+- at least one peer or historical analog exists for margin/multiple comparison,
+- capex is disclosed even if growth vs maintenance split is unclear,
+- core/wedge boundary is clear enough for Stage 10.
+
+LOW:
+- no guidance,
+- no consensus,
+- no backlog or committed revenue,
+- no peer comparison possible,
+- capex completely opaque,
+- boundary unclear.
+
+The key difference: for pre-profit and growth companies, MEDIUM does not require "FCF bridge available" or "historical margins available." It requires "forward revenue anchor exists and margin range can be bounded by peers."
+
+Normalized current FCF is a requirement for HIGH confidence in pre-profit types, not for MEDIUM.
 
 PROXY-HEAVY VALUATION DISCIPLINE
 
@@ -3778,6 +3849,9 @@ PHASE 7 — REVERSE DCF (WHAT THE MARKET IMPLIES)
 Solve for market-implied parameters using TOTAL valuation:
 A) Implied revenue growth (holding margins and WACC constant)
 B) Implied FCF margin (holding growth and WACC constant)
+
+For PRE_PROFIT_OPTION_CORE and GROWTH_INDUSTRIAL_CORE:
+In addition to solving for implied growth and implied margin, also solve for implied mature-state EBITDA margin needed to justify current EV at peer-comparable terminal multiple. Report this as "implied margin at maturity" and compare to peer range. This is often the most informative single number for pre-profit companies.
 
 Compute divergence versus your Base assumptions.
 Large divergence indicates real mispricing fuel.
