@@ -264,6 +264,23 @@
       background: #e8eaed;
     }
 
+    .portfolio-only-btn {
+      background: #e0f2fe;
+      color: #075985;
+      border: 1px solid #bae6fd;
+    }
+
+    .portfolio-only-btn:hover {
+      background: #bae6fd;
+    }
+
+    .portfolio-only-btn:disabled {
+      background: #e5e7eb;
+      color: #94a3b8;
+      border-color: #e5e7eb;
+      cursor: not-allowed;
+    }
+
     .submit-btn {
       background: #4285f4;
       color: #fff;
@@ -300,7 +317,7 @@
 <body>
   <div class="container">
     <h1>Wklej zrodlo do analizy</h1>
-    <p class="description">Wklej tekst zrodla lub zalacz PDF-y. Kazdy PDF uruchomi osobny proces i osobne okno ChatGPT.</p>
+    <p class="description">Wklej tekst zrodla lub zalacz PDF-y, a potem uruchom jeden zestaw promptow: analiza spolki plus automatyczna analiza portfela. Kazdy PDF uruchomi osobny proces i osobne okno ChatGPT.</p>
 
     <label for="titleInput">Tytul (opcjonalnie)</label>
     <input type="text" id="titleInput" placeholder="Opcjonalnie: tytul artykulu">
@@ -340,7 +357,8 @@
 
     <div class="buttons">
       <button class="cancel-btn" id="cancelBtn">Anuluj</button>
-      <button class="submit-btn" id="submitBtn" disabled>Uruchom</button>
+      <button class="portfolio-only-btn" id="portfolioOnlyBtn" disabled>Uruchom tylko portfolio</button>
+      <button class="submit-btn" id="submitBtn" disabled>Uruchom zestaw promptow</button>
     </div>
     <p id="providerStatus" class="provider-status" aria-live="polite"></p>
   </div>

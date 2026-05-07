@@ -275,25 +275,25 @@ function testMcpWritePromptsUseIskierkaToolNames() {
   const stage17WritePrompt = prompts[17] || '';
 
   assert(
-    stage5McpPrompt.includes('query ladder'),
-    'Stage 5 should use a query ladder instead of overloaded sector-memory queries.'
+    stage5McpPrompt.includes('Retrieve sector memory entries using combinations of:'),
+    'Stage 5 should define sector-memory retrieval inputs.'
   );
   assert(
-    stage5McpPrompt.includes('MCP_QUERY_RETURNED_EMPTY'),
-    'Stage 5 should distinguish an empty sector-memory result from MCP unavailability.'
+    stage5McpPrompt.includes('mark MCP_UNAVAILABLE'),
+    'Stage 5 should mark MCP unavailability explicitly.'
   );
   assert(
-    stage5McpPrompt.includes('MODEL_GENERATED_NOT_MCP_RETRIEVED'),
-    'Stage 5 fallback overlay should be explicitly marked as model-generated.'
+    stage5McpPrompt.includes('do not count duplicates as independent evidence'),
+    'Stage 5 should prevent duplicate sector-memory entries from becoming independent evidence.'
   );
 
   assert(
-    stage14RecordPrompt.includes('"schema": "economist.response.v2"'),
-    'Stage 14 should emit the structured economist.response.v2 schema used by copy/replay.'
+    !stage14RecordPrompt.includes('economist.response.v2'),
+    'Stage 14 should no longer require the legacy economist.response.v2 schema string.'
   );
   assert(
-    stage14RecordPrompt.includes('schema musi mieć wartość economist.response.v2'),
-    'Stage 14 final instruction should require the schema field.'
+    stage14RecordPrompt.includes('records ma dokładnie 2 rekordy'),
+    'Stage 14 final instruction should require exactly two records.'
   );
 
   assert(
@@ -313,8 +313,12 @@ function testMcpWritePromptsUseIskierkaToolNames() {
     'Stage 15 should identify the generated Stage 14 source by the new 18-prompt structure.'
   );
   assert(
-    stage15WritePrompt.includes('"schema": "economist.response.v2"'),
-    'Stage 15 should locate the generated Stage 14 JSON by schema.'
+    stage15WritePrompt.includes('obiekt JSON z polem records będącym tablicą'),
+    'Stage 15 should locate the generated Stage 14 JSON by records array shape.'
+  );
+  assert(
+    !stage15WritePrompt.includes('"schema": "economist.response.v2"'),
+    'Stage 15 should not locate the generated Stage 14 JSON by legacy schema.'
   );
   assert(
     !stage15WritePrompt.includes('Weź wyłącznie bezpośrednio poprzednią wiadomość assistant'),
@@ -337,8 +341,8 @@ function testMcpWritePromptsUseIskierkaToolNames() {
     'Stage 15 should explicitly suppress MCP unavailable sentinel output.'
   );
   assert(
-    stage15WritePrompt.includes('Zatrzymano rozmawianie z domeną iskierka'),
-    'Stage 15 should treat interrupted Iskierka domain messages as technical write failures and still copy JSON.'
+    stage15WritePrompt.includes('wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny'),
+    'Stage 15 should treat technical write failures as copy-through events.'
   );
   assert(
     stage15WritePrompt.includes('Nie używaj `context_packs.upsert`'),

@@ -1968,25 +1968,13 @@ CORE wyklucza tylko prawdziwie incremental thesis wedge, czyli efekt ponad to, c
 
 ZASADA GŁÓWNA
 
-CORE is a safety filter, not an investment engine. CORE never wins
-PRIMARY by virtue of being well-modeled or high quality. CORE's only
-roles are:
-- to determine whether the company is structurally safe enough to
-  express the article's mechanism,
-- to prevent double-counting between baseline economics and incremental
-  thesis contribution,
-- to provide a downside floor for sizing and risk decisions.
+If the stock later wins mainly on CORE, CORE must be proven with the same rigor that the pipeline applies to WEDGE.
 
-A stock cannot "win on CORE." If the article-derived WEDGE is small or
-absent, no amount of CORE rigor promotes the company to PRIMARY. The
-correct outcome is SECONDARY, SMALL_STARTER, or SECTOR_MEMORY_ONLY.
-
-If CORE is not decision-grade, all downstream valuation is diagnostic
-only: no sizing, no hard buy zone, no trade-ready record, no final
-investment decision.
-
-If WEDGE is not material relative to price (per Stock Materiality
-Threshold), the company cannot be PRIMARY regardless of CORE quality.
+If CORE is not decision-grade, all downstream valuation is diagnostic only:
+- no sizing,
+- no hard buy zone,
+- no trade-ready record,
+- no final investment decision.
 
 MIEJSCE W WORKFLOW
 
@@ -2026,25 +2014,6 @@ Do not change thesis evidence tier.
 Do not replace Stage 3 proof with your own intuition.
 
 Use inherited handoffs as controlling inputs.
-
-ARTICLE FIDELITY CHECK (mandatory before any CORE work)
-
-Retrieve from Stage 0 ARTICLE MECHANISM SPINE the CENTRALITY_MAP and
-classify each company:
-
-- CENTRAL: directly named or implied by the article's mechanism; sits
-  at the central invoice item, gate, or pricing object.
-- ADJACENT: necessary enabler but not the article's focus.
-- OUT_OF_SCOPE: sector-related but not connected to the mechanism.
-
-Implication:
-- CENTRAL: full CORE reconstruction proceeds normally.
-- ADJACENT: full CORE reconstruction proceeds; flag
-  ADJACENT_EXPRESSION_ONLY for downstream stages. Cannot be PRIMARY
-  in Stage 13 unless no CENTRAL company passes evidence and
-  materiality thresholds.
-- OUT_OF_SCOPE: do not perform CORE reconstruction. Output
-  OUT_OF_SCOPE_FILTER and route to SECTOR_MEMORY_ONLY.
 
 MANDATORY INTERNET RESEARCH
 
@@ -2675,8 +2644,6 @@ At the end include a compact handoff block:
 [For each company:]
 COMPANY:
 TICKER:
-ARTICLE_CENTRALITY: [CENTRAL / ADJACENT / OUT_OF_SCOPE]
-CENTRALITY_JUSTIFICATION: [1-2 sentences citing mechanism spine]
 REPORTING_CURRENCY:
 ANCHOR_DATE:
 CORE_TYPE:
@@ -2832,25 +2799,7 @@ MCP / ISKIERKA RETRIEVAL
 
 Use MCP / Iskierka sector-context search.
 
-Do not send one overloaded query with every concept at once. Retrieval must use
-a query ladder:
-
-1. exact sector / company_family terms from the company records,
-2. short anchor queries, one at a time, for the actual mechanism
-   (examples: SOCAMM, HBM, rack-scale, N3 wafer allocation, EUV,
-   working-capital pass-through),
-3. pairwise 2-3 token queries only if the short anchor is too broad,
-4. broad sector fallback only after the mechanism queries are attempted.
-
-Use both Polish and English aliases when obvious:
-- Semiconductors / Półprzewodniki,
-- Manufacturing / Produkcja przemysłowa,
-- Technology Hardware / Sprzęt technologiczny,
-- memory / pamięć,
-- foundry / foundry / produkcja układów,
-- WFE / sprzęt półprzewodnikowy.
-
-Retrieve sector memory entries using short combinations of:
+Retrieve sector memory entries using combinations of:
 - sector,
 - subsector,
 - selected subsegment,
@@ -2872,28 +2821,9 @@ Retrieve sector memory entries using short combinations of:
 - factory buildout,
 - returns quality.
 
-Classify MCP retrieval state precisely:
-
-- MCP_TOOL_UNAVAILABLE: the tool/server is not callable.
-- MCP_ALIAS_NOT_FOUND: only the requested alias/name is missing; try the visible
-  equivalent before giving up.
-- MCP_SCHEMA_MISMATCH: the tool returns a shape that is not sector memory.
-- MCP_QUERY_RETURNED_EMPTY: the tool is callable but this query returned zero
-  active rows.
-
-Do not call an empty result MCP_UNAVAILABLE.
-
-If all retrieval attempts are MCP_QUERY_RETURNED_EMPTY:
+If MCP is unavailable:
 - do not stop,
-- mark MCP_QUERY_RETURNED_EMPTY,
-- continue with model-generated sector overlay only,
-- label it explicitly as MODEL_GENERATED_NOT_MCP_RETRIEVED,
-- state that Stage 4 remains unaudited by retrieved sector memory.
-
-If MCP_TOOL_UNAVAILABLE / MCP_ALIAS_NOT_FOUND / MCP_SCHEMA_MISMATCH remains after
-trying visible equivalents:
-- do not stop,
-- mark the precise status,
+- mark MCP_UNAVAILABLE,
 - continue with no sector overlay impact,
 - state that Stage 4 remains unaudited by sector memory.
 
@@ -5345,31 +5275,6 @@ NEW — Terminal share diagnostic (mandatory reporting):
 • TerminalShare = PV_TV / (PV_FCF + PV_TV)
 If TerminalShare is very high, interpret WACC sensitivity as duration sensitivity. Do not confuse high duration with the true economic engine of the thesis.
 
-STEP 5.5a — ARTICLE FIDELITY GATE (before Tier classification)
-
-Inherit ARTICLE_CENTRALITY and CENTRALITY_JUSTIFICATION from Stage 4.
-
-Tier caps:
-
-If CENTRAL: no cap.
-
-If ADJACENT:
-- Maximum Tier 2.
-- Tier 1 not allowed unless no CENTRAL candidate exists in the
-  candidate set AND WEDGE_TO_PRICE >= 10% AND Market Implied Residual
-  is LOW or MEDIUM.
-- Output flag ADJACENT_EXPRESSION.
-- Mark ROLE_ELIGIBILITY: SECONDARY_OR_DEFENSIVE_PRIMARY.
-
-If OUT_OF_SCOPE:
-- Tier = N/A_OUT_OF_SCOPE. Route to SECTOR_MEMORY_ONLY.
-
-If WEDGE_TO_PRICE < 5% AND ADJACENT: Tier capped at 3.
-
-If WEDGE_TO_PRICE < 5% AND CENTRAL: Tier capped at 3 unless Market
-Neglect is HIGH (residual class HIGH or EXTREME with explanation that
-residual is core mispricing, not unproven thesis).
-
 Step 5.5 CONTRACT-BASED BEAR FLOOR (mandatory stress test)
 Compute DCF-independent Bear:
 1) Revenue_floor = min(funded_backlog_annual_conversion, LTM_revenue × 0.85). Source: Stage 3 KPI + Semantics. Use only Obligated-Funded/Delivered-Cash.
@@ -5510,9 +5415,6 @@ This table enables Stage 13 Composite Rank by providing directly comparable metr
   IMPLIED_THESIS_CAPTURE: [rate or margin on thesis stream, if segment-specific; else N/A]
   HORIZON_SPREAD: [bps] | TERMINAL_SHARE: [%]
   TIER: [1/2/3/4 or N/A_DIAGNOSTIC]
-  ARTICLE_CENTRALITY: [CENTRAL / ADJACENT / OUT_OF_SCOPE]
-  ROLE_ELIGIBILITY: [PRIMARY_ELIGIBLE / SECONDARY_OR_DEFENSIVE_PRIMARY / SECTOR_MEMORY_ONLY]
-  ARTICLE_FIDELITY_FLAGS: [ADJACENT_EXPRESSION / CENTRAL / OUT_OF_SCOPE / None]
   TOTAL_DIAGNOSTIC_ONLY: [TRUE/FALSE]
   CORE_REBUILD_REQUIRED: [TRUE/FALSE]
   CORE_DECISION_GRADE: [TRUE/FALSE from Stage 4]
@@ -5927,88 +5829,45 @@ Use Stage 12 gate results as controlling inputs.
 STEP 1 — ELIMINATE AVOID COMPANIES
 Remove any company with AVOID decision. If fewer than 2 remain, flag SHORTFALL and proceed with what you have.
 
-STEP 2 — COMPUTE COMPOSITE SCORE (8 dimensions, 0-5 each)
+STEP 2 — COMPUTE COMPOSITE SCORE (6 dimensions, 0-5 each)
 
-Composite Score is a watchlist prioritization tool. It cannot override
-Gate 2 Value, Gate 3 Proof, or Article Fidelity Gate.
+Composite Score is a watchlist prioritization tool only.
 
-Dimension 1: Article Fidelity (weight 25%)
-Source: Stage 4/11 ARTICLE_CENTRALITY + Stage 0 mechanism spine
-  5: CENTRAL — directly at central invoice item, gate, or pricing object
-  4: CENTRAL — at central node, one inferential step from article
-  3: ADJACENT — necessary enabler at sector-critical gate referenced
-     in article
-  2: ADJACENT — sector-relevant gate not in central spine
-  1: ADJACENT — peripheral gate, weak link to mechanism
-  0: OUT_OF_SCOPE — thematic only
+It cannot override Gate 2 Value or Gate 3 Proof.
 
-  Hard rule: D1 = 0 → REMOVE from ranking.
-  Hard rule: D1 = 1 → max SECONDARY.
+A high Composite Score should not hide a weak value setup, weak proof, proxy-heavy economics, or non-material wedge.
 
-Dimension 2: Market Neglect (weight 15%)
-Source: Stage 11 RESIDUAL_CLASS + market neglect labelling
-  5: HIGH — mechanism misclassified, hidden, or not in consensus
-  4: HIGH — partially hidden with some sell-side recognition
-  3: MEDIUM — recognized but underweighted
-  2: LOW — bottleneck and economics generally understood
-  1: ALREADY PRICED IN — sell-side framing matches article framing
-  0: CROWDED — narrative is consensus
-
-  Hard rule: D2 <= 1 AND D1 >= 3 → flag CROWDED_CENTRAL, cap composite
-  at 3.0.
-
-Dimension 3: Stock Materiality (weight 15%)
-Source: Stage 10 WEDGE_TO_PRICE + Stage 11 valuation
-  5: WEDGE_TO_PRICE >= 10% AND high market neglect
-  4: WEDGE_TO_PRICE 8-10%, or 10%+ with medium neglect
-  3: WEDGE_TO_PRICE 5-8%, requires KPI proof
-  2: WEDGE_TO_PRICE 5-8%, weak proof
-  1: WEDGE_TO_PRICE < 5%, low neglect
-  0: WEDGE cannot move EBIT/FCF/multiple
-
-  Hard rule: D3 <= 1 → cannot be PRIMARY.
-
-Dimension 4: Traction Quality (weight 15%)
+Dimension 1: Traction Quality (weight 30%)
 Source: Stage 3 Floor_Traction + TractionClass + Semantics Verdict
-  5: HARD_TRACTION + Floor_Traction >= 0.6 + Obligated-Funded or
-     Delivered-Cash semantics
+  5: HARD_TRACTION + Floor_Traction >= 0.6 + Semantics Obligated-Funded or Delivered-Cash
   4: HARD_TRACTION + Floor_Traction < 0.6
   3: SOFT_TRACTION + CP >= 3
   2: SOFT_TRACTION + CP < 3
   1: OPTION_ONLY
   0: LOW_QUALITY
 
-Dimension 5: Capture Durability (weight 10%)
+Dimension 2: Competitive Position / Gate Control (weight 20%)
 Source: Stage 7 moat score + Stage 3 CP gate-weighted
   5: Moat >= 8/12 + CP >= 4 with GQ-A gate
   4: Moat 6-7 + CP >= 4
-  3: Moat 6+ with CP 3, or Moat 3-5 with CP >= 4
+  3: Moat 6+ with CP 3, OR Moat 3-5 with CP >= 4
   2: Moat 3-5 + CP 3
   1: Moat 3-5 + CP <= 2
   0: Moat < 3
 
-Dimension 6: Value Asymmetry (weight 8%)
+Dimension 3: Value Asymmetry (weight 15%)
 Source: Stage 11 Asymmetry_TOTAL
-  HORIZON_DEPENDENT cap at 2. WACC-dominated cap at 3.
-  WATCH/PRICE_CONTINGENT minimum 1.
-  5: > 5:1 AND DominantDriver != WACC
-  4: 4:1-5:1 AND DominantDriver != WACC
-  3: 3:1-4:1, or any with WACC
-  2: 2:1-3:1, or HORIZON_DEPENDENT cap
-  1: 1.5:1-2:1
+  IMPORTANT: If HORIZON_DEPENDENT flag is set, cap at score 2.
+  If DominantDriver = WACC, cap at score 3.
+  If company is WATCH / PRICE_CONTINGENT from Stage 12, minimum score = 1.
+  5: Asymmetry > 5:1 AND DominantDriver is NOT WACC
+  4: 4:1–5:1 AND DominantDriver is NOT WACC
+  3: 3:1–4:1, OR any asymmetry with DominantDriver = WACC
+  2: 2:1–3:1, OR HORIZON_DEPENDENT cap
+  1: 1.5:1–2:1
   0: < 1.5:1
 
-Dimension 7: Returns Quality & Capital Allocation (weight 7%)
-Source: Stage 8
-  5: ROIC > 15% or > WACC by >=500bps, strong conversion, disciplined
-     dilution
-  4: 10-15% or > WACC by >=300bps
-  3: modestly above cost of capital
-  2: around cost of capital
-  1: below cost of capital
-  0: persistent value destruction
-
-Dimension 8: Revaluation Imminence (weight 5%)
+Dimension 4: Revaluation Imminence (weight 10%)
 Source: Stage 9 REI_SCORE
   5: REI > 15% AND VOI < 6 months
   4: REI 10-15% OR VOI 6-9 months
@@ -6017,14 +5876,42 @@ Source: Stage 9 REI_SCORE
   1: REI < 5% OR VOI > 18 months
   0: No measurable RP or priced-in
 
-Composite Score = SUM(dimension_score × weight). Apply existing
-penalties (Valuation Object Fit, ET-C). Scale 0-5.
+Dimension 5: Returns Quality & Capital Allocation (weight 15%)
+Source: Stage 8
+  5: thesis-adjusted ROIC or ROTCE > 15% or > WACC by >=500bps, strong cash conversion, disciplined dilution
+  4: 10-15% or > WACC by >=300bps, acceptable conversion and allocation
+  3: modestly above cost of capital, mixed but acceptable conversion/allocation
+  2: around cost of capital or leverage-dependent optics
+  1: below cost of capital, weak conversion, or meaningful dilution
+  0: persistent value destruction or capital allocation failure
 
-Hard rules summary:
-- D1 = 0 → REMOVE
-- D1 = 1 → max SECONDARY
-- D1 >= 3 AND D2 <= 1 → cap 3.0, flag CROWDED_CENTRAL
-- D3 <= 1 → cannot be PRIMARY.
+Dimension 6: Execution Readiness (weight 10%)
+Source: Stage 12 gate results + Stage 2 overheating score
+  5: All Gates PASS, overheating <= 2
+  4: All Gates PASS, overheating 3-4
+  3: Gate 2 RISK but rest PASS
+  2: Gate 3 LOW/MEDIUM but quality + value OK
+  1: Gate 2 FAIL but quality strong
+  0: Gate 1 FAIL (already AVOID)
+
+Valuation Object Fit penalty:
+Use VALUATION_OBJECT_FIT from Stage 12 Gate 2.
+
+- HIGH: no penalty
+- MEDIUM: subtract 0.2 from final Composite Score
+- LOW: subtract 0.5 from final Composite Score and cap EntryScore at 6.5
+
+If VALUATION_OBJECT_FIT = LOW, flag MODEL_OBJECT_RISK.
+
+Composite Score = SUM(dimension_score × weight), then apply Valuation Object Fit penalty if applicable.
+Scale 0-5.
+If company carries ET-C from the Stage 2 company-mapping output, subtract 0.3 from final Composite Score.
+
+All weighted Composite calculations must be computed mechanically from the displayed component scores.
+
+Do not manually approximate Composite.
+
+If arithmetic and narrative ranking conflict, keep the arithmetic correct and explain the conflict separately.
 
 STEP 2.5 — ENTRY SCORE 0-10 (near-term actionability score)
 
@@ -6107,33 +5994,19 @@ STEP 3 — RANK AND SELECT UP TO TOP 2
 Rank all WATCH companies that survived prior gates.
 
 Sort remaining WATCH companies by:
-1. ARTICLE_CENTRALITY (CENTRAL > ADJACENT — hard primary sort)
-2. ENTRY_SCORE_0_10
-3. Composite Score
-4. Earlier VOI window
-5. Better downside floor
-
-Hard rules on PRIMARY selection:
-- A CENTRAL company with ENTRY_SCORE >= 6.5 outranks any ADJACENT
-  company regardless of ADJACENT's ENTRY_SCORE or Composite.
-- ADJACENT can become PRIMARY only if no CENTRAL company has
-  ENTRY_SCORE >= 6.5. Flag DEFENSIVE_PRIMARY and reduce sizing by
-  one tier.
-- OUT_OF_SCOPE is never selected.
-
-If only ADJACENT companies have ENTRY_SCORE >= 6.5:
-- PRIMARY = best available adjacent expression
-- Flag BEST_AVAILABLE_EXPRESSION
-- Sizing: SMALL_STARTER (50% of normal sizing for that composite tier)
-- Selection reason must explicitly say "best adjacent expression in
-  absence of central candidate", not "best company in sector"
+1. ENTRY_SCORE_0_10
+2. Composite Score
+3. Earlier VOI window
+4. Better downside floor
 
 If the thesis wedge is operationally real but immaterial to the stock, do not reward thematic fit in ranking. The name must win on CORE mispricing or superior returns quality.
 
 Eligibility guidance:
 - PRIMARY normally requires ENTRY_SCORE_0_10 >= 7.5
 - SECONDARY normally requires ENTRY_SCORE_0_10 >= 6.5
-- PRIMARY and SECONDARY must always be assigned to the top surviving WATCH companies; if actionability threshold is not met, set sizing = 0% and category/status = ENTRY_SHORTFALL.
+- Select up to 2 as PRIMARY and SECONDARY if they meet the required quality and entry-actionability standard.
+- If fewer than 2 meet the standard, output fewer and flag ENTRY_SHORTFALL.
+- Do not select a company solely to fill the PRIMARY / SECONDARY slots.
 
 Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap in invoice items:
 - Replace #2 with #3 if available
@@ -6141,9 +6014,8 @@ Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap i
 
 STEP 4 — ASSIGN ROLES AND SIZING
 
-#1 = PRIMARY (larger position, earlier entry)
-#2 = SECONDARY (smaller position or conditional on VOI from PRIMARY)
-If a slot's actionability threshold is not met, keep the role assignment and set sizing = 0% and category/status = ENTRY_SHORTFALL.
+#1 = PRIMARY (larger position, earlier entry) if it meets the standard
+#2 = SECONDARY (smaller position or conditional on VOI from PRIMARY) if it meets the standard
 
 Sizing:
   Composite 4.0-5.0: PRIMARY 3-5%, SECONDARY 2-3%
@@ -6156,7 +6028,7 @@ If CONCENTRATION_RISK: cap combined at 6%.
 STEP 5 — OUTPUT
 
 Comparison Table (all finalists):
-| Company | Ticker | Decision | Category | EntryBlocker | D1 Article Fidelity (25%) | D2 Market Neglect (15%) | D3 Stock Materiality (15%) | D4 Traction Quality (15%) | D5 Capture Durability (10%) | D6 Value Asymmetry (8%) | D7 Returns Quality (7%) | D8 Revaluation Imminence (5%) | Composite | EntryScore | Rank | Role | Sizing |
+| Company | Ticker | Decision | Category | EntryBlocker | D1 (30%) | D2 (20%) | D3 (15%) | D4 (10%) | D5 (15%) | D6 (10%) | Composite | EntryScore | Rank | Role | Sizing |
 
 Selection Summary:
 PRIMARY: [Company] — Composite [X.XX]/5.0 — EntryScore [Y.Y]/10 — Sizing [X%]
@@ -6170,11 +6042,6 @@ NOT SELECTED (WATCH): [list with Composite, EntryScore, and upgrade condition]
 === STAGE 13 HANDOFF ===
 PRIMARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | EntryBlocker: [blocker] | Sizing: [X%]
 SECONDARY: [Company or ENTRY_SHORTFALL] | [Ticker or N/A] | Composite: [X.XX or N/A] | EntryScore: [Y.Y/10 or N/A] | EntryBlocker: [blocker or N/A] | Sizing: [X% or N/A]
-PRIMARY_CENTRALITY: [CENTRAL / ADJACENT_DEFENSIVE]
-PRIMARY_BEST_AVAILABLE_EXPRESSION: [TRUE / FALSE]
-SECONDARY_CENTRALITY: [CENTRAL / ADJACENT / N/A]
-CROWDED_CENTRAL_FLAG: [TRUE / FALSE]
-SELECTION_REASON_TYPE: [CENTRAL_MATERIAL / CENTRAL_NEGLECTED / ADJACENT_DEFENSIVE / BEST_AVAILABLE / SHORTFALL]
 CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
 === END HANDOFF ===
 
@@ -6374,32 +6241,20 @@ DATA_GAP_STAGE=11
 
 I zakończ.
 
-Jeśli Stage 13 zwraca PRIMARY: ENTRY_SHORTFALL i SECONDARY: ENTRY_SHORTFALL:
-zwróć dokładnie jeden obiekt JSON:
-
-{
-  "schema": "economist.response.v2",
-  "records": [],
-  "extras": {
-    "shortfall_reason": "Żadna spółka nie przeszła progu jakości i actionability. Pipeline kończy się bez PRIMARY i SECONDARY."
-  }
-}
-
-Następnie zakończ. Nie twórz rekordów zastępczych.
-
 Wymagany output
 
 Zwróć dokładnie jeden obiekt JSON:
 
 {
-  "schema": "economist.response.v2",
   "records": [ ... ]
 }
 Standardowy przypadek
-schema ma dokładnie wartość economist.response.v2
-records ma 0–2 rekordy zależnie od liczby spółek, które przeszły próg jakości i actionability
+records ma dokładnie 2 rekordy
 pierwszy rekord = PRIMARY
 drugi rekord = SECONDARY
+Jeśli tylko jedna spółka przeszła
+zwróć 1 rekord
+dodaj extras.shortfall_reason
 Kształt rekordu
 
 Każdy rekord musi mieć dokładnie te sekcje:
@@ -6442,13 +6297,6 @@ Credo Technology Group (CRDO:NASDAQ)
 
 fields.zrodlo_tezy
 dokładnie THESIS_SOURCE ze Stage 1
-fields.article_centrality_role
-- format: jeden z poniższych:
-  - "CENTRAL — najczystsza ekspresja mechanizmu artykułu"
-  - "CENTRAL — przy centralnym węźle, jedna inferencja od artykułu"
-  - "ADJACENT_DEFENSIVE — najlepsza dostępna ekspresja w braku central candidate"
-  - "ADJACENT — pomocniczy bottleneck, pozycja drugoplanowa"
-- Inheritance: Stage 13 PRIMARY_CENTRALITY + PRIMARY_BEST_AVAILABLE_EXPRESSION
 fields.material_zrodlowy_podcast
 dokładnie THESIS_SOURCE ze Stage 1
 fields.teza_inwestycyjna
@@ -6460,30 +6308,15 @@ Wymagania:
 ma być samowystarczalne
 ma odpowiadać jak mini nota inwestycyjna
 Musi zawierać:
-0. Mechanizm artykułu i centralność — jaki przepływ kapitału ujawnia
-   artykuł i czy ta spółka siedzi przy centralnym węźle (CENTRAL),
-   przy adjacent gate (ADJACENT), czy jest defensive expression wybraną
-   w braku central candidate (ADJACENT_DEFENSIVE). To zdanie musi być
-   pierwsze. Jeśli spółka jest defensive pick, opisz to jako defensive
-   pick, nie jako "najlepszą jakościową ekspresję sektora".
-1. Rynek dziś — jakie napięcie / problem / zmiana strukturalna istnieje
-2. Oferta firmy — co firma sprzedaje i komu
-3. Monetyzacja — konkretny przykład: kto płaci, za co płaci, jak to
-   wpływa na przychód / marżę / FCF
-4. Edge — gdzie siedzi przewaga i dlaczego nie jest łatwa do skopiowania;
-   jeśli ADJACENT_DEFENSIVE, edge jest bezpieczeństwem, nie article-driven
-   asymetrią
-5. Dlaczego teraz — co sprawia, że to jest moment decyzyjny
-6. Co rynek wycenia źle — growth, margin, duration, proof, size of wedge,
-   quality of business; jeśli ADJACENT_DEFENSIVE i wedge jest de minimis,
-   napisz wprost "wedge nie jest dużą okazją; case opiera się na CORE
-   quality i bezpieczeństwie ekspozycji"
-7. Warunek wejścia — kiedy to staje się kupowalne
-8. Warunek niewchodzenia — kiedy nadal nie należy kupować
+Rynek dziś — jakie napięcie / problem / zmiana strukturalna istnieje
+Oferta firmy — co firma sprzedaje i komu
+Monetyzacja — konkretny przykład: kto płaci, za co płaci, jak to wpływa na przychód / marżę / FCF
+Edge — gdzie siedzi przewaga i dlaczego nie jest łatwa do skopiowania
+Dlaczego teraz — co sprawia, że to jest moment decyzyjny
+Co rynek wycenia źle — growth, margin, duration, proof, size of wedge, quality of business
+Warunek wejścia — kiedy to staje się kupowalne
+Warunek niewchodzenia — kiedy nadal nie należy kupować
 Reguły:
-- Zdanie 0 obowiązkowe i pierwsze.
-- ADJACENT_DEFENSIVE musi być explicit nazwane "defensive expression"
-  albo "best available expression in absence of central candidate".
 bez odwołań do stage’ów
 bez semikolonów
 bez pustych fraz
@@ -6754,19 +6587,15 @@ extras.identity
 
 Pola obowiązkowe:
 
-- role
-- decision_category
-- entry_blocker
-- article_centrality (CENTRAL / ADJACENT_DEFENSIVE / ADJACENT)
-- best_available_expression (TRUE / FALSE)
-- crowded_central_flag (TRUE / FALSE)
-- selection_reason_type (CENTRAL_MATERIAL / CENTRAL_NEGLECTED / ADJACENT_DEFENSIVE / BEST_AVAILABLE)
-- subsegment
-- monetization_path
-- dominant_driver
-- persistence
-- evidence_tier
-- layer_depth
+role
+decision_category
+entry_blocker
+subsegment
+monetization_path
+dominant_driver
+persistence
+evidence_tier
+layer_depth
 
 To ma krótko powiedzieć, czym ten record jest.
 
@@ -6978,21 +6807,12 @@ what_would_make_it_buyable
 what_would_kill_it
 why_it_is_better_than_the_other_finalists
 
-Wymagania (2-4 zdania):
-- CENTRAL: dlaczego ta spółka jest najczystszą ekspresją mechanizmu
-  artykułu; gdzie konkurenci są adjacent.
-- ADJACENT_DEFENSIVE: dlaczego ta spółka została wybrana jako defensive
-  primary mimo że nie jest centralnym węzłem; jakie central candidates
-  zostały rozważone i dlaczego nie spełniły progu actionability.
-- Bez fraz typu "najlepsza spółka w sektorze" jako głównego uzasadnienia.
+Każde pole:
 
-article_centrality_audit (NOWE pole obowiązkowe)
-
-Wymagania (2-3 zdania):
-- Co jest centralnym mechanizmem artykułu (z mechanism spine).
-- Gdzie ta spółka siedzi w stosunku do tego mechanizmu.
-- Jeśli ADJACENT_DEFENSIVE: jakie central candidates istniały i dlaczego
-  nie zostały wybrane.
+2–4 zdania
+konkretne
+użyteczne
+bez odwołań do stage’ów
 
 To jest „mózg decyzji”.
 Jeśli ta sekcja jest słaba, rekord jest słaby.
@@ -7042,11 +6862,9 @@ Finalna walidacja
 
 Przed zwrotem sprawdź:
 
-schema == economist.response.v2
-top-level object has schema == "economist.response.v2"
+top-level object has exactly one field: records
 records jest tablicą
-records ma 0–2 rekordy zależnie od liczby spółek, które przeszły próg jakości i actionability
-jeśli records jest puste, top-level extras.shortfall_reason musi istnieć
+records ma dokładnie 2 rekordy w standardowym przypadku
 PRIMARY jest pierwszy
 każdy rekord ma:
 decision_role
@@ -7072,19 +6890,18 @@ bez komentarzy
 bez tekstu przed i po JSON
 Finalna instrukcja
 
-Wygeneruj dokładnie jeden obiekt JSON z polami schema i records.
+Wygeneruj dokładnie jeden obiekt JSON z polem records.
 Nie dodawaj żadnych wyjaśnień.
 Nie używaj markdownu.
 Nie zwracaj nic poza JSON-em.
-schema musi mieć wartość economist.response.v2.
-PRIMARY jako pierwszy rekord, SECONDARY jako drugi rekord; records: [] tylko jeśli Stage 13 nie ma surviving WATCH companies.
+PRIMARY jako pierwszy rekord, SECONDARY jako drugi tylko jeśli istnieje drugi rekord.
 --- PROMPT SEPARATOR ---
 STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS
 Zadanie: wstaw dokładnie wygenerowany JSON Stage 14 do bazy przez MCP Iskierka.
 
 Źródło danych dla tego etapu to wygenerowany output Stage 14 / Prompt 15 z 18, niekoniecznie bezpośrednio poprzednia wiadomość.
 
-Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 14, czyli obiekt JSON z polem `"schema": "economist.response.v2"` oraz polem records będącym tablicą.
+Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 14, czyli obiekt JSON z polem records będącym tablicą.
 
 Ignoruj wiadomości techniczne Stage 15, wyniki MCP, statusy narzędzi, komentarze oraz inne teksty, które nie są obiektem JSON z polem records będącym tablicą. Nie używaj Stage 16 ani tablic sektorowych jako źródła dla Stage 15.
 
@@ -7117,8 +6934,6 @@ Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/hist
 Po próbie zapisu zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 14, żeby pipeline mógł przejść do Stage 16.
 
 Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian.
-
-Jeśli interfejs lub host narzędzi zwróci komunikat operacyjny typu „Zatrzymano rozmawianie z domeną iskierka”, „tool call interrupted”, „domain stopped”, timeout albo podobny sygnał przerwania rozmowy z MCP, potraktuj to jako błąd techniczny zapisu. Nie cytuj tego komunikatu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian.
 
 Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian, chyba że w historii rozmowy w ogóle nie było obiektu JSON z polem records będącym tablicą; wtedy użyj DATA_GAP_STAGE=14.
 
@@ -7811,7 +7626,7 @@ Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześ
   }
 ]
 
-Ignoruj wiadomości techniczne Stage 17, wyniki MCP, statusy narzędzi, komentarze, Stage 14 `economist.response.v2` oraz inne teksty, które nie są top-level tablicą rekordów z polami `sektor`, `podsektor`, `opis`.
+Ignoruj wiadomości techniczne Stage 17, wyniki MCP, statusy narzędzi, komentarze, Stage 14 final investment records oraz inne teksty, które nie są top-level tablicą rekordów z polami `sektor`, `podsektor`, `opis`.
 
 Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
 
