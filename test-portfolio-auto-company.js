@@ -339,7 +339,28 @@ async function testManualTextSharesOneSourceAcrossCompanyAndPortfolio() {
   assert.strictEqual(Object.prototype.hasOwnProperty.call(portfolioCall.tabs[0], 'manualText'), false);
 }
 
-function testPortfolioChoiceIsNotVisibleInUi() {
+async function testManualPortfolioOnlyQueuesOnePortfolioProcess() {
+  const context = buildContext();
+  const sourceText = 'P'.repeat(10000);
+  const result = await context.runManualSourceAnalysis(sourceText, 'Manual portfolio', 5, 'portfolio');
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.queuedCount, 1);
+  assert.strictEqual(context.sourceMaterialSubmissions.length, 1);
+  assert.strictEqual(context.sourceMaterialSubmissions[0].source.metadata.analysis_type, 'portfolio');
+  assert.strictEqual(context.sourceMaterialSubmissions[0].source.metadata.requested_instances, 1);
+  assert.strictEqual(context.sourceMaterialSubmissions[0].source.metadata.includes_portfolio, false);
+  assert.strictEqual(context.processArticleCalls.length, 1);
+  assert.strictEqual(context.processArticleCalls[0].analysisType, 'portfolio');
+  assert.strictEqual(
+    context.processArticleCalls[0].chatUrl,
+    'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project'
+  );
+  assert.deepStrictEqual(context.processArticleCalls[0].promptChain, ['portfolio prompt']);
+  assert.strictEqual(context.processArticleCalls[0].tabs.length, 1);
+}
+
+function testManualSourceShowsSinglePortfolioActionWithoutModeToggle() {
   const popupHtml = fs.readFileSync(path.join(__dirname, 'popup.html'), 'utf8');
   const manualSourceHtml = fs.readFileSync(path.join(__dirname, 'manual-source.html'), 'utf8');
   const manualSourceJs = fs.readFileSync(path.join(__dirname, 'manual-source.js'), 'utf8');
@@ -349,40 +370,50 @@ function testPortfolioChoiceIsNotVisibleInUi() {
   assert.strictEqual(manualSourceHtml.includes('analysisModePortfolioInput'), false);
   assert.strictEqual(manualSourceHtml.includes('portfolioAddonInput'), false);
   assert.strictEqual(manualSourceHtml.includes('analysis-mode'), false);
+  assert.strictEqual(manualSourceHtml.includes('portfolioOnlyBtn'), true);
+  assert.strictEqual(manualSourceHtml.includes('Uruchom tylko portfolio'), true);
   assert.strictEqual(manualSourceJs.includes('analysisModeCompanyInput'), false);
   assert.strictEqual(manualSourceJs.includes('includePortfolioAnalysis'), false);
   assert.strictEqual(manualSourceJs.includes('getSelectedAnalysisType'), false);
   assert.strictEqual(popupJs.includes('options.analysisType'), false);
+  assert.strictEqual(manualSourceHtml.includes('Uruchom zestaw promptow'), true);
+  assert.strictEqual(manualSourceJs.includes('analysisType: normalizedLaunchType'), true);
+  assert.strictEqual(manualSourceJs.includes('PORTFOLIO_ONLY_LOCAL_LABEL'), true);
 }
 
-function testPortfolioPromptChainHasThreePrompts() {
+function testPortfolioPromptChainHasFourPrompts() {
   const promptText = fs.readFileSync(path.join(__dirname, 'prompts-portfolio.txt'), 'utf8');
   const separator = /^\s*(?:◄\s*PROMPT_SEPARATOR\s*►|---\s*PROMPT\s*SEPARATOR\s*---)\s*$/gim;
   const prompts = promptText.split(separator).map((item) => item.trim()).filter(Boolean);
 
-  assert.strictEqual(prompts.length, 3);
-  assert.ok(prompts[0].includes('{{articlecontent}}'));
-  assert.ok(prompts[0].includes('ARTICLE_THESIS_REPORT'));
+  assert.strictEqual(prompts.length, 4);
+  assert.ok(prompts[0].includes('{{article}}'));
+  assert.ok(prompts[0].includes('Ranking warstw value chain'));
   assert.ok(prompts[1].includes('PORTFOLIO_REFLECTION_REPORT'));
-  assert.ok(prompts[1].includes('broker.positions.list({})'));
-  assert.ok(prompts[1].includes('recent_research_rows_load'));
-  assert.ok(prompts[1].includes('get_company_context'));
-  assert.ok(prompts[1].includes('NIE wywoluj `list_resources`'));
-  assert.ok(prompts[1].includes('Nie generuj jeszcze decyzji transakcyjnych'));
+  assert.ok(prompts[1].includes('account.positions.analysis_context'));
+  assert.ok(prompts[1].includes('include_context_text'));
+  assert.ok(prompts[1].includes('nie używaj broker.positions.list({})'));
+  assert.ok(prompts[1].includes('nie używaj list_resources'));
+  assert.ok(prompts[1].includes('Nie generuj jeszcze konkretnych zleceń, Take Profit ani Stop Loss'));
   assert.ok(!prompts[1].includes('mcp__codex_apps__iskierka._stage12_research_rows_upsert'));
-  assert.ok(prompts[2].includes('broker.positions.list({})'));
-  assert.ok(prompts[2].includes('portfolio_action_voting_upsert'));
-  assert.ok(prompts[2].includes('portfolio_action_votings_list'));
-  assert.ok(prompts[2].includes('point_rows'));
-  assert.ok(prompts[2].includes('score = clamp(round(sum(points)), -10, 10)'));
-  assert.ok(prompts[2].includes('TABELA GLOWNA - SCORING POZYCJI'));
+  assert.ok(prompts[2].includes('Finalny sizing, TP/SL i zapis feedbacku przez MCP'));
+  assert.ok(prompts[2].includes('portfolio.feedback.submit'));
+  assert.ok(prompts[2].includes('portfolio.feedback.sizing_monitor'));
+  assert.ok(prompts[2].includes('stop_loss_price'));
+  assert.ok(prompts[2].includes('take_profit_price'));
+  assert.ok(prompts[3].includes('Wykonawczy przelicznik akcji i zapis draft planu'));
+  assert.ok(prompts[3].includes('qty_change'));
+  assert.ok(prompts[3].includes('action_plan'));
+  assert.ok(prompts[3].includes('portfolio.feedback.submit'));
+  assert.ok(prompts[3].includes('portfolio.feedback.sizing_monitor'));
 }
 
 async function main() {
   await testPopupRunQueuesPortfolioAutomatically();
   await testManualTextSharesOneSourceAcrossCompanyAndPortfolio();
-  testPortfolioChoiceIsNotVisibleInUi();
-  testPortfolioPromptChainHasThreePrompts();
+  await testManualPortfolioOnlyQueuesOnePortfolioProcess();
+  testManualSourceShowsSinglePortfolioActionWithoutModeToggle();
+  testPortfolioPromptChainHasFourPrompts();
   console.log('portfolio auto company test: ok');
 }
 

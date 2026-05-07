@@ -11,11 +11,39 @@ const remoteRefreshBtn = document.getElementById('remoteRefreshBtn');
 const remoteInfo = document.getElementById('remoteInfo');
 const providerStatus = document.getElementById('providerStatus');
 const instancesInfo = document.getElementById('instancesInfo');
+const instancesControl = document.querySelector('.instances-control');
 const instancePresetButtons = Array.from(document.querySelectorAll('[data-instances]'));
 const submitBtn = document.getElementById('submitBtn');
+const portfolioOnlyBtn = document.getElementById('portfolioOnlyBtn');
 const cancelBtn = document.getElementById('cancelBtn');
 
-const DEFAULT_INSTANCES = 5;
+const urlParams = new URLSearchParams(window.location.search);
+const MANUAL_ANALYSIS_TYPE_COMPANY = 'company';
+const MANUAL_ANALYSIS_TYPE_PORTFOLIO = 'portfolio';
+
+function normalizeManualSourceAnalysisType(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === MANUAL_ANALYSIS_TYPE_PORTFOLIO || normalized === 'portfolio_analysis') {
+    return MANUAL_ANALYSIS_TYPE_PORTFOLIO;
+  }
+  return MANUAL_ANALYSIS_TYPE_COMPANY;
+}
+
+const manualSourceAnalysisType = normalizeManualSourceAnalysisType(urlParams.get('analysisType'));
+const manualSourcePortfolioOnly = manualSourceAnalysisType === MANUAL_ANALYSIS_TYPE_PORTFOLIO;
+const LOCAL_SUBMIT_LABEL = manualSourcePortfolioOnly ? 'Uruchom portfolio' : 'Uruchom zestaw promptow';
+const REMOTE_SUBMIT_LABEL = manualSourcePortfolioOnly ? 'Wyslij portfolio' : 'Wyslij zestaw';
+const PORTFOLIO_ONLY_LOCAL_LABEL = 'Uruchom tylko portfolio';
+const PORTFOLIO_ONLY_REMOTE_LABEL = 'Wyslij tylko portfolio';
+const IDLE_SUBMIT_LABELS = new Set([
+  'Uruchom',
+  'Wyslij remote',
+  LOCAL_SUBMIT_LABEL,
+  REMOTE_SUBMIT_LABEL,
+  PORTFOLIO_ONLY_LOCAL_LABEL,
+  PORTFOLIO_ONLY_REMOTE_LABEL
+]);
+const DEFAULT_INSTANCES = manualSourcePortfolioOnly ? 1 : 5;
 const ALLOWED_INSTANCE_COUNTS = new Set([1, 5, 10, 20]);
 const MANUAL_SOURCE_PREFILL_STORAGE_KEY = 'manual_source_prefill_draft';
 const MANUAL_SOURCE_PREFILL_MAX_AGE_MS = 5 * 60 * 1000;
@@ -24,6 +52,7 @@ const PROVIDER_KEEPALIVE_INTERVAL_MS = 15000;
 
 let instances = DEFAULT_INSTANCES;
 let queueActive = false;
+let submitRequestActive = false;
 const providerId = `manual-pdf-provider-${Date.now()}-${Math.random().toString(36).slice(2, 10)}`;
 const pdfFileByToken = new Map();
 let selectedPdfFiles = [];
@@ -32,13 +61,35 @@ let providerKeepaliveTimer = null;
 let remoteRunners = [];
 let remoteRunnerLoading = false;
 let remoteConfigHydrated = false;
+let remoteRunnerLoadError = '';
 
-const urlParams = new URLSearchParams(window.location.search);
 const presetTitle = urlParams.get('title') || '';
 const prefillToken = urlParams.get('prefillToken') || '';
 if (presetTitle && !titleInput.value) {
   titleInput.value = presetTitle;
 }
+
+function applyManualSourceAnalysisModeUi() {
+  if (!manualSourcePortfolioOnly) return;
+  document.title = 'Wklej zrodlo do portfolio';
+  const heading = document.querySelector('h1');
+  const description = document.querySelector('.description');
+  if (heading) {
+    heading.textContent = 'Wklej zrodlo do analizy portfela';
+  }
+  if (description) {
+    description.textContent = 'Wklej tekst zrodla lub zalacz PDF-y, a potem uruchom tylko proces Portfolio Analysis. Ekran nie odpala wtedy glownego procesu analizy spolki.';
+  }
+  if (instancesControl) {
+    instancesControl.hidden = true;
+  }
+  if (portfolioOnlyBtn) {
+    portfolioOnlyBtn.hidden = true;
+  }
+  submitBtn.textContent = LOCAL_SUBMIT_LABEL;
+}
+
+applyManualSourceAnalysisModeUi();
 
 function setProviderStatus(text, tone = 'info') {
   providerStatus.textContent = text || '';
@@ -66,6 +117,19 @@ function formatRemoteRunnerOption(runner) {
   return `${runnerName} (${state}${busySuffix})`;
 }
 
+function formatRemoteRunnerLoadError(errorCode) {
+  const code = typeof errorCode === 'string' ? errorCode.trim() : '';
+  const labels = {
+    missing_dispatch_credentials: 'Brak sekretu HMAC Watchlist. Uzupelnij Watchlist -> Secret w popupie rozszerzenia.',
+    missing_intake_url: 'Brak Intake URL Watchlist. Uzupelnij konfiguracje w popupie rozszerzenia.',
+    missing_key_id: 'Brak Key ID Watchlist. Uzupelnij konfiguracje w popupie rozszerzenia.',
+    dispatch_disabled: 'Watchlist dispatch jest wylaczony.',
+    invalid_watchlist_api_url: 'Niepoprawny Intake URL Watchlist.',
+    remote_runner_list_failed: 'Nie udalo sie pobrac listy runnerow.'
+  };
+  return labels[code] || code || '';
+}
+
 function renderRemoteRunnerOptions(preferredRunnerId = '') {
   if (!remoteRunnerSelect) return;
   const currentRunnerId = preferredRunnerId || getSelectedRemoteRunnerId();
@@ -73,8 +137,15 @@ function renderRemoteRunnerOptions(preferredRunnerId = '') {
 
   if (remoteRunners.length === 0) {
     const option = document.createElement('option');
-    option.value = '';
-    option.textContent = remoteRunnerLoading ? 'Ladowanie runnerow...' : 'Brak runnerow';
+    if (currentRunnerId && !remoteRunnerLoading) {
+      option.value = currentRunnerId;
+      option.textContent = `Zapisany runner ${currentRunnerId}`;
+    } else {
+      option.value = '';
+      option.textContent = remoteRunnerLoading
+        ? 'Ladowanie runnerow...'
+        : (remoteRunnerLoadError ? 'Brak konfiguracji Watchlist' : 'Brak runnerow');
+    }
     remoteRunnerSelect.appendChild(option);
   } else {
     remoteRunners.forEach((runner) => {
@@ -103,7 +174,7 @@ function syncRemoteControls() {
     remoteControls.hidden = !remoteEnabled;
   }
   if (remoteRunnerSelect) {
-    remoteRunnerSelect.disabled = queueActive || !remoteEnabled || remoteRunnerLoading || remoteRunners.length === 0;
+    remoteRunnerSelect.disabled = queueActive || !remoteEnabled || remoteRunnerLoading || (!hasRunner && remoteRunners.length === 0);
   }
   if (remoteRefreshBtn) {
     remoteRefreshBtn.disabled = queueActive || remoteRunnerLoading;
@@ -116,6 +187,8 @@ function syncRemoteControls() {
       remoteInfo.textContent = 'Remote dziala dla tekstu wklejonego w to okno. PDF-y zostaja lokalnie na tym komputerze.';
     } else if (hasPdf) {
       remoteInfo.textContent = 'Remote nie obsluguje PDF z tego okna. Usun PDF-y albo wylacz remote.';
+    } else if (remoteRunnerLoadError) {
+      remoteInfo.textContent = remoteRunnerLoadError;
     } else if (!hasRunner) {
       remoteInfo.textContent = 'Wybierz runnera, zanim wyslesz tekst zdalnie.';
     } else {
@@ -148,17 +221,21 @@ async function loadRemoteRunnerOptions(options = {}) {
     remoteRunners = Array.isArray(runnersResponse?.items)
       ? runnersResponse.items.filter((runner) => runner && typeof runner === 'object')
       : [];
+    remoteRunnerLoadError = runnersResponse?.success === false
+      ? formatRemoteRunnerLoadError(runnersResponse?.error)
+      : '';
     renderRemoteRunnerOptions(selectedRunnerId);
     if (getRemoteModeEnabled() && remoteRunners.length === 0 && options?.silent !== true) {
-      setProviderStatus(runnersResponse?.error || 'Nie znaleziono aktywnych runnerow.', 'error');
+      setProviderStatus(remoteRunnerLoadError || runnersResponse?.error || 'Nie znaleziono aktywnych runnerow.', 'error');
     } else if (getRemoteModeEnabled() && options?.silent !== true) {
       setProviderStatus(`Wczytano ${remoteRunners.length} runnerow.`, 'success');
     }
   } catch (error) {
     remoteRunners = [];
+    remoteRunnerLoadError = formatRemoteRunnerLoadError(error?.message) || `Nie udalo sie pobrac runnerow: ${error?.message || String(error)}.`;
     renderRemoteRunnerOptions();
     if (options?.silent !== true) {
-      setProviderStatus(`Nie udalo sie pobrac runnerow: ${error?.message || String(error)}.`, 'error');
+      setProviderStatus(remoteRunnerLoadError, 'error');
     }
   } finally {
     remoteRunnerLoading = false;
@@ -186,10 +263,18 @@ function updateSubmitButton() {
   const hasText = sourceInput.value.trim().length > 0;
   const hasPdf = selectedPdfFiles.length > 0;
   const remoteEnabled = getRemoteModeEnabled();
-  const remoteBlocked = remoteEnabled && (hasPdf || !hasText || !getSelectedRemoteRunnerId() || remoteRunnerLoading);
-  submitBtn.disabled = queueActive || (!hasText && !hasPdf) || remoteBlocked;
-  if (!queueActive && (submitBtn.textContent === 'Uruchom' || submitBtn.textContent === 'Wyslij remote')) {
-    submitBtn.textContent = remoteEnabled ? 'Wyslij remote' : 'Uruchom';
+  const remoteBlocked = remoteEnabled && (hasPdf || !hasText || !getSelectedRemoteRunnerId() || remoteRunnerLoading || !!remoteRunnerLoadError);
+  const disabled = queueActive || submitRequestActive || (!hasText && !hasPdf) || remoteBlocked;
+  submitBtn.disabled = disabled;
+  if (!queueActive && !submitRequestActive && IDLE_SUBMIT_LABELS.has(submitBtn.textContent)) {
+    submitBtn.textContent = remoteEnabled ? REMOTE_SUBMIT_LABEL : LOCAL_SUBMIT_LABEL;
+  }
+  if (portfolioOnlyBtn) {
+    portfolioOnlyBtn.hidden = manualSourcePortfolioOnly;
+    portfolioOnlyBtn.disabled = disabled;
+    if (!queueActive && !submitRequestActive && IDLE_SUBMIT_LABELS.has(portfolioOnlyBtn.textContent)) {
+      portfolioOnlyBtn.textContent = remoteEnabled ? PORTFOLIO_ONLY_REMOTE_LABEL : PORTFOLIO_ONLY_LOCAL_LABEL;
+    }
   }
 }
 
@@ -210,6 +295,19 @@ function updateInstancesDisplay() {
   if (instancesInfo) {
     instancesInfo.textContent = 'Dla PDF mnozy kazdy plik.';
   }
+}
+
+function formatManualSourceLaunchError(errorCode, launchPortfolioOnly) {
+  const code = typeof errorCode === 'string' ? errorCode.trim() : '';
+  if (code === 'prompts_not_loaded') {
+    return launchPortfolioOnly
+      ? 'Brak promptow portfolio. Odswiez rozszerzenie i sprobuj ponownie.'
+      : 'Brak promptow company/portfolio. Odswiez rozszerzenie i sprobuj ponownie.';
+  }
+  if (code === 'request_entity_too_large' || code === 'http_413') {
+    return 'Material jest za duzy dla aktualnego limitu serwera. Po deployu poprawionej konfiguracji Nginx limit bedzie wyzszy.';
+  }
+  return code || 'unknown';
 }
 
 function setQueueUiLocked(locked) {
@@ -519,8 +617,11 @@ function releasePdfProviderState(releaseMessage = '') {
   pdfInput.value = '';
   setQueueUiLocked(false);
   renderPdfList();
+  submitBtn.textContent = getRemoteModeEnabled() ? REMOTE_SUBMIT_LABEL : LOCAL_SUBMIT_LABEL;
+  if (portfolioOnlyBtn) {
+    portfolioOnlyBtn.textContent = getRemoteModeEnabled() ? PORTFOLIO_ONLY_REMOTE_LABEL : PORTFOLIO_ONLY_LOCAL_LABEL;
+  }
   updateSubmitButton();
-  submitBtn.textContent = getRemoteModeEnabled() ? 'Wyslij remote' : 'Uruchom';
 
   if (releaseMessage) {
     setProviderStatus(releaseMessage, 'success');
@@ -557,15 +658,17 @@ instancePresetButtons.forEach((button) => {
   });
 });
 
-submitBtn.addEventListener('click', async () => {
-  if (queueActive) return;
+async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
+  if (queueActive || submitRequestActive) return;
 
+  const normalizedLaunchType = normalizeManualSourceAnalysisType(launchAnalysisType);
+  const launchPortfolioOnly = normalizedLaunchType === MANUAL_ANALYSIS_TYPE_PORTFOLIO;
   const hasPdf = selectedPdfFiles.length > 0;
   const text = sourceInput.value.trim();
   const title = titleInput.value.trim() || 'Recznie wklejony artykul';
   const remoteEnabled = getRemoteModeEnabled();
   const remoteRunnerId = getSelectedRemoteRunnerId();
-  const effectiveInstances = instances;
+  const effectiveInstances = launchPortfolioOnly ? 1 : instances;
 
   if (!hasPdf && !text) return;
   if (hasPdf && remoteEnabled) {
@@ -579,14 +682,17 @@ submitBtn.addEventListener('click', async () => {
     return;
   }
 
-  submitBtn.disabled = true;
-  submitBtn.textContent = remoteEnabled ? 'Wysylam...' : 'Uruchamiam...';
+  submitRequestActive = true;
+  updateSubmitButton();
+  triggerButton.disabled = true;
+  triggerButton.textContent = remoteEnabled ? 'Wysylam...' : 'Uruchamiam...';
 
   const payload = hasPdf
     ? {
       type: 'MANUAL_SOURCE_SUBMIT',
       mode: 'pdf',
       title,
+      analysisType: normalizedLaunchType,
       instances: effectiveInstances,
       pdfProviderId: providerId,
       pdfFiles: selectedPdfFiles,
@@ -596,6 +702,7 @@ submitBtn.addEventListener('click', async () => {
       mode: 'text',
       text,
       title,
+      analysisType: normalizedLaunchType,
       instances: effectiveInstances,
       remote: remoteEnabled,
       runnerId: remoteEnabled ? remoteRunnerId : '',
@@ -608,26 +715,26 @@ submitBtn.addEventListener('click', async () => {
 
   const response = await sendRuntimeMessage(payload);
   if (response?.ok === false) {
-    submitBtn.textContent = 'Blad';
-    submitBtn.disabled = false;
+    submitRequestActive = false;
+    triggerButton.textContent = 'Blad';
     setProviderStatus(`Blad wysylki: ${response.errorMessage || response.errorCode || 'runtime_error'}`, 'error');
     if (hasPdf) {
       stopProviderKeepalive();
     }
+    updateSubmitButton();
     return;
   }
 
   if (!response?.success) {
     const launchError = response?.error || response?.reason || 'unknown';
-    const launchMessage = launchError === 'prompts_not_loaded'
-      ? 'Brak promptow company/portfolio. Odswiez rozszerzenie i sprobuj ponownie.'
-      : launchError;
-    submitBtn.textContent = 'Blad';
-    submitBtn.disabled = false;
+    const launchMessage = formatManualSourceLaunchError(launchError, launchPortfolioOnly);
+    submitRequestActive = false;
+    triggerButton.textContent = 'Blad';
     setProviderStatus(`Blad uruchomienia: ${launchMessage}`, 'error');
     if (hasPdf) {
       stopProviderKeepalive();
     }
+    updateSubmitButton();
     return;
   }
 
@@ -638,36 +745,53 @@ submitBtn.addEventListener('click', async () => {
 
   if (hasPdf) {
     queueActive = true;
+    submitRequestActive = false;
     startProviderKeepalive();
     setQueueUiLocked(true);
-    submitBtn.disabled = true;
-    submitBtn.textContent = 'Kolejka uruchomiona';
+    triggerButton.disabled = true;
+    triggerButton.textContent = 'Kolejka uruchomiona';
     setProviderStatus(
       `Provider aktywny. Zakolejkowano ${response?.queuedCount || response?.queued || 0} zadan, sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
       'info'
     );
+    updateSubmitButton();
     return;
   }
 
+  submitRequestActive = false;
   if (response?.remote === true) {
-    submitBtn.textContent = 'Wyslano';
-    const portfolioSuffix = response?.extraPortfolioQueued ? ' + portfolio 1x' : '';
+    triggerButton.textContent = 'Wyslano';
+    const portfolioSuffix = launchPortfolioOnly
+      ? 'portfolio'
+      : `company${response?.extraPortfolioQueued ? ' + portfolio 1x' : ''}`;
     setProviderStatus(
-      `Wyslano ${response?.submittedCount || response?.queuedCount || 0} jobow company${portfolioSuffix} do runnera ${response?.runnerId || remoteRunnerId}.`,
+      `Wyslano ${response?.submittedCount || response?.queuedCount || 0} jobow ${portfolioSuffix} do runnera ${response?.runnerId || remoteRunnerId}.`,
       'success'
     );
   } else {
-    submitBtn.textContent = 'Uruchomiono';
-    const portfolioSuffix = response?.extraPortfolioQueued ? ' + portfolio 1x' : '';
+    triggerButton.textContent = 'Uruchomiono';
+    const portfolioSuffix = launchPortfolioOnly
+      ? 'portfolio'
+      : `company${response?.extraPortfolioQueued ? ' + portfolio 1x' : ''}`;
     setProviderStatus(
-      `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz company${portfolioSuffix}. Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+      `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz ${portfolioSuffix}. Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
       'success'
     );
   }
   setTimeout(() => {
-    submitBtn.textContent = getRemoteModeEnabled() ? 'Wyslij remote' : 'Uruchom';
+    triggerButton.textContent = launchPortfolioOnly
+      ? (getRemoteModeEnabled() ? PORTFOLIO_ONLY_REMOTE_LABEL : PORTFOLIO_ONLY_LOCAL_LABEL)
+      : (getRemoteModeEnabled() ? REMOTE_SUBMIT_LABEL : LOCAL_SUBMIT_LABEL);
     updateSubmitButton();
   }, 900);
+}
+
+submitBtn.addEventListener('click', () => {
+  void submitManualSourceFromButton(submitBtn, manualSourceAnalysisType);
+});
+
+portfolioOnlyBtn?.addEventListener('click', () => {
+  void submitManualSourceFromButton(portfolioOnlyBtn, MANUAL_ANALYSIS_TYPE_PORTFOLIO);
 });
 
 cancelBtn.addEventListener('click', () => {

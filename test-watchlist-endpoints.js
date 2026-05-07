@@ -256,6 +256,7 @@ function buildContext(overrides = {}) {
     'buildRemoteRunnerStatusApiPath',
     'buildRemoteJobApiPath',
     'normalizeRemoteApiErrorText',
+    'normalizeRemoteApiResponseErrorText',
     'performSignedIskraApiRequest',
     'listRemoteRunnersViaApi',
     'getRemoteRunnerStatusViaApi',
@@ -365,6 +366,35 @@ async function testPerformSignedIskraApiRequestRetriesTransientErrors() {
   assert.strictEqual(result.success, true);
   assert.strictEqual(attempt, 2);
   assert.deepStrictEqual(toPlainJson(result.payload), { ok: true });
+}
+
+async function testPerformSignedIskraApiRequestHidesHtml413Body() {
+  const context = buildContext({
+    WatchlistApiUtils: {
+      buildSignedJsonRequest: async (options) => ({
+        url: `https://iskierka-watchlist.duckdns.org${options.path}`,
+        method: options.method,
+        headers: { 'X-Test': '1' },
+        body: ''
+      })
+    },
+    fetch: async () => ({
+      ok: false,
+      status: 413,
+      text: async () => '<html><head><title>413 Request Entity Too Large</title></head><body>nginx</body></html>'
+    })
+  });
+
+  const result = await context.performSignedIskraApiRequest({
+    method: 'POST',
+    path: '/api/v1/source-materials',
+    retryCount: 0
+  });
+
+  assert.strictEqual(result.success, false);
+  assert.strictEqual(result.status, 413);
+  assert.strictEqual(result.error, 'request_entity_too_large');
+  assert.strictEqual(result.error.includes('<html>'), false);
 }
 
 async function testRemoteApiWrappersBuildExpectedRequests() {
@@ -537,6 +567,7 @@ async function testFetchRemoteProblemLogsFallsBackToNextCandidate() {
 async function main() {
   await testPerformSignedIskraApiRequestReturnsParsedSuccess();
   await testPerformSignedIskraApiRequestRetriesTransientErrors();
+  await testPerformSignedIskraApiRequestHidesHtml413Body();
   await testRemoteApiWrappersBuildExpectedRequests();
   await testFetchRemoteProblemLogsLoadsEntriesFromSignedEndpoint();
   await testFetchRemoteProblemLogsFallsBackToNextCandidate();

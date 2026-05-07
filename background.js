@@ -148,6 +148,7 @@ const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
 const ANALYSIS_QUEUE_PAUSED_STORAGE_KEY = 'analysis_queue_paused';
 const ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY = 'iskra_remote_execution_mode';
 const ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY = 'iskra_remote_selected_runner_id';
+const ISKRA_DEFAULT_REMOTE_SELECTED_RUNNER_ID = 'ext-a2506ac9-8f3d-4d52-8d4f-92f71e864d9f';
 const ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY = 'iskra_remote_runner_enabled';
 const ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY = 'iskra_remote_runner_name';
 const ISKRA_REMOTE_JOB_SUPPRESSIONS_STORAGE_KEY = 'iskra_remote_job_suppressions';
@@ -2857,11 +2858,10 @@ async function getStoredRemoteExecutionMode() {
 async function getStoredSelectedRemoteRunnerId() {
   try {
     const stored = await chrome.storage.local.get([ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY]);
-    return typeof stored?.[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY] === 'string'
-      ? stored[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY].trim()
-      : '';
+    const storedRunnerId = normalizeSelectedRemoteRunnerId(stored?.[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY]);
+    return storedRunnerId || getDefaultSelectedRemoteRunnerId();
   } catch (error) {
-    return '';
+    return getDefaultSelectedRemoteRunnerId();
   }
 }
 
@@ -2890,7 +2890,13 @@ function normalizeRemoteRunnerName(value) {
 }
 
 function normalizeSelectedRemoteRunnerId(value) {
-  return typeof value === 'string' ? value.trim() : '';
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (normalized === 'default_runner_missing') return '';
+  return normalized;
+}
+
+function getDefaultSelectedRemoteRunnerId() {
+  return normalizeSelectedRemoteRunnerId(ISKRA_DEFAULT_REMOTE_SELECTED_RUNNER_ID);
 }
 
 async function getRemoteExecutionConfigSnapshot(options = {}) {
@@ -3065,6 +3071,28 @@ function normalizeRemoteApiErrorText(error, fallback = 'remote_api_failed') {
   return normalized || fallback;
 }
 
+function normalizeRemoteApiResponseErrorText(status, payload = {}, responseText = '') {
+  if (status === 413) {
+    return 'request_entity_too_large';
+  }
+
+  const payloadDetail = typeof payload?.detail === 'string' && payload.detail.trim()
+    ? payload.detail.trim()
+    : '';
+  const payloadReason = typeof payload?.reason === 'string' && payload.reason.trim()
+    ? payload.reason.trim()
+    : '';
+  if (payloadDetail) return payloadDetail;
+  if (payloadReason) return payloadReason;
+
+  const text = typeof responseText === 'string' ? responseText.trim() : '';
+  if (!text) return `http_${status}`;
+  if (/^\s*</.test(text) || /<html[\s>]/i.test(text)) {
+    return `http_${status}`;
+  }
+  return text.slice(0, 240);
+}
+
 async function performSignedIskraApiRequest(options = {}) {
   const config = await resolveWatchlistDispatchConfiguration(options?.forceConfigReload === true);
   if (!config?.ok) {
@@ -3154,13 +3182,15 @@ async function performSignedIskraApiRequest(options = {}) {
 
         if (!response.ok) {
           lastStatus = response.status;
-          lastError = (
-            (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
-            || (typeof responsePayload?.reason === 'string' && responsePayload.reason.trim())
-            || (typeof responseText === 'string' && responseText.trim())
-            || `http_${response.status}`
-          );
-          if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409 || response.status === 422) {
+          lastError = normalizeRemoteApiResponseErrorText(response.status, responsePayload, responseText);
+          if (
+            response.status === 401
+            || response.status === 403
+            || response.status === 404
+            || response.status === 409
+            || response.status === 413
+            || response.status === 422
+          ) {
             break;
           }
         } else {
