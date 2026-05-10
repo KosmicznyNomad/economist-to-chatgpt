@@ -355,6 +355,7 @@ function buildPriorityContext() {
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
+    'isProcessWindowAutoCloseEnabled',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
     'getProcessLastActivityTimestamp',

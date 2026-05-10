@@ -205,14 +205,16 @@ Finalny zapis wykona Prompt 3 po dodaniu Take Profit i Stop Loss.
 NAJWAŻNIEJSZA ZASADA DANYCH
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Portfel czytasz ze SNAPSHOTU portfela, nie z live IBKR.
+Portfel czytasz z wklejonego poniżej SNAPSHOTU portfela, nie z live IBKR
+i nie przez MCP w tym promcie.
 
 Poprawny model bezpieczeństwa to:
-IBKR/TWS lub IB Gateway -> job snapshotu -> PostgreSQL snapshot -> read-only MCP.
+IBKR/TWS lub IB Gateway -> job snapshotu -> PostgreSQL snapshot -> blok
+wstawiony do `prompts-portfolio.txt`.
 
-MCP nie ma logować się do IBKR i nie ma pobierać live pozycji z brokera.
-MCP ma tylko czytać ostatni zapisany snapshot portfela oraz powiązane tezy
-z bazy/researchu.
+Ten blok jest odświeżany poza ChatGPT, razem z aktualizacją snapshotu.
+W Prompcie 2 nie uruchamiaj connectorów ani narzędzi tylko po to, żeby
+pobrać listę pozycji. Masz użyć danych już wklejonych niżej.
 
 Jeśli snapshot jest pusty, stary albo nie zawiera wag/market value,
 nie przechodź na live IBKR jako fallback. Napisz w DATA QUALITY CHECK,
@@ -223,62 +225,3130 @@ Nie używaj Codex App / live broker endpointów do tego zadania.
 Nie używaj danych z watchlisty jako substytutu realnych wag portfela.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 1 - POBIERZ PORTFEL ZE SNAPSHOTU PORTFELA
+KROK 1 - WCZYTAJ WKLEJONY SNAPSHOT PORTFELA
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Użyj MCP w tej kolejności:
+Użyj wyłącznie bloku między markerami
+`PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN` i `PORTFOLIO_SNAPSHOT_FROM_DB_END`.
+To jest ręcznie wstawiony snapshot z PostgreSQL, aktualizowany przez job
+snapshotu portfela. Tezy i kontekst spółek, jeśli są dostępne w bazie,
+są w `positions[].db_context`.
 
-Użyj narzędzia:
+PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN
+{
+  "account_summary": {
+    "available_funds": 20085.46,
+    "base_currency": "USD",
+    "cash": 29059.66,
+    "net_liquidation": 55575.08,
+    "positions_source": {
+      "mode": "ibkr_live"
+    },
+    "price_change_coverage": {
+      "1m_count": 72,
+      "2m_count": 72,
+      "3m_count": 72,
+      "5d_count": 72
+    }
+  },
+  "context_status": "loaded",
+  "generated_for_prompt_utc": "2026-05-09T20:18:39Z",
+  "positions": [
+    {
+      "account": "U22088457",
+      "avg_cost": 580.7968,
+      "base_currency": "USD",
+      "conid": 120549389,
+      "cost_basis_base": 6969.5622,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 13.2392,
+      "fx_rate_to_base": 1.0,
+      "market_price": 613.25,
+      "market_value": 7359.0,
+      "market_value_base": 7359.0,
+      "price_change_1m_pct": 6.9561,
+      "price_change_2m_pct": -4.9592,
+      "price_change_3m_pct": -7.3444,
+      "price_change_5d_pct": -8.4051,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 612.88,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 12.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "META",
+      "total_pnl_base": 389.44,
+      "total_pnl_pct": 5.5877,
+      "unrealized_pnl_base": 389.44,
+      "unrealized_pnl_pct": 5.5877,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 1373.4,
+      "base_currency": "USD",
+      "conid": 102284257,
+      "cost_basis_base": 6463.6017,
+      "currency": "EUR",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 11.8485,
+      "db_context": {
+        "company_family": "Kinetyczna obrona powietrzna, SHORAD i amunicja",
+        "company_name": "Rheinmetall (RHM:ETR)",
+        "company_type": "Prime obronny z platformami, wieżami, armatami i amunicją programowalną",
+        "revenue_model": "Kontrakty platformowe, produkcja systemów, amunicja powtarzalna, modernizacja i serwis",
+        "risks": "VOI: funded Skyranger / SHORAD order intake >=€1.5B, Fals: serial delivery opóźnione poza 2029, Primary risk: certyfikacja i capacity wypychają cash conversion, Composite: 3.55/5.0, EntryScore: 5.1/10, Sizing: 1-2% warunkowo",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "RHM:XETRA",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.1766,
+      "market_price": 1399.4,
+      "market_value": 5597.6,
+      "market_value_base": 6585.9649,
+      "price_change_1m_pct": -8.5826,
+      "price_change_2m_pct": -12.113,
+      "price_change_3m_pct": -12.7703,
+      "price_change_5d_pct": 4.6039,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 1399.6,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 4.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "RHM",
+      "total_pnl_base": 122.3632,
+      "total_pnl_pct": 1.8931,
+      "unrealized_pnl_base": 122.3632,
+      "unrealized_pnl_pct": 1.8931,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 207.9492,
+      "base_currency": "USD",
+      "conid": 347869622,
+      "cost_basis_base": 5198.73,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 10.6751,
+      "db_context": {
+        "company_family": "Enterprise AI infrastructure and rack-scale systems",
+        "company_name": "Dell Technologies (DELL:NYSE)",
+        "company_type": "Zdywersyfikowany dostawca sprzętu IT, usług, storage i finansowania",
+        "revenue_model": "Sprzedaż sprzętu, backlog projektowy, usługi, support i finansowanie",
+        "risks": "VOI: next quarterly AI orders / backlog / ISG margin / FCF update, Fals: ISG margin <11.0% or AI-server backlog conversion fails to produce FCF over two quarters, Primary risk: AI-server revenue scales but remains GPU pass-through, compressing ISG margin and weakening FCF conversion, Composite: 2.93/5.0, EntryScore: 4.6/10, Sizing: 0%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "DELL:NYSE",
+        "theme_tags": [
+          "ai",
+          "infra_data",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 237.35,
+      "market_value": 5933.75,
+      "market_value_base": 5933.75,
+      "price_change_1m_pct": 37.8912,
+      "price_change_2m_pct": 63.0257,
+      "price_change_3m_pct": 97.2739,
+      "price_change_5d_pct": 16.114,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 238.8,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 25.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "DELL",
+      "total_pnl_base": 735.02,
+      "total_pnl_pct": 14.1385,
+      "unrealized_pnl_base": 735.02,
+      "unrealized_pnl_pct": 14.1385,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 509.6425,
+      "base_currency": "USD",
+      "conid": 9939,
+      "cost_basis_base": 4077.14,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 9.3896,
+      "db_context": {
+        "company_family": "AI memory and HBM capacity",
+        "company_name": "Micron Technology (MU:NASDAQ)",
+        "company_type": "Memory semiconductor manufacturer",
+        "revenue_model": "Cyclical product revenue with capacity allocation and price-mix upside",
+        "risks": "VOI: FQ3/FQ4 FY2026 earnings, Fals: combined margin <60% lub FCF materialnie poniżej capex burden, Primary risk: HBM scarcity przechodzi w zwykły cykl pamięci, Composite: 3.80/5.0, EntryScore: 6.0/10, Sizing: 2-3% warunkowo",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "MU:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 652.4,
+      "market_value": 5219.2,
+      "market_value_base": 5219.2,
+      "price_change_1m_pct": 76.4586,
+      "price_change_2m_pct": 80.0135,
+      "price_change_3m_pct": 68.8895,
+      "price_change_5d_pct": 28.5712,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 666.59,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "NASDAQ",
+      "quantity": 8.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "MU",
+      "total_pnl_base": 1142.06,
+      "total_pnl_pct": 28.0113,
+      "unrealized_pnl_base": 1142.06,
+      "unrealized_pnl_pct": 28.0113,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 551.072,
+      "base_currency": "USD",
+      "conid": 120552142,
+      "cost_basis_base": 5510.72,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 9.275,
+      "db_context": {
+        "company_family": "Prime obronny i producent certyfikowanych interceptorów",
+        "company_name": "Lockheed Martin (LMT:NYSE)",
+        "company_type": "Zintegrowany wykonawca obronny z programami rakietowymi i lotniczymi",
+        "revenue_model": "Wieloletnie kontrakty obronne, finansowane serie produkcyjne, FMS, wsparcie i sustainment",
+        "risks": "VOI: FY2026-FY2027 PAC-3/THAAD funded lot awards and production-rate updates, Fals: PAC-3 MSE funded awards fail to support >800 annualized units by FY2027, Primary risk: framework funding disappoints and ramp remains optionality rather than cash-flow duration, Composite: 3.80/5.0, EntryScore: 5.5/10, Sizing: 0% now; conditional 2-3% upon upgrade",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "LMT:NYSE",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 515.55,
+      "market_value": 5155.5,
+      "market_value_base": 5155.5,
+      "price_change_1m_pct": -19.3823,
+      "price_change_2m_pct": -23.447,
+      "price_change_3m_pct": -17.531,
+      "price_change_5d_pct": 0.8729,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 514.26,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 10.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "LMT",
+      "total_pnl_base": -355.22,
+      "total_pnl_pct": -6.446,
+      "unrealized_pnl_base": -355.22,
+      "unrealized_pnl_pct": -6.446,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 386.4579,
+      "base_currency": "USD",
+      "conid": 120549183,
+      "cost_basis_base": 4637.495,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 9.1428,
+      "db_context": {
+        "company_family": "Custom AI silicon and networking",
+        "company_name": "Broadcom (AVGO:NASDAQ)",
+        "company_type": "Fabless semiconductor + infrastructure software",
+        "revenue_model": "Custom silicon programs + infrastructure software cash flows",
+        "risks": "VOI: kwartalne AI semiconductor revenue >= $12B, Fals: miss wobec $10.7B guide lub pogorszenie margin / FCF, Primary risk: hyperscalerzy przejmuja ekonomie custom silicon, Composite: 3.11/5.0, EntryScore: 5.0/10, Sizing: 0% ENTRY_SHORTFALL",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "AVGO:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "infra_data",
+          "semis",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 423.5,
+      "market_value": 5082.0,
+      "market_value_base": 5082.0,
+      "price_change_1m_pct": 35.3052,
+      "price_change_2m_pct": 28.734,
+      "price_change_3m_pct": 27.7905,
+      "price_change_5d_pct": 4.9303,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 425.44,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 12.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "AVGO",
+      "total_pnl_base": 444.51,
+      "total_pnl_pct": 9.5851,
+      "unrealized_pnl_base": 444.51,
+      "unrealized_pnl_pct": 9.5851,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 152.3624,
+      "base_currency": "USD",
+      "conid": 266311882,
+      "cost_basis_base": 4113.785,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 8.2771,
+      "db_context": {
+        "company_family": "Półprzewodniki i infrastruktura AI",
+        "company_name": "Marvell Technology (MRVL:NASDAQ)",
+        "company_type": "Układy obliczeniowe i platformy AI",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: przychody Data Center >=1.25 mld USD kwartalnie do FY2027 Q2, Fals: wzrost Data Center <20% r/r przez 2 kolejne kwartaly do FY2027 Q2, Primary risk: opoznienia rampu u hyperskalerow i koncentracja klientow powoduje niedowiezienie wolumenu i kompresje mnoznikow",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "MRVL:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 170.4,
+      "market_value": 4600.8,
+      "market_value_base": 4600.8,
+      "price_change_1m_pct": 57.2003,
+      "price_change_2m_pct": 92.196,
+      "price_change_3m_pct": 114.437,
+      "price_change_5d_pct": 9.9508,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 172.15,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 27.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "MRVL",
+      "total_pnl_base": 487.01,
+      "total_pnl_pct": 11.8385,
+      "unrealized_pnl_base": 487.01,
+      "unrealized_pnl_pct": 11.8385,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 119.2689,
+      "base_currency": "USD",
+      "conid": 266311923,
+      "cost_basis_base": 4174.41,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 8.1857,
+      "db_context": {
+        "company_family": "Dostawca interfejsow pamieci i IP",
+        "company_name": "Rambus (RMBS:NASDAQ)",
+        "company_type": "Asset-light semiconductor IP and interface-chip supplier",
+        "revenue_model": "Sprzedaz chipow interfejsowych, licencje IP, billings i royalties",
+        "risks": "VOI: Q2-Q3 2026 product revenue ≥$105M, Fals: product revenue <$90M or two sequential declines without licensing/IP offset, Primary risk: dual-sourcing and content compression, Composite: 3.70/5.0, EntryScore: 5.5/10, Sizing: 1–2% conditional",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "RMBS:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 130.0,
+      "market_value": 4550.0,
+      "market_value_base": 4550.0,
+      "price_change_1m_pct": 41.0106,
+      "price_change_2m_pct": 47.5715,
+      "price_change_3m_pct": 21.4192,
+      "price_change_5d_pct": 15.9415,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 130.04,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 35.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "RMBS",
+      "total_pnl_base": 375.59,
+      "total_pnl_pct": 8.9974,
+      "unrealized_pnl_base": 375.59,
+      "unrealized_pnl_pct": 8.9974,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 261.0471,
+      "base_currency": "USD",
+      "conid": 658388919,
+      "cost_basis_base": 3654.66,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 8.1101,
+      "db_context": {
+        "company_family": "Custom switchgear i E-house dla AI data center",
+        "company_name": "Powell Industries (POWL:NASDAQ)",
+        "company_type": "Projektowy dostawca systemów dystrybucji energii",
+        "revenue_model": "Kontrakty projektowe, backlog, dostawy systemów elektrycznych i rozliczenia etapowe",
+        "risks": "VOI: Q2-Q3 FY2026 zamówienia AI/data center, Fals: zamówienia AI/data center <75 mln USD w którymkolwiek z dwóch kolejnych kwartałów, Primary risk: obecna cena wymaga dużo większego i dłuższego cyklu AI electrical niż potwierdza policzalny wedge, Composite: 3.60/5.0, EntryScore: 5.5/10, Sizing: 0% teraz, warunkowo 2-3%",
+        "sector": "NIEZNANY",
+        "symbol_key": "POWL:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 322.0,
+      "market_value": 4508.0,
+      "market_value_base": 4508.0,
+      "price_change_1m_pct": 71.5403,
+      "price_change_2m_pct": 98.6726,
+      "price_change_3m_pct": 64.4757,
+      "price_change_5d_pct": 26.3561,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 320.3,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 14.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "POWL",
+      "total_pnl_base": 853.34,
+      "total_pnl_pct": 23.3494,
+      "unrealized_pnl_base": 853.34,
+      "unrealized_pnl_pct": 23.3494,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 333.814,
+      "base_currency": "USD",
+      "conid": 120549733,
+      "cost_basis_base": 3338.14,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 7.2383,
+      "db_context": {
+        "company_family": "Hyperscaler AI infrastructure platform",
+        "company_name": "Alphabet Inc. (GOOGL:NASDAQ)",
+        "company_type": "Platforma cloud i właściciel TPU",
+        "revenue_model": "Cloud capacity, usage, committed contracts i managed AI services",
+        "risks": "VOI: wyniki Q2–Q3 2026, marża Google Cloud i konwersja backlogu, Fals: Cloud backlog rośnie, ale marża Cloud pozostaje poniżej 32% lub spada przez dwa kwartały, Primary risk: capex AI zjada FCF mimo wzrostu Cloud, Composite: 3.70/5.0, EntryScore: 5.0/10, Sizing: 1–2% only after upgrade",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "GOOGL:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "infra_data"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 402.34,
+      "market_value": 4023.4,
+      "market_value_base": 4023.4,
+      "price_change_1m_pct": 32.6844,
+      "price_change_2m_pct": 33.3378,
+      "price_change_3m_pct": 23.2856,
+      "price_change_5d_pct": 13.7452,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 398.04,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 10.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "GOOGL",
+      "total_pnl_base": 685.26,
+      "total_pnl_pct": 20.5282,
+      "unrealized_pnl_base": 685.26,
+      "unrealized_pnl_pct": 20.5282,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 315.3511,
+      "base_currency": "USD",
+      "conid": 120550749,
+      "cost_basis_base": 4099.5646,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 7.0982,
+      "db_context": {
+        "company_family": "Obrona i bezpieczeństwo",
+        "company_name": "L3Harris Technologies (LHX:NYSE)",
+        "company_type": "Elektronika sensory i łączność obronna",
+        "revenue_model": "Kontrakty rządowe",
+        "risks": "VOI: potwierdzone kontrakty wieloletnie SRM i uruchomienia linii, Fals: book-to-bill SRM poniżej 1.1 przez dwa kwartały lub poślizg uruchomienia mocy powyżej dwóch kwartałów, Primary risk: trwałe ograniczenia podaży energetyków ograniczające throughput",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "LHX:NYSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 303.5,
+      "market_value": 3945.5,
+      "market_value_base": 3945.5,
+      "price_change_1m_pct": -15.7584,
+      "price_change_2m_pct": -17.5691,
+      "price_change_3m_pct": -13.5732,
+      "price_change_5d_pct": -5.9739,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 302.2,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 13.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "LHX",
+      "total_pnl_base": -154.06,
+      "total_pnl_pct": -3.758,
+      "unrealized_pnl_base": -154.06,
+      "unrealized_pnl_pct": -3.758,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 142.103,
+      "base_currency": "USD",
+      "conid": 451397890,
+      "cost_basis_base": 3978.8832,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 6.8301,
+      "db_context": {
+        "company_family": "Technologia i oprogramowanie",
+        "company_name": "Palantir Technologies (PLTR:NYSE)",
+        "company_type": "Oprogramowanie branżowe o wysokiej krytyczności",
+        "revenue_model": "Subskrypcja oprogramowania",
+        "risks": "VOI: potwierdzone przejścia z pilota do produkcji w Indo Pacific i book to bill powyżej 1.2 przez dwa kwartały, Fals: wzrost przychodów poniżej 10 procent r r przez dwa kwartały lub brak nowych wdrożeń produkcyjnych, Primary risk: przesunięcia budżetowe i opóźnienia przetargów u kluczowych klientów rządowych",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "PLTR:NYSE",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 135.59,
+      "market_value": 3796.52,
+      "market_value_base": 3796.52,
+      "price_change_1m_pct": -9.5586,
+      "price_change_2m_pct": -14.8702,
+      "price_change_3m_pct": -1.5526,
+      "price_change_5d_pct": -3.0296,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 133.79,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 28.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "PLTR",
+      "total_pnl_base": -182.36,
+      "total_pnl_pct": -4.5832,
+      "unrealized_pnl_base": -182.36,
+      "unrealized_pnl_pct": -4.5832,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 414.5582,
+      "base_currency": "USD",
+      "conid": 118239139,
+      "cost_basis_base": 3731.024,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 6.7559,
+      "db_context": {
+        "company_family": "Enterprise software i cloud platform",
+        "company_name": "Microsoft (MSFT:NASDAQ)",
+        "company_type": "Zdywersyfikowana platforma software z warstwą developer tooling",
+        "revenue_model": "Subskrypcje enterprise, usage credits, cloud consumption i premium requests",
+        "risks": "VOI: FY2027 Q1-Q2 earnings, Fals: PBP margin below 49% while Copilot usage grows without temporary explanation, Primary risk: Copilot usage grows but model costs absorb economics, Composite: 3.80/5.0, EntryScore: 5.0/10, Sizing: conditional 2-3%",
+        "sector": "Software steruje pracą, pieniędzmi i ryzykiem",
+        "symbol_key": "MSFT:NASDAQ",
+        "theme_tags": [
+          "cloud",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 417.25,
+      "market_value": 3755.25,
+      "market_value_base": 3755.25,
+      "price_change_1m_pct": 11.0169,
+      "price_change_2m_pct": 1.2226,
+      "price_change_3m_pct": 3.1959,
+      "price_change_5d_pct": -2.4737,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 413.96,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 9.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "MSFT",
+      "total_pnl_base": 24.23,
+      "total_pnl_pct": 0.6494,
+      "unrealized_pnl_base": 24.23,
+      "unrealized_pnl_pct": 0.6494,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 4950.0,
+      "base_currency": "USD",
+      "conid": 218592385,
+      "cost_basis_base": 3165.4755,
+      "currency": "JPY",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 6.0745,
+      "db_context": {
+        "company_family": "Precyzyjne reduktory i komponenty ruchu",
+        "company_name": "Nabtesco (6268:TSE)",
+        "company_type": "Dostawca komponentów przemysłowych",
+        "revenue_model": "Sprzedaż kwalifikowanych komponentów i części do systemów ruchu",
+        "risks": "VOI: aktualizacja segmentu reduktorów Q2–Q3 2026, Fals: book-to-bill <1.0x przez dwie aktualizacje, Primary risk: OEM-y humanoidów omijają architekturę RV/cykloidalną, Composite: 3.55/5.0, EntryScore: 5.1/10, Sizing: warunkowo 2–3% po upgrade",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "6268:TSE",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 0.0064,
+      "market_price": 5280.0,
+      "market_value": 528000.0,
+      "market_value_base": 3376.5072,
+      "price_change_1m_pct": 24.3314,
+      "price_change_2m_pct": 14.1957,
+      "price_change_3m_pct": 16.4487,
+      "price_change_5d_pct": 12.052,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 5253.0,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 100.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "6268",
+      "total_pnl_base": 211.0317,
+      "total_pnl_pct": 6.6667,
+      "unrealized_pnl_base": 211.0317,
+      "unrealized_pnl_pct": 6.6667,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 306.3833,
+      "base_currency": "USD",
+      "conid": 441828908,
+      "cost_basis_base": 2757.45,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 5.7723,
+      "db_context": {
+        "company_family": "Data center power and thermal infrastructure",
+        "company_name": "Vertiv (VRT:NYSE)",
+        "company_type": "Critical infrastructure equipment and services provider",
+        "revenue_model": "Equipment, projects, services and lifecycle support",
+        "risks": "VOI: wyniki Q2 FY2026 i adjusted FCF >= $600M, Fals: przychody mijają guidance albo adjusted FCF słabnie mimo backlogu, Primary risk: backlog zamienia się w przychód bez FCF, Composite: 2.68/5.0, EntryScore: 4.9/10, Sizing: 0% ENTRY_SHORTFALL",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "VRT:NYSE",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "electrification",
+          "infra_data"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 356.5,
+      "market_value": 3208.5,
+      "market_value_base": 3208.5,
+      "price_change_1m_pct": 38.7238,
+      "price_change_2m_pct": 48.449,
+      "price_change_3m_pct": 83.5157,
+      "price_change_5d_pct": 17.2252,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 358.92,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 9.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "VRT",
+      "total_pnl_base": 451.05,
+      "total_pnl_pct": 16.3575,
+      "unrealized_pnl_base": 451.05,
+      "unrealized_pnl_pct": 16.3575,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 1374.6155,
+      "base_currency": "USD",
+      "conid": 150046008,
+      "cost_basis_base": 2749.231,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 5.59,
+      "db_context": {
+        "company_family": "Litografia półprzewodnikowa",
+        "company_name": "ASML Holding (ASML:NASDAQ)",
+        "company_type": "Dostawca sprzętu procesowego o pozycji monopolistycznej w EUV",
+        "revenue_model": "Sprzedaż systemów litografii, serwis installed base i field options",
+        "risks": "VOI: EUV net bookings >=€8B in each of the next two reported quarters, Fals: EUV book-to-bill below 1.0x for two consecutive quarters or 2026 revenue outlook cut, Primary risk: EUV pull-forward proves cyclical, Composite: 3.30/5.0, EntryScore: 5.5/10, Sizing: 0% now / 1-2% conditional",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ASML:NASDAQ",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 1553.61,
+      "market_value": 3107.22,
+      "market_value_base": 3107.22,
+      "price_change_1m_pct": 18.4607,
+      "price_change_2m_pct": 19.4879,
+      "price_change_3m_pct": 9.3227,
+      "price_change_5d_pct": 10.8071,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 1544.74,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 2.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "ASML",
+      "total_pnl_base": 357.99,
+      "total_pnl_pct": 13.0215,
+      "unrealized_pnl_base": 357.99,
+      "unrealized_pnl_pct": 13.0215,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 150.0616,
+      "base_currency": "USD",
+      "conid": 147632494,
+      "cost_basis_base": 2250.924,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 5.1799,
+      "db_context": {
+        "company_family": "Operatorzy AI cloud",
+        "company_name": "Nebius Group (NBIS:NASDAQ)",
+        "company_type": "Zintegrowany dostawca infrastruktury AI cloud",
+        "revenue_model": "Kontrakty na moc i usługi infrastrukturalne",
+        "risks": "VOI: FY26 kwartalne aktualizacje ARR i mocy / FY26 results, Fals: ARR < 9.0 mld USD albo opóźnienie dostaw mocy, Primary risk: konwersja power-to-ARR zwalnia i wymaga kolejnego finansowania, Composite: 3.58/5.0, EntryScore: 6.7/10, Sizing: 2%",
+        "sector": "NIEZNANY",
+        "symbol_key": "NBIS:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "electrification"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 191.95,
+      "market_value": 2879.25,
+      "market_value_base": 2879.25,
+      "price_change_1m_pct": 73.3517,
+      "price_change_2m_pct": 118.3925,
+      "price_change_3m_pct": 126.5854,
+      "price_change_5d_pct": 38.1755,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 195.09,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 15.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "NBIS",
+      "total_pnl_base": 628.33,
+      "total_pnl_pct": 27.9143,
+      "unrealized_pnl_base": 628.33,
+      "unrealized_pnl_pct": 27.9143,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 77.776,
+      "base_currency": "USD",
+      "conid": 451398106,
+      "cost_basis_base": 2745.2658,
+      "currency": "EUR",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 4.9841,
+      "db_context": {
+        "company_family": "Radary, sensory i elektronika obrony powietrznej",
+        "company_name": "Hensoldt (HAG:ETR)",
+        "company_type": "Dostawca kwalifikowanych radarow i sensorow obronnych",
+        "revenue_model": "Zamowienia projektowe, dostawy radarow, serwis, szkolenia i integracja",
+        "risks": "VOI: FY2026 results / Q4 2026 adjusted FCF i dostawy radarow, Fals: FY2026 adjusted FCF < EUR 350m albo slippage TRML/SPEXER bez backlog conversion, Primary risk: popyt na radary jest realny, ale bottlenecks moga opoznic cash conversion i utrzymac duration discount, Composite: 3.45/5.0, EntryScore: 5.5/10, Sizing: conditional 1-2%",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "HAG:XETRA",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.1766,
+      "market_price": 78.488,
+      "market_value": 2354.64,
+      "market_value_base": 2770.3974,
+      "price_change_1m_pct": -3.1111,
+      "price_change_2m_pct": 6.4858,
+      "price_change_3m_pct": 0.9389,
+      "price_change_5d_pct": 4.2785,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 78.48,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 30.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "HAG",
+      "total_pnl_base": 25.1315,
+      "total_pnl_pct": 0.9154,
+      "unrealized_pnl_base": 25.1315,
+      "unrealized_pnl_pct": 0.9154,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 136.59,
+      "base_currency": "USD",
+      "conid": 315663617,
+      "cost_basis_base": 1912.26,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 4.3825,
+      "db_context": {
+        "company_family": "Data center electrical infrastructure",
+        "company_name": "nVent Electric (NVT:NYSE)",
+        "company_type": "Industrial equipment and components",
+        "revenue_model": "Product sales with project-linked orders and service adjacency",
+        "risks": "VOI: kolejne dwa kwartalne update'y data-center/order w 2026, Fals: data-center backlog growth stalls or liquid-cooling qualification fails to convert into visible orders, Primary risk: data-center revenue grows but lower-margin or acquisition mix prevents FCF uplift, Composite: 3.80/5.0, EntryScore: 6.0/10, Sizing: 2-3% conditional",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "NVT:NYSE",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "industrial",
+          "infra_data"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 174.0,
+      "market_value": 2436.0,
+      "market_value_base": 2436.0,
+      "price_change_1m_pct": 46.9125,
+      "price_change_2m_pct": 62.6957,
+      "price_change_3m_pct": 53.1339,
+      "price_change_5d_pct": 25.566,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 172.49,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 14.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "NVT",
+      "total_pnl_base": 523.74,
+      "total_pnl_pct": 27.3885,
+      "unrealized_pnl_base": 523.74,
+      "unrealized_pnl_pct": 27.3885,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 146.5,
+      "base_currency": "USD",
+      "conid": 102308512,
+      "cost_basis_base": 1896.0416,
+      "currency": "EUR",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.7969,
+      "db_context": {
+        "company_family": "Rack-level electrical and digital infrastructure for data centers",
+        "company_name": "Legrand (LR:EPA)",
+        "company_type": "Zdywersyfikowany dostawca infrastruktury elektrycznej i cyfrowej",
+        "revenue_model": "Sprzedaz komponentow, systemow infrastruktury, akwizycje produktowe i dystrybucja przez kanal",
+        "risks": "VOI: H1 2026 adjusted operating margin i datacenter mix, Fals: margin <20.0% i datacenter mix nie rosnie powyzej 26%, Primary risk: acquisition-led growth obniza incremental ROIC, Composite: 3.10/5.0, EntryScore: 5.5/10, Sizing: conditional 1-2% upon upgrade",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "LR:EPA",
+        "theme_tags": [
+          "cloud",
+          "infra_data"
+        ]
+      },
+      "fx_rate_to_base": 1.1766,
+      "market_price": 163.07,
+      "market_value": 1793.77,
+      "market_value_base": 2110.4949,
+      "price_change_1m_pct": 20.0148,
+      "price_change_2m_pct": 18.357,
+      "price_change_3m_pct": 15.584,
+      "price_change_5d_pct": 8.9328,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 162.8,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 11.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "LR",
+      "total_pnl_base": 214.4533,
+      "total_pnl_pct": 11.3106,
+      "unrealized_pnl_base": 214.4533,
+      "unrealized_pnl_pct": 11.3106,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 143.8471,
+      "base_currency": "USD",
+      "conid": 18416237,
+      "cost_basis_base": 2013.86,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.7526,
+      "db_context": {
+        "company_family": "Test i probe cardy dla HBM",
+        "company_name": "FormFactor (FORM:NASDAQ)",
+        "company_type": "Dostawca probe cards i rozwi?za? testowych dla p??przewodnik?w",
+        "revenue_model": "Sprzeda? specjalistycznych kart probe i narz?dzi testowych z ekspozycj? na popyt HBM oraz advanced packaging",
+        "risks": "VOI: następna aktualizacja HBM probe-card revenue, DRAM orders i capacity ramp, Fals: spadek HBM revenue istotnie poniżej około $40M kwartalnie bez zastępczego popytu, Primary risk: niedowykorzystanie capex i słaby CROIC, Composite: 3.20/5.0, EntryScore: 5.5/10, Sizing: 1–2% warunkowo",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "FORM:NASDAQ",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 148.99,
+      "market_value": 2085.86,
+      "market_value_base": 2085.86,
+      "price_change_1m_pct": 42.7395,
+      "price_change_2m_pct": 75.4147,
+      "price_change_3m_pct": 65.1567,
+      "price_change_5d_pct": 10.0273,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 149.12,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "NASDAQ",
+      "quantity": 14.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "FORM",
+      "total_pnl_base": 72.0,
+      "total_pnl_pct": 3.5752,
+      "unrealized_pnl_base": 72.0,
+      "unrealized_pnl_pct": 3.5752,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 200.805,
+      "base_currency": "USD",
+      "conid": 4815747,
+      "cost_basis_base": 2008.05,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.7474,
+      "db_context": {
+        "company_family": "AI compute platform",
+        "company_name": "NVIDIA (NVDA:NASDAQ)",
+        "company_type": "Platform prime / accelerated computing",
+        "revenue_model": "Hardware systems + networking + software/runtime",
+        "risks": "VOI: ujawniony physical-AI / Cosmos / Isaac paid run-rate >= $2B rocznie, Fals: brak paid attach lub named customer economics w 6-12 miesiecy, Primary risk: physical-AI pozostaje zbyt male wobec Data Center CORE, Composite: 3.21/5.0, EntryScore: 5.5/10, Sizing: 0% ENTRY_SHORTFALL",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "NVDA:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 208.3,
+      "market_value": 2083.0,
+      "market_value_base": 2083.0,
+      "price_change_1m_pct": 16.995,
+      "price_change_2m_pct": 16.8766,
+      "price_change_3m_pct": 12.0921,
+      "price_change_5d_pct": -0.6786,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 207.83,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "NASDAQ",
+      "quantity": 10.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "NVDA",
+      "total_pnl_base": 74.95,
+      "total_pnl_pct": 3.7325,
+      "unrealized_pnl_base": 74.95,
+      "unrealized_pnl_pct": 3.7325,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 5.5499,
+      "base_currency": "USD",
+      "conid": 86212388,
+      "cost_basis_base": 2206.1473,
+      "currency": "GBP",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.6567,
+      "db_context": {
+        "company_family": "Obrona, energetyka wojskowa i krytyczne komponenty amunicyjne",
+        "company_name": "Chemring Group (CHG:LSE)",
+        "company_type": "spolka przemyslowo-obronna z kwalifikowana produkcja materialow energetycznych",
+        "revenue_model": "kontrakty projektowe, backlog obronny, dostawy komponentow, serwis i capacity ramp",
+        "risks": "VOI: FY2026 H1 / trading order-cover update, Fals: Energetics order cover poniżej 65% albo cash conversion poniżej 70%, Primary risk: capex capacity absorbuje gotówkę zanim przychód energetyczny skaluje FCF, Composite: 3.85/5.0, EntryScore: 5.1/10, Sizing: conditional 2-3%",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "CHG:LSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.3613,
+      "market_price": 5.1133,
+      "market_value": 1493.08,
+      "market_value_base": 2032.5934,
+      "price_change_1m_pct": -6.5814,
+      "price_change_2m_pct": -4.486,
+      "price_change_3m_pct": 2.2,
+      "price_change_5d_pct": -0.3899,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 511.0,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "LSE",
+      "quantity": 292.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "CHG",
+      "total_pnl_base": -173.5576,
+      "total_pnl_pct": -7.867,
+      "unrealized_pnl_base": -173.5576,
+      "unrealized_pnl_pct": -7.867,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 153.0,
+      "base_currency": "USD",
+      "conid": 135678562,
+      "cost_basis_base": 2295.0,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.6485,
+      "db_context": {
+        "company_family": "Obrona powietrzna, integracja systemów i wyrzutnie krótkiego oraz średniego zasięgu",
+        "company_name": "Leidos Holdings (LDOS:NYSE)",
+        "company_type": "Kwalifikowany integrator i producent wyrzutni dla programów obronnych USA",
+        "revenue_model": "Kontrakty rządowe, produkcja projektowa, kamienie milowe dostaw i wsparcie posprzedażowe",
+        "risks": "VOI: FY2026 IFPC production/delivery and follow-on awards, Fals: IFPC funded value below $1.2B or no delivery milestones, Primary risk: funded launchers do not convert into cash, Composite: 4.15/5.0, EntryScore: 5.6/10, Sizing: 3% conditional",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "LDOS:NYSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 135.2,
+      "market_value": 2028.0,
+      "market_value_base": 2028.0,
+      "price_change_1m_pct": -15.4073,
+      "price_change_2m_pct": -24.1666,
+      "price_change_3m_pct": -30.1,
+      "price_change_5d_pct": -7.5457,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 134.9,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 15.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "LDOS",
+      "total_pnl_base": -267.0,
+      "total_pnl_pct": -11.634,
+      "unrealized_pnl_base": -267.0,
+      "unrealized_pnl_pct": -11.634,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 506.3413,
+      "base_currency": "USD",
+      "conid": 217331252,
+      "cost_basis_base": 2025.365,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.627,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "Hubbell Incorporated (HUBB:NYSE)",
+        "company_type": "Kable rozdzielnie i komponenty sieci",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: dwa najbliższe raporty kwartalne, confirm: organiczny wzrost powyżej 8 do 10 procent i stabilna konwersja gotówki, Fals: dwa kwartały wzrost poniżej 3 procent i marża FCF poniżej 12 procent, Primary risk: reżim wysokiego kosztu kapitału i spłaszczenie wydatków utilities",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "HUBB:NYSE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 504.01,
+      "market_value": 2016.04,
+      "market_value_base": 2016.04,
+      "price_change_1m_pct": 0.629,
+      "price_change_2m_pct": 6.5318,
+      "price_change_3m_pct": -0.2898,
+      "price_change_5d_pct": -7.9845,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 502.34,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 4.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "HUBB",
+      "total_pnl_base": -9.32,
+      "total_pnl_pct": -0.4602,
+      "unrealized_pnl_base": -9.32,
+      "unrealized_pnl_pct": -0.4602,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 229.9643,
+      "base_currency": "USD",
+      "conid": 314722179,
+      "cost_basis_base": 1609.75,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.5239,
+      "db_context": {
+        "company_family": "Polprzewodniki i elektronika mocy",
+        "company_name": "Vicor (VICR:NASDAQ)",
+        "company_type": "Moduly zasilania o wysokiej gestosci",
+        "revenue_model": "Sprzedaz komponentow OEM",
+        "risks": "VOI: Q1 2026 backlog i advanced-product update, Fals: backlog spada ponizej okolo 170 mln USD do Q2 2026 przy slabszym komentarzu o advanced products, Primary risk: backlog moze pozostac realny, ale zbyt maly wobec wyceny, wiec teza nie przelozy sie na akcje, Composite: 2.85/5.0, EntryScore: 5.0/10, Sizing: 0.5-1%",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "VICR:NASDAQ",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 279.82,
+      "market_value": 1958.74,
+      "market_value_base": 1958.74,
+      "price_change_1m_pct": 80.0398,
+      "price_change_2m_pct": 72.3366,
+      "price_change_3m_pct": 75.355,
+      "price_change_5d_pct": 9.2092,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 280.34,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 7.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "VICR",
+      "total_pnl_base": 348.99,
+      "total_pnl_pct": 21.6798,
+      "unrealized_pnl_base": 348.99,
+      "unrealized_pnl_pct": 21.6798,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 162.741,
+      "base_currency": "USD",
+      "conid": 658389433,
+      "cost_basis_base": 1627.41,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.5028,
+      "db_context": {
+        "company_family": "High-speed AI interconnect semiconductors",
+        "company_name": "Credo Technology Group (CRDO:NASDAQ)",
+        "company_type": "Fabless semiconductor connectivity supplier",
+        "revenue_model": "Product revenue from qualified AI connectivity components",
+        "risks": "VOI: Q4 FY2026 / Q1 FY2027 earnings, Fals: revenue growth < 10% sequentially albo gross margin < 60%, Primary risk: koncentracja klienta i product-cycle fade, Composite: 3.30/5.0, EntryScore: 5.0/10, Sizing: 0% teraz; 1-2% po upgrade",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "CRDO:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 194.7,
+      "market_value": 1947.0,
+      "market_value_base": 1947.0,
+      "price_change_1m_pct": 93.5292,
+      "price_change_2m_pct": 80.5427,
+      "price_change_3m_pct": 77.9982,
+      "price_change_5d_pct": 12.8122,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 198.29,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 10.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CRDO",
+      "total_pnl_base": 319.59,
+      "total_pnl_pct": 19.638,
+      "unrealized_pnl_base": 319.59,
+      "unrealized_pnl_pct": 19.638,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 181.1018,
+      "base_currency": "USD",
+      "conid": 120551276,
+      "cost_basis_base": 1992.12,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.4636,
+      "db_context": {
+        "company_family": "Nauka, zdrowie i testowanie",
+        "company_name": "Danaher (DHR:NYSE)",
+        "company_type": "Narzędzia diagnostyczne i laboratoryjne",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: raport i guidance Q4 2025 w oknie styczeń 2026, Fals: przez 2 kwartały wzrost przychodów nie przekracza 5% i cash nie rośnie, Primary risk: kompresja wyceny przy braku dowodu na przyspieszenie",
+        "sector": "Zaufanie, zdrowie i rzadkość utrzymują premię",
+        "symbol_key": "DHR:NYSE",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 175.02,
+      "market_value": 1925.22,
+      "market_value_base": 1925.22,
+      "price_change_1m_pct": -8.9527,
+      "price_change_2m_pct": -10.5269,
+      "price_change_3m_pct": -19.2466,
+      "price_change_5d_pct": -2.17,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 174.92,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 11.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "DHR",
+      "total_pnl_base": -66.9,
+      "total_pnl_pct": -3.3582,
+      "unrealized_pnl_base": -66.9,
+      "unrealized_pnl_pct": -3.3582,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 147.0777,
+      "base_currency": "USD",
+      "conid": 258046583,
+      "cost_basis_base": 1912.0105,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 3.4436,
+      "db_context": {
+        "company_family": "AI data-center networking",
+        "company_name": "Arista Networks (ANET:NYSE)",
+        "company_type": "publiczny dostawca infrastruktury sieciowej",
+        "revenue_model": "sprzedaż sprzętu sieciowego plus oprogramowanie i support",
+        "risks": "VOI: GAAP gross margin ≥63% w kolejnych 2-4 raportach kwartalnych, Fals: GAAP gross margin <60% przez dwa kwartały bez przejściowego wyjaśnienia, Primary risk: presja hyperscalerów lub alternatywne architektury kompresują marżę AI networking, Composite: 2.90/5.0, EntryScore: 5.0/10, Sizing: 0%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ANET:NYSE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 147.24,
+      "market_value": 1914.12,
+      "market_value_base": 1914.12,
+      "price_change_1m_pct": 16.4832,
+      "price_change_2m_pct": 10.663,
+      "price_change_3m_pct": 6.9605,
+      "price_change_5d_pct": -12.8172,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 147.06,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 13.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "ANET",
+      "total_pnl_base": 2.11,
+      "total_pnl_pct": 0.1104,
+      "unrealized_pnl_base": 2.11,
+      "unrealized_pnl_pct": 0.1104,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 199.965,
+      "base_currency": "USD",
+      "conid": 120549668,
+      "cost_basis_base": 1599.72,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.9979,
+      "db_context": {
+        "company_family": "AI compute platform",
+        "company_name": "NVIDIA (NVDA:NASDAQ)",
+        "company_type": "Platform prime / accelerated computing",
+        "revenue_model": "Hardware systems + networking + software/runtime",
+        "risks": "VOI: ujawniony physical-AI / Cosmos / Isaac paid run-rate >= $2B rocznie, Fals: brak paid attach lub named customer economics w 6-12 miesiecy, Primary risk: physical-AI pozostaje zbyt male wobec Data Center CORE, Composite: 3.21/5.0, EntryScore: 5.5/10, Sizing: 0% ENTRY_SHORTFALL",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "NVDA:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 208.3,
+      "market_value": 1666.4,
+      "market_value_base": 1666.4,
+      "price_change_1m_pct": 16.995,
+      "price_change_2m_pct": 16.8766,
+      "price_change_3m_pct": 12.0921,
+      "price_change_5d_pct": -0.6786,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 207.83,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 8.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "NVDA",
+      "total_pnl_base": 66.68,
+      "total_pnl_pct": 4.1682,
+      "unrealized_pnl_base": 66.68,
+      "unrealized_pnl_pct": 4.1682,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 6.615,
+      "base_currency": "USD",
+      "conid": 603531664,
+      "cost_basis_base": 1556.6013,
+      "currency": "EUR",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.9888,
+      "fx_rate_to_base": 1.1766,
+      "market_price": 7.06,
+      "market_value": 1412.0,
+      "market_value_base": 1661.316,
+      "price_change_error": "162:Historical Market Data Service error message:No market data permissions for FWB2 STK",
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "FWB2",
+      "quantity": 200.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "NSK",
+      "total_pnl_base": 104.7147,
+      "total_pnl_pct": 6.7271,
+      "unrealized_pnl_base": 104.7147,
+      "unrealized_pnl_pct": 6.7271,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 105.4717,
+      "base_currency": "USD",
+      "conid": 786545678,
+      "cost_basis_base": 1265.66,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.9414,
+      "db_context": {
+        "company_family": "AI GPU cloud platform",
+        "company_name": "CoreWeave (CRWV:NASDAQ)",
+        "company_type": "GPU cloud capacity and managed AI infrastructure provider",
+        "revenue_model": "Reserved GPU cloud capacity, usage commitments and platform services",
+        "risks": "VOI: FY2026 results, Fals: LTM FCF margin gorszy niż -100% przy dalszym wzroście capexu, Primary risk: RPO konwertuje do revenue, ale nie do FCF per share, Composite: 3.00/5.0, EntryScore: 4.5/10, Sizing: 0%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "CRWV:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "infra_data",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 136.25,
+      "market_value": 1635.0,
+      "market_value_base": 1635.0,
+      "price_change_1m_pct": 70.472,
+      "price_change_2m_pct": 89.0396,
+      "price_change_3m_pct": 53.3963,
+      "price_change_5d_pct": 20.8337,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 137.98,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 12.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CRWV",
+      "total_pnl_base": 369.34,
+      "total_pnl_pct": 29.1816,
+      "unrealized_pnl_base": 369.34,
+      "unrealized_pnl_pct": 29.1816,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 170.9814,
+      "base_currency": "USD",
+      "conid": 714770511,
+      "cost_basis_base": 1196.87,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.6702,
+      "db_context": {
+        "company_family": "AI connectivity silicon",
+        "company_name": "Astera Labs (ALAB:NASDAQ)",
+        "company_type": "Fabless semiconductor supplier",
+        "revenue_model": "Sprzedaz kwalifikowanych układów, modułów i platform connectivity",
+        "risks": "VOI: najbliższy update wynikowy o Scorpio, scale-up fabric i gross margin, Fals: revenue misses guide, gross margin poniżej ~73% lub słabszy komentarz o design wins, Primary risk: rynek już wycenia wysoką marżę i duration, Composite: 2.73/5.0, EntryScore: 5.0/10, Sizing: 0%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ALAB:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 212.03,
+      "market_value": 1484.21,
+      "market_value_base": 1484.21,
+      "price_change_1m_pct": 81.295,
+      "price_change_2m_pct": 79.4547,
+      "price_change_3m_pct": 25.9405,
+      "price_change_5d_pct": 8.6665,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 213.91,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 7.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "ALAB",
+      "total_pnl_base": 287.34,
+      "total_pnl_pct": 24.0076,
+      "unrealized_pnl_base": 287.34,
+      "unrealized_pnl_pct": 24.0076,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 132.6,
+      "base_currency": "USD",
+      "conid": 166176201,
+      "cost_basis_base": 1326.0,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.5663,
+      "fx_rate_to_base": 1.0,
+      "market_price": 142.65,
+      "market_value": 1426.5,
+      "market_value_base": 1426.5,
+      "price_change_1m_pct": 15.6406,
+      "price_change_2m_pct": 8.1428,
+      "price_change_3m_pct": -12.9654,
+      "price_change_5d_pct": 8.4413,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 141.44,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 10.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "BABA",
+      "total_pnl_base": 100.5,
+      "total_pnl_pct": 7.5792,
+      "unrealized_pnl_base": 100.5,
+      "unrealized_pnl_pct": 7.5792,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 22.7508,
+      "base_currency": "USD",
+      "conid": 558457638,
+      "cost_basis_base": 1296.796,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.5616,
+      "db_context": {
+        "company_family": "DevSecOps i software development lifecycle platform",
+        "company_name": "GitLab (GTLB:NASDAQ)",
+        "company_type": "High-gross-margin subscription software z AI attach optionality",
+        "revenue_model": "ARR, enterprise subscriptions, AI platform attach i hybrid pricing",
+        "risks": "VOI: FY2027 Q1-Q2 earnings, Fals: ARR growth below 20% YoY by FY2027 Q2 without Duo attach or hybrid-pricing uplift, Primary risk: Duo is retention not monetization, Composite: 3.00/5.0, EntryScore: 5.0/10, Sizing: conditional 1-2%",
+        "sector": "Software steruje pracą, pieniędzmi i ryzykiem",
+        "symbol_key": "GTLB:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 24.98,
+      "market_value": 1423.86,
+      "market_value_base": 1423.86,
+      "price_change_1m_pct": 6.7223,
+      "price_change_2m_pct": -2.489,
+      "price_change_3m_pct": -24.4009,
+      "price_change_5d_pct": 10.8626,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 24.29,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 57.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "GTLB",
+      "total_pnl_base": 127.06,
+      "total_pnl_pct": 9.798,
+      "unrealized_pnl_base": 127.06,
+      "unrealized_pnl_pct": 9.798,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 75.1206,
+      "base_currency": "USD",
+      "conid": 290669026,
+      "cost_basis_base": 1277.05,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.4155,
+      "db_context": {
+        "company_family": "Technologia i oprogramowanie",
+        "company_name": "Okta (OKTA:NASDAQ)",
+        "company_type": "Cyberbezpieczeństwo i tożsamość",
+        "revenue_model": "Subskrypcja oprogramowania",
+        "risks": "VOI: cRPO > 2.80B USD i widoczny AI-agent attach po pierwszym pelnym kwartale po GA, Fals: brak dowodu attach lub upsell dla AI agentow w dwoch kolejnych kwartalach, Primary risk: tozsamosc agentow pozostaje funkcja produktu zamiast osobnej linii budzetowej, Composite: 2.45/5.0, Sizing: 1-2%",
+        "sector": "Software steruje pracą, pieniędzmi i ryzykiem",
+        "symbol_key": "OKTA:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 78.98,
+      "market_value": 1342.66,
+      "market_value_base": 1342.66,
+      "price_change_1m_pct": -3.8729,
+      "price_change_2m_pct": -4.0634,
+      "price_change_3m_pct": -10.7217,
+      "price_change_5d_pct": 1.6807,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 77.44,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 17.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "OKTA",
+      "total_pnl_base": 65.61,
+      "total_pnl_pct": 5.1376,
+      "unrealized_pnl_base": 65.61,
+      "unrealized_pnl_pct": 5.1376,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 340.27,
+      "base_currency": "USD",
+      "conid": 120549262,
+      "cost_basis_base": 680.54,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.3474,
+      "db_context": {
+        "company_family": "AI memory and HBM capacity",
+        "company_name": "Micron Technology (MU:NASDAQ)",
+        "company_type": "Memory semiconductor manufacturer",
+        "revenue_model": "Cyclical product revenue with capacity allocation and price-mix upside",
+        "risks": "VOI: FQ3/FQ4 FY2026 earnings, Fals: combined margin <60% lub FCF materialnie poniżej capex burden, Primary risk: HBM scarcity przechodzi w zwykły cykl pamięci, Composite: 3.80/5.0, EntryScore: 6.0/10, Sizing: 2-3% warunkowo",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "MU:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 652.4,
+      "market_value": 1304.8,
+      "market_value_base": 1304.8,
+      "price_change_1m_pct": 76.4586,
+      "price_change_2m_pct": 80.0135,
+      "price_change_3m_pct": 68.8895,
+      "price_change_5d_pct": 28.5712,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 666.59,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 2.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "MU",
+      "total_pnl_base": 624.26,
+      "total_pnl_pct": 91.7301,
+      "unrealized_pnl_base": 624.26,
+      "unrealized_pnl_pct": 91.7301,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 363.4733,
+      "base_currency": "USD",
+      "conid": 120549908,
+      "cost_basis_base": 1090.42,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.3032,
+      "fx_rate_to_base": 1.0,
+      "market_price": 426.75,
+      "market_value": 1280.25,
+      "market_value_base": 1280.25,
+      "price_change_1m_pct": 21.5529,
+      "price_change_2m_pct": 31.9887,
+      "price_change_3m_pct": 32.9013,
+      "price_change_5d_pct": 12.0312,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 428.62,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 3.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "AMAT",
+      "total_pnl_base": 189.83,
+      "total_pnl_pct": 17.4089,
+      "unrealized_pnl_base": 189.83,
+      "unrealized_pnl_pct": 17.4089,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 395.55,
+      "base_currency": "USD",
+      "conid": 120551141,
+      "cost_basis_base": 1186.65,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.2767,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "Eaton (ETN:NYSE)",
+        "company_type": "Sprzęt do centrów danych i zasilania",
+        "revenue_model": "Sprzedaż sprzętu i serwis posprzedażowy",
+        "risks": "VOI: wyniki z początku maja 2026 z aktualizacją backlogu i zamówień data center w Electrical Americas, Fals: wzrost zamówień data center <50% r/r i brak dalszego wzrostu backlogu w dwóch kolejnych raportach, Primary risk: popyt AI pozostaje realny, ale zbyt rozcieńczony w skali całej spółki, Composite: 3.40, EntryScore: 5.5, Sizing: 2–3%.",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ETN:NYSE",
+        "theme_tags": [
+          "ai",
+          "cloud"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 421.83,
+      "market_value": 1265.49,
+      "market_value_base": 1265.49,
+      "price_change_1m_pct": 15.8015,
+      "price_change_2m_pct": 21.1761,
+      "price_change_3m_pct": 12.7254,
+      "price_change_5d_pct": 2.5854,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 421.39,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 3.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "ETN",
+      "total_pnl_base": 78.84,
+      "total_pnl_pct": 6.6439,
+      "unrealized_pnl_base": 78.84,
+      "unrealized_pnl_pct": 6.6439,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 365.925,
+      "base_currency": "USD",
+      "conid": 150045607,
+      "cost_basis_base": 1097.775,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.2552,
+      "db_context": {
+        "company_family": "Leading-edge foundry",
+        "company_name": "Taiwan Semiconductor Manufacturing Company (TSM:NYSE)",
+        "company_type": "Advanced-node wafer capacity owner",
+        "revenue_model": "Foundry wafer revenue, advanced-node capacity allocation and customer prepayments",
+        "risks": "VOI: gross margin ≥68% w Q2/Q3 2026 z dowodem pricingu lub prepayments, Fals: gross margin <60% przy wysokim HPC/N3 mix, Primary risk: TSMC absorbuje capex a rentę scarcity przejmują klienci, Composite: 3.80/5.0, EntryScore: 5.5/10, Sizing: 0% teraz, warunkowo 2–3%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "TSM:NYSE",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 417.85,
+      "market_value": 1253.55,
+      "market_value_base": 1253.55,
+      "price_change_1m_pct": 22.747,
+      "price_change_2m_pct": 23.7865,
+      "price_change_3m_pct": 20.2523,
+      "price_change_5d_pct": 6.518,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 419.5,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 3.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "TSM",
+      "total_pnl_base": 155.78,
+      "total_pnl_pct": 14.1905,
+      "unrealized_pnl_base": 155.78,
+      "unrealized_pnl_pct": 14.1905,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 68.7327,
+      "base_currency": "USD",
+      "conid": 290653523,
+      "cost_basis_base": 1030.99,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.2398,
+      "db_context": {
+        "company_family": "Półprzewodniki i infrastruktura AI",
+        "company_name": "Ultra Clean Holdings (UCTT:NASDAQ)",
+        "company_type": "Sprzęt do produkcji i testowania półprzewodników",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: wyniki i call 2026-02-23, Warn: TTM unlevered FCF margin poniżej 9% do Q4 2026, Fals: TTM unlevered FCF margin 7% lub mniej do Q4 2026, Primary risk: brak resetu marży przez słabszy cykl inwestycji klientów i gorszy miks",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "UCTT:NASDAQ",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 83.0,
+      "market_value": 1245.0,
+      "market_value_base": 1245.0,
+      "price_change_1m_pct": 31.8483,
+      "price_change_2m_pct": 65.0712,
+      "price_change_3m_pct": 72.8308,
+      "price_change_5d_pct": 15.9006,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 83.46,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 15.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "UCTT",
+      "total_pnl_base": 214.01,
+      "total_pnl_pct": 20.7577,
+      "unrealized_pnl_base": 214.01,
+      "unrealized_pnl_pct": 20.7577,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 84.1469,
+      "base_currency": "USD",
+      "conid": 640790880,
+      "cost_basis_base": 1093.9101,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.2218,
+      "db_context": {
+        "company_family": "Półprzewodniki i infrastruktura AI",
+        "company_name": "Aehr Test Systems (AEHR:NASDAQ)",
+        "company_type": "Sprzęt do produkcji i testowania półprzewodników",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: effective backlog >=25 mln USD i kolejne zamowienia Sonoma w FQ4 FY2026-FQ1 FY2027, Fals: effective backlog <18 mln USD do FQ4 FY2026, Primary risk: pauza zamowien u kluczowych klientow AI, Composite: 2.60/5.0, Sizing: 0.5–1%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "AEHR:NASDAQ",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 95.0,
+      "market_value": 1235.0,
+      "market_value_base": 1235.0,
+      "price_change_1m_pct": 85.4486,
+      "price_change_2m_pct": 171.6372,
+      "price_change_3m_pct": 266.5404,
+      "price_change_5d_pct": 18.2374,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 96.73,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 13.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "AEHR",
+      "total_pnl_base": 141.09,
+      "total_pnl_pct": 12.8978,
+      "unrealized_pnl_base": 141.09,
+      "unrealized_pnl_pct": 12.8978,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 146.5811,
+      "base_currency": "USD",
+      "conid": 134280621,
+      "cost_basis_base": 1319.23,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 2.1891,
+      "db_context": {
+        "company_family": "Obrona powietrzna, integracja systemów i wyrzutnie krótkiego oraz średniego zasięgu",
+        "company_name": "Leidos Holdings (LDOS:NYSE)",
+        "company_type": "Kwalifikowany integrator i producent wyrzutni dla programów obronnych USA",
+        "revenue_model": "Kontrakty rządowe, produkcja projektowa, kamienie milowe dostaw i wsparcie posprzedażowe",
+        "risks": "VOI: FY2026 IFPC production/delivery and follow-on awards, Fals: IFPC funded value below $1.2B or no delivery milestones, Primary risk: funded launchers do not convert into cash, Composite: 4.15/5.0, EntryScore: 5.6/10, Sizing: 3% conditional",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "LDOS:NYSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 135.2,
+      "market_value": 1216.8,
+      "market_value_base": 1216.8,
+      "price_change_1m_pct": -15.4073,
+      "price_change_2m_pct": -24.1666,
+      "price_change_3m_pct": -30.1,
+      "price_change_5d_pct": -7.5457,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 134.9,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "NYSE",
+      "quantity": 9.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "LDOS",
+      "total_pnl_base": -102.43,
+      "total_pnl_pct": -7.7644,
+      "unrealized_pnl_base": -102.43,
+      "unrealized_pnl_pct": -7.7644,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 25.0415,
+      "base_currency": "USD",
+      "conid": 179386449,
+      "cost_basis_base": 776.285,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.9341,
+      "db_context": {
+        "company_family": "AI rack-scale infrastructure integrator",
+        "company_name": "Super Micro Computer (SMCI:NASDAQ)",
+        "company_type": "Hardware integrator and server systems supplier",
+        "revenue_model": "Project and product revenue with deployment support",
+        "risks": "VOI: Q3/Q4 FY2026 earnings showing non-GAAP gross margin ≥8.0%, Fals: gross margin below 7% for two consecutive quarters while operating cash flow is negative or working capital expands, Primary risk: AI rack revenue remains low-margin pass-through, Composite: 3.05/5.0, EntryScore: 5.7/10, Sizing: 0%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "SMCI:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "infra_data"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 34.68,
+      "market_value": 1075.08,
+      "market_value_base": 1075.08,
+      "price_change_1m_pct": 57.1882,
+      "price_change_2m_pct": 10.6995,
+      "price_change_3m_pct": 0.8144,
+      "price_change_5d_pct": 31.6869,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 34.66,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 31.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "SMCI",
+      "total_pnl_base": 298.8,
+      "total_pnl_pct": 38.491,
+      "unrealized_pnl_base": 298.8,
+      "unrealized_pnl_pct": 38.491,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 58.7414,
+      "base_currency": "USD",
+      "conid": 179385241,
+      "cost_basis_base": 822.38,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.9258,
+      "db_context": {
+        "company_family": "OSAT i advanced packaging",
+        "company_name": "Amkor Technology (AMKR:NASDAQ)",
+        "company_type": "Dostawca usług pakowania, montażu i testowania półprzewodników",
+        "revenue_model": "Kontrakty produkcyjne i usługi packaging/test rozpoznawane przy dostawie oraz akceptacji klienta",
+        "risks": "VOI: Q1/Q2 2026 gross margin ≥16.5%, Fals: gross margin nadal 14-15% do Q2 2026 mimo ramp advanced packaging, Primary risk: capex-heavy packaging growth podnosi przychody bez ROIC > WACC, Composite: 2.40/5.0, EntryScore: 3.9/10, Sizing: Conditional 1-2%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "AMKR:NASDAQ",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 76.46,
+      "market_value": 1070.44,
+      "market_value_base": 1070.44,
+      "price_change_1m_pct": 64.1931,
+      "price_change_2m_pct": 85.5804,
+      "price_change_3m_pct": 56.4425,
+      "price_change_5d_pct": 9.3613,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 77.22,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 14.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "AMKR",
+      "total_pnl_base": 248.06,
+      "total_pnl_pct": 30.1637,
+      "unrealized_pnl_base": 248.06,
+      "unrealized_pnl_pct": 30.1637,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 7.9165,
+      "base_currency": "USD",
+      "conid": 836357555,
+      "cost_basis_base": 791.646,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.7307,
+      "fx_rate_to_base": 1.0,
+      "market_price": 9.62,
+      "market_value": 962.0,
+      "market_value_base": 962.0,
+      "price_change_1m_pct": 59.8684,
+      "price_change_2m_pct": 54.7771,
+      "price_change_3m_pct": 65.5877,
+      "price_change_5d_pct": 47.2727,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 9.72,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 100.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "POET",
+      "total_pnl_base": 170.35,
+      "total_pnl_pct": 21.5185,
+      "unrealized_pnl_base": 170.35,
+      "unrealized_pnl_pct": 21.5185,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 25.5167,
+      "base_currency": "USD",
+      "conid": 103550172,
+      "cost_basis_base": 900.6639,
+      "currency": "EUR",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.7002,
+      "db_context": {
+        "company_family": "Usługi profesjonalne i certyfikacja",
+        "company_name": "Bureau Veritas (BVI:EPA)",
+        "company_type": "Inspekcja, testy i certyfikacja",
+        "revenue_model": "Uslugi certyfikacyjne i audytowe",
+        "risks": "VOI: Q1 2026 revenue update 22 Apr 2026, Fals: Industry organic growth < 4.0% by Q1/Q2 2026, Primary risk: industrial slowdown obniża wzrost Industry i Certification i utrzymuje dyskonto duration, Composite: 3.60/5.0, EntryScore: 6.0/10, Sizing: 2.5%",
+        "sector": "Zaufanie, zdrowie i rzadkość utrzymują premię",
+        "symbol_key": "BVI:EPA",
+        "theme_tags": [
+          "industrial"
+        ]
+      },
+      "fx_rate_to_base": 1.1766,
+      "market_price": 26.774,
+      "market_value": 803.22,
+      "market_value_base": 945.0441,
+      "price_change_1m_pct": 1.6325,
+      "price_change_2m_pct": -7.0486,
+      "price_change_3m_pct": -4.2561,
+      "price_change_5d_pct": 3.559,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 26.77,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 30.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "BVI",
+      "total_pnl_base": 44.3802,
+      "total_pnl_pct": 4.9275,
+      "unrealized_pnl_base": 44.3802,
+      "unrealized_pnl_pct": 4.9275,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 254.02,
+      "base_currency": "USD",
+      "conid": 150045911,
+      "cost_basis_base": 762.06,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.4435,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "Generac Holdings (GNRC:NYSE)",
+        "company_type": "Kable rozdzielnie i komponenty sieci",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: kolejne 1 do 2 raporty kwartalne pokazują trwały krok w cash conversion i przyspieszenie wzrostu w C&I. Fals: brak poprawy cash conversion i brak przyspieszenia sprzedaży przez 2 kolejne kwartały. Primary risk: kompresja wyceny gdy wyniki nie dowiozą założeń wbudowanych w cenę",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "GNRC:NYSE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 267.4558,
+      "market_value": 802.37,
+      "market_value_base": 802.37,
+      "price_change_1m_pct": 36.7737,
+      "price_change_2m_pct": 31.0754,
+      "price_change_3m_pct": 45.7091,
+      "price_change_5d_pct": 5.733,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 267.42,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 3.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "GNRC",
+      "total_pnl_base": 40.31,
+      "total_pnl_pct": 5.2896,
+      "unrealized_pnl_base": 40.31,
+      "unrealized_pnl_pct": 5.2896,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 117.5,
+      "base_currency": "USD",
+      "conid": 103550235,
+      "cost_basis_base": 552.9876,
+      "currency": "EUR",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.4041,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "Nexans (NEX:EPA)",
+        "company_type": "Kable rozdzielnie i komponenty sieci",
+        "revenue_model": "Sprzedaż projektowa",
+        "risks": "VOI: PWR Transmission standard sales organic growth co najmniej 20% YoY w najbliższym full year oraz utrzymanie cash conversion, Fals: PWR Transmission wzrost 5% YoY lub mniej w 12–18 miesięcy, Primary risk: odroczenia projektów i odwrót working capital obniżający FCF",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "NEX:EPA",
+        "theme_tags": [
+          "electrification"
+        ]
+      },
+      "fx_rate_to_base": 1.1766,
+      "market_price": 165.84,
+      "market_value": 663.36,
+      "market_value_base": 780.4891,
+      "price_change_1m_pct": 40.8163,
+      "price_change_2m_pct": 37.3134,
+      "price_change_3m_pct": 19.051,
+      "price_change_5d_pct": 8.1646,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 165.6,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 4.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "NEX",
+      "total_pnl_base": 227.5015,
+      "total_pnl_pct": 41.1404,
+      "unrealized_pnl_base": 227.5015,
+      "unrealized_pnl_pct": 41.1404,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 167.63,
+      "base_currency": "USD",
+      "conid": 445550744,
+      "cost_basis_base": 502.89,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.4006,
+      "fx_rate_to_base": 1.0,
+      "market_price": 259.5,
+      "market_value": 778.5,
+      "market_value_base": 778.5,
+      "price_change_1m_pct": 17.3812,
+      "price_change_2m_pct": 27.358,
+      "price_change_3m_pct": 43.5194,
+      "price_change_5d_pct": 17.276,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 248.59,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 3.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "NET",
+      "total_pnl_base": 275.61,
+      "total_pnl_pct": 54.8052,
+      "unrealized_pnl_base": 275.61,
+      "unrealized_pnl_pct": 54.8052,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 1041.83,
+      "base_currency": "USD",
+      "conid": 14016709,
+      "cost_basis_base": 666.2399,
+      "currency": "JPY",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.384,
+      "db_context": {
+        "company_family": "Przemysł i automatyzacja",
+        "company_name": "Nippon Thompson / IKO (6480:TSE)",
+        "company_type": "Automatyka przemysłowa i robotyka",
+        "revenue_model": "Sprzedaż produktowa i serwisowa B2B",
+        "risks": "VOI: wyniki FY03/26 i kolejny odczyt zamówień, Fals: zlecenia produktów tezy < ¥60bn lub relacja zamówienia do sprzedaży < 1.0x przy wynikach FY03/26, Primary risk: osłabienie popytu w Chinach i półprzewodnikach zatrzyma reset marży, Composite: 3.60/5.0, Sizing: 2-3%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "6480:TSE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 0.0064,
+      "market_price": 1203.0,
+      "market_value": 120300.0,
+      "market_value_base": 769.3065,
+      "price_change_1m_pct": 25.1559,
+      "price_change_2m_pct": 27.2727,
+      "price_change_3m_pct": 23.8683,
+      "price_change_5d_pct": 22.2335,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 1204.0,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "primary_exchange": "TSEJ",
+      "quantity": 100.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "6480",
+      "total_pnl_base": 103.0666,
+      "total_pnl_pct": 15.4699,
+      "unrealized_pnl_base": 103.0666,
+      "unrealized_pnl_pct": 15.4699,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 66.5125,
+      "base_currency": "USD",
+      "conid": 266319027,
+      "cost_basis_base": 665.125,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.3729,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "Atkore Inc. (ATKR:NYSE)",
+        "company_type": "Kable rozdzielnie i komponenty sieci",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: TTM FCF margin >=8.5% w FY2026 Q2, Fals: TTM FCF margin <=6.0% do FY2026 Q3, Primary risk: dalsza normalizacja cen bez odbicia wolumenu i wykorzystania mocy",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ATKR:NYSE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 76.31,
+      "market_value": 763.1,
+      "market_value_base": 763.1,
+      "price_change_1m_pct": 21.4434,
+      "price_change_2m_pct": 24.1329,
+      "price_change_3m_pct": 12.5665,
+      "price_change_5d_pct": 1.1679,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 76.23,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 10.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "ATKR",
+      "total_pnl_base": 97.97,
+      "total_pnl_pct": 14.7296,
+      "unrealized_pnl_base": 97.97,
+      "unrealized_pnl_pct": 14.7296,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 439.92,
+      "base_currency": "USD",
+      "conid": 451395215,
+      "cost_basis_base": 439.92,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.2144,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "IES Holdings (IESC:NASDAQ)",
+        "company_type": "EPC i wykonawstwo infrastruktury",
+        "revenue_model": "Sprzedaż projektowa",
+        "risks": "VOI: wzrost przychodów Q/Q ≥8% przez dwa kwartały i marża EBIT ≥10%, Fals: spowalniający pipeline i backlog lub kompresja marż, Primary risk: normalizacja tempa budowy data center obniża oczekiwania wzrostu",
+        "sector": "Software steruje pracą, pieniędzmi i ryzykiem",
+        "symbol_key": "IESC:NASDAQ",
+        "theme_tags": [
+          "cloud",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 675.0,
+      "market_value": 675.0,
+      "market_value_base": 675.0,
+      "price_change_1m_pct": 37.8193,
+      "price_change_2m_pct": 56.4705,
+      "price_change_3m_pct": 47.8108,
+      "price_change_5d_pct": 17.8021,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 673.84,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "IESC",
+      "total_pnl_base": 235.08,
+      "total_pnl_pct": 53.437,
+      "unrealized_pnl_base": 235.08,
+      "unrealized_pnl_pct": 53.437,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 552.59,
+      "base_currency": "USD",
+      "conid": 266311858,
+      "cost_basis_base": 552.59,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.213,
+      "db_context": {
+        "company_family": "Przemysł i infrastruktura",
+        "company_name": "Fabrinet (FN:NYSE)",
+        "company_type": "Produkcja elektroniki i fotonika",
+        "revenue_model": "Produkcja kontraktowa B2B",
+        "risks": "VOI: next earnings z disclosure HPC ramp, Fals: HPC revenue nie przekracza 120M USD kwartalnie w dwoch kolejnych raportach, Primary risk: opoznienie jednego lub dwoch glownych ramp klienta przesuwa monetyzacje, Composite: 3.40/5.0, EntryScore: 5.0/10, Sizing: 1-2%",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "FN:NYSE",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 674.25,
+      "market_value": 674.25,
+      "market_value_base": 674.25,
+      "price_change_1m_pct": 22.502,
+      "price_change_2m_pct": 38.7654,
+      "price_change_3m_pct": 34.7428,
+      "price_change_5d_pct": 5.5373,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 679.09,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "FN",
+      "total_pnl_base": 121.66,
+      "total_pnl_pct": 22.0163,
+      "unrealized_pnl_base": 121.66,
+      "unrealized_pnl_pct": 22.0163,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 182.2892,
+      "base_currency": "USD",
+      "conid": 123487747,
+      "cost_basis_base": 546.8676,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 1.0794,
+      "db_context": {
+        "company_family": "NIEZNANY",
+        "company_name": "Digital Realty (DLR:NYSE)",
+        "company_type": "NIEZNANY",
+        "revenue_model": "NIEZNANY",
+        "risks": "VOI: najbliższa kwartalna publikacja backlogu i commencementów, Composite: 3.40/5.0, EntryScore: 5.5/10, Sizing: 2–3% po upgrade",
+        "sector": "NIEZNANY",
+        "symbol_key": "DLR:NYSE",
+        "theme_tags": []
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 200.0,
+      "market_value": 600.0,
+      "market_value_base": 600.0,
+      "price_change_1m_pct": 9.7203,
+      "price_change_2m_pct": 13.3322,
+      "price_change_3m_pct": 16.3501,
+      "price_change_5d_pct": 2.6316,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 199.68,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 3.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "DLR",
+      "total_pnl_base": 53.13,
+      "total_pnl_pct": 9.7153,
+      "unrealized_pnl_base": 53.13,
+      "unrealized_pnl_pct": 9.7153,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 35.68,
+      "base_currency": "USD",
+      "conid": 128834251,
+      "cost_basis_base": 535.2,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.9537,
+      "db_context": {
+        "company_family": "Obrona i bezpieczeństwo",
+        "company_name": "KBR Inc. (KBR:NYSE)",
+        "company_type": "Inżynieria i integracja systemów obronnych",
+        "revenue_model": "Kontrakty rządowe projektowe i usługowe",
+        "risks": "VOI: wyniki FY2026 i okno ujawnienia spin MTS, Fals: backlog MTS nie przekracza 13.0 mld USD i konwersja backlogu nie poprawia się do końca FY2026, Primary risk: opoznienie spin MTS utrzymuje dyskonto konglomeratowe, Composite: 3.80/5.0, EntryScore: 6.0/10, Sizing: 2–3%",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "KBR:NYSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 35.34,
+      "market_value": 530.1,
+      "market_value_base": 530.1,
+      "price_change_1m_pct": -6.6968,
+      "price_change_2m_pct": -12.225,
+      "price_change_3m_pct": -19.2688,
+      "price_change_5d_pct": -2.5264,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 35.11,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 15.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "KBR",
+      "total_pnl_base": -5.1,
+      "total_pnl_pct": -0.9529,
+      "unrealized_pnl_base": -5.1,
+      "unrealized_pnl_pct": -0.9529,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 12.3087,
+      "base_currency": "USD",
+      "conid": 519076078,
+      "cost_basis_base": 492.35,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.9535,
+      "db_context": {
+        "company_family": "Obrona i bezpieczeństwo",
+        "company_name": "Cellebrite (CLBT:NASDAQ)",
+        "company_type": "Bezpieczeństwo publiczne i sprzęt dla służb",
+        "revenue_model": "Subskrypcja i usługi zarządzane",
+        "risks": "VOI: nazwane umowy ramowe w krajach i metropoliach, Fals: ARR <10% r/r przez dwa kwartały lub NRR <110%, Primary risk: ograniczenia eksportowe i opóźnienia przetargów",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "CLBT:NASDAQ",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 13.25,
+      "market_value": 530.0,
+      "market_value_base": 530.0,
+      "price_change_1m_pct": -6.5957,
+      "price_change_2m_pct": -13.9216,
+      "price_change_3m_pct": -7.0572,
+      "price_change_5d_pct": 3.6192,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 13.17,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 40.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CLBT",
+      "total_pnl_base": 37.65,
+      "total_pnl_pct": 7.647,
+      "unrealized_pnl_base": 37.65,
+      "unrealized_pnl_pct": 7.647,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 572.55,
+      "base_currency": "USD",
+      "conid": 179384888,
+      "cost_basis_base": 572.55,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.8989,
+      "db_context": {
+        "company_family": "Obrona elektroniczna i integracja systemow C-UxS",
+        "company_name": "CACI International Inc. (CACI:NYSE)",
+        "company_type": "Rzadowy integrator technologii obronnych",
+        "revenue_model": "Kontrakty rzadowe, integracja, wsparcie i uslugi utrzymaniowe",
+        "risks": "VOI: FY2026 Q4 / FY2027 funded-backlog update, Fals: Canada CUAS nie konwertuje do backlogu/przychodu albo C-UxS funded backlog spada, Primary risk: strumień C-UxS/EW pozostaje zbyt mały wobec całej spółki, Composite: 3.75/5.0, EntryScore: 5.5/10, Sizing: 2-3% conditional",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "CACI:NYSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 499.66,
+      "market_value": 499.66,
+      "market_value_base": 499.66,
+      "price_change_1m_pct": -12.6781,
+      "price_change_2m_pct": -18.9253,
+      "price_change_3m_pct": -19.253,
+      "price_change_5d_pct": -0.7177,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 499.42,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CACI",
+      "total_pnl_base": -72.89,
+      "total_pnl_pct": -12.7308,
+      "unrealized_pnl_base": -72.89,
+      "unrealized_pnl_pct": -12.7308,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 395.97,
+      "base_currency": "USD",
+      "conid": 118017869,
+      "cost_basis_base": 459.444,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.8805,
+      "db_context": {
+        "company_family": "Infrastruktura i elektryfikacja",
+        "company_name": "Eaton (ETN:NYSE)",
+        "company_type": "Sprzęt do centrów danych i zasilania",
+        "revenue_model": "Sprzedaż sprzętu i serwis posprzedażowy",
+        "risks": "VOI: wyniki z początku maja 2026 z aktualizacją backlogu i zamówień data center w Electrical Americas, Fals: wzrost zamówień data center <50% r/r i brak dalszego wzrostu backlogu w dwóch kolejnych raportach, Primary risk: popyt AI pozostaje realny, ale zbyt rozcieńczony w skali całej spółki, Composite: 3.40, EntryScore: 5.5, Sizing: 2–3%.",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ETN:NYSE",
+        "theme_tags": [
+          "ai",
+          "cloud"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 421.83,
+      "market_value": 489.45,
+      "market_value_base": 489.45,
+      "price_change_1m_pct": 15.8015,
+      "price_change_2m_pct": 21.1761,
+      "price_change_3m_pct": 12.7254,
+      "price_change_5d_pct": 2.5854,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 421.39,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "NYSE",
+      "quantity": 1.1603,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "ETN",
+      "total_pnl_base": 30.01,
+      "total_pnl_pct": 6.5318,
+      "unrealized_pnl_base": 30.01,
+      "unrealized_pnl_pct": 6.5318,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 446.53,
+      "base_currency": "USD",
+      "conid": 120551998,
+      "cost_basis_base": 446.53,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.7799,
+      "db_context": {
+        "company_family": "Obrona i bezpieczeństwo",
+        "company_name": "Motorola Solutions (MSI:NYSE)",
+        "company_type": "Bezpieczeństwo publiczne i sprzęt dla służb",
+        "revenue_model": "Subskrypcja i usługi zarządzane",
+        "risks": "VOI: nowe wygrane regionalne CAD i 112 oraz skrócenie czasu wdrożeń, Fals: przychody z oprogramowania i usług poniżej 10% r/r przez dwa kwartały lub book to bill poniżej 1.0, Primary risk: istotna ingerencja regulacyjna w kluczową umowę",
+        "sector": "Suwerenność jest ważniejsza niż efektywność",
+        "symbol_key": "MSI:NYSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 433.5156,
+      "market_value": 433.52,
+      "market_value_base": 433.52,
+      "price_change_1m_pct": -1.7513,
+      "price_change_2m_pct": -5.8816,
+      "price_change_3m_pct": 2.7192,
+      "price_change_5d_pct": 1.0321,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 433.66,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "MSI",
+      "total_pnl_base": -13.01,
+      "total_pnl_pct": -2.9136,
+      "unrealized_pnl_base": -13.01,
+      "unrealized_pnl_pct": -2.9136,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 158.69,
+      "base_currency": "USD",
+      "conid": 451393509,
+      "cost_basis_base": 317.38,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.7242,
+      "db_context": {
+        "company_family": "Semiconductor equipment",
+        "company_name": "Camtek Ltd. (CAMT:NASDAQ)",
+        "company_type": "Inspection and metrology tools",
+        "revenue_model": "Capex equipment plus service",
+        "risks": "VOI: Q2-Q3 2026 AI-related inspection/metrology orders >= $120M, Fals: brak konwersji zamówień AI do revenue 2026 albo GM < 48-50%, Primary risk: order wave pauzuje i duration premium znika, Composite: 3.90/5.0, EntryScore: 5.5/10, Sizing: Conditional 2-3%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "CAMT:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "semis"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 201.28,
+      "market_value": 402.56,
+      "market_value_base": 402.56,
+      "price_change_1m_pct": 27.2876,
+      "price_change_2m_pct": 37.4924,
+      "price_change_3m_pct": 35.9146,
+      "price_change_5d_pct": 7.8315,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 202.54,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 2.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CAMT",
+      "total_pnl_base": 85.18,
+      "total_pnl_pct": 26.8385,
+      "unrealized_pnl_base": 85.18,
+      "unrealized_pnl_pct": 26.8385,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 97.4,
+      "base_currency": "USD",
+      "conid": 134129971,
+      "cost_basis_base": 250.4604,
+      "currency": "CHF",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.6905,
+      "db_context": {
+        "company_family": "Przemysł i automatyzacja",
+        "company_name": "INFICON Holding AG (IFCN:SW)",
+        "company_type": "Metrologia i precyzja przemysłowa",
+        "revenue_model": "Sprzedaż sprzętu",
+        "risks": "VOI: wyniki 2026-03-24 i dwa kolejne raporty z wzrostem przychodów powyżej 15% YoY oraz FCF margin powyżej 16%, Fals: dwa raporty spadku przychodów powyżej 10% YoY lub trwała FCF margin poniżej 8%, Primary risk: de-rating gdy wzrost nie dowiezie oczekiwań",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "IFCN:SW",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.2857,
+      "market_price": 149.259,
+      "market_value": 298.52,
+      "market_value_base": 383.8165,
+      "price_change_1m_pct": 43.1862,
+      "price_change_2m_pct": 34.1727,
+      "price_change_3m_pct": 25.3781,
+      "price_change_5d_pct": 3.8997,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 149.2,
+      "price_change_points": 90.0,
+      "price_change_source": "yahoo_daily_fallback",
+      "quantity": 2.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "IFCN",
+      "total_pnl_base": 133.356,
+      "total_pnl_pct": 53.2444,
+      "unrealized_pnl_base": 133.356,
+      "unrealized_pnl_pct": 53.2444,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 4.9436,
+      "base_currency": "USD",
+      "conid": 92780852,
+      "cost_basis_base": 423.9847,
+      "currency": "GBP",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.676,
+      "fx_rate_to_base": 1.3613,
+      "market_price": 4.3813,
+      "market_value": 276.02,
+      "market_value_base": 375.7578,
+      "price_change_1m_pct": -8.174,
+      "price_change_2m_pct": -14.0441,
+      "price_change_3m_pct": -8.0774,
+      "price_change_5d_pct": -0.2055,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 437.0,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 63.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "QQ.",
+      "total_pnl_base": -48.2188,
+      "total_pnl_pct": -11.3728,
+      "unrealized_pnl_base": -48.2188,
+      "unrealized_pnl_pct": -11.3728,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 309.45,
+      "base_currency": "USD",
+      "conid": 128833122,
+      "cost_basis_base": 309.45,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.6406,
+      "db_context": {
+        "company_family": "Technologia i oprogramowanie",
+        "company_name": "Cadence Design Systems (CDNS:NASDAQ)",
+        "company_type": "Oprogramowanie projektowe i inżynieryjne",
+        "revenue_model": "Subskrypcja oprogramowania i licencje",
+        "risks": "VOI: kolejne 2 raporty i backlog powyzej 8.5 mld USD z komercjalizacja AI agent, Fals: backlog pozostaje nie wyzej niz 8.2 mld USD i brak platnego attach AI agent w 12 miesiecy, Primary risk: produkt AI pozostaje wazny strategicznie ale za maly finansowo dla juz bogatej wyceny, Composite: 2.95/5.0, Sizing: 1-2%",
+        "sector": "Software steruje pracą, pieniędzmi i ryzykiem",
+        "symbol_key": "CDNS:NASDAQ",
+        "theme_tags": [
+          "ai",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 356.06,
+      "market_value": 356.06,
+      "market_value_base": 356.06,
+      "price_change_1m_pct": 27.0267,
+      "price_change_2m_pct": 19.5191,
+      "price_change_3m_pct": 25.1764,
+      "price_change_5d_pct": 7.5618,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 354.9,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CDNS",
+      "total_pnl_base": 46.61,
+      "total_pnl_pct": 15.0622,
+      "unrealized_pnl_base": 46.61,
+      "unrealized_pnl_pct": 15.0622,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 1.9385,
+      "base_currency": "USD",
+      "conid": 396138658,
+      "cost_basis_base": 271.8166,
+      "currency": "GBP",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.6079,
+      "fx_rate_to_base": 1.3613,
+      "market_price": 2.4098,
+      "market_value": 248.21,
+      "market_value_base": 337.8988,
+      "price_change_1m_pct": 22.5505,
+      "price_change_2m_pct": 22.9969,
+      "price_change_3m_pct": 30.033,
+      "price_change_5d_pct": 19.4543,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 236.4,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 103.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "HTWS",
+      "total_pnl_base": 66.0796,
+      "total_pnl_pct": 24.3104,
+      "unrealized_pnl_base": 66.0796,
+      "unrealized_pnl_pct": 24.3104,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 5.208,
+      "base_currency": "USD",
+      "conid": 85012682,
+      "cost_basis_base": 319.0443,
+      "currency": "GBP",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.5635,
+      "db_context": {
+        "company_family": "Obrona, energetyka wojskowa i krytyczne komponenty amunicyjne",
+        "company_name": "Chemring Group (CHG:LSE)",
+        "company_type": "spolka przemyslowo-obronna z kwalifikowana produkcja materialow energetycznych",
+        "revenue_model": "kontrakty projektowe, backlog obronny, dostawy komponentow, serwis i capacity ramp",
+        "risks": "VOI: FY2026 H1 / trading order-cover update, Fals: Energetics order cover poniżej 65% albo cash conversion poniżej 70%, Primary risk: capex capacity absorbuje gotówkę zanim przychód energetyczny skaluje FCF, Composite: 3.85/5.0, EntryScore: 5.1/10, Sizing: conditional 2-3%",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "CHG:LSE",
+        "theme_tags": [
+          "defence"
+        ]
+      },
+      "fx_rate_to_base": 1.3613,
+      "market_price": 5.1133,
+      "market_value": 230.1,
+      "market_value_base": 313.2449,
+      "price_change_1m_pct": -6.5814,
+      "price_change_2m_pct": -4.486,
+      "price_change_3m_pct": 2.2,
+      "price_change_5d_pct": -0.3899,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 511.0,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 45.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "CHG",
+      "total_pnl_base": -5.7993,
+      "total_pnl_pct": -1.8177,
+      "unrealized_pnl_base": -5.7993,
+      "unrealized_pnl_pct": -1.8177,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 152.64,
+      "base_currency": "USD",
+      "conid": 120550092,
+      "cost_basis_base": 305.28,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.5469,
+      "db_context": {
+        "company_family": "Energia i surowce",
+        "company_name": "NRG Energy (NRG:NYSE)",
+        "company_type": "Wytwarzanie i sprzedaż energii",
+        "revenue_model": "Opłata za użytkowanie lub wolumen",
+        "risks": "VOI: wyraźny wzrost FCF YoY przy utrzymaniu dywidendy i skupach, Fals: FCF stagnacja przy rosnącym długu lub dużej akwizycji, Primary risk: spread kompresja i regulacja mocy",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "NRG:NYSE",
+        "theme_tags": [
+          "electrification"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 152.0,
+      "market_value": 304.0,
+      "market_value_base": 304.0,
+      "price_change_1m_pct": 0.5607,
+      "price_change_2m_pct": -2.3847,
+      "price_change_3m_pct": -1.748,
+      "price_change_5d_pct": 1.0939,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 150.64,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 2.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "NRG",
+      "total_pnl_base": -1.28,
+      "total_pnl_pct": -0.4193,
+      "unrealized_pnl_base": -1.28,
+      "unrealized_pnl_pct": -0.4193,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 8.4298,
+      "base_currency": "USD",
+      "conid": 231042613,
+      "cost_basis_base": 244.4637,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.469,
+      "db_context": {
+        "company_family": "Hurtowy operator kampusow IDC",
+        "company_name": "VNET Group (VNET:NASDAQ)",
+        "company_type": "Operator centrów danych i hurtowej pojemności AI-ready",
+        "revenue_model": "Wieloletnie kontrakty hurtowe IDC z przychodem recurring po uruchomieniu pojemnosci",
+        "risks": "VOI: wyniki Q2/Q3 2026 z ujawnieniem nowych hurtowych zamowien IDC, Fals: skumulowane nowe zamowienia hurtowe IDC <100 MW do Q3 2026, Primary risk: slabnie tempo nowych zamowien lub zamowienia nie konwertuja sie w przychod hurtowy i wtedy growth rerating znika przy nadal wysokim lewarze, Composite: 2.90/5.0, EntryScore: 5.1/10, Sizing: 1-2%",
+        "sector": "Fizyczne wąskie gardła dyktują wartość",
+        "symbol_key": "VNET:NASDAQ",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 8.99,
+      "market_value": 260.71,
+      "market_value_base": 260.71,
+      "price_change_1m_pct": 11.2346,
+      "price_change_2m_pct": -6.341,
+      "price_change_3m_pct": -19.5536,
+      "price_change_5d_pct": 8.5542,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 9.01,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 29.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "VNET",
+      "total_pnl_base": 16.25,
+      "total_pnl_pct": 6.6472,
+      "unrealized_pnl_base": 16.25,
+      "unrealized_pnl_pct": 6.6472,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 175.3,
+      "base_currency": "USD",
+      "conid": 120549661,
+      "cost_basis_base": 175.3,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.3585,
+      "db_context": {
+        "company_family": "Enterprise software i cloud infrastructure",
+        "company_name": "Oracle (ORCL:NYSE)",
+        "company_type": "Zdywersyfikowana platforma software plus chmura infrastrukturalna",
+        "revenue_model": "Subskrypcje software, support, OCI IaaS i committed cloud capacity",
+        "risks": "VOI: Q4 FY2026 / FY2027 kwartalne FCF, OCI revenue, capex i RPO, Fals: TTM FCF pozostaje ujemny przy wysokim capex i braku marży OCI, Primary risk: OCI RPO rośnie, ale capex i koszty infrastruktury zjadają economics, Composite: 3.25/5.0, EntryScore: 5.6/10, Sizing: N/A watch-only",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "ORCL:NYSE",
+        "theme_tags": [
+          "ai",
+          "cloud",
+          "infra_data",
+          "software"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 199.25,
+      "market_value": 199.25,
+      "market_value_base": 199.25,
+      "price_change_1m_pct": 33.3173,
+      "price_change_2m_pct": 26.8502,
+      "price_change_3m_pct": 35.8563,
+      "price_change_5d_pct": 18.4337,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 194.03,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "ORCL",
+      "total_pnl_base": 23.95,
+      "total_pnl_pct": 13.6623,
+      "unrealized_pnl_base": 23.95,
+      "unrealized_pnl_pct": 13.6623,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 3865.757,
+      "base_currency": "USD",
+      "conid": 39130575,
+      "cost_basis_base": 123.1564,
+      "currency": "TWD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.2843,
+      "db_context": {
+        "company_family": "Materiały do zaawansowanych PCB",
+        "company_name": "Elite Material Co. (2383:TPE)",
+        "company_type": "Producent laminatów niskostratnych i CCL",
+        "revenue_model": "Sprzedaż komponentów OEM do producentów PCB i sieci infrastrukturalnych",
+        "risks": "VOI: kwartalne odczyty wzrostu platformy infrastrukturalnej w Q2–Q3 2026, Fals: wzrost infrastruktury <20% r/r przez 2 kolejne kwartały do Q3 2026, Primary risk: szybkie poszerzenie podaży premium laminatów obniża mix i trwałość marży, Composite: 3.15/5.0, EntryScore: 5.0/10, Sizing: 2–3% po upgrade",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "2383:TPE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 0.0319,
+      "market_price": 4960.0,
+      "market_value": 4960.0,
+      "market_value_base": 158.0172,
+      "price_change_1m_pct": 71.9237,
+      "price_change_2m_pct": 110.1695,
+      "price_change_3m_pct": 157.6623,
+      "price_change_5d_pct": 11.7117,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 4960.0,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "TWSE",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "2383",
+      "total_pnl_base": 34.8606,
+      "total_pnl_pct": 28.306,
+      "unrealized_pnl_base": 34.8606,
+      "unrealized_pnl_pct": 28.306,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 13.36,
+      "base_currency": "USD",
+      "conid": 821220060,
+      "cost_basis_base": 66.8,
+      "currency": "USD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.1967,
+      "db_context": {
+        "company_family": "Przemysł i infrastruktura",
+        "company_name": "WhiteFiber (WYFI:NASDAQ)",
+        "company_type": "Centra danych i kolokacja AI",
+        "revenue_model": "Kolokacja i wynajem mocy obliczeniowej",
+        "risks": "VOI: start uslugi NC-1 w Q2 2026 i sciezka do kwartalnych przychodow z kolokacji >10 mln USD, Fals: brak startu NC-1 do Q2 2026 lub kwartalna kolokacja <6 mln USD do Q3 2026, Primary risk: opoznienie NC-1 opoznia billing i utrzymuje kontrakt jako papier zamiast cash flow, Composite: 3.55/5.0, EntryScore: 5.6/10, Sizing: 1-2%",
+        "sector": "AI pożera compute, energię i robotykę",
+        "symbol_key": "WYFI:NASDAQ",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 1.0,
+      "market_price": 21.87,
+      "market_value": 109.35,
+      "market_value_base": 109.35,
+      "price_change_1m_pct": 78.138,
+      "price_change_2m_pct": 38.2581,
+      "price_change_3m_pct": 15.4012,
+      "price_change_5d_pct": 40.7091,
+      "price_change_asof_date": "2026-05-06",
+      "price_change_latest_close": 21.43,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "quantity": 5.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "CFD",
+      "symbol": "WYFI",
+      "total_pnl_base": 42.55,
+      "total_pnl_pct": 63.6976,
+      "unrealized_pnl_base": 42.55,
+      "unrealized_pnl_pct": 63.6976,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 678.1276,
+      "base_currency": "USD",
+      "conid": 39131336,
+      "cost_basis_base": 43.208,
+      "currency": "TWD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.1027,
+      "fx_rate_to_base": 0.0319,
+      "market_price": 896.0,
+      "market_value": 1792.0,
+      "market_value_base": 57.0901,
+      "price_change_1m_pct": 58.8652,
+      "price_change_2m_pct": 107.4074,
+      "price_change_3m_pct": 163.5294,
+      "price_change_5d_pct": 11.5816,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 896.0,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "TWSE",
+      "quantity": 2.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "3037",
+      "total_pnl_base": 13.8819,
+      "total_pnl_pct": 32.1282,
+      "unrealized_pnl_base": 13.8819,
+      "unrealized_pnl_pct": 32.1282,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    },
+    {
+      "account": "U22088457",
+      "avg_cost": 1250.234,
+      "base_currency": "USD",
+      "conid": 39130540,
+      "cost_basis_base": 39.8303,
+      "currency": "TWD",
+      "current_weight_basis": "net_liquidation",
+      "current_weight_pct": 0.0831,
+      "db_context": {
+        "company_family": "Zaawansowane PCB dla serwerów i sieci",
+        "company_name": "Gold Circuit Electronics (2368:TPE)",
+        "company_type": "Producent wysokowarstwowych płyt PCB dla AI/server/network",
+        "revenue_model": "Sprzedaż projektowo-produkcyjna OEM do dostawców infrastruktury i serwerów",
+        "risks": "VOI: 1H26 results i milestone'y rampu w Tajlandii, Fals: brak pełnej certyfikacji klienta i brak startu produkcji masowej do Q3 2026, Primary risk: opóźnienie kwalifikacji i słabsza absorpcja nowej mocy zatrzymują asset-turn i marżę, Composite: 2.65/5.0, EntryScore: 4.8/10, Sizing: 0.5–1% po upgrade",
+        "sector": "NIEZNANY",
+        "symbol_key": "2368:TPE",
+        "theme_tags": [
+          "ai"
+        ]
+      },
+      "fx_rate_to_base": 0.0319,
+      "market_price": 1450.0,
+      "market_value": 1450.0,
+      "market_value_base": 46.1945,
+      "price_change_1m_pct": 56.4186,
+      "price_change_2m_pct": 83.0808,
+      "price_change_3m_pct": 94.6309,
+      "price_change_5d_pct": 6.6176,
+      "price_change_asof_date": "2026-05-07",
+      "price_change_latest_close": 1450.0,
+      "price_change_points": 90.0,
+      "price_change_source": "ibkr_historical_daily",
+      "primary_exchange": "TWSE",
+      "quantity": 1.0,
+      "realized_pnl_base": 0.0,
+      "sec_type": "STK",
+      "symbol": "2368",
+      "total_pnl_base": 6.3643,
+      "total_pnl_pct": 15.9786,
+      "unrealized_pnl_base": 6.3643,
+      "unrealized_pnl_pct": 15.9786,
+      "updated_utc": "2026-05-07T11:25:54Z"
+    }
+  ],
+  "schema": "portfolio.prompt_embedded_snapshot.v1",
+  "snapshot": {
+    "account": "U22088457",
+    "age_hours": 56.854,
+    "generated_utc": "2026-05-07T11:27:25Z",
+    "max_age_hours": 36.0,
+    "positions_count": 73,
+    "positions_with_db_context": 64,
+    "snapshot_date": "2026-05-07",
+    "snapshot_id": "ibkrps-4441dbcbef8e655e3952bd39e2b3",
+    "source": "ibkr_live_daily_snapshot",
+    "stale": true
+  },
+  "source": "postgresql_latest_snapshot"
+}
+PORTFOLIO_SNAPSHOT_FROM_DB_END
 
-`account.positions.analysis_context({
-     "account": "U22088457",
-     "include_context_text": true,
-     "include_full_analysis_rows": false,
-     "include_unmatched": true,
-     "max_theses_per_position": 2,
-     "thesis_chars": 900
-})`
+Jeśli blok ma `source: placeholder_until_snapshot_refresh`, puste `positions`,
+brak `snapshot.generated_utc`, brak `market_value_base` albo brak
+`current_weight_pct`, nie udawaj kompletności. W DATA QUALITY CHECK napisz,
+że wklejony snapshot nie został odświeżony albo jest niekompletny.
 
-Jeśli ChatGPT pokazuje długi prefiks wygenerowany przez connector,
-wybierz semantycznie to samo narzędzie snapshotu portfela. Nie wybieraj
-szerokiej Iskierki ani live broker tools.
-
-   Co to jest:
-   Jedyna właściwa funkcja do odczytu portfela. Czyta ostatni snapshot
-   z PostgreSQL, a nie live IBKR.
-
-   Do czego jej użyć:
-   - wszystkie aktualne pozycje ze snapshotu
-   - ilość akcji/udziałów
-   - market value
-   - `market_price` z ostatniego snapshotu, jeśli snapshot ją zawiera
-   - koszt oraz PnL na pozycji, jeśli snapshot je zawiera
-   - wagi portfela
-   - account/snapshot metadata, w tym timestamp snapshotu
-   - dopasowania spółek w bazie
-   - duplikaty symboli / company matches
-   - powiązane tezy i research rows dla pozycji
-   - rola pozycji, jeśli da się ją odczytać lub ostrożnie wywnioskować:
-     core / satellite / hedge / opcja
-
-   Jak interpretować account:
-   "U22088457" to konto oczekiwane przez workflow. Jeśli narzędzie zwraca
-   pełny kod konta albo suffix konta ze snapshotu, użyj go tylko jako
-   metadanych w raporcie. Nie zgaduj innego konta.
-
-   Czego ta funkcja NIE robi:
-   - nie loguje do IBKR
-   - nie odświeża snapshotu
-   - nie składa zleceń
-   - nie czyta live broker positions
-   - nie zastępuje procesu SSH/TWS/IB Gateway -> snapshot job
-
-Nie używaj szerokiej Iskierki jako fallbacku w tym promcie.
-Jeśli teza konkretnej spółki jest niejasna mimo `include_context_text`,
-oznacz `value_capture_assessment` jako `unknown`, opisz brak danych
-w DATA QUALITY CHECK i nie zgaduj.
+Pierwotną tezę pozycji czytaj z `positions[].db_context.thesis`,
+`why_buy`, `why_avoid` i `risks`. Jeśli `context_status` nie jest `loaded`
+albo dana pozycja nie ma `db_context`, nie pobieraj tezy przez MCP w
+Prompcie 2. Oceń relację do tezy autora na podstawie modelu biznesowego,
+symbolu, sektora i danych liczbowych ze snapshotu, a
+`value_capture_assessment` ustaw na `unknown` wszędzie tam, gdzie brakuje
+wystarczających danych.
 
 Czego NIE robić:
+- nie używaj `tool_search` w Prompcie 2
+- nie używaj `account.positions.analysis_context` w Prompcie 2
 - nie używaj mcp__codex_apps__iskierka._broker_positions_list
 - nie używaj mcp__codex_apps__iskierka._companies_context
 - nie używaj broker.positions.list({})
@@ -289,7 +3359,7 @@ Czego NIE robić:
 - nie używaj portfolio.feedback.submit
 - niczego nie zapisuj i nie aktualizuj
 
-Jeśli snapshot tool zwraca błąd, 0 pozycji albo brak timestampu:
+Jeśli wklejony snapshot ma 0 pozycji albo brak timestampu:
 - nie licz wag
 - nie oceniaj proporcji
 - nie zgaduj portfela z pamięci
@@ -431,12 +3501,9 @@ W JSON używaj angielskich wartości zgodnych z MCP:
 - `EXIT` dla ZAMKNIJ
 - `WATCH` dla OBSERWUJ
 
-Potem dodaj tabelę zbiorczą:
-
-| Ticker | Warstwa | Obecna waga | Docelowa waga | Delta | Decyzja | Priorytet |
-
-Sortuj: najpierw największe delty dodatnie,
-potem bez zmian, na końcu największe delty ujemne.
+W JSON wypełnij `positions` tak, żeby zastępowało dawną tabelę
+zbiorczą. Sortuj: najpierw największe delty dodatnie, potem bez zmian,
+na końcu największe delty ujemne.
 
 Nie generuj jeszcze konkretnych zleceń, Take Profit ani Stop Loss.
 Nie używaj `portfolio.feedback.submit`.
@@ -447,81 +3514,33 @@ które Prompt 3 zamieni na finalny zapis feedbacku portfela.
 FORMAT ODPOWIEDZI
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Pisz po polsku, konkretnie i ekonomicznie.
-Każde zdanie ma mówić kto, co i dlaczego - nie "spółka może zyskać".
-Zacznij od odpowiedzi na dwa pytania z góry, potem rozwiń mechanizm.
+Zwróć wyłącznie jeden poprawny JSON. Bez Markdown, bez tabel, bez nagłówków,
+bez komentarzy, bez code fence, bez tekstu przed JSON i bez tekstu po JSON.
+Główny obiekt JSON jest raportem `PORTFOLIO_REFLECTION_REPORT` i ma być
+bezpośrednio parsowalny przez Prompt 3. W polach tekstowych pisz po polsku,
+konkretnie i ekonomicznie.
 
-Struktura odpowiedzi:
+Ten JSON ma zastąpić cały dawny opisowy output. Nie wypisuj osobno:
+- odpowiedzi prose na dwa pytania,
+- DATA QUALITY CHECK jako tabeli,
+- tabel warstw,
+- tabel pozycji,
+- akapitów podsumowania.
 
-## 1. Odpowiedź wprost na dwa pytania
+Zamiast tego umieść te informacje w polach JSON:
+- `answers`
+- `data_quality`
+- `layers_current`
+- `layers_target`
+- `positions`
+- `real_exposure`
+- `proxy_exposure`
+- `portfolio_gaps`
 
-PYTANIE 1 - czy wagi warstw są zgodne z rankingiem autora czy odwrócone?
-Odpowiedz krótko i konkretnie.
-
-PYTANIE 2 - gdzie jest realna ekspozycja, a gdzie narracyjne proxy?
-Odpowiedz krótko i konkretnie.
-
-## 2. DATA QUALITY CHECK
-
-Napisz:
-- timestamp snapshotu
-- konto/sufiks konta
-- liczba pozycji
-- czy są market value i wagi
-- czy są ilości i ceny
-- czy są PnL na pozycjach
-- czy są dane 5d/1m/2m/3m, jeśli narzędzie snapshotu je faktycznie zwraca
-- które pozycje nie mają dopasowanej spółki/researchu
-- czego brakuje i jak to ogranicza wnioski
-
-## 3. Tabela warstw i pokrycia tezy
-
-| Warstwa (ranking autora) | Pozycje w portfelu | Łączna waga | Jakość ekspozycji | Czy waga odpowiada randze warstwy? |
-
-## 4. Zestawienie tez spółek z tezą autora
-
-Dla każdej materialnej pozycji:
-- warstwa autora
-- pierwotna teza ze snapshotu
-- relacja do tezy autora: wzmacnia / rozszerza / osłabia / neutralna / sprzeczna
-- mechanizm zarabiania
-- czy przechwytuje marżę
-- pricing power
-- bilans/przeżywalność
-- czy to realna ekspozycja czy proxy
-- czy pierwotna teza nadal stoi
-
-## 5. Dywersyfikacja źródeł ekspozycji
-
-Odpowiedz:
-- które warstwy #1-#5 są pokryte, a których brakuje
-- gdzie wiele tickerów zależy od tego samego punktu awarii
-- ile portfel ma niezależnych dróg sukcesu
-- czy ekspozycja jest rzeczywiście zdywersyfikowana
-
-## 6. Ryzyka, pozycje i docelowe wagi
-
-Podaj:
-- obecne wagi warstw
-- docelowe wagi warstw
-- główne ryzyka konstrukcji portfela
-- blok dla każdej pozycji z decyzją i docelową wagą
-- tabelę zbiorczą:
-
-| Ticker | Warstwa | Obecna waga | Docelowa waga | Delta | Decyzja | Priorytet |
-
-Sortuj: największe delty dodatnie, potem bez zmian,
-na końcu największe delty ujemne.
-
-Zakończ jednym akapitem:
-Co portfel zmienia i dlaczego - jaki mechanizm ryzyka spada,
-jaki rośnie i co będzie dowodem, że decyzja była słuszna.
-
-## 7. PORTFOLIO_REFLECTION_REPORT
-
-Na końcu dodaj blok JSON do użycia przez Prompt 3.
-Ten blok ma być kompatybilny z finalnym zapisem `portfolio.feedback.submit`,
-ale w tym promcie niczego jeszcze nie zapisuj.
+Jeśli snapshot jest pusty albo niekompletny, nadal zwróć ten sam JSON:
+ustaw `snapshot_quality` na `incomplete`, zostaw tablice decyzyjne puste,
+a braki opisz w `data_quality` i `portfolio_gaps`. W tym promcie
+niczego nie zapisuj.
 
 Do `layer_id` użyj jednej z wartości:
 - `ai_frontier_model_labs`
@@ -535,13 +3554,30 @@ Do `layer_id` użyj jednej z wartości:
 - `other_or_unassigned`
 
 {
+  "answers": {
+    "layer_weights_vs_author_ranking": "...",
+    "real_exposure_vs_narrative_proxy": "..."
+  },
   "portfolio_level_summary": "...",
   "main_problem": "...",
   "main_change": "...",
   "snapshot_quality": "fresh/usable/stale/incomplete",
   "snapshot_timestamp": "...",
   "account": "...",
-  "current_layer_weights": [
+  "data_quality": {
+    "snapshot_timestamp": "...",
+    "snapshot_source": "...",
+    "account": "...",
+    "positions_count": 0,
+    "has_market_value": true,
+    "has_weights": true,
+    "has_quantity_and_price": true,
+    "has_pnl": true,
+    "has_price_change_windows": true,
+    "context_status": "...",
+    "missing_or_limited_data": ["..."]
+  },
+  "layers_current": [
     {
       "author_rank": 1,
       "layer_id": "...",
@@ -553,7 +3589,7 @@ Do `layer_id` użyj jednej z wartości:
       "why": "..."
     }
   ],
-  "target_layer_weights": [
+  "layers_target": [
     {
       "layer_id": "...",
       "current_pct": 0.0,
@@ -563,7 +3599,7 @@ Do `layer_id` użyj jednej z wartości:
       "best_marginal_use_of_capital_in_existing_portfolio": "..."
     }
   ],
-  "position_votes_draft": [
+  "positions": [
     {
       "symbol": "...",
       "layer_id": "...",
@@ -580,8 +3616,8 @@ Do `layer_id` użyj jednej z wartości:
       "decision_invalidates_if": "..."
     }
   ],
-  "real_exposures": ["..."],
-  "narrative_proxies": ["..."],
+  "real_exposure": ["..."],
+  "proxy_exposure": ["..."],
   "potential_false_beneficiaries": ["..."],
   "portfolio_gaps": ["..."],
   "questions_for_prompt_3": [
@@ -602,42 +3638,44 @@ Prompty 1 i 2 już wykonały analizę:
   docelowe wagi i decyzje per pozycja
 
 Twoje zadanie teraz to wyłącznie:
-1. Pobrać aktualny snapshot portfela
+1. Wziąć aktualny snapshot portfela z bloku wklejonego w Prompcie 2
 2. Nałożyć wnioski z Promptu 2 na rzeczywiste ceny i ilości
 3. Uzupełnić Stop Loss i Take Profit dla każdej pozycji
 4. Zapisać całość jednym atomowym zapisem przez MCP
-5. Pokazać finalną tabelę
+5. Zwrócić finalny output wyłącznie jako JSON
 
 Nie analizujesz od nowa. Nie piszesz nowej tezy.
 Bierzesz gotowe decyzje z Promptu 2 i przekładasz je na konkretne liczby,
 poziomy i draft plan działań.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 1 - POBIERZ SNAPSHOT
+KROK 1 - WCZYTAJ SNAPSHOT Z PROMPTU 2
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Użyj publicznego narzędzia snapshotu:
+Nie pobieraj snapshotu przez MCP. Nie używaj `tool_search`,
+`account.positions.analysis_context` ani żadnego narzędzia snapshotu.
 
-`account.positions.analysis_context({
-  "account": "U22088457",
-  "include_context_text": true,
-  "include_unmatched": true,
-  "include_full_analysis_rows": false,
-  "max_theses_per_position": 5,
-  "thesis_chars": 900
-})`
+Użyj tego samego JSON-a, który był w Prompcie 2 między:
+- `PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN`
+- `PORTFOLIO_SNAPSHOT_FROM_DB_END`
 
-Jeśli ChatGPT pokazuje długi prefiks connectora, wybierz semantycznie
-to samo narzędzie, np. narzędzie snapshotu portfela odpowiadające
-`account.positions.analysis_context`.
+To jest jedyne źródło aktualnych pozycji, cen, wag i kontekstu tez spółek.
+Jeśli blok ma `source: placeholder_until_snapshot_refresh`, `positions: []`,
+brak `snapshot.generated_utc`, brak konta albo brak wag/cen pozycji, zatrzymaj
+etap: nie buduj pustego payloadu, nie wywołuj `portfolio.feedback.submit`,
+nie pisz `Gotowe`. Finalny output nadal ma być jednym JSON-em: ustaw
+`status` na `NIE_ZAPISANO`, w `errors` wpisz
+`snapshot_db_not_refreshed`, a w `summary.main_problem` napisz, że trzeba
+najpierw uruchomić lokalny job snapshotu aktualizujący `prompts-portfolio.txt`.
 
 Wyciągnij dla każdej pozycji:
 - `symbol`
 - `quantity`
 - `current_weight_pct`
 - `market_price`
-- `market_value`
-- `snapshot_id`
+- `market_value_base` albo `market_value`
+- `snapshot_id` z `snapshot.id`
+- `db_context` z tezami spółki, jeśli istnieje
 
 Jeśli snapshot nie ma `market_price`, ilości albo market value, nie licz konkretnych
 liczb akcji. Zapisz feedback i TP/SL tylko tam, gdzie dane są wystarczające,
@@ -654,6 +3692,10 @@ Dla każdej pozycji weź z Promptu 2:
 - `value_capture_assessment`
 - `feedback_text`
 - `why_this_action`
+
+W Prompcie 2 lista decyzji nazywa się `positions`. Jeśli widzisz starszy
+output z inną nazwą tej listy, potraktuj go wyłącznie jako alias `positions`
+i nie emituj starej nazwy w finalnym JSON.
 
 Użyj dokładnie tych `layer_id`:
 - `ai_frontier_model_labs`
@@ -709,16 +3751,18 @@ Nie używaj analizy technicznej: żadnych wsparć, oporów, średnich kroczącyc
 formacji ani momentum wykresu.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 4 - ZBUDUJ ACTION PLAN
+KROK 4 - ZBUDUJ TRADES
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Buduj `action_plan` tylko dla pozycji wymagających realnej zmiany sizingu.
+Buduj `trades` tylko dla pozycji wymagających realnej zmiany sizingu.
+To jest prosta nazwa finalnego JSON. Przy zapisie do `portfolio.feedback.submit`
+ta sama lista trafia do wymaganego technicznie pola `action_plan`.
 
 Mapowanie:
 - `INCREASE` -> `action: "BUY"`
 - `REDUCE` -> `action: "SELL"`
 - `EXIT` -> `action: "SELL_ALL"`
-- `HOLD` i `WATCH` zwykle nie tworzą trade action
+- `HOLD` i `WATCH` zwykle nie tworzą wpisu w `trades`
 
 Draft redukcji lub zwiększenia:
 
@@ -835,47 +3879,110 @@ Wykonaj dokładnie jedno wywołanie `portfolio.feedback.submit`:
 
 Nie kopiuj przykładu mechanicznie. Wypełnij realnymi pozycjami i wagami.
 
+Niezależnie od tego, czy narzędzie MCP było dostępne, finalny JSON ma
+zawierać `feedback_payload` z dokładnie tym payloadem zapisu. Lokalny
+mechanizm kopiowania finalnej odpowiedzi odczytuje to pole i zapisuje je do
+bazy przez standardową kolejkę DB. `feedback_payload` może być `null` tylko
+wtedy, gdy snapshot albo decyzje wejściowe są tak niekompletne, że nie wolno
+zbudować payloadu.
+
+Jeśli narzędzie `portfolio.feedback.submit` naprawdę nie jest dostępne w tej
+sesji, nie udawaj zapisu. W finalnym JSON ustaw `status` na
+`ZAPIS_NIEPOTWIERDZONY`, a payload gotowy do ręcznego przekazania umieść w
+polu `feedback_payload`. W takim przypadku nie wywołuj
+`portfolio.feedback.sizing_monitor` i nie używaj słów `Gotowe`, `zapisano`
+ani `submit udany`.
+
 Po zapisie wywołaj:
 
 `portfolio.feedback.sizing_monitor({ "account": "U22088457", "limit": 250 })`
 
-Jeśli zapis się nie uda, nie zapisuj częściami. Pokaż błąd i payload,
-który miał zostać zapisany. Atomowość jest ważniejsza niż częściowy sukces.
+Jeśli zapis się nie uda, nie zapisuj częściami. W finalnym JSON ustaw
+`status` na `NIE_ZAPISANO`, a błąd i payload, który miał zostać zapisany,
+umieść w polach `errors` i `feedback_payload`. Atomowość jest ważniejsza
+niż częściowy sukces.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 FINALNA ODPOWIEDŹ
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 
-Pokaż w tej kolejności:
+Zwróć wyłącznie jeden poprawny JSON. Bez Markdown, bez tabel, bez nagłówków,
+bez komentarzy, bez code fence, bez tekstu przed JSON i bez tekstu po JSON.
+Ten JSON zastępuje dawny output z podsumowaniem, tabelą pozycji, tabelą
+warstw, planem działań i potwierdzeniem MCP.
 
-1. PODSUMOWANIE - 3 zdania
-- główny problem portfela względem tezy autora
-- główna zmiana i skąd bierze się kapitał
-- największe ryzyko koncentracji po zmianach
+Słownik nazw finalnego JSON:
+- `trades` = draft zmian pozycji; przy zapisie trafia do MCP jako `action_plan`
+- `entry_rules` = zasady wejścia/wyjścia; przy zapisie trafia do MCP jako `entry_strategy`
+- `save` = wynik próby zapisu
+- `feedback_payload` = dokładny payload zapisu
+- `totals` = podsumowanie wartości i ryzyka
 
-2. TABELA POZYCJI
+Struktura finalnego JSON:
 
-| Symbol | Warstwa | Obecna waga | Target waga | Akcja | Value capture | Stop Loss | Take Profit | Komentarz |
+{
+  "status": "SUBMIT_OK/ZAPIS_NIEPOTWIERDZONY/NIE_ZAPISANO",
+  "summary": {
+    "main_problem": "...",
+    "main_change_and_capital_source": "...",
+    "largest_concentration_risk": "..."
+  },
+  "snapshot": {
+    "snapshot_id": "...",
+    "generated_utc": "...",
+    "account": "U22088457",
+    "positions_count": 0,
+    "stale": false
+  },
+  "positions": [
+    {
+      "symbol": "...",
+      "layer_id": "...",
+      "current_weight_pct": 0.0,
+      "target_weight_pct": 0.0,
+      "action": "INCREASE/REDUCE/HOLD/EXIT/WATCH",
+      "value_capture_assessment": "real_capture/proxy/weak_proxy/unrelated/unknown",
+      "stop_loss_price": null,
+      "take_profit_price": null,
+      "comment": "..."
+    }
+  ],
+  "layers": [
+    {
+      "layer_id": "...",
+      "current_pct": 0.0,
+      "target_pct": 0.0,
+      "vote": "INCREASE/REDUCE/HOLD/ROTATE/CLEANUP",
+      "why": "..."
+    }
+  ],
+  "trades": [],
+  "entry_rules": [],
+  "save": {
+    "submit_ok": false,
+    "review_id": "",
+    "layers_written": 0,
+    "positions_written": 0,
+    "draft_actions_written": 0,
+    "sizing_monitor_ok": false,
+    "positions_with_tp_sl": 0
+  },
+  "feedback_payload": {
+    "schema": "portfolio.feedback.submit.v1",
+    "review": {},
+    "layer_votes": [],
+    "position_votes": [],
+    "action_plan": [],
+    "entry_strategy": [],
+    "account": "U22088457"
+  },
+  "errors": []
+}
 
-3. TABELA WARSTW
-
-| Warstwa | Obecna waga | Target waga | Vote | Dlaczego |
-
-4. PLAN DZIAŁAŃ
-- co zmienić teraz
-- co zwiększać tylko po korekcie lub po wynikach
-- co tylko obserwować
-
-5. POTWIERDZENIE MCP
-- submit udany / nieudany
-- `review_id`
-- liczba warstw zapisanych
-- liczba pozycji zapisanych
-- liczba draft actions
-- `sizing_monitor`: liczba pozycji z ustawionym TP/SL
-
-Nie kończ na analizie. Finalny etap zawsze kończy się zapisem przez MCP
-i tabelą z TP/SL dla każdej pozycji, chyba że MCP zwróci błąd zapisu.
+Nie kończ na analizie. Finalny etap zawsze kończy się próbą zapisu przez MCP,
+chyba że snapshot DB jest nieodświeżony albo MCP zwróci błąd. Jeśli zapis albo
+późniejszy `sizing_monitor` nie był wykonany pomyślnie, `status` nie może być
+`SUBMIT_OK`.
 
 ━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
 CZEGO NIE UŻYWAĆ
@@ -895,293 +4002,221 @@ Wszystko jest draftem, feedback ledgerem i monitoringiem.
 
 PROMPT 4 - Wykonawczy przelicznik akcji i zapis draft planu
 
-Jesteś analitykiem portfela. To jest ETAP 4 - wykonawczy.
+Jesteś analitykiem portfela na etapie wykonawczym. Masz outputy z P1, P2
+i P3 oraz ten sam snapshot DB, który został wklejony w Prompcie 2. Twoje zadanie
+to złożyć wnioski z poprzednich etapów w jeden spójny zestaw decyzji,
+przeliczyć je na konkretne liczby akcji i zapisać feedback atomowym
+wywołaniem portfolio.feedback.submit. Nie analizujesz od nowa — kopiujesz
+wnioski z P1, P2 i P3 i mapujesz je na strukturę MCP. Jeśli czegoś nie ma
+w poprzednich outputach albo w snapshotcie, nie zgadujesz — oznaczasz brak
+danych i nie tworzysz dla tego wiersza akcji transakcyjnej.
 
-Masz gotowe wejścia z poprzednich etapów:
-- Prompt 2: ticker, `layer_id`, akcja, `target_weight_pct`,
-  `value_capture_assessment`, priorytet i uzasadnienie
-- Prompt 3: `stop_loss_price` i `take_profit_price` per pozycja
+Nie pobierasz snapshotu przez MCP. Nie używaj `tool_search`,
+`account.positions.analysis_context` ani żadnego narzędzia snapshotu.
+Zacznij od odczytania JSON-a z bloku Promptu 2:
+`PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN` / `PORTFOLIO_SNAPSHOT_FROM_DB_END`.
+Ze snapshotu potrzebujesz dla każdej pozycji: symbol, quantity, market_price,
+currency, market_value_base, current_weight_pct oraz z kontekstu konta
+net_liquidation i cash. NAV do wszystkich obliczeń to net_liquidation.
+Jeśli to pole jest puste, użyj summary.market_value_total, a jeśli tego
+też nie ma — sumy abs(market_value_base) wszystkich pozycji. Główna cena
+pozycji to zawsze market_price, nie current_price. Używaj wyłącznie
+symboli które faktycznie istnieją w snapshotcie — spółki z P2 i P3 które
+nie mają wpisu w snapshotcie pomijasz w payloadzie MCP i wymieniasz je
+w osobnej notatce jako pominięte.
 
-Twoje jedyne zadanie:
-1. Pobrać snapshot z aktualnymi cenami i liczbą akcji
-2. Przeliczyć docelowe wagi na konkretne liczby akcji
-3. Zbilansować zakupy ze sprzedażą i gotówką
-4. Zapisać jedną rundę wykonawczego feedbacku przez MCP
-5. Pokazać jedną tabelę z liczbami
+Jeśli blok snapshotu ma `source: placeholder_until_snapshot_refresh`,
+`positions: []`, brak `snapshot.generated_utc`, brak konta albo brak danych
+do przeliczeń, przerwij etap i nie wykonuj `portfolio.feedback.submit`.
+Finalny output nadal ma być jednym JSON-em: ustaw `status` na
+`NIE_ZAPISANO`, w `errors` wpisz konkretny brak danych oraz informację, że
+feedback ledger nie został zmieniony. Nie pisz `Gotowe`, nie pokazuj sukcesu
+i nie twórz pustego payloadu.
 
-Nie analizujesz. Nie zmieniasz decyzji z Promptu 2.
-Nie wymyślasz nowych warstw ani nowych targetów.
-Liczysz i zapisujesz draft plan do ręcznego wykonania.
+Jeśli w outputach P2/P3 nie ma realnych decyzji per pozycja, targetów lub
+warstw, przerwij etap tak samo: zwróć jeden JSON ze `status:
+"NIE_ZAPISANO"` i błędem `missing_input_decisions`. Nie odtwarzaj decyzji od
+nowa i nie zapisuj feedbacku z samych danych snapshotu.
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 1 - POBIERZ SNAPSHOT
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Zanim przejdziesz do obliczeń, przypomnij sobie kluczowe rozróżnienie
+z P2 i P3. Decyzje mają dwie niezależne osie: pierwsza mówi czy zmieniać
+wagę całej warstwy w portfelu i pochodzi z P2, druga mówi czy zmieniać
+skład wewnątrz warstwy niezależnie od łącznej wagi i pochodzi z P3.
+Warstwa może mieć dobrą wagę ale źle ułożony skład — wtedy właściwą
+decyzją jest ROTATE w layer_votes i odpowiednie INCREASE/REDUCE
+w position_votes bez zmiany sumy wag warstwy. Nie wolno mieszać tych osi.
 
-Użyj publicznego narzędzia snapshotu:
+Obliczenia dla każdej pozycji wykonujesz w tej kolejności. Wartość
+docelowa to target_weight_pct podzielone przez 100 i pomnożone przez NAV.
+Wartość aktualna to market_value_base, a jeśli to pole jest puste —
+current_weight_pct podzielone przez 100 razy NAV. Delta wartości to
+różnica tych dwóch. Cena jednej akcji w walucie bazowej to
+abs(market_value_base / quantity) — jeśli nie możesz jej wyliczyć bo
+brakuje danych, a waluta pozycji nie jest bazową walutą snapshotu, nie
+zgadujesz kursu FX: wpisujesz qty_change zero, transaction_value_usd
+równe delta_value_base i w feedback_text zaznaczasz brak FX do wyliczenia
+liczby akcji. Gdy masz cenę akcji, surowa liczba to delta podzielona przez
+cenę, zaokrąglona do całości. Dla INCREASE wynik musi być nieujemny, dla
+REDUCE niedodatni, dla EXIT to minus pełna ilość ze snapshotu, dla HOLD
+i WATCH zero. Wartość transakcji to abs(qty_rounded razy cena akcji).
+Jeśli snapshot nie ma snapshot_id, quantity, market_price lub
+market_value_base, nie liczysz akcji dla tej pozycji i nie tworzysz dla
+niej wpisu w `trades`.
 
-`account.positions.analysis_context({
-  "account": "U22088457",
-  "include_context_text": false,
-  "include_unmatched": true,
-  "include_full_analysis_rows": false,
-  "max_theses_per_position": 0
-})`
+Po wyliczeniu wszystkich delt sprawdzasz bilans kapitału. Suma sprzedaży
+to suma transaction_value_usd dla qty_rounded ujemnych, suma zakupów to
+suma dla qty_rounded dodatnich, a dostępna gotówka pochodzi z pola cash
+w kontekście konta lub wynosi zero jeśli brak danych. Jeśli zakupy
+przekraczają sprzedaż plus gotówkę, zmniejszasz zakupy od najniższego
+priorytetu w górę, a przy tym samym priorytecie tniesz najpierw warstwy
+niżej w rankingu autora z P1. Zmniejszasz qty_rounded aż zakupy zmieszczą
+się w dostępnym kapitale i zaznaczasz przycięte pozycje w feedback_text.
+Nie używasz dźwigni.
 
-Wyciągnij dla każdej pozycji:
-- `symbol`
-- `quantity`
-- `market_price`
-- `currency`
-- `market_value`
-- `market_value_base`
-- `current_weight_pct`
-- `snapshot.snapshot_id`
-- `account_context.net_liquidation`
-- `account_context.cash`, jeśli dostępne
+Payload MCP budujesz według tych zasad. W review wpisujesz
+portfolio_feedback jako jedno zdanie wykonawcze o całym portfelu,
+main_problem jako główny problem portfela względem tezy skopiowany z P2,
+main_change jako główną zmianę i źródło kapitału z P2, snapshot_id ze
+snapshotu i pusty review_id. W layer_votes dodajesz tylko warstwy z pewnym
+layer_id — dozwolone wartości to ai_frontier_model_labs,
+ai_neocloud_gpu_rental, ai_nvidia_systems_socamm, ai_memory_hbm_dram_socamm,
+ai_foundry_leading_edge, ai_inference_providers, ai_hyperscalers,
+ai_power_thermal_datacenter i other_or_unassigned. Vote musi być jednym z
+INCREASE, REDUCE, HOLD, ROTATE, CLEANUP. Jeśli P2 mówi że waga jest dobra
+ale skład zły, używasz ROTATE i przenosisz logikę rotacji do position_votes.
+W position_votes dodajesz tylko spółki które istnieją w snapshotcie. Action
+musi być jednym z INCREASE, REDUCE, HOLD, EXIT, WATCH. HOLD i WATCH mogą
+mieć SL, TP i feedback_text, ale nie muszą tworzyć wpisu w `trades`.
+value_capture_assessment musi być jednym z real_capture, proxy, weak_proxy,
+unrelated, unknown. W finalnym JSON zewnętrznym używasz pola `trades`.
+Do payloadu MCP ta sama lista trafia jako techniczne `action_plan`.
+`trades` zawiera tylko realne propozycje transakcji — INCREASE z
+qty_rounded większym od zera mapuje się na BUY, REDUCE z qty_rounded
+mniejszym od zera na SELL, EXIT na SELL_ALL. Dla HOLD i WATCH nie tworzysz
+`trades`. Jeśli qty_rounded wynosi zero po zaokrągleniu, też nie tworzysz
+`trades` mimo że pozycja zostaje w
+position_votes. W later dozwolone triggery to PRICE_PULLBACK, AFTER_EARNINGS
+i MANUAL_REVIEW — nie używasz THESIS_CONFIRMED, zamiast tego opisujesz
+warunek w condition i używasz MANUAL_REVIEW. Priority musi być HIGH, MEDIUM
+lub LOW. W finalnym JSON zewnętrznym używasz `entry_rules`; do payloadu
+MCP wpisujesz tę samą listę jako techniczne `entry_strategy`. `entry_rules`
+zawiera wpisy dla pozycji z INCREASE, REDUCE, EXIT, WATCH lub istotnym
+warunkiem rewizji — nie musi zawierać liczb, ale musi wyjaśniać logikę
+wejścia lub wyjścia. Na końcu payloadu pole account to "U22088457".
 
-Do wszystkich obliczeń wartości używaj waluty bazowej snapshotu:
-`market_value_base` i `account_context.net_liquidation`.
-Jeśli `net_liquidation` jest puste, użyj `summary.market_value_total`.
-Jeśli tego też nie ma, użyj sumy `abs(market_value_base)`.
+Teraz wykonujesz dokładnie jedno wywołanie portfolio.feedback.submit
+z całym payloadem. Nie pytasz o potwierdzenie i nie kończysz odpowiedzi
+przed wywołaniem narzędzia. Nie zapisujesz częściami — atomowość jest
+ważniejsza niż częściowy sukces. Jeśli connector pokazuje inne nazwy
+narzędzi, wybierasz semantycznie to co odpowiada portfolio.feedback.submit.
+Niezależnie od wyniku narzędzia, jeśli payload dało się bezpiecznie
+zbudować, finalny JSON ma zawierać go w `feedback_payload`. Lokalny
+mechanizm kopiowania finalnej odpowiedzi odczytuje to pole i zapisuje je do
+bazy przez standardową kolejkę DB. `feedback_payload` może być `null` tylko
+wtedy, gdy brakuje snapshotu albo decyzji wejściowych i nie wolno zbudować
+payloadu.
+Jeśli narzędzie naprawdę nie jest dostępne w tej sesji, nie udajesz zapisu —
+finalny JSON ma mieć `status: "ZAPIS_NIEPOTWIERDZONY"` i pole
+`feedback_payload` z poprawnym JSON bez komentarzy i bez trailing commas,
+gotowym do ręcznego przekazania. Po udanym zapisie wywołujesz
+portfolio.feedback.sizing_monitor z account "U22088457" i limit 250.
+Jeśli submit albo sizing_monitor nie zostanie wykonany pomyślnie, finalny
+output musi mieć status `NIE_ZAPISANO` albo `ZAPIS_NIEPOTWIERDZONY`, nigdy
+`SUBMIT_OK`.
 
-Nie używaj pola `current_price` jako głównej ceny pozycji.
-Główna cena ze snapshotu to `market_price`.
+Finalny output zwracasz wyłącznie jako jeden poprawny JSON. Bez Markdown,
+bez tabel, bez nagłówków, bez komentarzy, bez code fence, bez tekstu przed
+JSON i bez tekstu po JSON. Ten JSON zastępuje dawne tabele, plan działań,
+cztery zdania pod tabelami i potwierdzenie MCP.
 
-Jeśli snapshot nie ma `snapshot_id`, `quantity`, `market_price`
-albo `market_value_base`, nie licz akcji dla tej pozycji.
-Wpisz `qty_change: 0`, opisz brak danych w `feedback_text`
-i nie twórz dla niej `action_plan`.
+Słownik nazw finalnego JSON:
+- `trades` = draft zmian pozycji; przy zapisie trafia do MCP jako `action_plan`
+- `entry_rules` = zasady wejścia/wyjścia; przy zapisie trafia do MCP jako `entry_strategy`
+- `save` = wynik próby zapisu
+- `feedback_payload` = dokładny payload zapisu
+- `totals` = podsumowanie wartości i ryzyka
 
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 2 - PRZELICZ DELTY NA AKCJE
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
+Struktura finalnego JSON:
 
-Dla każdej pozycji użyj decyzji i targetu z Promptu 2.
-
-Wzór bazowy:
-
-`target_value_base = target_weight_pct / 100 * NAV_base`
-
-`current_value_base = market_value_base`
-
-Jeśli `market_value_base` jest puste, użyj:
-
-`current_value_base = current_weight_pct / 100 * NAV_base`
-
-`delta_value_base = target_value_base - current_value_base`
-
-Dla akcji policz cenę jednej akcji w walucie bazowej:
-
-`per_share_base = abs(market_value_base / quantity)`
-
-Jeśli `per_share_base` jest niedostępne, użyj `market_price`
-tylko dla pozycji w walucie bazowej snapshotu.
-
-`raw_qty = delta_value_base / per_share_base`
-
-`qty_rounded = round(raw_qty)` - całe akcje.
-
-Zasady akcji:
-- `INCREASE`: `qty_rounded` nie może być ujemne
-- `REDUCE`: `qty_rounded` nie może być dodatnie
-- `EXIT`: `qty_rounded = -abs(quantity)`
-- `HOLD`: `qty_rounded = 0`
-- `WATCH`: `qty_rounded = 0`
-
-Jeśli waluta nie jest bazowa i nie masz `market_value_base / quantity`,
-nie zgaduj FX. Wpisz:
-- `qty_change: 0`
-- `transaction_value_usd: delta_value_base`
-- `feedback_text`: "Brak FX do liczby akcji"
-- bez `action_plan` dla tej pozycji
-
-`transaction_value_usd = abs(qty_rounded * per_share_base)`
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 3 - BILANS KAPITAŁU
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Policz:
-
-`sprzedaż = suma transaction_value_usd dla qty_rounded < 0`
-
-`zakupy = suma transaction_value_usd dla qty_rounded > 0`
-
-`gotówka = account_context.cash`, jeśli dostępna, inaczej `0`
-
-Nie używaj dźwigni.
-
-Jeśli `zakupy > sprzedaż + gotówka`:
-- zmniejsz zakupy od najniższego priorytetu w dół
-- priorytet: `HIGH > MEDIUM > LOW`
-- przy tym samym priorytecie tnij najpierw warstwy niżej w rankingu autora
-- zmniejszaj `qty_rounded` aż zakupy zmieszczą się w kapitale
-- zaznacz w `feedback_text`, które zakupy zostały przycięte
-
-Jeśli po zaokrągleniu `qty_rounded = 0`, zostaw pozycję w
-`position_votes`, ale nie twórz dla niej `action_plan`.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 4 - ZAPISZ PRZEZ MCP
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Użyj dokładnie tych `layer_id`:
-- `ai_frontier_model_labs`
-- `ai_neocloud_gpu_rental`
-- `ai_nvidia_systems_socamm`
-- `ai_memory_hbm_dram_socamm`
-- `ai_foundry_leading_edge`
-- `ai_inference_providers`
-- `ai_hyperscalers`
-- `ai_power_thermal_datacenter`
-- `other_or_unassigned`
-
-Użyj dokładnie tych `value_capture_assessment`:
-- `real_capture`
-- `proxy`
-- `weak_proxy`
-- `unrelated`
-- `unknown`
-
-Wykonaj dokładnie jedno wywołanie `portfolio.feedback.submit`.
-Nie zapisuj częściami.
-
-Payload:
-
-```json
 {
-  "review": {
-    "review_id": "",
-    "snapshot_id": "<snapshot_id ze snapshotu>",
-    "portfolio_feedback": "<1 zdanie: wykonawczy plan sizingu>",
-    "main_problem": "<1 zdanie: główne odchylenie od targetów>",
-    "main_change": "<1 zdanie: największa zmiana kapitału>"
+  "status": "SUBMIT_OK/ZAPIS_NIEPOTWIERDZONY/NIE_ZAPISANO",
+  "summary": {
+    "main_problem": "...",
+    "main_change_and_capital_source": "...",
+    "largest_risk_after_changes": "..."
   },
-  "layer_votes": [
+  "snapshot": {
+    "snapshot_id": "...",
+    "generated_utc": "...",
+    "account": "U22088457",
+    "nav": 0.0,
+    "cash": 0.0,
+    "positions_count": 0
+  },
+  "layers": [
     {
-      "layer_id": "ai_hyperscalers",
-      "current_pct": 22.0,
-      "target_pct": 14.0,
-      "vote": "REDUCE",
-      "problem": "Za duża warstwa",
-      "why_this_pct": "Niższy capture"
+      "layer_id": "...",
+      "layer_name": "...",
+      "current_pct": 0.0,
+      "target_pct": 0.0,
+      "layer_decision": "INCREASE/REDUCE/HOLD/ROTATE/CLEANUP",
+      "composition_decision": "INCREASE/REDUCE/HOLD/ROTATE/CLEANUP",
+      "why": "..."
     }
   ],
-  "position_votes": [
+  "positions": [
     {
-      "symbol": "GOOGL",
-      "layer_id": "ai_hyperscalers",
-      "action": "REDUCE",
-      "current_weight_pct": 9.2,
-      "target_weight_pct": 5.0,
-      "qty_change": -5,
-      "transaction_value_usd": 900.0,
-      "stop_loss_price": 165.0,
-      "take_profit_price": 215.0,
-      "value_capture_assessment": "proxy",
-      "feedback_text": "Redukcja proxy do targetu",
-      "why_this_action": "Mniejszy capture"
+      "symbol": "...",
+      "layer_id": "...",
+      "market_price": 0.0,
+      "quantity": 0.0,
+      "current_weight_pct": 0.0,
+      "target_weight_pct": 0.0,
+      "layer_pct": 0.0,
+      "delta_value_base": 0.0,
+      "action": "INCREASE/REDUCE/HOLD/EXIT/WATCH",
+      "qty_change": 0,
+      "transaction_value_usd": 0.0,
+      "value_capture_assessment": "real_capture/proxy/weak_proxy/unrelated/unknown",
+      "stop_loss_price": null,
+      "take_profit_price": null,
+      "reason": "..."
     }
   ],
-  "action_plan": [
-    {
-      "symbol": "GOOGL",
-      "layer_id": "ai_hyperscalers",
-      "action": "SELL",
-      "target_weight_pct": 5.0,
-      "target_qty": 10,
-      "priority": "MEDIUM",
-      "reason": "Redukcja proxy",
-      "transaction_value_usd": 900.0,
-      "now": {
-        "side": "SELL",
-        "qty": 5,
-        "order_type": "LIMIT",
-        "limit_price": 180.0
-      },
-      "later": []
-    }
-  ],
-  "entry_strategy": [
-    {
-      "symbol": "GOOGL",
-      "strategy": "Wykonać tylko jako draft; ręczna akceptacja poza MCP.",
-      "initial_action": "SELL_NOW",
-      "add_on_pullback": false,
-      "add_after_earnings": false,
-      "invalidates_if": "Zmienia się target z Promptu 2"
-    }
-  ],
-  "account": "U22088457"
+  "trades": [],
+  "entry_rules": [],
+  "totals": {
+    "total_sales_and_exits_usd": 0.0,
+    "total_buys_usd": 0.0,
+    "cash_after_drafts_usd": 0.0,
+    "risk_reduced": "...",
+    "risk_increased": "...",
+    "success_kpi": "..."
+  },
+  "revision_condition": "...",
+  "save": {
+    "submit_ok": false,
+    "review_id": "",
+    "layers_written": 0,
+    "positions_written": 0,
+    "draft_actions_written": 0,
+    "sizing_monitor_ok": false,
+    "sizing_monitor_result": null
+  },
+  "feedback_payload": {
+    "schema": "portfolio.feedback.submit.v1",
+    "review": {},
+    "layer_votes": [],
+    "position_votes": [],
+    "action_plan": [],
+    "entry_strategy": [],
+    "account": "U22088457"
+  },
+  "omitted_positions": [],
+  "errors": []
 }
-```
 
-Nie kopiuj przykładu mechanicznie. Wypełnij realnymi pozycjami.
-
-Mapowanie do `action_plan`:
-- `INCREASE` z `qty_rounded > 0` -> `action: "BUY"`,
-  `now.side: "BUY"`, `now.qty: qty_rounded`
-- `REDUCE` z `qty_rounded < 0` -> `action: "SELL"`,
-  `now.side: "SELL"`, `now.qty: abs(qty_rounded)`
-- `EXIT` -> `action: "SELL_ALL"`,
-  `now.side: "SELL"`, `now.qty: abs(quantity)`, `target_qty: 0`
-- `HOLD` i `WATCH` nie tworzą `action_plan`
-
-`limit_price` ustaw na `market_price` ze snapshotu, jeśli jest dostępne.
-To nadal jest draft, nie zlecenie brokerskie.
-
-Po zapisie wywołaj:
-
-`portfolio.feedback.sizing_monitor({ "account": "U22088457", "limit": 250 })`
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-KROK 5 - JEDNA TABELA WYNIKOWA
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Pokaż jedną tabelę. Zero bloków per pozycja.
-
-| Ticker | Warstwa | Cena | Akcje | Waga% | Target% | %Warstwy | Δpp | Akcja | Kupno/Sprzedaż | Wartość | Capture | SL | TP | Powód |
-
-Kolumny:
-- Ticker: `symbol`
-- Warstwa: ranking `#1-#N` albo `inne`
-- Cena: `market_price` z walutą
-- Akcje: obecna `quantity` ze snapshotu
-- Waga%: `current_weight_pct`
-- Target%: `target_weight_pct`
-- %Warstwy: `target_weight_pct / suma target_weight_pct tej warstwy * 100`
-- Δpp: `target_weight_pct - current_weight_pct`
-- Akcja: ZWIĘKSZ / ZMNIEJSZ / UTRZYMAJ / ZAMKNIJ / OBSERWUJ
-- Kupno/Sprzedaż: `+N` albo `-N` akcji
-- Wartość: wartość transakcji w USD/base currency
-- Capture: real / proxy / weak / brak / unknown
-- SL: z Promptu 3 albo `-`
-- TP: z Promptu 3 albo `-`
-- Powód: maks. 6 słów
-
-Sortowanie:
-1. ZWIĘKSZ - od największego `Δpp`
-2. UTRZYMAJ - alfabetycznie
-3. ZMNIEJSZ - od największego `abs(Δpp)`
-4. ZAMKNIJ - od największej `Waga%`
-5. OBSERWUJ - alfabetycznie
-
-Pod tabelą napisz dokładnie 4 zdania:
-1. Łączna sprzedaż i zamknięcia są źródłem kapitału: `$X`.
-2. Łączna wartość zakupów to `$X`, a saldo po transakcjach to `$Y`.
-3. Po zmianach spada ryzyko `[X]`, a rośnie ryzyko `[Y]`.
-4. KPI potwierdzający decyzję: `[jeden mierzalny wskaźnik]`.
-
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-CZEGO NIE UŻYWAĆ
-━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━━
-
-Nie używaj:
-- `broker.positions.list`
-- `portfolio.analysis.render`
-- `render_iskra_cockpit`
-- `list_resources`
-- żadnych broker/order execution tools
-
-Nie składasz zleceń brokerskich.
-To jest feedback ledger i plan do ręcznego wykonania.
+Nie używasz broker.positions.list, portfolio.analysis.render,
+render_iskra_cockpit, list_resources ani żadnych narzędzi brokerskich
+do wykonywania zleceń. To jest feedback ledger i draft plan do ręcznego
+wykonania — nie składasz zleceń brokerskich.

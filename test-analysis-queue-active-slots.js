@@ -371,10 +371,10 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
   assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-2']);
   assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), []);
-  assert.deepStrictEqual(context.closedRuns, ['run-1']);
+  assert.deepStrictEqual(context.closedRuns, []);
 }
 
-async function testSavedProcessWithMissingLocalContextClosesWindow() {
+async function testSavedProcessWithMissingLocalContextKeepsWindowOpen() {
   context = buildScenarioContext();
   const now = Date.now();
   context.analysisQueueState = {
@@ -411,14 +411,14 @@ async function testSavedProcessWithMissingLocalContextClosesWindow() {
   context.closedRuns = [];
   await context.reconcileAnalysisQueueState('saved_missing_context');
 
-  assert.deepStrictEqual(context.closedRuns, ['run-1']);
+  assert.deepStrictEqual(context.closedRuns, []);
   assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
   assert(
     context.upserts.some((entry) => (
       entry.runId === 'run-1'
       && entry.patch.slotReleaseReason === 'final_stage_local_saved_after_local_context_loss'
     )),
-    'Saved process that lost its local tab should release and request process-window close.'
+    'Saved process that lost its local tab should release without requesting process-window close.'
   );
 }
 
@@ -696,6 +696,7 @@ function buildScenarioContext() {
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
+    'isProcessWindowAutoCloseEnabled',
     'buildStaleQueueReleasePatch',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
@@ -733,7 +734,7 @@ async function main() {
   await testClosedWindowDoesNotConsumeSlot();
   await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();
   await testCompletedPendingDispatchKeepsSlotReserved();
-  await testSavedProcessWithMissingLocalContextClosesWindow();
+  await testSavedProcessWithMissingLocalContextKeepsWindowOpen();
   await testLocalSaveFailureKeepsCompletedProcessWindowOpen();
   await testDuplicateActiveJobsReleaseSupersededContext();
   await testManualPdfJobsRespectDedicatedConcurrencyCap();

@@ -43,6 +43,10 @@ const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
 const ANALYSIS_TYPE_COMPANY = 'company';
 const ANALYSIS_TYPE_PORTFOLIO = 'portfolio';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA = 'portfolio.prompt_first_response.v1';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE = 'portfolio_prompt1_value_chain_ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE = 'Portfolio Prompt 1: Value Chain Ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_REASON = 'portfolio_prompt1_value_chain_ranking';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
@@ -203,6 +207,8 @@ const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   alarmName: 'completed-process-persistence-retry'
 };
 const PROCESS_WINDOW_CLOSE_RETRY = {
+  // Process tabs/windows are user-visible work surfaces; keep them open after queue/save completion.
+  enabled: false,
   initialDelayMs: 1500,
   maxDelayMs: 60 * 1000,
   maxAttempts: 24,
@@ -4472,10 +4478,14 @@ async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, option
 
   const createdCount = results.filter((entry) => entry.created === true).length;
   const idempotentCount = results.filter((entry) => entry.idempotent === true).length;
+  const submitError = results.length > 0
+    ? ''
+    : (failures.find((entry) => typeof entry?.error === 'string' && entry.error.trim())?.error || 'remote_submit_failed');
   return {
     success: results.length > 0,
     remote: true,
     runnerId: safeRunnerId,
+    error: submitError,
     batchId: typeof batch?.batchId === 'string' ? batch.batchId : '',
     submissionId: typeof batch?.submissionId === 'string' ? batch.submissionId : '',
     submittedCount: results.length,
@@ -8146,6 +8156,10 @@ async function getActiveProcessForTab(tabId) {
 
 function removeWindowSafe(windowId) {
   return new Promise((resolve) => {
+    if (!isProcessWindowAutoCloseEnabled()) {
+      resolve(false);
+      return;
+    }
     if (!Number.isInteger(windowId)) {
       resolve(false);
       return;
@@ -8184,6 +8198,10 @@ function isChromeMissingTabOrWindowError(message, target = '') {
 
 function removeTabSafe(tabId) {
   return new Promise((resolve) => {
+    if (!isProcessWindowAutoCloseEnabled()) {
+      resolve(false);
+      return;
+    }
     if (!Number.isInteger(tabId)) {
       resolve(false);
       return;
@@ -9281,6 +9299,15 @@ function hasProcessCloseableSavedResponse(process) {
   return process?.completedResponseSaved === true;
 }
 
+function isProcessWindowAutoCloseEnabled() {
+  try {
+    return typeof PROCESS_WINDOW_CLOSE_RETRY !== 'undefined'
+      && PROCESS_WINDOW_CLOSE_RETRY?.enabled === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   if (!job || typeof job !== 'object') {
     return { action: 'release', closeWindow: false, reason: 'invalid_job' };
@@ -9301,7 +9328,7 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     if (delivery.confirmed === true) {
       return {
         action: 'release',
-        closeWindow: true,
+        closeWindow: isProcessWindowAutoCloseEnabled(),
         reason: 'dispatch_confirmed',
         slotReleaseReason: 'dispatch_confirmed'
       };
@@ -9316,7 +9343,7 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     }
     return {
       action: 'release',
-      closeWindow: true,
+      closeWindow: isProcessWindowAutoCloseEnabled(),
       reason: 'dispatch_pending',
       slotReleaseReason: 'final_stage_local_saved'
     };
@@ -9327,7 +9354,7 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     if (hasProcessCloseableSavedResponse(process)) {
       return {
         action: 'release',
-        closeWindow: true,
+        closeWindow: isProcessWindowAutoCloseEnabled(),
         reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending',
         slotReleaseReason: delivery.confirmed === true
           ? 'dispatch_confirmed_after_local_context_loss'
@@ -9578,6 +9605,9 @@ async function findOpenProcessTabByConversationUrl(process) {
 }
 
 async function attemptProcessWindowClose(process) {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    return { closed: false, reason: 'process_window_auto_close_disabled', closeMode: '' };
+  }
   if (!process || typeof process !== 'object') {
     return { closed: false, reason: 'invalid_process', closeMode: '' };
   }
@@ -9705,6 +9735,13 @@ function clearProcessWindowCloseRetry(runId = '', options = {}) {
 }
 
 function resolveProcessWindowCloseRetryPlan(process) {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    return {
+      needed: false,
+      reason: 'process_window_auto_close_disabled',
+      delivery: process && typeof process === 'object' ? getProcessQueueDeliveryState(process) : null
+    };
+  }
   if (!process || typeof process !== 'object') {
     return { needed: false, reason: 'invalid_process', delivery: null };
   }
@@ -9745,6 +9782,15 @@ function resolveProcessWindowCloseRetryPlan(process) {
 }
 
 function scheduleProcessWindowCloseRetriesForSnapshot(records = [], origin = 'registry_ready') {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
+    processWindowCloseRetryTimersByRunId.clear();
+    processWindowCloseRetryDueAtByRunId.clear();
+    processWindowCloseRetryAttemptCountByRunId.clear();
+    processWindowCloseRetryInFlight.clear();
+    void syncProcessWindowCloseRetryAlarm();
+    return;
+  }
   const snapshot = Array.isArray(records) ? records : [];
   snapshot.forEach((process) => {
     scheduleProcessWindowCloseRetry(process, {
@@ -9762,6 +9808,10 @@ function scheduleProcessWindowCloseRetry(processOrRunId, options = {}) {
     ? processOrRunId.trim()
     : (typeof process?.id === 'string' ? process.id.trim() : '');
   if (!normalizedRunId) return false;
+  if (!isProcessWindowAutoCloseEnabled()) {
+    clearProcessWindowCloseRetry(normalizedRunId);
+    return false;
+  }
 
   const currentProcess = process || processRegistry.get(normalizedRunId) || null;
   const plan = resolveProcessWindowCloseRetryPlan(currentProcess);
@@ -9819,6 +9869,10 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
   const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
   if (!normalizedRunId) {
     return { success: false, reason: 'missing_run_id' };
+  }
+  if (!isProcessWindowAutoCloseEnabled()) {
+    clearProcessWindowCloseRetry(normalizedRunId);
+    return { success: true, skipped: true, closed: false, reason: 'process_window_auto_close_disabled' };
   }
   if (processWindowCloseRetryInFlight.has(normalizedRunId)) {
     return { success: false, skipped: true, reason: 'retry_in_flight' };
@@ -9968,6 +10022,10 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
 async function closeProcessWindowAfterQueueSuccess(process, options = {}) {
   if (!process || typeof process !== 'object') return false;
   const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  if (!isProcessWindowAutoCloseEnabled()) {
+    if (runId) clearProcessWindowCloseRetry(runId);
+    return false;
+  }
   const plan = resolveProcessWindowCloseRetryPlan(process);
   if (!plan.needed) {
     if (runId) clearProcessWindowCloseRetry(runId);
@@ -10473,6 +10531,20 @@ async function runDueCompletedProcessPersistenceRetries(origin = 'alarm') {
 }
 
 async function runDueProcessWindowCloseRetries(origin = 'alarm') {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
+    processWindowCloseRetryTimersByRunId.clear();
+    processWindowCloseRetryDueAtByRunId.clear();
+    processWindowCloseRetryAttemptCountByRunId.clear();
+    processWindowCloseRetryInFlight.clear();
+    await syncProcessWindowCloseRetryAlarm().catch(() => {});
+    return {
+      success: true,
+      attempted: 0,
+      due: 0,
+      reason: 'process_window_auto_close_disabled'
+    };
+  }
   await ensureProcessRegistryReady();
   const nowTs = Date.now();
   const dueRunIds = new Set();
@@ -11327,7 +11399,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
               slotReleaseReason: closeSavedMissingContextWindow
                 ? 'final_stage_local_saved_after_local_context_loss'
                 : 'local_context_missing',
-              closeWindow: closeSavedMissingContextWindow
+              closeWindow: closeSavedMissingContextWindow && isProcessWindowAutoCloseEnabled()
             });
             const stalePatch = await buildStaleQueueReleasePatch(process, now);
             if (stalePatch) {
@@ -12554,13 +12626,13 @@ async function stopSingleProcess(process, options = {}) {
   }
 
   let tabClosed = false;
-  if (processTabId !== null) {
+  if (isProcessWindowAutoCloseEnabled() && processTabId !== null) {
     tabClosed = await removeTabSafe(processTabId);
   }
 
   // Fallback: close the whole window only when it is a dedicated process window
   // with no extra tabs (to avoid closing source/info windows).
-  if (!tabClosed && processWindowId !== null && processWindowId !== preserveWindowId) {
+  if (isProcessWindowAutoCloseEnabled() && !tabClosed && processWindowId !== null && processWindowId !== preserveWindowId) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
     const validTabs = Array.isArray(tabsInWindow?.tabs)
       ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
@@ -14277,7 +14349,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   const promptsToSend = PROMPTS_COMPANY.slice(effectiveStartIndex);
   const cleanedPrompts = [...promptsToSend];
   if (cleanedPrompts[0]) {
-    cleanedPrompts[0] = cleanedPrompts[0].replace('{{articlecontent}}', '').trim();
+    cleanedPrompts[0] = removeSourceTextPlaceholdersFromPromptTemplate(cleanedPrompts[0]);
   }
 
   const payload = '';
@@ -18321,6 +18393,19 @@ function compactWhitespace(text) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+const SOURCE_TEXT_PLACEHOLDER_REGEX = /\{\{\s*(?:articlecontent|article)\s*\}\}/gi;
+
+function injectSourceTextIntoPromptTemplate(promptText, sourceText) {
+  const template = typeof promptText === 'string' ? promptText : '';
+  const source = typeof sourceText === 'string' ? sourceText : '';
+  return template.replace(SOURCE_TEXT_PLACEHOLDER_REGEX, () => source);
+}
+
+function removeSourceTextPlaceholdersFromPromptTemplate(promptText) {
+  const template = typeof promptText === 'string' ? promptText : '';
+  return template.replace(SOURCE_TEXT_PLACEHOLDER_REGEX, '').trim();
+}
+
 function isChatGptUrl(url) {
   if (typeof url !== 'string') return false;
   const candidate = url.trim();
@@ -19094,12 +19179,45 @@ async function ensureCompanyPromptsReady() {
   return Array.isArray(PROMPTS_COMPANY) && PROMPTS_COMPANY.length > 0;
 }
 
-async function ensurePortfolioPromptsReady() {
-  if (Array.isArray(PROMPTS_PORTFOLIO) && PROMPTS_PORTFOLIO.length > 0) {
-    return true;
+function getPortfolioPromptSnapshotStatus(promptChain = PROMPTS_PORTFOLIO) {
+  const chain = Array.isArray(promptChain) ? promptChain : [];
+  const promptTwo = typeof chain[1] === 'string' ? chain[1] : '';
+  const snapshotMatch = promptTwo.match(
+    new RegExp('^PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN\\n([\\s\\S]*?)\\nPORTFOLIO_SNAPSHOT_FROM_DB_END$', 'm')
+  );
+
+  if (!snapshotMatch) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_missing' };
   }
+
+  const snapshotBlock = snapshotMatch[1];
+  if (new RegExp('"source"\\s*:\\s*"placeholder_until_snapshot_refresh"').test(snapshotBlock)) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_placeholder' };
+  }
+  if (new RegExp('"positions"\\s*:\\s*\\[\\s*\\]').test(snapshotBlock)) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_empty_positions' };
+  }
+  if (!new RegExp('"generated_utc"\\s*:\\s*"[^"]+"').test(snapshotBlock)) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_missing_timestamp' };
+  }
+
+  return { ok: true, reason: 'portfolio_prompt_snapshot_ready' };
+}
+
+async function ensurePortfolioPromptsReady() {
+  // Portfolio Prompt 2 embeds the latest DB snapshot, so refresh from the
+  // bundled prompt file before each portfolio launch instead of relying on
+  // a startup-only in-memory copy.
   await loadPrompts();
-  return Array.isArray(PROMPTS_PORTFOLIO) && PROMPTS_PORTFOLIO.length > 0;
+  if (!Array.isArray(PROMPTS_PORTFOLIO) || PROMPTS_PORTFOLIO.length === 0) {
+    return false;
+  }
+  const snapshotStatus = getPortfolioPromptSnapshotStatus(PROMPTS_PORTFOLIO);
+  if (!snapshotStatus.ok) {
+    console.warn('[watchlist] Portfolio prompts snapshot not ready:', snapshotStatus.reason);
+    return false;
+  }
+  return true;
 }
 
 async function ensurePromptChainReadyForAnalysisType(analysisType) {
@@ -19120,7 +19238,7 @@ function buildCompanyPromptChainForResume(startIndex) {
 
   const normalized = [...chain];
   if (typeof normalized[0] === 'string') {
-    normalized[0] = normalized[0].replace('{{articlecontent}}', '').trim();
+    normalized[0] = removeSourceTextPlaceholdersFromPromptTemplate(normalized[0]);
   }
   return normalized;
 }
@@ -19417,7 +19535,7 @@ function tokenizeForCompanyPromptMatch(text) {
 
 function normalizeCompanyPromptTemplate(promptText) {
   const raw = typeof promptText === 'string' ? promptText : '';
-  return compactWhitespace(raw.replace(/\{\{\s*articlecontent\s*\}\}/gi, ' '));
+  return compactWhitespace(raw.replace(SOURCE_TEXT_PLACEHOLDER_REGEX, ' '));
 }
 
 function buildCompanyPromptMatchRecords(prompts) {
@@ -21969,6 +22087,7 @@ function summarizeWatchlistDispatchPayload(payload) {
     schema: typeof payload.schema === 'string' ? payload.schema : '',
     responseId: typeof payload.responseId === 'string' ? payload.responseId : '',
     runId: typeof payload.runId === 'string' ? payload.runId : '',
+    sourceRecordSuffix: typeof payload.sourceRecordSuffix === 'string' ? payload.sourceRecordSuffix : '',
     analysisType: typeof payload.analysisType === 'string' ? payload.analysisType : '',
     source: typeof payload.source === 'string' ? payload.source : '',
     sourceTitle: typeof payload.sourceTitle === 'string' ? payload.sourceTitle : '',
@@ -21979,6 +22098,7 @@ function summarizeWatchlistDispatchPayload(payload) {
     textFingerprint: textFingerprint(text),
     hasConversationUrl: !!(typeof payload.conversationUrl === 'string' && payload.conversationUrl.trim()),
     conversationLogCount,
+    stageReason: typeof payload.stage?.selected_response_reason === 'string' ? payload.stage.selected_response_reason : '',
     hasDecisionRecord: !!decisionRecord,
     decisionRecordFormat: typeof decisionRecord?.recordFormat === 'string' ? decisionRecord.recordFormat : ''
   };
@@ -22168,7 +22288,203 @@ function extractStructuredWatchlistResponseFromText(rawText) {
   return null;
 }
 
+function extractPortfolioFinalResponseFromText(rawText) {
+  const candidates = extractStructuredWatchlistJsonCandidates(rawText);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        continue;
+      }
+      const schema = normalizeStructuredWatchlistValue(parsed.schema).toLowerCase();
+      const status = normalizeStructuredWatchlistValue(parsed.status).toUpperCase();
+      const hasPortfolioShape = (
+        parsed.save && typeof parsed.save === 'object' && !Array.isArray(parsed.save)
+      ) || (
+        parsed.totals && typeof parsed.totals === 'object' && !Array.isArray(parsed.totals)
+      ) || (
+        Object.prototype.hasOwnProperty.call(parsed, 'feedback_payload')
+      ) || (
+        parsed.mcp_confirmation && typeof parsed.mcp_confirmation === 'object' && !Array.isArray(parsed.mcp_confirmation)
+      ) || (
+        parsed.execution_summary && typeof parsed.execution_summary === 'object' && !Array.isArray(parsed.execution_summary)
+      ) || (
+        Object.prototype.hasOwnProperty.call(parsed, 'mcp_feedback_json')
+      ) || (
+        Array.isArray(parsed.positions) && Array.isArray(parsed.layers)
+      );
+      if ((schema === 'portfolio.final_response.v1' || status) && hasPortfolioShape) {
+        return {
+          schema: schema || 'portfolio.final_response.v1',
+          payload: parsed,
+          text: candidate
+        };
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+  return null;
+}
+
+function cloneJsonCompatibleValue(value) {
+  if (value === null || value === undefined) return value;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (_) {
+    return value;
+  }
+}
+
+function parseJsonObjectCandidate(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+  const candidates = extractStructuredWatchlistJsonCandidates(value);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (_) {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+function isPortfolioFeedbackSubmitPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const schema = normalizeStructuredWatchlistValue(payload.schema).toLowerCase();
+  const tool = normalizeStructuredWatchlistValue(payload.tool).toLowerCase();
+  const hasReview = payload.review && typeof payload.review === 'object' && !Array.isArray(payload.review);
+  const hasFeedbackRows = (
+    Array.isArray(payload.layer_votes)
+    || Array.isArray(payload.position_votes)
+    || Array.isArray(payload.action_plan)
+    || Array.isArray(payload.actions)
+    || Array.isArray(payload.trades)
+    || Array.isArray(payload.entry_strategy)
+    || Array.isArray(payload.entry_rules)
+  );
+  return schema === 'portfolio.feedback.submit.v1'
+    || tool === 'portfolio.feedback.submit'
+    || (hasReview && hasFeedbackRows);
+}
+
+function normalizePortfolioFeedbackSubmitDispatchPayload(rawPayload, meta) {
+  const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const payload = parseJsonObjectCandidate(rawPayload);
+  if (!isPortfolioFeedbackSubmitPayload(payload)) return null;
+
+  const review = payload.review && typeof payload.review === 'object' && !Array.isArray(payload.review)
+    ? cloneJsonCompatibleValue(payload.review)
+    : null;
+  const layerVotes = Array.isArray(payload.layer_votes) ? cloneJsonCompatibleValue(payload.layer_votes) : [];
+  const positionVotes = Array.isArray(payload.position_votes) ? cloneJsonCompatibleValue(payload.position_votes) : [];
+  const actionPlan = Array.isArray(payload.action_plan)
+    ? cloneJsonCompatibleValue(payload.action_plan)
+    : (
+      Array.isArray(payload.actions)
+        ? cloneJsonCompatibleValue(payload.actions)
+        : (Array.isArray(payload.trades) ? cloneJsonCompatibleValue(payload.trades) : [])
+    );
+  const entryStrategy = Array.isArray(payload.entry_strategy)
+    ? cloneJsonCompatibleValue(payload.entry_strategy)
+    : (Array.isArray(payload.entry_rules) ? cloneJsonCompatibleValue(payload.entry_rules) : []);
+  if (!review || (layerVotes.length === 0 && positionVotes.length === 0 && actionPlan.length === 0)) {
+    return null;
+  }
+
+  const baseRunId = normalizeStructuredWatchlistValue(payload.runId || payload.run_id || safeMeta.runId);
+  const baseResponseId = normalizeStructuredWatchlistValue(payload.responseId || payload.response_id || safeMeta.responseId);
+  const responseId = baseResponseId
+    ? (baseResponseId.includes('portfolio_feedback_submit') ? baseResponseId : `${baseResponseId}:portfolio_feedback_submit`)
+    : generateResponseId(baseRunId);
+  const account = normalizeStructuredWatchlistValue(payload.account || safeMeta.account || 'U22088457');
+  const source = normalizeStructuredWatchlistValue(payload.source || safeMeta.source, 'Portfolio feedback submit payload');
+  const sourceTitle = normalizeStructuredWatchlistValue(payload.sourceTitle || payload.source_title || safeMeta.sourceTitle, source);
+  const conversationUrl = normalizeChatConversationUrl(
+    normalizeStructuredWatchlistValue(payload.conversationUrl || payload.conversation_url || safeMeta.conversationUrl)
+  );
+  const stage = payload.stage && typeof payload.stage === 'object' && !Array.isArray(payload.stage)
+    ? cloneJsonCompatibleValue(payload.stage)
+    : (
+      safeMeta.stage && typeof safeMeta.stage === 'object' && !Array.isArray(safeMeta.stage)
+        ? cloneJsonCompatibleValue(safeMeta.stage)
+        : {}
+    );
+  stage.selected_response_kind = 'portfolio_feedback_submit';
+
+  const submitPayload = {
+    schema: 'portfolio.feedback.submit.v1',
+    responseId,
+    runId: baseRunId || null,
+    text: '',
+    source,
+    sourceTitle,
+    analysisType: 'portfolio_feedback_submit',
+    timestamp: payload.timestamp ?? safeMeta.timestamp ?? Date.now(),
+    account,
+    review,
+    layer_votes: layerVotes,
+    position_votes: positionVotes,
+    action_plan: actionPlan,
+    entry_strategy: entryStrategy,
+    stage
+  };
+  if (conversationUrl) {
+    submitPayload.conversationUrl = conversationUrl;
+  }
+  const conversationLogs = normalizeConversationLogSnapshot(
+    payload.conversationLogs || payload.conversation_logs || safeMeta.conversationLogs,
+    RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+  );
+  if (conversationLogs.length > 0) {
+    submitPayload.conversationLogs = conversationLogs;
+    submitPayload.conversationLogCount = conversationLogs.length;
+  }
+  submitPayload.text = JSON.stringify({
+    schema: submitPayload.schema,
+    account: submitPayload.account,
+    review: submitPayload.review,
+    layer_votes: submitPayload.layer_votes,
+    position_votes: submitPayload.position_votes,
+    action_plan: submitPayload.action_plan,
+    entry_strategy: submitPayload.entry_strategy
+  });
+  return submitPayload;
+}
+
+function extractPortfolioFeedbackSubmitPayloadFromFinalResponse(rawText, meta) {
+  const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const finalResponse = parseJsonObjectCandidate(rawText);
+  if (!finalResponse) return null;
+  const direct = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse, safeMeta);
+  if (direct) return direct;
+  if (Object.prototype.hasOwnProperty.call(finalResponse, 'feedback_payload')) {
+    return normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.feedback_payload, safeMeta);
+  }
+  if (!Object.prototype.hasOwnProperty.call(finalResponse, 'mcp_feedback_json')) {
+    return null;
+  }
+  return normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.mcp_feedback_json, safeMeta);
+}
+
 function buildResponseContractValidation(rawText) {
+  const portfolioFinalResponse = extractPortfolioFinalResponseFromText(rawText);
+  if (portfolioFinalResponse) {
+    return {
+      valid: true,
+      kind: 'portfolio.final_response.v1',
+      portfolioFinalResponse
+    };
+  }
+
   const structuredResponse = extractStructuredWatchlistResponseFromText(rawText);
   if (structuredResponse) {
     return {
@@ -22280,10 +22596,21 @@ function mapDispatchDecisionRecord(record) {
 
 function normalizeWatchlistDispatchPayload(response) {
   if (!response || typeof response !== 'object') return null;
+  const portfolioFeedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(response);
+  if (portfolioFeedbackPayload) {
+    return portfolioFeedbackPayload;
+  }
   const text = typeof response.text === 'string' ? response.text : '';
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
+  const customSchema = normalizeStructuredWatchlistValue(response.schema || response.responseSchema);
+  const unstructuredSchema = customSchema && customSchema.toLowerCase() !== 'economist.response.v2'
+    ? customSchema
+    : 'economist.response.v1';
+  const sourceRecordSuffix = normalizeStructuredWatchlistValue(
+    response.sourceRecordSuffix || response.source_record_suffix
+  );
   const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
     ? DecisionContractUtils.validateDecisionContractText(text)
     : null;
@@ -22395,7 +22722,7 @@ function normalizeWatchlistDispatchPayload(response) {
   const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
 
   const payload = {
-    schema: structuredPayload ? 'economist.response.v2' : 'economist.response.v1',
+    schema: structuredPayload ? 'economist.response.v2' : unstructuredSchema,
     responseId: responseId || generateResponseId(runId),
     runId: runId || null,
     text: dispatchText,
@@ -22420,6 +22747,9 @@ function normalizeWatchlistDispatchPayload(response) {
   }
   if (Number.isInteger(sourceMeta.sourceMaterialLength)) {
     payload.sourceMaterialLength = sourceMeta.sourceMaterialLength;
+  }
+  if (sourceRecordSuffix) {
+    payload.sourceRecordSuffix = sourceRecordSuffix;
   }
   if (sourceMeta.sourceMaterialStored) {
     payload.sourceMaterialStored = true;
@@ -22486,12 +22816,20 @@ function normalizeWatchlistDispatchPayload(response) {
   } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
     payload.conversationLogCount = response.conversationLogCount;
   }
+  if (response.stage && typeof response.stage === 'object' && !Array.isArray(response.stage)) {
+    payload.stage = response.stage;
+  }
   applyChatGptComputationStatePatch(payload, response);
   return payload;
 }
 
 function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const portfolioFeedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(rawPayload);
+  if (portfolioFeedbackPayload) {
+    applyChatGptComputationStatePatch(portfolioFeedbackPayload, rawPayload);
+    return portfolioFeedbackPayload;
+  }
   const rawText = typeof rawPayload.text === 'string' ? rawPayload.text : '';
   const hasStructuredRecords = Array.isArray(rawPayload.records) && rawPayload.records.length > 0;
   if (!rawText.trim() && !hasStructuredRecords) return null;
@@ -22505,6 +22843,10 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     : generateResponseId(runId);
   const source = trimProblemLogText(rawPayload.source || '', 140);
   const analysisType = trimProblemLogText(rawPayload.analysisType || '', 80);
+  const sourceRecordSuffix = trimProblemLogText(
+    rawPayload.sourceRecordSuffix || rawPayload.source_record_suffix || '',
+    120
+  );
   const sourceMeta = normalizeResponseSourceMeta(rawPayload, source);
   const structuredResponse = (() => {
     const chooseRicherStructuredPayload = (leftPayload, rightPayload) => {
@@ -22621,6 +22963,9 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   }
   if (Number.isInteger(sourceMeta.sourceMaterialLength)) {
     payload.sourceMaterialLength = sourceMeta.sourceMaterialLength;
+  }
+  if (sourceRecordSuffix) {
+    payload.sourceRecordSuffix = sourceRecordSuffix;
   }
   if (sourceMeta.sourceMaterialStored) {
     payload.sourceMaterialStored = true;
@@ -26483,6 +26828,10 @@ async function syncProcessWindowCloseRetryAlarm(nowTs = Date.now()) {
   if (!alarmName) {
     return { scheduled: false, reason: 'missing_alarm_name' };
   }
+  if (!isProcessWindowAutoCloseEnabled()) {
+    await clearAlarmSafe(alarmName);
+    return { scheduled: false, reason: 'process_window_auto_close_disabled' };
+  }
   const nextRetryAt = computeProcessRetryAlarmAt(processWindowCloseRetryDueAtByRunId, nowTs);
   if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
     await clearAlarmSafe(alarmName);
@@ -26997,6 +27346,26 @@ function pickAnalysisLaunchMetric(primaryResult, portfolioResult, key, fallback 
   return fallback;
 }
 
+function getAnalysisLaunchErrorDetail(result) {
+  if (!result || typeof result !== 'object') return '';
+  if (typeof result.error === 'string' && result.error.trim()) return result.error.trim();
+  if (typeof result.reason === 'string' && result.reason.trim()) return result.reason.trim();
+
+  const failures = Array.isArray(result.failures) ? result.failures : [];
+  for (const failure of failures) {
+    if (typeof failure?.error === 'string' && failure.error.trim()) return failure.error.trim();
+    if (typeof failure?.reason === 'string' && failure.reason.trim()) return failure.reason.trim();
+  }
+
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  for (const item of skipped) {
+    if (typeof item?.error === 'string' && item.error.trim()) return item.error.trim();
+    if (typeof item?.reason === 'string' && item.reason.trim()) return item.reason.trim();
+  }
+
+  return '';
+}
+
 function mergeAnalysisLaunchResults(primaryResult, portfolioResult = null, options = {}) {
   const primaryFallbackQueued = Number.isInteger(options?.primaryFallbackQueued)
     ? options.primaryFallbackQueued
@@ -27044,7 +27413,9 @@ function mergeAnalysisLaunchResults(primaryResult, portfolioResult = null, optio
     merged.submittedCount = primarySubmittedCount + portfolioSubmittedCount;
   }
   if (!merged.success) {
-    merged.error = primaryResult?.error || portfolioResult?.error || 'analysis_launch_failed';
+    merged.error = getAnalysisLaunchErrorDetail(primaryResult)
+      || getAnalysisLaunchErrorDetail(portfolioResult)
+      || 'analysis_launch_failed';
   }
   return merged;
 }
@@ -27055,6 +27426,24 @@ function getPromptFileNameForAnalysisType(analysisType) {
     : 'prompts-company.txt';
 }
 
+async function fetchPromptResourceText(url, cacheKey = Date.now()) {
+  const resourceUrl = `${url}${url.includes('?') ? '&' : '?'}prompt_cache_bust=${encodeURIComponent(String(cacheKey))}`;
+  let response;
+  try {
+    response = await fetch(resourceUrl, { cache: 'no-store' });
+  } catch (error) {
+    console.warn('[prompts] Cache-busted prompt fetch failed, retrying base URL:', error);
+    response = await fetch(url, { cache: 'no-store' });
+  }
+  if (!response?.ok) {
+    response = await fetch(url, { cache: 'no-store' });
+  }
+  if (!response?.ok) {
+    throw new Error(`prompt_fetch_failed:${response?.status || 'unknown'}`);
+  }
+  return response.text();
+}
+
 // Load prompts from txt files.
 async function loadPrompts() {
   try {
@@ -27062,13 +27451,10 @@ async function loadPrompts() {
 
     const companyUrl = chrome.runtime.getURL('prompts-company.txt');
     const portfolioUrl = chrome.runtime.getURL('prompts-portfolio.txt');
-    const [companyResponse, portfolioResponse] = await Promise.all([
-      fetch(companyUrl),
-      fetch(portfolioUrl)
-    ]);
+    const cacheKey = Date.now();
     const [companyText, portfolioText] = await Promise.all([
-      companyResponse.text(),
-      portfolioResponse.text()
+      fetchPromptResourceText(companyUrl, cacheKey),
+      fetchPromptResourceText(portfolioUrl, cacheKey)
     ]);
 
     // Parse in a way that tolerates UTF-8 and mojibake separator variants.
@@ -27864,6 +28250,15 @@ async function saveResponse(
     const saveOptions = options && typeof options === 'object'
       ? options
       : {};
+    const responseSchema = typeof (saveOptions.schema || saveOptions.responseSchema) === 'string'
+      && (saveOptions.schema || saveOptions.responseSchema).trim()
+      ? (saveOptions.schema || saveOptions.responseSchema).trim()
+      : '';
+    const sourceRecordSuffix = typeof (saveOptions.sourceRecordSuffix || saveOptions.source_record_suffix) === 'string'
+      && (saveOptions.sourceRecordSuffix || saveOptions.source_record_suffix).trim()
+      ? (saveOptions.sourceRecordSuffix || saveOptions.source_record_suffix).trim()
+      : '';
+    const skipProcessPersistencePatch = saveOptions.skipProcessPersistencePatch === true;
     const deferDispatchFlush = saveOptions.deferDispatchFlush === true;
     const deferredFlushReason = typeof saveOptions.deferredFlushReason === 'string' && saveOptions.deferredFlushReason.trim()
       ? saveOptions.deferredFlushReason.trim()
@@ -27891,7 +28286,7 @@ async function saveResponse(
       || (normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
         ? 'portfolio_analysis_saved_locally'
         : 'dispatch_skipped_by_options');
-    if (normalizedRunId) {
+    if (normalizedRunId && !skipProcessPersistencePatch) {
       await upsertProcess(normalizedRunId, {
         lifecycleStatus: 'finalizing',
         status: 'finalizing',
@@ -27930,6 +28325,12 @@ async function saveResponse(
       analysisType: analysisType,
       responseId: normalizedResponseId
     };
+    if (responseSchema) {
+      newResponse.schema = responseSchema;
+    }
+    if (sourceRecordSuffix) {
+      newResponse.sourceRecordSuffix = sourceRecordSuffix;
+    }
     if (normalizedSourceMeta.sourceTitle) {
       newResponse.sourceTitle = normalizedSourceMeta.sourceTitle;
     }
@@ -27967,7 +28368,7 @@ async function saveResponse(
       newResponse.conversationLogs = conversationLogs;
       newResponse.conversationLogCount = conversationLogs.length;
     }
-    if (normalizedRunId) {
+    if (normalizedRunId && !skipProcessPersistencePatch) {
       applyChatGptComputationStatePatch(newResponse, processRegistry.get(normalizedRunId) || null);
     }
     
@@ -28080,19 +28481,69 @@ async function saveResponse(
       'captured',
       `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, source=${conversationAnalysis.snapshotSource}`
     );
+    const normalizedSaveAnalysisType = typeof normalizeAnalysisTypeForPromptChain === 'function'
+      ? normalizeAnalysisTypeForPromptChain(analysisType)
+      : normalizeStructuredWatchlistValue(analysisType).toLowerCase();
+    const shouldExtractPortfolioFeedbackSubmit = responseSchema.toLowerCase() === 'portfolio.final_response.v1'
+      || sourceRecordSuffix === 'portfolio_final_json'
+      || normalizedSaveAnalysisType === ANALYSIS_TYPE_PORTFOLIO;
+    const portfolioFeedbackDispatchPayload = shouldExtractPortfolioFeedbackSubmit
+      ? extractPortfolioFeedbackSubmitPayloadFromFinalResponse(responseText, {
+        runId: normalizedRunId,
+        responseId: normalizedResponseId,
+        source,
+        sourceTitle: normalizedSourceMeta.sourceTitle || source,
+        timestamp: Date.now(),
+        stage: normalizedStage,
+        conversationUrl: normalizedConversationUrl,
+        conversationLogs
+      })
+      : null;
+    const dispatchPortfolioFeedbackSubmit = !!portfolioFeedbackDispatchPayload;
+    const effectiveSkipWatchlistDispatch = skipWatchlistDispatch && !dispatchPortfolioFeedbackSubmit;
+    const effectiveSkipWatchlistDispatchReason = dispatchPortfolioFeedbackSubmit
+      ? ''
+      : skipWatchlistDispatchReason;
+    const portfolioFeedbackFlushFocus = dispatchPortfolioFeedbackSubmit && typeof normalizeWatchlistFlushFocus === 'function'
+      ? normalizeWatchlistFlushFocus(
+        {
+          runId: portfolioFeedbackDispatchPayload.runId || normalizedRunId,
+          responseId: portfolioFeedbackDispatchPayload.responseId || normalizedResponseId,
+          forceMatchingReady: true,
+          prioritizeMatching: true
+        },
+        portfolioFeedbackDispatchPayload.runId || normalizedRunId,
+        portfolioFeedbackDispatchPayload.responseId || normalizedResponseId
+      )
+      : null;
+    const effectiveDispatchFlushFocus = portfolioFeedbackFlushFocus || dispatchFlushFocus;
+    const effectiveDispatchFlushReason = dispatchPortfolioFeedbackSubmit
+      ? 'portfolio_feedback_submit'
+      : dispatchFlushReason;
+    if (dispatchPortfolioFeedbackSubmit) {
+      appendDispatchProcessLog(
+        'portfolio_feedback_submit',
+        'extracted',
+        `responseId=${portfolioFeedbackDispatchPayload.responseId || 'n/a'}, layers=${Array.isArray(portfolioFeedbackDispatchPayload.layer_votes) ? portfolioFeedbackDispatchPayload.layer_votes.length : 0}, positions=${Array.isArray(portfolioFeedbackDispatchPayload.position_votes) ? portfolioFeedbackDispatchPayload.position_votes.length : 0}`
+      );
+    }
 
     try {
-      if (skipWatchlistDispatch) {
+      if (effectiveSkipWatchlistDispatch) {
         dispatchOutcome.queueSkipped = true;
-        dispatchOutcome.queueSkipReason = skipWatchlistDispatchReason;
+        dispatchOutcome.queueSkipReason = effectiveSkipWatchlistDispatchReason;
         dispatchOutcome.failureStage = 'queue';
-        dispatchOutcome.failureReason = skipWatchlistDispatchReason;
-        appendDispatchProcessLog('queue_result', 'skipped', `reason=${skipWatchlistDispatchReason}`);
+        dispatchOutcome.failureReason = effectiveSkipWatchlistDispatchReason;
+        appendDispatchProcessLog('queue_result', 'skipped', `reason=${effectiveSkipWatchlistDispatchReason}`);
         console.log(
-          `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${skipWatchlistDispatchReason}`
+          `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${effectiveSkipWatchlistDispatchReason}`
         );
       } else {
-      appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
+      appendDispatchProcessLog(
+        'queue_attempt',
+        'start',
+        `responseId=${dispatchPortfolioFeedbackSubmit ? portfolioFeedbackDispatchPayload.responseId : normalizedResponseId}, kind=${dispatchPortfolioFeedbackSubmit ? 'portfolio_feedback_submit' : 'watchlist_response'}`
+      );
       const dispatchResponse = {
         ...((lastSaved && typeof lastSaved === 'object') ? lastSaved : newResponse)
       };
@@ -28111,7 +28562,9 @@ async function saveResponse(
       if (!normalizedSourceMeta.sourceMaterialId && typeof normalizedSourceMeta.sourceMaterialText === 'string' && normalizedSourceMeta.sourceMaterialText.trim()) {
         dispatchResponse.sourceMaterialText = normalizedSourceMeta.sourceMaterialText;
       }
-      const dispatchQueueResult = await enqueueWatchlistDispatch(dispatchResponse, copyTrace);
+      const dispatchQueueResult = dispatchPortfolioFeedbackSubmit
+        ? await enqueueWatchlistDispatchPayload(portfolioFeedbackDispatchPayload, copyTrace)
+        : await enqueueWatchlistDispatch(dispatchResponse, copyTrace);
       if (dispatchQueueResult?.queued) {
         dispatchOutcome.queued = true;
         dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
@@ -28141,10 +28594,10 @@ async function saveResponse(
             queueSize: dispatchOutcome.queueSize
           });
         } else {
-          appendDispatchProcessLog('flush_attempt', 'start', `reason=${dispatchFlushReason}`);
+          appendDispatchProcessLog('flush_attempt', 'start', `reason=${effectiveDispatchFlushReason}`);
           const flushResult = await flushWatchlistDispatchOutbox(
-            dispatchFlushReason,
-            dispatchFlushFocus ? { focus: dispatchFlushFocus } : {}
+            effectiveDispatchFlushReason,
+            effectiveDispatchFlushFocus ? { focus: effectiveDispatchFlushFocus } : {}
           );
           const mergedDispatchOutcome = mergeSaveResponseDispatchWithFlushResult(
             dispatchOutcome,
@@ -28283,7 +28736,7 @@ async function saveResponse(
     console.log(`Nowy stan: ${verifiedResponses.length} odpowiedzi w storage (zweryfikowano lokalnie: ${verifiedResponses.length})`);
     console.log(`Fingerprint: ${copyFingerprint}`);
     console.log(`${'*'.repeat(80)}\n`);
-    if (normalizedRunId) {
+    if (normalizedRunId && !skipProcessPersistencePatch) {
       await upsertProcess(normalizedRunId, buildSaveResponseProcessPersistencePatch({
         responseId: normalizedResponseId,
         copyTrace,
@@ -28390,7 +28843,20 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       },
       {
         deferDispatchFlush: true,
-        deferredFlushReason: 'runtime_bridge_fast_ack'
+        deferredFlushReason: typeof message.deferredFlushReason === 'string' && message.deferredFlushReason.trim()
+          ? message.deferredFlushReason.trim()
+          : 'runtime_bridge_fast_ack',
+        dispatchFlushReason: typeof message.dispatchFlushReason === 'string' && message.dispatchFlushReason.trim()
+          ? message.dispatchFlushReason.trim()
+          : 'save_response',
+        schema: typeof (message.schema || message.responseSchema) === 'string'
+          ? (message.schema || message.responseSchema)
+          : '',
+        sourceRecordSuffix: typeof (message.sourceRecordSuffix || message.source_record_suffix) === 'string'
+          ? (message.sourceRecordSuffix || message.source_record_suffix)
+          : '',
+        skipWatchlistDispatch: message.skipWatchlistDispatch === true,
+        skipProcessPersistencePatch: message.skipProcessPersistencePatch === true
       }
     )
       .then((saveResult) => {
@@ -30472,7 +30938,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       timestamp: Date.now()
     });
     const firstPrompt = promptChainSafe[0] || '';
-    let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+    let payload = injectSourceTextIntoPromptTemplate(firstPrompt, extractedText);
     const restOfPrompts = promptChainSafe.slice(1);
     processTotalPrompts = promptChainSafe.length;
     const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
@@ -31265,8 +31731,8 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       // Wyciągnij treść pierwszego prompta z promptChain
       const firstPrompt = promptChain[0] || '';
       
-      // Wstaw treść artykułu do pierwszego prompta (zamień {{articlecontent}})
-      let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+      // Wstaw treść źródła do pierwszego prompta.
+      let payload = injectSourceTextIntoPromptTemplate(firstPrompt, extractedText);
       
       // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
       const restOfPrompts = promptChain.slice(1);
@@ -32491,6 +32957,13 @@ async function requestManualPdfProviderChunk({ providerId, token, offset = 0, ch
 // Funkcja uruchamiajaca analize z recznie wklejonego zrodla
 async function runManualSourceAnalysis(text, title, instances, analysisType = ANALYSIS_TYPE_COMPANY) {
   const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const promptsReady = await ensurePromptChainReadyForAnalysisType(normalizedAnalysisType);
+  if (!promptsReady) {
+    return {
+      success: false,
+      error: normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO ? 'portfolio_prompts_not_loaded' : 'prompts_not_loaded'
+    };
+  }
   const promptChain = getPromptChainForAnalysisType(normalizedAnalysisType);
   const safeText = typeof text === 'string' ? text : '';
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
@@ -32528,6 +33001,14 @@ async function runManualSourceAnalysisWithPortfolio(text, title, instances, anal
   const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
   if (!shouldRunPortfolioAlongsideCompany(normalizedAnalysisType)) {
     return runManualSourceAnalysis(text, title, instances, normalizedAnalysisType);
+  }
+  const promptsReady = await ensureCompanyPromptsReady();
+  const portfolioPromptsReady = await ensurePortfolioPromptsReady();
+  if (!promptsReady || !portfolioPromptsReady) {
+    return {
+      success: false,
+      error: !promptsReady ? 'prompts_not_loaded' : 'portfolio_prompts_not_loaded'
+    };
   }
 
   const safeText = typeof text === 'string' ? text : '';
@@ -33140,6 +33621,12 @@ async function injectToChat(
     console.log(`  Analysis: ${analysisType}`);
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
+
+    const normalizedInjectedAnalysisType = typeof analysisType === 'string'
+      ? analysisType.trim().toLowerCase()
+      : '';
+    const isPortfolioAnalysis = normalizedInjectedAnalysisType === 'portfolio'
+      || normalizedInjectedAnalysisType === 'portfolio_analysis';
 
     const persistenceMeta = persistenceContext && typeof persistenceContext === 'object'
       ? persistenceContext
@@ -33812,6 +34299,7 @@ async function injectToChat(
           .filter((item) => item && typeof item === 'object')
           .map((item) => ({
             responseId: typeof item.responseId === 'string' ? item.responseId.trim() : '',
+            schema: typeof item.schema === 'string' ? item.schema.trim() : '',
             text: typeof item.text === 'string' ? item.text : '',
             source: typeof item.source === 'string' ? item.source : '',
             sourceTitle: typeof item.sourceTitle === 'string' ? item.sourceTitle : '',
@@ -33823,6 +34311,8 @@ async function injectToChat(
             sourceMaterialStored: item.sourceMaterialStored === true,
             sourceMaterialText: typeof item.sourceMaterialText === 'string' ? item.sourceMaterialText : '',
             analysisType: typeof item.analysisType === 'string' ? item.analysisType : '',
+            sourceRecordSuffix: typeof item.sourceRecordSuffix === 'string' ? item.sourceRecordSuffix : '',
+            skipProcessPersistencePatch: item.skipProcessPersistencePatch === true,
             runId: typeof item.runId === 'string' ? item.runId : '',
             conversationUrl: typeof item.conversationUrl === 'string' ? item.conversationUrl : '',
             stage: item.stage && typeof item.stage === 'object' && !Array.isArray(item.stage)
@@ -33953,15 +34443,29 @@ async function injectToChat(
         ? runId.trim()
         : '';
       const timestamp = Date.now();
-      const source = sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : '');
+      const source = typeof options?.source === 'string' && options.source.trim()
+        ? options.source.trim()
+        : (sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : ''));
+      const responseSourceTitle = typeof options?.sourceTitle === 'string' && options.sourceTitle.trim()
+        ? options.sourceTitle.trim()
+        : (sourceTitleForSave || source);
+      const responseSchema = typeof options?.schema === 'string' && options.schema.trim()
+        ? options.schema.trim()
+        : '';
+      const responseAnalysisType = typeof options?.analysisType === 'string' && options.analysisType.trim()
+        ? options.analysisType.trim()
+        : (typeof analysisType === 'string' ? analysisType : '');
+      const sourceRecordSuffix = typeof options?.sourceRecordSuffix === 'string' && options.sourceRecordSuffix.trim()
+        ? options.sourceRecordSuffix.trim()
+        : '';
       const record = {
         responseId: normalizedResponseId,
         text: normalizedText.slice(0, MAX_COMPLETED_RESPONSE_CHARS),
         source,
-        sourceTitle: sourceTitleForSave || source,
+        sourceTitle: responseSourceTitle,
         sourceName: sourceNameForSave || '',
         sourceUrl: sourceUrlForSave || '',
-        analysisType: typeof analysisType === 'string' ? analysisType : '',
+        analysisType: responseAnalysisType,
         runId: normalizedRunId,
         conversationUrl: typeof location?.href === 'string' ? location.href : '',
         stage: stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
@@ -33969,8 +34473,15 @@ async function injectToChat(
           : null,
         savedAt: timestamp,
         lastError: typeof options?.lastError === 'string' ? options.lastError.trim() : '',
-        attempts: Number.isInteger(options?.attempts) ? options.attempts : 0
+        attempts: Number.isInteger(options?.attempts) ? options.attempts : 0,
+        skipProcessPersistencePatch: options?.skipProcessPersistencePatch === true
       };
+      if (responseSchema) {
+        record.schema = responseSchema;
+      }
+      if (sourceRecordSuffix) {
+        record.sourceRecordSuffix = sourceRecordSuffix;
+      }
       applySourceMaterialMetaForSave(record, { includeText: true });
       applyInjectedChatGptComputationStatePatch(
         record,
@@ -34002,6 +34513,7 @@ async function injectToChat(
         const attempt = await sendRuntimeMessageWithTimeout({
           type: 'SAVE_RESPONSE',
           text: item.text,
+          schema: item.schema || '',
           source: item.source || item.sourceTitle || '',
           sourceTitle: item.sourceTitle || item.source || '',
           sourceName: item.sourceName || '',
@@ -34012,6 +34524,8 @@ async function injectToChat(
           sourceMaterialStored: item.sourceMaterialStored === true,
           sourceMaterialText: item.sourceMaterialText || '',
           analysisType: item.analysisType || analysisType,
+          sourceRecordSuffix: item.sourceRecordSuffix || '',
+          skipProcessPersistencePatch: item.skipProcessPersistencePatch === true,
           runId: item.runId || '',
           responseId: item.responseId || '',
           stage: item.stage && typeof item.stage === 'object' ? item.stage : null,
@@ -34043,7 +34557,7 @@ async function injectToChat(
       return { attempted: true, origin, replayed, failed, remaining: keep.length };
     }
 
-    async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null) {
+    async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null, options = {}) {
       const storageUtils = globalThis.ResponseStorageUtils || null;
       const decisionUtils = globalThis.DecisionContractUtils || null;
       const normalizedText = typeof responseText === 'string' ? responseText : '';
@@ -34064,8 +34578,21 @@ async function injectToChat(
         ? runId.trim()
         : '';
       const timestamp = Date.now();
-      const source = sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : '');
-      const normalizedAnalysisType = typeof analysisType === 'string' ? analysisType : '';
+      const source = typeof options?.source === 'string' && options.source.trim()
+        ? options.source.trim()
+        : (sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : ''));
+      const responseSourceTitle = typeof options?.sourceTitle === 'string' && options.sourceTitle.trim()
+        ? options.sourceTitle.trim()
+        : sourceTitleForSave;
+      const normalizedAnalysisType = typeof options?.analysisType === 'string' && options.analysisType.trim()
+        ? options.analysisType.trim()
+        : (typeof analysisType === 'string' ? analysisType : '');
+      const responseSchema = typeof options?.schema === 'string' && options.schema.trim()
+        ? options.schema.trim()
+        : '';
+      const sourceRecordSuffix = typeof options?.sourceRecordSuffix === 'string' && options.sourceRecordSuffix.trim()
+        ? options.sourceRecordSuffix.trim()
+        : '';
       const stage = stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
         ? stageMeta
         : null;
@@ -34078,8 +34605,14 @@ async function injectToChat(
         analysisType: normalizedAnalysisType,
         responseId: normalizedResponseId
       };
-      if (sourceTitleForSave) {
-        responseRecord.sourceTitle = sourceTitleForSave;
+      if (responseSchema) {
+        responseRecord.schema = responseSchema;
+      }
+      if (sourceRecordSuffix) {
+        responseRecord.sourceRecordSuffix = sourceRecordSuffix;
+      }
+      if (responseSourceTitle) {
+        responseRecord.sourceTitle = responseSourceTitle;
       }
       if (sourceNameForSave) {
         responseRecord.sourceName = sourceNameForSave;
@@ -34855,12 +35388,28 @@ async function injectToChat(
       };
     }
 
-    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex, selectedResponseReason = 'last_prompt') {
+    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex, selectedResponseReason = 'last_prompt', options = {}) {
       const normalizedText = typeof responseText === 'string' ? responseText : '';
       if (!normalizedText.trim()) {
         return { ok: false, error: 'empty_response' };
       }
 
+      const responseOptions = options && typeof options === 'object' ? options : {};
+      const responseSource = typeof responseOptions.source === 'string' && responseOptions.source.trim()
+        ? responseOptions.source.trim()
+        : (sourceTitleForSave || articleTitle || '');
+      const responseSourceTitle = typeof responseOptions.sourceTitle === 'string' && responseOptions.sourceTitle.trim()
+        ? responseOptions.sourceTitle.trim()
+        : (sourceTitleForSave || articleTitle || '');
+      const responseAnalysisType = typeof responseOptions.analysisType === 'string' && responseOptions.analysisType.trim()
+        ? responseOptions.analysisType.trim()
+        : analysisType;
+      const responseSchema = typeof responseOptions.schema === 'string' && responseOptions.schema.trim()
+        ? responseOptions.schema.trim()
+        : '';
+      const sourceRecordSuffix = typeof responseOptions.sourceRecordSuffix === 'string' && responseOptions.sourceRecordSuffix.trim()
+        ? responseOptions.sourceRecordSuffix.trim()
+        : '';
       const stageMeta = {};
       if (Number.isInteger(selectedPrompt)) {
         stageMeta.selected_response_prompt = selectedPrompt;
@@ -34873,6 +35422,9 @@ async function injectToChat(
           ? selectedResponseReason.trim()
           : 'last_prompt';
       }
+      if (responseOptions.stageMeta && typeof responseOptions.stageMeta === 'object' && !Array.isArray(responseOptions.stageMeta)) {
+        Object.assign(stageMeta, responseOptions.stageMeta);
+      }
       const promptFromStage = Number.isInteger(stageMeta?.selected_response_prompt)
         ? stageMeta.selected_response_prompt
         : null;
@@ -34881,22 +35433,46 @@ async function injectToChat(
         : buildInjectedResponseId(normalizedText, promptFromStage);
       const pageEmergencySave = stagePageEmergencyResponse(normalizedText, normalizedResponseId, stageMeta, {
         lastError: '',
-        attempts: 0
+        attempts: 0,
+        schema: responseSchema,
+        analysisType: responseAnalysisType,
+        sourceRecordSuffix,
+        source: responseSource,
+        sourceTitle: responseSourceTitle,
+        skipProcessPersistencePatch: responseOptions.skipProcessPersistencePatch === true
       });
 
       const messagePayload = {
         type: 'SAVE_RESPONSE',
         text: normalizedText,
-        source: sourceTitleForSave || articleTitle || '',
-        sourceTitle: sourceTitleForSave || articleTitle || '',
+        source: responseSource,
+        sourceTitle: responseSourceTitle,
         sourceName: sourceNameForSave || '',
         sourceUrl: sourceUrlForSave || '',
-        analysisType,
+        analysisType: responseAnalysisType,
         runId: typeof runId === 'string' ? runId : '',
         responseId: normalizedResponseId,
         stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
         conversationUrl: typeof location?.href === 'string' ? location.href : ''
       };
+      if (responseSchema) {
+        messagePayload.schema = responseSchema;
+      }
+      if (sourceRecordSuffix) {
+        messagePayload.sourceRecordSuffix = sourceRecordSuffix;
+      }
+      if (typeof responseOptions.deferredFlushReason === 'string' && responseOptions.deferredFlushReason.trim()) {
+        messagePayload.deferredFlushReason = responseOptions.deferredFlushReason.trim();
+      }
+      if (typeof responseOptions.dispatchFlushReason === 'string' && responseOptions.dispatchFlushReason.trim()) {
+        messagePayload.dispatchFlushReason = responseOptions.dispatchFlushReason.trim();
+      }
+      if (responseOptions.skipWatchlistDispatch === true) {
+        messagePayload.skipWatchlistDispatch = true;
+      }
+      if (responseOptions.skipProcessPersistencePatch === true) {
+        messagePayload.skipProcessPersistencePatch = true;
+      }
       applySourceMaterialMetaForSave(messagePayload, { includeText: true });
 
       const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);
@@ -34908,7 +35484,8 @@ async function injectToChat(
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
               normalizedResponseId,
-              stageMeta
+              stageMeta,
+              responseOptions
             );
           } catch (error) {
             emergencyLocalSave = {
@@ -34946,7 +35523,8 @@ async function injectToChat(
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
               normalizedResponseId,
-              stageMeta
+              stageMeta,
+              responseOptions
             );
           } catch (error) {
             emergencyLocalSave = {
@@ -34981,6 +35559,59 @@ async function injectToChat(
         saveResult: runtimeResponse?.saveResult && typeof runtimeResponse.saveResult === 'object'
           ? runtimeResponse.saveResult
           : null
+      };
+    }
+
+    async function copyPortfolioPromptOneResponseToDatabase(responseText) {
+      const normalizedAnalysisType = typeof analysisType === 'string'
+        ? analysisType.trim().toLowerCase()
+        : '';
+      if (normalizedAnalysisType !== 'portfolio' && normalizedAnalysisType !== 'portfolio_analysis') {
+        return { attempted: false, reason: 'not_portfolio_analysis' };
+      }
+      const normalizedText = typeof responseText === 'string' ? responseText : '';
+      if (!normalizedText.trim()) {
+        return { attempted: false, reason: 'empty_response' };
+      }
+
+      const selectedPrompt = 1;
+      const selectedStageIndex = 0;
+      const responseId = buildInjectedResponseId(normalizedText, selectedPrompt);
+      console.log(
+        `[copy-flow] [portfolio-prompt1:start] prompt=${selectedPrompt} len=${normalizedText.length} responseId=${responseId}`
+      );
+      const saveResult = await persistFinalResponseViaRuntimeMessage(
+        normalizedText,
+        responseId,
+        selectedPrompt,
+        selectedStageIndex,
+        'portfolio_prompt1_value_chain_ranking',
+        {
+          schema: 'portfolio.prompt_first_response.v1',
+          analysisType: 'portfolio_prompt1_value_chain_ranking',
+          source: 'Portfolio Prompt 1: Value Chain Ranking',
+          sourceTitle: sourceTitleForSave || articleTitle || 'Portfolio Prompt 1',
+          sourceRecordSuffix: 'portfolio_prompt1_value_chain_ranking',
+          deferredFlushReason: 'portfolio_prompt1_runtime_bridge_fast_ack',
+          dispatchFlushReason: 'portfolio_prompt1_value_chain_ranking',
+          skipProcessPersistencePatch: true,
+          stageMeta: {
+            source: 'portfolio_prompt_process',
+            category: 'portfolio_prompt_copy',
+            artifact_name: 'Portfolio Prompt 1: Value Chain Ranking'
+          }
+        }
+      );
+      const ok = saveResult?.ok === true && saveResult?.saveResult?.success === true;
+      console[ok ? 'log' : 'warn'](
+        `[copy-flow] [portfolio-prompt1:${ok ? 'ok' : 'failed'}] prompt=${selectedPrompt} responseId=${responseId} trace=${saveResult?.saveResult?.copyTrace || 'n/a'} error=${saveResult?.error || ''}`
+      );
+      return {
+        attempted: true,
+        ok,
+        responseId,
+        saveResult: saveResult?.saveResult || null,
+        error: saveResult?.error || ''
       };
     }
 
@@ -38281,6 +38912,53 @@ async function injectToChat(
     return '';
   }
 
+  function extractPortfolioFinalJsonText(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return '';
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const objectStart = raw.indexOf('{');
+    const objectEnd = raw.lastIndexOf('}');
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      candidates.push(raw.slice(objectStart, objectEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        const status = typeof parsed.status === 'string' ? parsed.status.trim() : '';
+        const hasPortfolioShape = (
+          parsed.save && typeof parsed.save === 'object' && !Array.isArray(parsed.save)
+        ) || (
+          parsed.totals && typeof parsed.totals === 'object' && !Array.isArray(parsed.totals)
+        ) || (
+          Object.prototype.hasOwnProperty.call(parsed, 'feedback_payload')
+        ) || (
+          parsed.mcp_confirmation && typeof parsed.mcp_confirmation === 'object' && !Array.isArray(parsed.mcp_confirmation)
+        ) || (
+          parsed.execution_summary && typeof parsed.execution_summary === 'object' && !Array.isArray(parsed.execution_summary)
+        ) || (
+          Object.prototype.hasOwnProperty.call(parsed, 'mcp_feedback_json')
+        ) || (
+          Array.isArray(parsed.positions) && Array.isArray(parsed.layers)
+        );
+        if (status && hasPortfolioShape) {
+          return candidate;
+        }
+      } catch (_error) {
+        // Keep trying other candidate shapes.
+      }
+    }
+    return '';
+  }
+
   function rememberStage12InvestmentJson(promptNumber, responseText) {
     const candidate = extractStage12InvestmentJsonText(responseText);
     if (!candidate) return false;
@@ -39448,6 +40126,14 @@ async function injectToChat(
         registerStageCompletion(stage0PromptIndex, stage0Response, stage0Validated);
         if (stage0Response && stage0Response.trim().length > 0) {
           console.log(`Stage 0 captured (${stage0Response.length} znakow) - bedzie wstawione w prompt chain`);
+          const portfolioPromptOneCopy = await copyPortfolioPromptOneResponseToDatabase(stage0Response);
+          if (portfolioPromptOneCopy?.attempted) {
+            console[portfolioPromptOneCopy.ok ? 'log' : 'warn']('[copy-flow] [portfolio-prompt1:result]', {
+              responseId: portfolioPromptOneCopy.responseId || '',
+              ok: portfolioPromptOneCopy.ok === true,
+              error: portfolioPromptOneCopy.error || ''
+            });
+          }
         } else {
           console.warn('Nie udalo sie pobrac Stage 0 (pusty tekst) - prompt chain bez wstawienia');
           stage0Response = '';
@@ -40224,8 +40910,8 @@ async function injectToChat(
           : Math.max(counterCurrent, 1);
         updateCounter(counter, counterCurrent, counterTotal, 'Prompt chain zakonczony. Trwa zapis do bazy...');
         
-        // Zwróć wygenerowany Stage 14 JSON do zapisu inwestycyjnego.
-        // Ostatni prompt obecnego chaina może być Stage 17 (sector memory MCP write), więc nie zapisujemy go jako watchlist final.
+        // Company chains zapisują Stage 14 JSON, bo ostatni prompt może być write-only.
+        // Portfolio chains są JSON-only na końcu, więc zapisujemy finalny JSON z ostatniego prompta.
         const lastPromptResponse = window._lastResponseToSave || '';
         const stage12Response = window._stage12ResponseToSave || '';
         const stage12ResponsePrompt = Number.isInteger(window._stage12ResponsePrompt)
@@ -40235,23 +40921,29 @@ async function injectToChat(
         const stage16SectorMemoryResponsePrompt = Number.isInteger(window._stage16SectorMemoryResponsePrompt)
           ? window._stage16SectorMemoryResponsePrompt
           : null;
-        const selectedResponseReason = stage12Response
-          ? 'stage14_investment_json'
-          : 'last_prompt';
-        const lastResponse = stage12Response || lastPromptResponse;
+        const portfolioFinalJsonResponse = isPortfolioAnalysis
+          ? (extractPortfolioFinalJsonText(lastPromptResponse) || lastPromptResponse)
+          : '';
+        const useStage12InvestmentResponse = !isPortfolioAnalysis && !!stage12Response;
+        const selectedResponseReason = isPortfolioAnalysis
+          ? 'portfolio_final_json'
+          : (useStage12InvestmentResponse ? 'stage14_investment_json' : 'last_prompt');
+        const lastResponse = isPortfolioAnalysis
+          ? portfolioFinalJsonResponse
+          : (stage12Response || lastPromptResponse);
         delete window._lastResponseToSave;
         delete window._stage12ResponseToSave;
         delete window._stage12ResponsePrompt;
         delete window._stage16SectorMemoryResponseToSave;
         delete window._stage16SectorMemoryResponsePrompt;
         console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków, reason=${selectedResponseReason})`);
-        console.log(`[copy-flow] [capture:return] prompt=${stage12Response ? stage12ResponsePrompt : completedPrompt} completedPrompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)} reason=${selectedResponseReason}`);
+        console.log(`[copy-flow] [capture:return] prompt=${useStage12InvestmentResponse ? stage12ResponsePrompt : completedPrompt} completedPrompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)} reason=${selectedResponseReason}`);
         if (stage16SectorMemoryResponse) {
           console.log(
             `[copy-flow] [capture:return-sector-memory] prompt=${stage16SectorMemoryResponsePrompt || 17} completedPrompt=${completedPrompt} len=${stage16SectorMemoryResponse.length} fp=${computeCopyFingerprint(stage16SectorMemoryResponse)} reason=stage16_sector_memory_json`
           );
         }
-        const selectedPrompt = stage12Response && Number.isInteger(stage12ResponsePrompt)
+        const selectedPrompt = useStage12InvestmentResponse && Number.isInteger(stage12ResponsePrompt)
           ? stage12ResponsePrompt
           : completedPrompt;
         const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
@@ -40268,7 +40960,18 @@ async function injectToChat(
             responseId,
             selectedPrompt,
             selectedStageIndex,
-            selectedResponseReason
+            selectedResponseReason,
+            isPortfolioAnalysis
+              ? {
+                schema: 'portfolio.final_response.v1',
+                sourceRecordSuffix: 'portfolio_final_json',
+                skipWatchlistDispatch: true,
+                dispatchFlushReason: 'portfolio_final_json',
+                stageMeta: {
+                  selected_response_kind: 'portfolio_final_json'
+                }
+              }
+              : {}
           );
           if (tabSaveResult.ok) {
             persistedViaMessage = true;

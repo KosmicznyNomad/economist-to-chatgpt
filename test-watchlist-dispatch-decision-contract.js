@@ -236,6 +236,11 @@ vm.createContext(context);
   'sanitizeStructuredWatchlistRecord',
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
+  'cloneJsonCompatibleValue',
+  'parseJsonObjectCandidate',
+  'isPortfolioFeedbackSubmitPayload',
+  'normalizePortfolioFeedbackSubmitDispatchPayload',
+  'extractPortfolioFeedbackSubmitPayloadFromFinalResponse',
   'mapDispatchDecisionRecord',
   'normalizeWatchlistDispatchPayload',
   'normalizeOutboundWatchlistDispatchPayload'
@@ -756,6 +761,74 @@ function testDispatchPayloadPreservesChatGptComputationTelemetry() {
   assert.strictEqual(outbound.chatGptComputationDetectedAt, 1_710_000_123_456);
 }
 
+function testPortfolioPromptOnePayloadKeepsRoutingMetadata() {
+  const payload = context.normalizeWatchlistDispatchPayload({
+    schema: 'portfolio.prompt_first_response.v1',
+    text: 'Ranking warstw value chain: #1 infrastructure, #2 software.',
+    source: 'Portfolio Prompt 1: Value Chain Ranking',
+    sourceTitle: 'Source article title',
+    analysisType: 'portfolio_prompt1_value_chain_ranking',
+    sourceRecordSuffix: 'portfolio_prompt1_value_chain_ranking',
+    responseId: 'resp-portfolio-p1',
+    runId: 'run-portfolio',
+    stage: {
+      selected_response_prompt: 1,
+      selected_response_stage_index: 0,
+      selected_response_reason: 'portfolio_prompt1_value_chain_ranking',
+      artifact_name: 'Portfolio Prompt 1: Value Chain Ranking'
+    },
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'portfolio.prompt_first_response.v1');
+  assert.strictEqual(payload.analysisType, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(payload.sourceRecordSuffix, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(payload.stage.selected_response_prompt, 1);
+  assert.strictEqual(payload.stage.selected_response_reason, 'portfolio_prompt1_value_chain_ranking');
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'portfolio.prompt_first_response.v1');
+  assert.strictEqual(outbound.analysisType, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(outbound.sourceRecordSuffix, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(outbound.stage.selected_response_stage_index, 0);
+}
+
+function testPortfolioFeedbackSubmitPayloadUsesDispatchShape() {
+  const payload = context.normalizeWatchlistDispatchPayload({
+    schema: 'portfolio.feedback.submit.v1',
+    responseId: 'resp-portfolio-final',
+    runId: 'run-portfolio',
+    source: 'Portfolio final JSON',
+    sourceTitle: 'Portfolio final JSON',
+    analysisType: 'portfolio_feedback_submit',
+    timestamp: 1_710_000_000_000,
+    account: 'U22088457',
+    review: {
+      review_id: 'pfb-test',
+      snapshot_id: 'ibkrps-test',
+      portfolio_feedback: 'Rotate sizing.'
+    },
+    layer_votes: [{ layer_id: 'ai_hyperscalers', vote: 'REDUCE' }],
+    position_votes: [{ symbol: 'GOOGL', layer_id: 'ai_hyperscalers', action: 'REDUCE' }],
+    trades: [{ symbol: 'GOOGL', action: 'SELL' }],
+    entry_rules: [{ symbol: 'GOOGL', strategy: 'Reduce now.' }]
+  });
+
+  assert.strictEqual(payload.schema, 'portfolio.feedback.submit.v1');
+  assert.strictEqual(payload.responseId, 'resp-portfolio-final:portfolio_feedback_submit');
+  assert.strictEqual(payload.analysisType, 'portfolio_feedback_submit');
+  assert.strictEqual(payload.account, 'U22088457');
+  assert.strictEqual(payload.review.review_id, 'pfb-test');
+  assert.strictEqual(JSON.parse(payload.text).position_votes[0].symbol, 'GOOGL');
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'portfolio.feedback.submit.v1');
+  assert.strictEqual(outbound.review.review_id, 'pfb-test');
+  assert.strictEqual(outbound.layer_votes[0].layer_id, 'ai_hyperscalers');
+  assert.strictEqual(outbound.action_plan[0].action, 'SELL');
+  assert.strictEqual(outbound.entry_strategy[0].strategy, 'Reduce now.');
+}
+
 function main() {
   testCurrentPairPayload();
   testShortfallPayload();
@@ -766,6 +839,8 @@ function main() {
   testStructuredV2DispatchWithoutTextSynthesizesPayloadText();
   testOutboundStructuredV2WithoutTextAcceptsDirectRecords();
   testDispatchPayloadPreservesChatGptComputationTelemetry();
+  testPortfolioPromptOnePayloadKeepsRoutingMetadata();
+  testPortfolioFeedbackSubmitPayloadUsesDispatchShape();
   console.log('test-watchlist-dispatch-decision-contract.js: ok');
 }
 

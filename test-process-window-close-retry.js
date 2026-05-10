@@ -224,6 +224,7 @@ async function main() {
       'www.chat.openai.com'
     ]),
     PROCESS_WINDOW_CLOSE_RETRY: {
+      enabled: false,
       initialDelayMs: 1500,
       maxDelayMs: 60 * 1000,
       maxAttempts: 24,
@@ -298,6 +299,7 @@ async function main() {
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
+    'isProcessWindowAutoCloseEnabled',
     'normalizeProcessWindowCloseState',
     'inspectProcessWindowContext',
     'attemptProcessWindowClose',
@@ -344,33 +346,24 @@ async function main() {
   });
 
   assert.strictEqual(firstClose, false);
-  assert.strictEqual(removeAttempt, 1);
-  assert.strictEqual(timers.length, 1);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'retrying');
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.attemptCount, 1);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.nextAttemptAt > 0, true);
-  assert.strictEqual(createCalls[0].name, 'completed-process-window-close-retry');
+  assert.strictEqual(removeAttempt, 0);
+  assert.strictEqual(timers.length, 0);
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose, undefined);
+  assert.strictEqual(createCalls.length, 0);
 
   const retryClose = await context.runProcessWindowCloseRetry('run-close', {
     origin: 'test-retry'
   });
 
-  assert.strictEqual(retryClose.closed, true);
-  assert.strictEqual(removeAttempt, 2);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'closed');
-  assert.ok(Number.isInteger(context.processRegistry.get('run-close').windowClose.closedAt));
-  assert(context.processRegistry.get('run-close').windowClose.nextAttemptAt === 0);
-  assert(
-    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'retrying'),
-    'Should log pending window-close retries.'
-  );
-  assert(
-    auditLogs.some((entry) => entry.code === 'completed_process_window_close_result' && entry.details?.state === 'closed'),
-    'Should log successful window-close completion.'
-  );
+  assert.strictEqual(retryClose.closed, false);
+  assert.strictEqual(retryClose.skipped, true);
+  assert.strictEqual(retryClose.reason, 'process_window_auto_close_disabled');
+  assert.strictEqual(removeAttempt, 0);
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose, undefined);
+  assert.strictEqual(auditLogs.length, 0);
   assert(
     clearCalls.includes('completed-process-window-close-retry'),
-    'Successful completion should clear the durable window-close retry alarm.'
+    'Disabled window close should clear the durable window-close retry alarm.'
   );
 
   const removedTabIds = [];
@@ -397,9 +390,9 @@ async function main() {
     ]
   });
 
-  assert.strictEqual(staleTabClose.closed, true);
-  assert.strictEqual(staleTabClose.reason, 'tab_closed_by_conversation_url');
-  assert.deepStrictEqual(removedTabIds, [11, 77]);
+  assert.strictEqual(staleTabClose.closed, false);
+  assert.strictEqual(staleTabClose.reason, 'process_window_auto_close_disabled');
+  assert.deepStrictEqual(removedTabIds, []);
 
   const fallbackRemovedTabIds = [];
   context.chrome.tabs.query = async () => [];
@@ -422,9 +415,9 @@ async function main() {
     windowId: 22
   });
 
-  assert.strictEqual(activeChatClose.closed, true);
-  assert.strictEqual(activeChatClose.reason, 'active_chatgpt_tab_closed_in_process_window');
-  assert.deepStrictEqual(fallbackRemovedTabIds, [11, 99]);
+  assert.strictEqual(activeChatClose.closed, false);
+  assert.strictEqual(activeChatClose.reason, 'process_window_auto_close_disabled');
+  assert.deepStrictEqual(fallbackRemovedTabIds, []);
 
   const stoppedRemovedTabIds = [];
   context.processRegistry.set('run-stopped-saved', {
@@ -466,9 +459,9 @@ async function main() {
     { origin: 'test-stopped-saved-close' }
   );
 
-  assert.strictEqual(stoppedSavedClose, true);
-  assert.deepStrictEqual(stoppedRemovedTabIds, [501, 503]);
-  assert.strictEqual(context.processRegistry.get('run-stopped-saved').windowClose.state, 'closed');
+  assert.strictEqual(stoppedSavedClose, false);
+  assert.deepStrictEqual(stoppedRemovedTabIds, []);
+  assert.strictEqual(context.processRegistry.get('run-stopped-saved').windowClose, undefined);
 
   context.processRegistry.set('run-window-missing', {
     id: 'run-window-missing',
@@ -500,9 +493,10 @@ async function main() {
     origin: 'test-window-missing'
   });
 
-  assert.strictEqual(missingWindowClose.closed, true);
-  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose.state, 'closed');
-  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose.lastReason, 'window_missing');
+  assert.strictEqual(missingWindowClose.closed, false);
+  assert.strictEqual(missingWindowClose.skipped, true);
+  assert.strictEqual(missingWindowClose.reason, 'process_window_auto_close_disabled');
+  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose, undefined);
 
   const urlOnlyPlan = context.resolveProcessWindowCloseRetryPlan({
     id: 'run-url-only',
@@ -516,8 +510,8 @@ async function main() {
     }
   });
 
-  assert.strictEqual(urlOnlyPlan.needed, true);
-  assert.strictEqual(urlOnlyPlan.reason, 'local_save_completed');
+  assert.strictEqual(urlOnlyPlan.needed, false);
+  assert.strictEqual(urlOnlyPlan.reason, 'process_window_auto_close_disabled');
 
   console.log('test-process-window-close-retry.js: ok');
 }

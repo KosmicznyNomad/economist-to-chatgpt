@@ -307,6 +307,21 @@ function formatManualSourceLaunchError(errorCode, launchPortfolioOnly) {
   if (code === 'request_entity_too_large' || code === 'http_413') {
     return 'Material jest za duzy dla aktualnego limitu serwera. Po deployu poprawionej konfiguracji Nginx limit bedzie wyzszy.';
   }
+  if (code === 'remote_runner_not_selected') {
+    return 'Nie wybrano runnera remote.';
+  }
+  if (code === 'remote_runner_status_failed') {
+    return 'Nie mozna sprawdzic statusu runnera remote.';
+  }
+  if (code === 'remote_submit_failed') {
+    return 'Runner remote nie przyjal zadnego zadania.';
+  }
+  if (code === 'analysis_launch_failed') {
+    return 'Nie udalo sie zakolejkowac zadnej analizy. Odswiez status runnera i sprobuj ponownie.';
+  }
+  if (code.startsWith('runner_')) {
+    return `Runner remote nie jest gotowy (${code.replace(/^runner_/, '')}).`;
+  }
   return code || 'unknown';
 }
 

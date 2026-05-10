@@ -223,6 +223,7 @@ function buildContext() {
         ? 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project'
         : 'https://chat.example';
     },
+    ensurePromptChainReadyForAnalysisType: async () => true,
     processArticles: async (tabs, promptChain, chatUrl, analysisType, options) => {
       context.captured = { tabs, promptChain, chatUrl, analysisType, options };
       return {

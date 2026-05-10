@@ -202,6 +202,7 @@ function buildContext() {
     Math,
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
+    SOURCE_TEXT_PLACEHOLDER_REGEX: /\{\{\s*(?:articlecontent|article)\s*\}\}/gi,
     PROMPTS_COMPANY: ['company prompt'],
     PROMPTS_PORTFOLIO: ['portfolio prompt'],
     CHAT_URL: 'https://chat.example',
@@ -210,6 +211,7 @@ function buildContext() {
     sourceMaterialSubmissions: [],
     ensureCompanyPromptsReady: async () => true,
     ensurePortfolioPromptsReady: async () => true,
+    ensurePromptChainReadyForAnalysisType: async () => true,
     normalizeRemoteExecutionMode: (value) => (value === 'remote' ? 'remote' : 'local'),
     getStoredRemoteExecutionMode: async () => 'local',
     getStoredSelectedRemoteRunnerId: async () => '',
@@ -246,6 +248,7 @@ function buildContext() {
   [
     'normalizeAnalysisTypeForPromptChain',
     'getPromptChainForAnalysisType',
+    'getPortfolioPromptSnapshotStatus',
     'getChatUrlForAnalysisType',
     'shouldRunPortfolioAlongsideCompany',
     'getAnalysisLaunchQueuedCount',
@@ -258,6 +261,8 @@ function buildContext() {
     'normalizeManualInstances',
     'normalizeSourceMaterialLength',
     'normalizeSourceMaterialSubmitFailure',
+    'injectSourceTextIntoPromptTemplate',
+    'removeSourceTextPlaceholdersFromPromptTemplate',
     'reportManualSourceMaterialSaveEvent',
     'submitManualSourceMaterialForQueue',
     'runManualSourceAnalysis',
@@ -360,6 +365,24 @@ async function testManualPortfolioOnlyQueuesOnePortfolioProcess() {
   assert.strictEqual(context.processArticleCalls[0].tabs.length, 1);
 }
 
+function testSourceTextPlaceholderInjectionSupportsPortfolioArticleAlias() {
+  const context = buildContext();
+  const sourceText = 'Tekst artykulu do analizy';
+
+  assert.strictEqual(
+    context.injectSourceTextIntoPromptTemplate('ARTYKUL:\n{{article}}', sourceText),
+    `ARTYKUL:\n${sourceText}`
+  );
+  assert.strictEqual(
+    context.injectSourceTextIntoPromptTemplate('ARTYKUL:\n{{ articlecontent }}\n{{ ARTICLE }}', sourceText),
+    `ARTYKUL:\n${sourceText}\n${sourceText}`
+  );
+  assert.strictEqual(
+    context.removeSourceTextPlaceholdersFromPromptTemplate('Start {{article}} / {{ articlecontent }} koniec'),
+    'Start  /  koniec'
+  );
+}
+
 function testManualSourceShowsSinglePortfolioActionWithoutModeToggle() {
   const popupHtml = fs.readFileSync(path.join(__dirname, 'popup.html'), 'utf8');
   const manualSourceHtml = fs.readFileSync(path.join(__dirname, 'manual-source.html'), 'utf8');
@@ -389,31 +412,131 @@ function testPortfolioPromptChainHasFourPrompts() {
   assert.strictEqual(prompts.length, 4);
   assert.ok(prompts[0].includes('{{article}}'));
   assert.ok(prompts[0].includes('Ranking warstw value chain'));
+
+  const context = buildContext();
+  const injectedFirstPrompt = context.injectSourceTextIntoPromptTemplate(prompts[0], 'SOURCE_BODY');
+  assert.ok(injectedFirstPrompt.includes('SOURCE_BODY'));
+  assert.ok(!/\{\{\s*(?:articlecontent|article)\s*\}\}/i.test(injectedFirstPrompt));
+
   assert.ok(prompts[1].includes('PORTFOLIO_REFLECTION_REPORT'));
-  assert.ok(prompts[1].includes('account.positions.analysis_context'));
-  assert.ok(prompts[1].includes('include_context_text'));
+  assert.ok(prompts[1].includes('PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN'));
+  assert.ok(prompts[1].includes('PORTFOLIO_SNAPSHOT_FROM_DB_END'));
+  assert.ok(prompts[1].includes('placeholder_until_snapshot_refresh'));
+  assert.ok(prompts[1].includes('positions[].db_context'));
+  assert.ok(prompts[1].includes('db_context.thesis'));
+  assert.ok(prompts[1].includes('nie używaj `tool_search` w Prompcie 2'));
+  assert.ok(prompts[1].includes('nie używaj `account.positions.analysis_context` w Prompcie 2'));
+  assert.ok(!prompts[1].includes('portfolio snapshot account positions analysis_context feedback sizing_monitor'));
+  assert.ok(!prompts[1].includes('include_context_text'));
+  assert.ok(!prompts[1].includes('"compact": true'));
   assert.ok(prompts[1].includes('nie używaj broker.positions.list({})'));
   assert.ok(prompts[1].includes('nie używaj list_resources'));
   assert.ok(prompts[1].includes('Nie generuj jeszcze konkretnych zleceń, Take Profit ani Stop Loss'));
+  assert.ok(prompts[1].includes('Zwróć wyłącznie jeden poprawny JSON'));
+  assert.ok(prompts[1].includes('"answers"'));
+  assert.ok(prompts[1].includes('"data_quality"'));
+  assert.ok(!prompts[1].includes('## 1. Odpowiedź wprost na dwa pytania'));
   assert.ok(!prompts[1].includes('mcp__codex_apps__iskierka._stage12_research_rows_upsert'));
   assert.ok(prompts[2].includes('Finalny sizing, TP/SL i zapis feedbacku przez MCP'));
+  assert.ok(prompts[2].includes('KROK 1 - WCZYTAJ SNAPSHOT Z PROMPTU 2'));
+  assert.ok(prompts[2].includes('Nie pobieraj snapshotu przez MCP'));
+  assert.ok(prompts[2].includes('PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN'));
+  assert.ok(prompts[2].includes('Zwróć wyłącznie jeden poprawny JSON'));
+  assert.ok(prompts[2].includes('"status": "SUBMIT_OK/ZAPIS_NIEPOTWIERDZONY/NIE_ZAPISANO"'));
+  assert.ok(prompts[2].includes('"feedback_payload"'));
+  assert.ok(!prompts[2].includes('TABELA POZYCJI'));
+  assert.ok(!prompts[2].includes('portfolio snapshot account positions analysis_context feedback sizing_monitor'));
+  assert.ok(!prompts[2].includes('account.positions.analysis_context({'));
+  assert.ok(!prompts[2].includes('hashed callable connectora'));
+  assert.ok(!prompts[2].includes('"compact": true'));
   assert.ok(prompts[2].includes('portfolio.feedback.submit'));
   assert.ok(prompts[2].includes('portfolio.feedback.sizing_monitor'));
   assert.ok(prompts[2].includes('stop_loss_price'));
   assert.ok(prompts[2].includes('take_profit_price'));
   assert.ok(prompts[3].includes('Wykonawczy przelicznik akcji i zapis draft planu'));
+  assert.ok(prompts[3].includes('ten sam snapshot DB, który został wklejony w Prompcie 2'));
+  assert.ok(prompts[3].includes('Nie pobierasz snapshotu przez MCP'));
+  assert.ok(prompts[3].includes('PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN'));
+  assert.ok(prompts[3].includes('Finalny output zwracasz wyłącznie jako jeden poprawny JSON'));
+  assert.ok(prompts[3].includes('"status": "SUBMIT_OK/ZAPIS_NIEPOTWIERDZONY/NIE_ZAPISANO"'));
+  assert.ok(prompts[3].includes('"totals"'));
+  assert.ok(prompts[3].includes('"feedback_payload"'));
+  assert.ok(!prompts[3].includes('Pod tabelami dopisujesz'));
+  assert.ok(!prompts[3].includes('portfolio snapshot account positions analysis_context feedback sizing_monitor'));
+  assert.ok(!prompts[3].includes('account.positions.analysis_context({'));
+  assert.ok(!prompts[3].includes('compact true'));
   assert.ok(prompts[3].includes('qty_change'));
-  assert.ok(prompts[3].includes('action_plan'));
+  assert.ok(prompts[3].includes('trades'));
   assert.ok(prompts[3].includes('portfolio.feedback.submit'));
   assert.ok(prompts[3].includes('portfolio.feedback.sizing_monitor'));
+  assert.ok(backgroundSource.includes('getPortfolioPromptSnapshotStatus'));
+  assert.ok(backgroundSource.includes('portfolio_prompt_snapshot_placeholder'));
+  assert.ok(backgroundSource.includes('portfolio_prompt_snapshot_empty_positions'));
+  assert.ok(backgroundSource.includes('extractPortfolioFinalJsonText'));
+  assert.ok(backgroundSource.includes('extractPortfolioFeedbackSubmitPayloadFromFinalResponse'));
+  assert.ok(backgroundSource.includes('portfolio.feedback.submit.v1'));
+  assert.ok(backgroundSource.includes('portfolio_feedback_submit'));
+  assert.ok(backgroundSource.includes('portfolio_final_json'));
+  assert.ok(backgroundSource.includes("schema: 'portfolio.final_response.v1'"));
+  assert.ok(backgroundSource.includes('useStage12InvestmentResponse = !isPortfolioAnalysis'));
+}
+
+function testPortfolioPromptSnapshotStatusUsesLineMarkers() {
+  const context = buildContext();
+  const readyPrompt = [
+    'prompt one',
+    [
+      'Instrukcja wspomina `PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN` i `PORTFOLIO_SNAPSHOT_FROM_DB_END`.',
+      'PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN',
+      JSON.stringify({
+        source: 'postgresql_latest_snapshot',
+        snapshot: { generated_utc: '2026-05-07T11:27:25Z' },
+        positions: [{ symbol: 'AAPL' }]
+      }),
+      'PORTFOLIO_SNAPSHOT_FROM_DB_END'
+    ].join('\n')
+  ];
+  const readyStatus = context.getPortfolioPromptSnapshotStatus(readyPrompt);
+  assert.strictEqual(readyStatus.ok, true);
+  assert.strictEqual(readyStatus.reason, 'portfolio_prompt_snapshot_ready');
+
+  const placeholderPrompt = [
+    'prompt one',
+    [
+      'PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN',
+      JSON.stringify({
+        source: 'placeholder_until_snapshot_refresh',
+        snapshot: { generated_utc: null },
+        positions: []
+      }),
+      'PORTFOLIO_SNAPSHOT_FROM_DB_END'
+    ].join('\n')
+  ];
+  const placeholderStatus = context.getPortfolioPromptSnapshotStatus(placeholderPrompt);
+  assert.strictEqual(placeholderStatus.ok, false);
+  assert.strictEqual(placeholderStatus.reason, 'portfolio_prompt_snapshot_placeholder');
+}
+
+function testPortfolioPromptOneResponseIsCopiedToDatabase() {
+  assert.ok(backgroundSource.includes('copyPortfolioPromptOneResponseToDatabase'));
+  assert.ok(backgroundSource.includes('portfolio.prompt_first_response.v1'));
+  assert.ok(backgroundSource.includes('portfolio_prompt1_value_chain_ranking'));
+  assert.match(
+    backgroundSource,
+    /stage0Response\s*=\s*await getLastResponseText\(\)[\s\S]{0,900}copyPortfolioPromptOneResponseToDatabase\(stage0Response\)/
+  );
+  assert.ok(backgroundSource.includes('skipProcessPersistencePatch: true'));
 }
 
 async function main() {
   await testPopupRunQueuesPortfolioAutomatically();
   await testManualTextSharesOneSourceAcrossCompanyAndPortfolio();
   await testManualPortfolioOnlyQueuesOnePortfolioProcess();
+  testSourceTextPlaceholderInjectionSupportsPortfolioArticleAlias();
   testManualSourceShowsSinglePortfolioActionWithoutModeToggle();
   testPortfolioPromptChainHasFourPrompts();
+  testPortfolioPromptSnapshotStatusUsesLineMarkers();
+  testPortfolioPromptOneResponseIsCopiedToDatabase();
   console.log('portfolio auto company test: ok');
 }
 

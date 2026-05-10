@@ -199,10 +199,60 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
   });
 }
 
+function makePortfolioFeedbackSubmitPayload() {
+  return {
+    schema: 'portfolio.feedback.submit.v1',
+    account: 'U22088457',
+    review: {
+      review_id: 'pfb-test',
+      snapshot_id: 'ibkrps-test',
+      portfolio_feedback: 'Rotate sizing.'
+    },
+    layer_votes: [{ layer_id: 'ai_hyperscalers', vote: 'REDUCE' }],
+    position_votes: [{ symbol: 'GOOGL', layer_id: 'ai_hyperscalers', action: 'REDUCE' }],
+    action_plan: [{ symbol: 'GOOGL', action: 'SELL' }],
+    entry_strategy: [{ symbol: 'GOOGL', strategy: 'Reduce now.' }]
+  };
+}
+
+function makePortfolioFinalResponse(status = 'SUBMIT_OK', feedbackPayload = null) {
+  return JSON.stringify({
+    status,
+    summary: {
+      main_problem: 'Problem',
+      main_change_and_capital_source: 'Change',
+      largest_risk_after_changes: 'Risk'
+    },
+    snapshot: {
+      snapshot_id: 'ibkrps-test',
+      account: 'U22088457',
+      positions_count: 1
+    },
+    layers: [],
+    positions: [],
+    trades: [],
+    entry_rules: [],
+    totals: {
+      total_sales_and_exits_usd: 0,
+      total_buys_usd: 0,
+      cash_after_drafts_usd: 0,
+      risk_reduced: '',
+      risk_increased: '',
+      success_kpi: ''
+    },
+    save: {
+      submit_ok: true
+    },
+    feedback_payload: feedbackPayload,
+    errors: []
+  });
+}
+
 const context = {
   console,
   JSON,
   DecisionContractUtils,
+  RESPONSE_CONVERSATION_LOG_MAX_ITEMS: 40,
   STRUCTURED_WATCHLIST_OPPORTUNITY_KEYS: [
     'value_chain_position',
     'price_dislocation_reason',
@@ -250,6 +300,15 @@ const context = {
   },
   extractLastAssistantResponseFromTab() {
     throw new Error('DOM fallback should not be used in this test');
+  },
+  normalizeChatConversationUrl(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeConversationLogSnapshot(value) {
+    return Array.isArray(value) ? value : [];
+  },
+  generateResponseId(runId = '') {
+    return `generated-${runId || 'none'}`;
   }
 };
 
@@ -264,6 +323,12 @@ vm.createContext(context);
   'sanitizeStructuredWatchlistRecord',
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
+  'extractPortfolioFinalResponseFromText',
+  'cloneJsonCompatibleValue',
+  'parseJsonObjectCandidate',
+  'isPortfolioFeedbackSubmitPayload',
+  'normalizePortfolioFeedbackSubmitDispatchPayload',
+  'extractPortfolioFeedbackSubmitPayloadFromFinalResponse',
   'buildResponseContractValidation',
   'getCompletedProcessLocalSaveState',
   'hasCompletedProcessLocalSave',
@@ -315,6 +380,41 @@ async function testAcceptsStructuredV2FinalContract() {
 
   assert.strictEqual(result.success, true);
   assert.strictEqual(result.contractKind, 'economist.response.v2');
+}
+
+async function testAcceptsPortfolioFinalJsonContract() {
+  const responseText = makePortfolioFinalResponse();
+  const result = await context.resolveCompletedProcessFinalResponseText({
+    analysisType: 'portfolio',
+    currentPrompt: 4,
+    totalPrompts: 4,
+    completedResponseText: responseText
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.contractKind, 'portfolio.final_response.v1');
+  assert.strictEqual(result.responseText, responseText);
+}
+
+function testExtractsPortfolioFeedbackSubmitPayloadFromFinalJson() {
+  const responseText = makePortfolioFinalResponse('NIE_ZAPISANO', makePortfolioFeedbackSubmitPayload());
+  const payload = context.extractPortfolioFeedbackSubmitPayloadFromFinalResponse(responseText, {
+    runId: 'run-portfolio',
+    responseId: 'resp-portfolio-final',
+    source: 'Portfolio final JSON',
+    sourceTitle: 'Portfolio final JSON'
+  });
+
+  assert.ok(payload);
+  assert.strictEqual(payload.schema, 'portfolio.feedback.submit.v1');
+  assert.strictEqual(payload.responseId, 'resp-portfolio-final:portfolio_feedback_submit');
+  assert.strictEqual(payload.runId, 'run-portfolio');
+  assert.strictEqual(payload.analysisType, 'portfolio_feedback_submit');
+  assert.strictEqual(payload.account, 'U22088457');
+  assert.strictEqual(payload.review.review_id, 'pfb-test');
+  assert.strictEqual(payload.layer_votes.length, 1);
+  assert.strictEqual(payload.position_votes[0].symbol, 'GOOGL');
+  assert.strictEqual(JSON.parse(payload.text).review.review_id, 'pfb-test');
 }
 
 async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {
@@ -543,6 +643,8 @@ async function main() {
   await testAcceptsCompletedPayloadEvenWhenPromptCountersLag();
   await testRejectsInvalidFinalContract();
   await testAcceptsStructuredV2FinalContract();
+  await testAcceptsPortfolioFinalJsonContract();
+  testExtractsPortfolioFeedbackSubmitPayloadFromFinalJson();
   await testFallsBackToCanonicalStorageWhenProcessPayloadMissing();
   testCriticalCompletedResponsePatchFlushesImmediately();
   testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot();
