@@ -51,6 +51,12 @@ If no candidate has strong article fidelity AND material flow AND market
 neglect, the system reports "best available expression" with reduced
 sizing — not a full-conviction PRIMARY masquerading as a high-quality pick.
 
+LAYERS OF ECONOMIC EVIDENCE
+
+Spend pressure exists. Revenue may follow. Margin may be retained. EPS may grow per share without dilution. These are four different claims requiring four different qualities of evidence. Before any quantitative output, the analyst must explicitly know which claim is being made and which evidence supports it.
+
+Sectors differ — defense procurement, energy infrastructure, healthcare reimbursement, industrial replacement. The four-layer discipline applies universally.
+
 CORE COMPLETENESS PRINCIPLE
 
 CORE serves as a contamination audit and safety filter, not as the
@@ -1078,6 +1084,22 @@ Expected distribution for the final evidence-qualified company set:
 
 **Tasks:**
 
+LAYER 3+ DISCOVERY — research questions before universe generation
+
+Before listing candidates, the analyst must spend genuine research effort answering five questions. These are not check boxes — they are the difference between finding the obvious beneficiary that everyone has and finding the upstream specialist whose component cannot be substituted within 24 months.
+
+Q1 — Customer-of-customer: For each obvious beneficiary in this thesis, who are THEIR most critical suppliers? Read their 10-K supplier lists, conference call mentions of "key partners," and industry teardowns. The market often knows the obvious beneficiary and ignores the upstream specialist.
+
+Q2 — Bill of materials at scale: When this thesis scales 10x, what bottleneck shows up that doesn't exist at current volume? Cooling, power equipment, specialty chemicals, calibration tools, qualification services. These are often small caps with sector neglect because at current scale they look like commodities.
+
+Q3 — Reference design archaeology: For physical products in this thesis, who designed the reference architecture that everyone copies? The reference designer often controls component selection through specification — even if they don't make the components.
+
+Q4 — Post-sale economics: After the primary product is sold, who captures the recurring revenue stream? Service contracts, maintenance, spare parts, software updates, qualification renewal, calibration. Recurring revenue is often valued lower than equipment sales but generates higher returns on capital.
+
+Q5 — Geographic anomalies: Are there foreign-listed companies (Japan, Korea, Taiwan, Germany, Netherlands) that supply critical components but trade at discount due to home-market valuation practices? These are systematically underpriced because US-focused analysts under-cover them.
+
+Output the discovery walk explicitly. If after this walk the universe consists only of large US-listed obvious names, state this and explain why the value chain has no investable Layer 3+ expression.
+
 1. **Generate an evidence-driven public company universe.**
    - Do not force 20-30 companies. Include only companies with a plausible public equity link to the selected invoice items or bottlenecks.
    - Expected range: 4-20 initial candidates, but fewer is acceptable if the public investable universe is concentrated.
@@ -1181,17 +1203,25 @@ State whether the thesis stream can plausibly move company EBIT, FCF, or valuati
    - Label confidence as LOW
    - Classify at most as Catalytic (never Core)
 
-3. **Critical Audit to Prevent "Guessed Exposure":**
-   
-   For each company, explicitly trace the evidence chain:
-   - "Thesis identifies invoice item: [X]"
-   - "Company's filing discloses segment: [Y]"
-   - "These match because: [reasoning]"
-   - "Segment revenue: $[A]B, Total revenue: $[B]B"
-   - "If thesis stream margins differ from company average: show EBIT / gross profit / contribution margin sensitivity or explicitly downgrade confidence"
-   - "Exposure: [A/B]% (Method [A/B/C/D], Confidence: [HIGH/MEDIUM/LOW])"
-   
-   **Red flag question:** "Am I assuming this company benefits because it sounds right, or do I have documentary evidence of revenue, profit sensitivity, or funded backlog conversion tied to the thesis invoice items?"
+3. **Three reality questions before tier classification:**
+
+These three questions separate genuine investment candidates from thematic fits. Answer each in 2-3 sentences with specific evidence, not yes/no.
+
+Q1 — What would force a customer to choose this company over alternatives?
+Not "they have a good product." A specific reason: qualification that takes 24+ months to replicate, installed base with switching costs, contractual lock-in, intellectual property that survives litigation, distribution relationships that competitors cannot copy. If no such reason exists, the company is a price-taker regardless of thesis exposure.
+
+Q2 — Walk three years forward: what does this company look like if the thesis plays out fully versus if the thesis stalls?
+Specifically: segment revenue, segment margin, capacity utilization, share count, balance sheet. If both scenarios look similar, the thesis is not the investment case — something else is. If they diverge dramatically, the thesis IS the investment case but the downside needs to be sized.
+
+Q3 — What is the market currently paying for, and what is it NOT paying for?
+Read the most recent sell-side notes. What is consensus modeling? What growth rate, margin assumption, capital return policy? Then identify ONE specific element the article-derived mechanism reveals that consensus does not yet model. If nothing specific, the company has no information advantage — only sector beta.
+
+Evidence chain:
+- "Customer lock-in mechanism: [specific]"
+- "3-year scenario split: [thesis plays out → X; thesis stalls → Y]"
+- "What consensus underweights: [specific]"
+
+If Q1 has no specific answer, classify as Sector Monitor. If Q3 has no specific answer, the company can be Material Play at best, not Core Play.
 
 4. **Classify Each Candidate:**
    - Core Play (>40% exposure)
@@ -1741,6 +1771,20 @@ State explicitly:
 
 If multiple sub-segments map to this company, choose ONE "primary" stream (highest exposure / best data / best thesis fit) and score it fully. For additional streams, write a brief secondary stream footnote.
 
+ECONOMIC VS OPERATIONAL EVIDENCE TEST
+
+Before scoring TS and TQ, distinguish operational evidence from economic evidence on the thesis stream.
+
+Operational evidence: company is doing the thing. Catalog matches thesis. Product is shipping. Customer is named. These prove existence, not economics.
+
+Economic evidence: company captures margin from the thing. Disclosed segment EBIT or gross margin on thesis stream. Cash flow conversion visible. Pricing power demonstrated through cycle. Capacity rent showing in returns. These prove value capture.
+
+Rule: TS can score on operational evidence. TQ requires economic evidence. A company with strong operational signals but missing economic signals scores high TS, low TQ, and lands in SOFT_TRACTION or OPTION_ONLY — not HARD_TRACTION.
+
+Common failure: company-wide aggregate margin substituted for thesis-stream margin. If the thesis stream cannot be isolated economically, TQ caps at 3 regardless of company size or reputation.
+
+Decision question for the analyst: if I had to defend this TQ score in front of a skeptical portfolio manager who asked "show me the thesis margin specifically, not the blended company average" — could I?
+
 ### Step 2: Classify Business Type
 Choose exactly one: BT-A (Project/Backlog), BT-B (Program/Budget), BT-C (Installed Base/Subscription), or BT-D (Regulated/RAB).
 
@@ -2101,6 +2145,14 @@ Think in this order:
 12. Where exactly do we disagree with the market?
 13. What should later be counted as WEDGE?
 14. What must not be counted as WEDGE because it already belongs in CORE?
+
+15. Five-year EPS reconstruction: If I assume current operating margin holds and revenue grows at consensus rate, what EPS will this company report in 5 years? Compare to today's diluted EPS. The ratio tells me what growth I'm paying for. If required EPS growth exceeds 15% CAGR for 5 years without disclosed mechanism, the price is paying for an option, not earnings.
+
+16. Cash conversion stress: Three-year cumulative FCF divided by cumulative net income. Below 0.6x means reported earnings don't fully convert to distributable cash. Investigate why: working capital intensity, capex burden, non-cash items. If structural rather than transitional, EPS-based valuation is unreliable and the analyst must use FCF directly.
+
+17. Capital allocation history: Over the last 5 years, has management used capital to grow per-share value (buybacks below intrinsic, accretive acquisitions, smart capex) or destroyed it (dilutive issuance, expensive M&A, capex chasing capacity that didn't generate returns)? Past behavior is the strongest predictor of how thesis-driven cash flows will be allocated.
+
+These feed existing CORE_CONFIDENCE and CORE_DECISION_GRADE.
 
 CORE TYPE CLASSIFICATION
 
@@ -2968,6 +3020,10 @@ Then ask:
 19. Did Stage 4 ignore capex, working capital, dilution or ROIC?
 20. Did Stage 4 ignore sector-specific upside such as service tail, consumables or installed-base lock-in?
 
+21. Rent retention test: Within 36 months, who will capture more of this bottleneck's economics — the supplier, the customer, or new entrants? Name the specific mechanism: customer-funded capacity that flips rent ownership, dual-sourcing that compresses pricing, architectural redesign that bypasses the bottleneck, new qualified entrants emerging from current development cycles. If the supplier captures more, what specific evidence supports that (margin expansion through cycle, contract structure improvements, pricing power demonstrated by ASP increases without volume loss)?
+
+22. Historical analog: When has this type of bottleneck existed before in any industry? Memory cycles, defense procurement waves, infrastructure build-outs, healthcare reimbursement changes. In the historical analog, who captured rent in the first 3 years and who captured it in years 4-7? The pattern typically shifts as supply responds — name when that shift is likely here.
+
 SECTOR OVERLAY PRINCIPLES
 
 1. Positive sector memory is not enough
@@ -3780,6 +3836,14 @@ After computing Required_Revenue_Range, verify against Stage 3:
   flag TRACTION_REALISM_MISMATCH. The math works but money is not moving. Override to WARN.
 - If TractionClass = OPTION_ONLY:
   wedge realism applies only to Bull scenario. Bear and Base assume near-zero thesis capture.
+
+COMPETITIVE ENTRY QUESTION before wedge realism is accepted:
+
+The pool size, capture rate, and conversion factor are mathematical. Before accepting Required_Revenue_Range as binding, ask:
+
+If a competitor with similar capabilities and 80% of the funding decided tomorrow to enter this pool, how much of the assumed capture would survive? Specifically: customers who would switch, contracts up for renewal, qualification cycles starting, pricing pressure on incumbents.
+
+If most of the capture survives competitive entry, the wedge math is defensible. If half disappears, the wedge is fragile regardless of pool size. State the surviving fraction and the basis.
 
 TIMING FRICTION CONSTRAINT (uses Stage 3):
 - Timing Friction 0-12m: thesis revenue may begin in Year 1.
@@ -4842,6 +4906,22 @@ Use when the company has structural positioning but no funded cash flow.
 6. OVERLAY_ROUTE:
 Use when the thesis is true but too small or diluted to move valuation.
 
+PROOF-CONDITIONAL PRECISION (calibrates WEDGE_NPV precision to proof permission):
+
+Before computing WEDGE_NPV_PER_SHARE Bear/Base/Bull, calibrate numerical precision to inherited PROOF_TO_MODEL_PERMISSION:
+
+- "none": Directional bands only. No per-share decimal precision. Use phrases like "small contribution" within WEDGE_NPV_PER_SHARE field. Add flag like "WEDGE_PRECISION_LIMITED" so Stage 11/12 read correctly.
+
+- "Bull only": Bear and Base near zero or normal CORE growth only. Bull carries rounded directional value with option framing. Use probability weights 50/35/15 instead of 25/50/25.
+
+- "partial Base": Base allows partial proof-supported uplift. Bull includes full trajectory. Round to nearest sensible unit.
+
+- "Base allowed": Full Bear/Base/Bull with normal precision.
+
+- "Core rebase allowed": Full modeling including CORE rebase.
+
+When precision is forced to bands, enrich FLAGS with descriptive reasons ("PROOF_LEVEL_L4", "NO_CUSTOMER_DISCLOSURE") for downstream interpretation.
+
 Routing rules:
 - If wedge-only sufficient = NO, do not model only new revenue.
 - If baseline contamination = HIGH, split current baseline exposure from incremental economics.
@@ -5162,6 +5242,19 @@ OBJECTIVE OF THIS REVERSE DCF
 Compute the market-implied assumptions (growth and/or margin and/or reinvestment intensity) that justify today’s price, then compare those assumptions to your Base case thesis assumptions to quantify mispricing.
 Before solving market-implied assumptions, verify that the Base scenario is consistent with current management guidance, funded backlog, and disclosed near-term conversion. If not, rebase the Base scenario before reverse DCF.
 For mature industrial and defense equities, reverse DCF conclusions must be checked against guidance, funded backlog conversion, replacement cycles, and segment materiality before classifying a stock as genuinely mispriced.
+
+ASYMMETRIC INFORMATION CHECK before Tier verdict:
+
+Reverse DCF reveals what the market implicitly assumes. The analyst's edge comes from knowing something the market does not yet model. Before assigning Tier, answer:
+
+What does this analyst know — from the article mechanism, sector research, or company filings — that consensus models do not yet incorporate, and how would consensus revise its model if that information became widely held?
+
+Examples:
+- "Consensus models flat segment margin; mechanism implies 300bp expansion through customer mix shift."
+- "Consensus models 5-year duration; contract structure suggests 7-year capacity rent."
+- "Consensus models single-supplier risk discount; qualification evidence shows incumbent is functionally protected."
+
+If the analyst cannot articulate a specific gap, the candidate has no informational edge — only sector beta. Tier 1 or Tier 2 require an articulated gap. Without it, Tier 3 at best.
 
 STEP-BY-STEP PROCESS
 
@@ -6881,15 +6974,19 @@ what_would_make_it_buyable
 what_would_kill_it
 why_it_is_better_than_the_other_finalists
 
-Każde pole:
+Każde pole musi zawierać substantywną treść ekonomiczną.
 
-2–4 zdania
-konkretne
-użyteczne
-bez odwołań do stage’ów
+why_watch_not_avoid: dlaczego firma nie jest strukturalnie uszkodzona. Odwołaj się do konkretnej trwałej pozycji konkurencyjnej, udowodnionej konwersji cash, odporności bilansu, lub ekonomii segmentu trzymającej się przez cykl. Bez ozdobników typu "dobry biznes" lub "ciekawa ekspozycja".
 
-To jest „mózg decyzji”.
-Jeśli ta sekcja jest słaba, rekord jest słaby.
+why_watch_not_buy_now: określ blocker konkretnie — cena, dowód, timing, czy jakość. Powiedz jaki poziom ceny albo jaki dowód usuwa blocker.
+
+what_would_make_it_buyable: konkretne i testowalne. Nie "lepsza egzekucja", ale "marża segmentowa Q2 powyżej X%" lub "cena poniżej Y z potwierdzonym Z". Obserwowalne w 6-18 miesięcy.
+
+what_would_kill_it: rzeczywisty kill ekonomiczny, nie ogólne ryzyko. Klient bypassuje przez redesign. Nadbudowa mocy niszczy pricing. Dual-sourcing przenosi rentę.
+
+why_it_is_better_than_the_other_finalists: porównanie na substancji ekonomicznej, nie na różnicy Composite Score. "Czystszy proof level z ujawnioną marżą segmentową" lub "Layer 3+ market neglect którego konkurenci nie mają".
+
+Czytelnik wracający za 6 miesięcy powinien odtworzyć logikę inwestycyjną z tych pięciu pól.
 
 extras.kpi_details
 
