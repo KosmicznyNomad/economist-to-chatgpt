@@ -43,10 +43,10 @@ const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
 const ANALYSIS_TYPE_COMPANY = 'company';
 const ANALYSIS_TYPE_PORTFOLIO = 'portfolio';
-const PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA = 'portfolio.prompt_first_response.v1';
-const PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE = 'portfolio_prompt1_value_chain_ranking';
-const PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE = 'Portfolio Prompt 1: Value Chain Ranking';
-const PORTFOLIO_PROMPT_ONE_RESPONSE_REASON = 'portfolio_prompt1_value_chain_ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA = 'portfolio.layer_ranking.v1';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE = 'portfolio_layer_ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE = 'Portfolio Prompt 1: Layer Ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_REASON = 'portfolio_layer_ranking';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
@@ -149,6 +149,8 @@ function computeFinalResponseSaveTimeoutMs() {
 }
 const FINAL_RESPONSE_SAVE_TIMEOUT_MS = computeFinalResponseSaveTimeoutMs();
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
+const WATCHLIST_INTAKE_STATUS_PATH = '/api/v1/intake/status';
+const WATCHLIST_DISPATCH_HEALTH_CACHE_TTL_MS = 30 * 1000;
 const ANALYSIS_QUEUE_PAUSED_STORAGE_KEY = 'analysis_queue_paused';
 const ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY = 'iskra_remote_execution_mode';
 const ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY = 'iskra_remote_selected_runner_id';
@@ -207,8 +209,8 @@ const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   alarmName: 'completed-process-persistence-retry'
 };
 const PROCESS_WINDOW_CLOSE_RETRY = {
-  // Process tabs/windows are user-visible work surfaces; keep them open after queue/save completion.
-  enabled: false,
+  // Process tabs/windows are automation-owned work surfaces; close them after final response persistence.
+  enabled: true,
   initialDelayMs: 1500,
   maxDelayMs: 60 * 1000,
   maxAttempts: 24,
@@ -262,6 +264,7 @@ let responseStorageMutationQueue = Promise.resolve();
 let canonicalResponseStorageReady = null;
 let analysisQueueMutationQueue = Promise.resolve();
 let watchlistDispatchCredentialsCache = null;
+let watchlistDispatchHealthCache = null;
 let watchlistDispatchProcessLogEntries = [];
 let watchlistDispatchProcessLogReady = null;
 let autoRestoreWindowsInProgress = false;
@@ -339,6 +342,20 @@ function normalizeComposerThinkingEffort(value) {
   return '';
 }
 
+function formatResumeProcessTitleWithThinkingEffort(title, composerThinkingEffort) {
+  const baseTitle = typeof title === 'string' && title.trim()
+    ? title.trim()
+    : '';
+  const normalizedEffort = normalizeComposerThinkingEffort(composerThinkingEffort);
+  if (!baseTitle || !normalizedEffort) return baseTitle;
+
+  const tag = `[${normalizedEffort.toUpperCase()}]`;
+  if (baseTitle.includes(tag)) return baseTitle;
+
+  const formattedTitle = baseTitle.replace(/^(Auto\s+(?:Start|Repeat))(?=:)/i, `$1 ${tag}`);
+  return formattedTitle === baseTitle ? `${baseTitle} ${tag}` : formattedTitle;
+}
+
 function normalizeChatGptMonitoringLabel(value, maxLength = 180) {
   const normalized = typeof value === 'string'
     ? value.replace(/\s+/g, ' ').trim()
@@ -407,10 +424,18 @@ function normalizeChatGptUiText(value) {
     .toLowerCase();
 }
 
-function isChatGptLimitOrRestrictionText(text) {
+function isChatGptLimitOrRestrictionText(text, source = 'text') {
   const lowered = normalizeChatGptUiText(text);
   if (!lowered) return false;
-  return /\blimit\s*:/.test(lowered);
+  const sourceKey = normalizeChatGptUiText(source);
+  const trustedUiSource = (
+    sourceKey.includes('alert') ||
+    sourceKey.includes('status') ||
+    sourceKey.includes('error') ||
+    sourceKey.includes('banner') ||
+    sourceKey.includes('toast')
+  );
+  return trustedUiSource && /^(?:limit|rate limit|usage limit)\s*:/.test(lowered) && lowered.length <= 240;
 }
 
 function isInjectRateLimitBlockedResult(result) {
@@ -2012,9 +2037,11 @@ function sanitizeAnalysisQueueJob(rawJob) {
     }
     sanitized.reloadBeforeResume = rawJob.reloadBeforeResume !== false;
     sanitized.forceRepeatLastPrompt = rawJob.forceRepeatLastPrompt === true;
+    sanitized.bypassPause = rawJob.bypassPause === true;
     sanitized.skipStagePreflight = rawJob.skipStagePreflight === true;
-    if (typeof rawJob.composerThinkingEffort === 'string' && rawJob.composerThinkingEffort.trim()) {
-      sanitized.composerThinkingEffort = rawJob.composerThinkingEffort.trim();
+    const composerThinkingEffort = normalizeComposerThinkingEffort(rawJob.composerThinkingEffort);
+    if (composerThinkingEffort) {
+      sanitized.composerThinkingEffort = composerThinkingEffort;
     }
     if (rawJob.precomputedStagePlan && typeof rawJob.precomputedStagePlan === 'object') {
       sanitized.precomputedStagePlan = rawJob.precomputedStagePlan;
@@ -2095,8 +2122,8 @@ async function setAnalysisQueuePaused(paused, options = {}) {
   }
   await chrome.storage.local.set({ [ANALYSIS_QUEUE_PAUSED_STORAGE_KEY]: nextPaused });
   analysisQueuePaused = nextPaused;
-  if (options?.requestReconcile !== false) {
-    requestAnalysisQueueReconcile(nextPaused ? 'queue_paused' : 'queue_resumed');
+  if (!nextPaused && options?.requestReconcile !== false) {
+    requestAnalysisQueueReconcile('queue_resumed');
   }
   if (!nextPaused && options?.requestRemoteRunnerCycle !== false) {
     requestRemoteRunnerCycle('queue_resumed');
@@ -2598,6 +2625,9 @@ function getAnalysisQueueProcessContextKey(process) {
 
 function shouldProcessOccupyAnalysisQueueSlot(process) {
   if (!process || typeof process !== 'object') return false;
+  if (shouldBypassAnalysisQueueForAnalysisType(process.analysisType)) {
+    return false;
+  }
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (process.queueManaged === true && process.slotReserved === false && status !== 'queued') {
     return false;
@@ -5070,6 +5100,13 @@ function sanitizeReloadResumeMonitorRow(rawRow) {
     totalPrompts: Number.isInteger(rawRow.totalPrompts) ? rawRow.totalPrompts : null,
     progressStageName: typeof rawRow.progressStageName === 'string' ? rawRow.progressStageName : '',
     progressStatus: typeof rawRow.progressStatus === 'string' ? rawRow.progressStatus : '',
+    progressStatusCode: typeof rawRow.progressStatusCode === 'string' ? rawRow.progressStatusCode : '',
+    progressReason: typeof rawRow.progressReason === 'string' ? rawRow.progressReason : '',
+    progressError: typeof rawRow.progressError === 'string' ? rawRow.progressError : '',
+    progressStatusText: typeof rawRow.progressStatusText === 'string' ? rawRow.progressStatusText : '',
+    processIssueFlags: Array.isArray(rawRow.processIssueFlags)
+      ? rawRow.processIssueFlags.filter((item) => typeof item === 'string' && item.trim()).slice(0, 12)
+      : [],
     progressNeedsAction: rawRow.progressNeedsAction === true,
     chatPromptNumber: Number.isInteger(rawRow.chatPromptNumber) ? rawRow.chatPromptNumber : null,
     chatPromptSource: typeof rawRow.chatPromptSource === 'string' ? rawRow.chatPromptSource : '',
@@ -7029,15 +7066,90 @@ function problemLogSourceMatches(sourceText, token) {
   return false;
 }
 
+function processProblemLogBlob(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  return [
+    entry.level,
+    entry.source,
+    entry.category,
+    entry.status,
+    entry.reason,
+    entry.error,
+    entry.statusText,
+    entry.message,
+    entry.stageName
+  ].map((value) => (typeof value === 'string' ? value.trim() : '')).join(' ').toLowerCase();
+}
+
+function hasOperationalProblemLogMarker(...values) {
+  const blob = values
+    .flat()
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (!blob) return false;
+  return [
+    'dispatch',
+    'retry',
+    'timeout',
+    'timed_out',
+    'slow',
+    'stuck',
+    'defer',
+    'pending',
+    'blocked',
+    'rate_limit',
+    'limit',
+    'unavailable',
+    'failed',
+    'failure',
+    'error',
+    'data_gap',
+    'recovery',
+    'resend',
+    'window_close',
+    'missing_dispatch',
+    'db_',
+    'http_'
+  ].some((marker) => blob.includes(marker));
+}
+
+function isNormalProcessProblemLogEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
+  if (!problemLogSourceMatches(source, 'process-monitor')) return false;
+  const level = normalizeProblemLogLevel(entry.level);
+  if (level === 'warn' || level === 'error') return false;
+  const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
+  const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  if (!['process_state', 'process_stream'].includes(category)) return false;
+  if (hasOperationalProblemLogMarker(
+    reason,
+    entry.statusText,
+    entry.message,
+    entry.error,
+    entry.stageName
+  )) {
+    return false;
+  }
+  if (reason.startsWith('ok_') || reason.startsWith('state_')) return true;
+  const status = normalizeProcessStatus(entry.status || '');
+  return ['queued', 'starting', 'started', 'running', 'finalizing', 'completed'].includes(status);
+}
+
 function isLowSignalProblemLogEntry(entry) {
   if (!entry || typeof entry !== 'object') return false;
   const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  const level = normalizeProblemLogLevel(entry.level);
 
   if (reason === 'remote_connection_configured') return true;
   if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
   if (problemLogSourceMatches(source, 'process-monitor-heartbeat')) return true;
+  if (problemLogSourceMatches(source, 'process-monitor') && reason === 'dispatch_skipped' && level === 'info') return true;
+  if (isNormalProcessProblemLogEntry(entry)) return true;
   if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
     return entry.heartbeat === true;
   }
@@ -7073,8 +7185,12 @@ function shouldDispatchProblemLogRemotely(entry) {
 
   const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
-  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
-    return entry.heartbeat !== true;
+  if (problemLogSourceMatches(source, 'process-monitor')) {
+    if (entry.heartbeat === true) return false;
+    if (category !== 'process_state' && category !== 'process_stream') {
+      return hasOperationalProblemLogMarker(processProblemLogBlob(entry));
+    }
+    return hasOperationalProblemLogMarker(processProblemLogBlob(entry));
   }
   if (category === 'process_state' || category === 'data_gap' || category === 'recovery') return true;
   return false;
@@ -7100,16 +7216,108 @@ function shouldRecordIssueForProcess(process) {
   ));
 }
 
-function shouldRecordSuccessForProcess(process, status, stage) {
-  if (!process || typeof process !== 'object') return false;
-  if (shouldRecordIssueForProcess(process)) return false;
-  if (isClosedProcessStatus(status) && status !== 'completed') return false;
+function resolveProcessDispatchProblemReason(process) {
+  if (!process || typeof process !== 'object') return '';
+  const dispatch = typeof getProcessPersistenceDispatchSnapshot === 'function'
+    ? getProcessPersistenceDispatchSnapshot(process)
+    : null;
+  if (!dispatch || typeof dispatch !== 'object') return '';
 
-  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
-  const hasPromptProgress = currentPrompt !== null && currentPrompt > 0;
-  if (status === 'completed') return true;
-  if (status === 'starting' || status === 'started' || status === 'queued') return true;
-  return hasPromptProgress;
+  const state = typeof dispatch.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
+  const verifyState = typeof dispatch.verifyState === 'string' ? dispatch.verifyState.trim().toLowerCase() : '';
+  const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
+  const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
+  const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
+  const pending = Number.isInteger(dispatch.pending) ? dispatch.pending : (deferred + remaining);
+  const accepted = Number.isInteger(dispatch.accepted) ? dispatch.accepted : 0;
+  const sent = Number.isInteger(dispatch.sent) ? dispatch.sent : 0;
+  const failureReason = typeof dispatch.failureReason === 'string' ? dispatch.failureReason.trim() : '';
+  const failureStage = typeof dispatch.failureStage === 'string' ? dispatch.failureStage.trim() : '';
+  const confirmed = typeof isExplicitlyVerifiedDispatch === 'function' && isExplicitlyVerifiedDispatch(dispatch);
+
+  if (dispatch.queueSkipped === true || dispatch.flushSkipped === true || state.includes('skipped')) return 'dispatch_skipped';
+  if (failed > 0 || state.includes('failed') || failureReason || failureStage) return 'dispatch_failed';
+  if (deferred > 0 || remaining > 0) return 'dispatch_deferred';
+  if (
+    pending > 0
+    || ['queued', 'dispatch_pending', 'awaiting_dispatch', 'dispatch_queued_no_flush_result'].includes(state)
+    || (sent > 0 && !confirmed)
+    || (accepted > 0 && !confirmed)
+    || verifyState === 'http_accepted'
+  ) {
+    const updatedAt = Number.isInteger(dispatch.updatedAt) && dispatch.updatedAt > 0
+      ? dispatch.updatedAt
+      : (
+        Number.isInteger(process.completedResponseCapturedAt) && process.completedResponseCapturedAt > 0
+          ? process.completedResponseCapturedAt
+          : 0
+      );
+    if (updatedAt && (Date.now() - updatedAt) >= Math.max(60_000, Number(WATCHLIST_DISPATCH?.verifyTimeoutMs || 0))) {
+      return 'dispatch_slow';
+    }
+    return sent > 0 || accepted > 0 ? 'dispatch_sending' : 'dispatch_pending';
+  }
+
+  return '';
+}
+
+function resolveProcessOperationalProblemReason(process, status, stage) {
+  if (!process || typeof process !== 'object') return '';
+  const reasonRaw = typeof process.reason === 'string' ? process.reason.trim() : '';
+  const errorRaw = typeof process.error === 'string' ? process.error.trim() : '';
+  const statusTextRaw = typeof process.statusText === 'string' ? process.statusText.trim() : '';
+  const statusCodeRaw = typeof process.statusCode === 'string' ? process.statusCode.trim() : '';
+  const queueStateRaw = typeof process.queueState === 'string' ? process.queueState.trim() : '';
+  const phaseRaw = typeof process.phase === 'string' ? process.phase.trim() : '';
+  const actionRaw = typeof process.actionRequired === 'string' ? process.actionRequired.trim() : '';
+  const dispatchReason = resolveProcessDispatchProblemReason(process);
+  if (dispatchReason) return dispatchReason;
+
+  const windowClose = typeof normalizeProcessWindowCloseState === 'function'
+    ? normalizeProcessWindowCloseState(process.windowClose)
+    : null;
+  const windowCloseState = typeof windowClose?.state === 'string' ? windowClose.state.trim().toLowerCase() : '';
+  if (windowCloseState === 'retrying') return 'window_close_retry';
+  if (windowCloseState === 'failed') return 'window_close_failed';
+
+  const markerFields = [
+    reasonRaw,
+    errorRaw,
+    statusTextRaw,
+    statusCodeRaw,
+    queueStateRaw,
+    phaseRaw,
+    actionRaw,
+    typeof stage?.stageName === 'string' ? stage.stageName : '',
+    status
+  ];
+  if (hasOperationalProblemLogMarker(markerFields)) {
+    const normalizedReason = trimProblemLogText(reasonRaw || statusCodeRaw || queueStateRaw || phaseRaw || actionRaw, 140);
+    return normalizedReason || 'operational_event';
+  }
+
+  return '';
+}
+
+function problemLogLevelForOperationalReason(reason) {
+  const normalized = typeof reason === 'string' ? reason.trim().toLowerCase() : '';
+  if (!normalized) return 'info';
+  if (normalized.includes('failed') || normalized.includes('error') || normalized.includes('timeout')) return 'error';
+  if (
+    normalized.includes('retry')
+    || normalized.includes('slow')
+    || normalized.includes('defer')
+    || normalized.includes('pending')
+    || normalized.includes('blocked')
+    || normalized.includes('stuck')
+  ) {
+    return 'warn';
+  }
+  return 'info';
+}
+
+function shouldRecordSuccessForProcess(process, status, stage) {
+  return false;
 }
 
 function buildProcessSuccessReason(status, stage) {
@@ -7242,7 +7450,9 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
   const chatUrlSignature = trimProblemLogText(processChatUrl || '', 180);
   const sourceUrlSignature = trimProblemLogText(processSourceUrl || '', 180);
   const issueDetected = shouldRecordIssueForProcess(process);
+  const operationalReason = issueDetected ? '' : resolveProcessOperationalProblemReason(process, status, stage);
   const successDetected = shouldRecordSuccessForProcess(process, status, stage);
+  if (!issueDetected && !operationalReason && !successDetected) return null;
   const stateDetected = !issueDetected && !successDetected;
 
   const reasonRaw = typeof process.reason === 'string' ? process.reason.trim() : '';
@@ -7252,13 +7462,13 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
     ? (reasonRaw || (isFailedProcessStatus(status) ? 'failed_status' : (process.needsAction ? 'needs_action' : 'process_issue')))
     : successDetected
       ? buildProcessSuccessReason(status, stage)
-      : (reasonRaw || buildProcessStateReason(status, stage));
+      : (reasonRaw || operationalReason || buildProcessStateReason(status, stage));
   const error = issueDetected ? errorRaw : '';
   const statusText = issueDetected
     ? (statusTextRaw || '')
     : successDetected
       ? buildProcessSuccessStatusText(reason, stage)
-      : (statusTextRaw || buildProcessStateStatusText(status, stage));
+      : (statusTextRaw || operationalReason || buildProcessStateStatusText(status, stage));
   const message = issueDetected
     ? trimProblemLogText(statusTextRaw || reasonRaw || errorRaw || status || 'process_issue', 260)
     : successDetected
@@ -7283,7 +7493,7 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
 
   const level = issueDetected
     ? (isFailedProcessStatus(status) ? 'error' : 'warn')
-    : (stateDetected && process.needsAction ? 'warn' : 'info');
+    : problemLogLevelForOperationalReason(reason);
 
   return {
     timestamp: Number.isInteger(process.timestamp) ? process.timestamp : Date.now(),
@@ -8832,6 +9042,39 @@ function normalizeSaveResponseDispatchOutcome(dispatchOutcome) {
   }
   dispatch.state = resolveSaveResponseDispatchPipelineState(dispatch);
   return dispatch;
+}
+
+function resolveSaveResponseDispatchSkipDecision(analysisType = 'company', responseSchema = '', sourceRecordSuffix = '', saveOptions = null) {
+  const options = saveOptions && typeof saveOptions === 'object' ? saveOptions : {};
+  const normalizedAnalysisType = typeof normalizeAnalysisTypeForPromptChain === 'function'
+    ? normalizeAnalysisTypeForPromptChain(analysisType)
+    : normalizeStructuredWatchlistValue(analysisType).toLowerCase();
+  const normalizedResponseSchema = normalizeStructuredWatchlistValue(responseSchema).toLowerCase();
+  const normalizedSourceRecordSuffix = normalizeStructuredWatchlistValue(sourceRecordSuffix).toLowerCase();
+  const isPortfolioFinalDispatchCandidate = normalizedResponseSchema === 'portfolio.final_response.v1'
+    || normalizedResponseSchema === 'portfolio.final_response.v2'
+    || normalizedSourceRecordSuffix === 'portfolio_final_json';
+  const allowPortfolioFeedbackDispatch = options.allowPortfolioFeedbackDispatch === true
+    || isPortfolioFinalDispatchCandidate;
+  const portfolioLocalOnly = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO
+    && !allowPortfolioFeedbackDispatch;
+  const explicitSkip = options.skipWatchlistDispatch === true
+    && !allowPortfolioFeedbackDispatch;
+  const skip = explicitSkip || portfolioLocalOnly;
+  const reason = skip
+    ? (
+      options.skipWatchlistDispatchReason
+      || (portfolioLocalOnly ? 'portfolio_analysis_saved_locally' : 'dispatch_skipped_by_options')
+    )
+    : '';
+  return {
+    skip,
+    reason,
+    normalizedAnalysisType,
+    normalizedResponseSchema,
+    isPortfolioFinalDispatchCandidate,
+    allowPortfolioFeedbackDispatch
+  };
 }
 
 function resolveSaveResponsePersistenceState(dispatchOutcome) {
@@ -10608,6 +10851,7 @@ function buildQueuedProcessPatchForJob(job) {
   const safeJob = sanitizeAnalysisQueueJob(job);
   if (!safeJob) return null;
   const totalPrompts = resolvePromptCountForQueuedJob(safeJob);
+  const composerThinkingEffort = normalizeComposerThinkingEffort(safeJob.composerThinkingEffort);
   const patch = {
     title: safeJob.title,
     analysisType: safeJob.analysisType || 'company',
@@ -10633,6 +10877,9 @@ function buildQueuedProcessPatchForJob(job) {
     sourceWindowId: Number.isInteger(safeJob.sourceWindowId) ? safeJob.sourceWindowId : null,
     messages: []
   };
+  if (composerThinkingEffort) {
+    patch.composerThinkingEffort = composerThinkingEffort;
+  }
 
   if (safeJob.kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
     const sourceUrl = typeof safeJob?.sourceUrl === 'string' && safeJob.sourceUrl.trim()
@@ -10670,6 +10917,148 @@ function buildQueuedProcessPatchForJob(job) {
   }
 
   return patch;
+}
+
+function shouldBypassAnalysisQueueForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO;
+}
+
+function findManualTextSourceForQueueBypass(sourceId, manualTextSources = []) {
+  const normalizedSourceId = sanitizeManualTextSourceId(sourceId);
+  if (!normalizedSourceId) return null;
+  return sanitizeManualTextSourceRecords(manualTextSources)
+    .find((source) => source?.id === normalizedSourceId) || null;
+}
+
+function hydrateManualTextForQueueBypass(tab, manualTextSources = []) {
+  if (!tab || typeof tab !== 'object') return tab;
+  if (typeof tab.manualText === 'string' && tab.manualText.trim()) return tab;
+  const manualUrl = typeof tab.url === 'string' ? tab.url : '';
+  if (!manualUrl.startsWith('manual://')) return tab;
+  const source = findManualTextSourceForQueueBypass(tab.manualTextSourceId, manualTextSources);
+  if (!source || typeof source.text !== 'string' || !source.text.trim()) return tab;
+  return {
+    ...tab,
+    manualText: source.text
+  };
+}
+
+function generateAnalysisQueueBypassRunId(analysisType = ANALYSIS_TYPE_COMPANY, index = 0) {
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const safeIndex = Number.isInteger(index) ? Math.max(0, index) : 0;
+  return `${normalizedAnalysisType}-queue-bypass-${Date.now()}-${safeIndex}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function launchAnalysisJobsOutsideQueue(tabs, promptChain, chatUrl, analysisType, options = {}) {
+  const sourceTabs = Array.isArray(tabs) ? tabs.filter((tab) => !!tab) : [];
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  if (sourceTabs.length === 0) {
+    const snapshot = await getAnalysisQueueStatusSnapshot();
+    return {
+      ...snapshot,
+      analysisType: normalizedAnalysisType,
+      queuedCount: 0,
+      launchedCount: 0,
+      queueBypassCount: 0,
+      queueBypass: true
+    };
+  }
+
+  const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
+  const invocationWindowId = Number.isInteger(options?.invocationWindowId)
+    ? options.invocationWindowId
+    : null;
+  const manualTextSources = sanitizeManualTextSourceRecords(options?.manualTextSources);
+  const launchedJobs = sourceTabs.map((tab, index) => {
+    const sourceUrl = typeof tab?.url === 'string' ? tab.url : '';
+    const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
+      ? options.sourceKind.trim()
+      : (sourceUrl === 'manual://pdf'
+        ? 'manual_pdf'
+        : (sourceUrl.startsWith('manual://') ? 'manual_text' : 'article'));
+    const title = typeof tab?.title === 'string' && tab.title.trim() ? tab.title.trim() : 'Bez tytulu';
+    const runId = generateAnalysisQueueBypassRunId(normalizedAnalysisType, index);
+    const launchTab = hydrateManualTextForQueueBypass({
+      ...tab,
+      sourceKind
+    }, manualTextSources);
+
+    void Promise.resolve()
+      .then(async () => {
+        await sleep(index * 500);
+        await executeAnalysisProcessJob(
+          launchTab,
+          promptChainSnapshot,
+          typeof chatUrl === 'string' ? chatUrl : '',
+          normalizedAnalysisType,
+          {
+            invocationWindowId,
+            runId,
+            sourceKind,
+            queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
+            manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
+            manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+            queueBypass: true,
+            queueBypassReason: typeof options?.reason === 'string' && options.reason.trim()
+              ? options.reason.trim()
+              : 'analysis_queue_bypass'
+          }
+        );
+      })
+      .catch(async (error) => {
+        console.warn('[analysis-queue] bypass launch failed:', {
+          runId,
+          analysisType: normalizedAnalysisType,
+          title,
+          error: error?.message || String(error)
+        });
+        if (typeof upsertProcess === 'function') {
+          await upsertProcess(runId, {
+            title,
+            analysisType: normalizedAnalysisType,
+            status: 'failed',
+            statusText: 'Blad uruchomienia poza kolejka',
+            reason: 'queue_bypass_launch_exception',
+            error: error?.message || String(error),
+            needsAction: false,
+            autoRecovery: null,
+            queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
+            manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
+            manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+            finishedAt: Date.now(),
+            timestamp: Date.now()
+          }).catch(() => null);
+        }
+      });
+
+    return {
+      runId,
+      analysisType: normalizedAnalysisType,
+      title,
+      sourceKind,
+      queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
+      manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
+      manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+      queueBypass: true
+    };
+  });
+
+  const queueSnapshot = await getAnalysisQueueStatusSnapshot();
+  return {
+    success: true,
+    jobs: launchedJobs,
+    analysisType: normalizedAnalysisType,
+    queuedCount: 0,
+    launchedCount: launchedJobs.length,
+    queueBypassCount: launchedJobs.length,
+    queueBypass: true,
+    maxConcurrent: queueSnapshot.maxConcurrent,
+    queueSize: queueSnapshot.queueSize,
+    activeSlots: queueSnapshot.activeSlots,
+    reservedSlots: queueSnapshot.reservedSlots,
+    liveSlots: queueSnapshot.liveSlots,
+    startingSlots: queueSnapshot.startingSlots
+  };
 }
 
 async function enqueueAnalysisJobs(rawJobs, options = {}) {
@@ -11501,10 +11890,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         sortAnalysisQueueWaitingJobs(state.waitingJobs);
         let manualPdfReservedSlots = state.activeJobs.filter((job) => job?.sourceKind === 'manual_pdf').length;
         while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
-          if (queuePaused || await getAnalysisQueuePaused()) {
-            break;
-          }
+          const pauseActive = queuePaused || await getAnalysisQueuePaused();
           const waitingIndex = state.waitingJobs.findIndex((job) => {
+            if (pauseActive && job?.bypassPause !== true) return false;
             if (job?.sourceKind !== 'manual_pdf') return true;
             return manualPdfReservedSlots < MANUAL_PDF_QUEUE_MAX_CONCURRENCY;
           });
@@ -11530,8 +11918,10 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
 
       const followUpProcessPatches = Array.from(followUpProcessPatchesByRunId.values());
       if (startJobs.length > 0 && await getAnalysisQueuePaused()) {
+        const pauseBypassJobs = startJobs.filter((job) => job?.bypassPause === true);
+        const pauseBlockedJobs = startJobs.filter((job) => job?.bypassPause !== true);
         const activatedJobIds = new Set(
-          startJobs
+          pauseBlockedJobs
             .map((job) => (typeof job?.jobId === 'string' ? job.jobId.trim() : ''))
             .filter(Boolean)
         );
@@ -11564,7 +11954,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             }
           });
         }
-        startJobs = [];
+        startJobs = pauseBypassJobs;
       }
 
       for (const update of followUpProcessPatches) {
@@ -14387,6 +14777,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     chatUrl: targetTabUrl || '',
     tabId,
     windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
+    ...(composerThinkingEffort ? { composerThinkingEffort } : {}),
     ...(queueManaged
       ? {
         queueManaged: true,
@@ -16575,8 +16966,8 @@ async function runResetScanStartAllTabs(options = {}) {
     const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
     const useStoredComposerThinkingEffort = options?.useStoredComposerThinkingEffort === true;
     let composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
-    // Unified rule: thinking effort is applied only when explicitly provided.
-    // Legacy fallback to stored value can be enabled only by explicit opt-in.
+    // Popup and process monitor can opt into the saved resume effort when
+    // the clicked button does not provide an explicit value.
     if (!composerThinkingEffort && useStoredComposerThinkingEffort) {
       composerThinkingEffort = await getStoredResumeComposerThinkingEffort();
     }
@@ -16871,12 +17262,12 @@ async function runResetScanStartAllTabs(options = {}) {
       }
 
       const savedStatus = normalizeProcessStatus(row?.progressStatus || '');
-      const savedNeedsAction = row?.progressNeedsAction === true;
+      const missingAssistantReplySignal = hasExplicitMissingAssistantReplySignal(row);
       let shouldAdvancePrompt = forceRepeatLastPrompt
         ? false
-        : !(savedNeedsAction || isFailedProcessStatus(savedStatus));
-      if (!forceRepeatLastPrompt && savedPromptNumber >= promptCount && !isClosedProcessStatus(savedStatus)) {
-        // For active runs at final prompt, retry the same stage instead of auto-marking completion.
+        : !missingAssistantReplySignal;
+      if (!forceRepeatLastPrompt && savedPromptNumber >= promptCount && !isClosedProcessStatus(savedStatus) && missingAssistantReplySignal) {
+        // At final prompt, only retry when there is an explicit no-reply signal.
         shouldAdvancePrompt = false;
       }
       let nextStartIndex = computeNextResumeIndex(
@@ -16893,8 +17284,8 @@ async function runResetScanStartAllTabs(options = {}) {
       const reason = forceRepeatLastPrompt
         ? (clampedFromPrompt1 ? 'force_repeat_saved_stage_clamped_to_prompt_2' : 'force_repeat_saved_stage')
         : (
-          savedNeedsAction || isFailedProcessStatus(savedStatus)
-            ? (clampedFromPrompt1 ? 'saved_stage_retry_clamped_to_prompt_2' : 'saved_stage_retry_same_prompt')
+          missingAssistantReplySignal
+            ? (clampedFromPrompt1 ? 'saved_stage_missing_reply_clamped_to_prompt_2' : 'saved_stage_missing_assistant_reply')
             : 'saved_stage_snapshot'
         );
 
@@ -16907,6 +17298,7 @@ async function runResetScanStartAllTabs(options = {}) {
         nextStartIndex,
         finalStageReached: !Number.isInteger(nextStartIndex),
         clampedFromPrompt1,
+        missingAssistantReply: missingAssistantReplySignal,
         reason
       };
     };
@@ -17020,6 +17412,11 @@ async function runResetScanStartAllTabs(options = {}) {
         totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null,
         progressStageName: typeof process?.stageName === 'string' ? process.stageName : '',
         progressStatus: process ? normalizeProcessStatus(process?.status || '') : '',
+        progressStatusCode: typeof process?.statusCode === 'string' ? process.statusCode : '',
+        progressReason: typeof process?.reason === 'string' ? process.reason : '',
+        progressError: typeof process?.error === 'string' ? process.error : '',
+        progressStatusText: typeof process?.statusText === 'string' ? process.statusText : '',
+        processIssueFlags: Array.isArray(process?.issueFlags) ? process.issueFlags.slice(0, 12) : [],
         progressNeedsAction: process?.needsAction === true,
         chatPromptNumber: null,
         chatPromptSource: '',
@@ -17122,6 +17519,11 @@ async function runResetScanStartAllTabs(options = {}) {
         row.totalPrompts = Number.isInteger(liveProcess?.totalPrompts) ? liveProcess.totalPrompts : row.totalPrompts;
         row.progressStageName = typeof liveProcess?.stageName === 'string' ? liveProcess.stageName : row.progressStageName;
         row.progressStatus = normalizeProcessStatus(liveProcess?.status || row.progressStatus || '');
+        row.progressStatusCode = typeof liveProcess?.statusCode === 'string' ? liveProcess.statusCode : row.progressStatusCode;
+        row.progressReason = typeof liveProcess?.reason === 'string' ? liveProcess.reason : row.progressReason;
+        row.progressError = typeof liveProcess?.error === 'string' ? liveProcess.error : row.progressError;
+        row.progressStatusText = typeof liveProcess?.statusText === 'string' ? liveProcess.statusText : row.progressStatusText;
+        row.processIssueFlags = Array.isArray(liveProcess?.issueFlags) ? liveProcess.issueFlags.slice(0, 12) : row.processIssueFlags;
         row.progressNeedsAction = liveProcess?.needsAction === true;
       }
       if (shouldPreserveLiveProcessDuringResume(liveProcess, row)) {
@@ -17427,7 +17829,7 @@ async function runResetScanStartAllTabs(options = {}) {
           markRestartLaunchPlan(row, row.nextStartIndex, {
             decisionReason: row.reason,
             decisionSource: row.resumeDecisionSource || 'saved_stage_snapshot',
-            missingAssistantReply: isMissingAssistantReplyReason(row.reason)
+            missingAssistantReply: savedStagePlan.missingAssistantReply === true
           });
           appendRecognitionStep(
             row,
@@ -19191,13 +19593,22 @@ function getPortfolioPromptSnapshotStatus(promptChain = PROMPTS_PORTFOLIO) {
   }
 
   const snapshotBlock = snapshotMatch[1];
-  if (new RegExp('"source"\\s*:\\s*"placeholder_until_snapshot_refresh"').test(snapshotBlock)) {
+  if (
+    new RegExp('"source"\\s*:\\s*"placeholder_until_snapshot_refresh"').test(snapshotBlock)
+    || new RegExp('(?:^|\\b)source\\s*[:=]\\s*placeholder_until_snapshot_refresh\\b', 'mi').test(snapshotBlock)
+  ) {
     return { ok: false, reason: 'portfolio_prompt_snapshot_placeholder' };
   }
-  if (new RegExp('"positions"\\s*:\\s*\\[\\s*\\]').test(snapshotBlock)) {
+  if (
+    new RegExp('"positions"\\s*:\\s*\\[\\s*\\]').test(snapshotBlock)
+    || new RegExp('^POSITIONS\\s*\\(\\s*0\\s*\\)\\s*$', 'mi').test(snapshotBlock)
+    || new RegExp('^Brak pozycji\\.\\s*$', 'mi').test(snapshotBlock)
+  ) {
     return { ok: false, reason: 'portfolio_prompt_snapshot_empty_positions' };
   }
-  if (!new RegExp('"generated_utc"\\s*:\\s*"[^"]+"').test(snapshotBlock)) {
+  const hasGeneratedUtc = new RegExp('"generated_utc"\\s*:\\s*"[^"]+"').test(snapshotBlock)
+    || new RegExp('(?:^|\\b)generated_utc\\s*[:=]\\s*(?!brak\\b|null\\b|unknown\\b)[^\\s|]+', 'mi').test(snapshotBlock);
+  if (!hasGeneratedUtc) {
     return { ok: false, reason: 'portfolio_prompt_snapshot_missing_timestamp' };
   }
 
@@ -19305,9 +19716,15 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
       method: typeof plan?.method === 'string' ? plan.method : 'audit:prompt_match',
       promptNumber: Number.isInteger(plan?.detectedPromptNumber) ? plan.detectedPromptNumber : null,
       index: Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null,
-      hasAssistantReplyAfter: plan?.hasAssistantReplyAfter === true,
-      hasAssistantReplyByCounters: plan?.hasAssistantReplyByCounters === true,
-      assistantReplyPassThreshold: plan?.assistantReplyPassThreshold === true,
+      hasAssistantReplyAfter: typeof plan?.hasAssistantReplyAfter === 'boolean'
+        ? plan.hasAssistantReplyAfter
+        : null,
+      hasAssistantReplyByCounters: typeof plan?.hasAssistantReplyByCounters === 'boolean'
+        ? plan.hasAssistantReplyByCounters
+        : null,
+      assistantReplyPassThreshold: typeof plan?.assistantReplyPassThreshold === 'boolean'
+        ? plan.assistantReplyPassThreshold
+        : null,
       conservativePromptNumber: Number.isInteger(plan?.detectedPromptNumber) ? plan.detectedPromptNumber : null,
       conservativePromptIndex: Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null,
       conservativePromptSource: typeof plan?.source === 'string' ? plan.source : 'conversation_audit',
@@ -20535,6 +20952,81 @@ function computeNextResumeIndex(lastPromptIndex, totalPrompts, shouldAdvanceProm
   return Math.max(1, nextIndex);
 }
 
+function normalizeResumeSignalToken(value) {
+  if (
+    typeof ProcessContractUtils !== 'undefined'
+    && typeof ProcessContractUtils?.normalizeCodeToken === 'function'
+  ) {
+    return ProcessContractUtils.normalizeCodeToken(value);
+  }
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/\._/g, '.')
+    .replace(/_\./g, '.')
+    .replace(/^[_./-]+|[_./-]+$/g, '');
+}
+
+function isMissingAssistantReplySignalToken(value) {
+  const token = normalizeResumeSignalToken(value);
+  if (!token) return false;
+  if (
+    token === 'missing_assistant_reply'
+    || token === 'missing_assistant_reply_by_count'
+    || token === 'assistant_reply_missing'
+    || token === 'assistant_reply_absent'
+    || token === 'no_assistant_reply'
+    || token === 'assistant_reply_empty'
+    || token === 'empty_response'
+    || token === 'no_response'
+    || token === 'no_response_or_error'
+    || token === 'brak_odpowiedzi'
+  ) {
+    return true;
+  }
+  return (
+    token.includes('missing_assistant_reply')
+    || token.includes('no_assistant_reply')
+    || token.includes('assistant_reply_empty')
+    || token.includes('empty_response')
+    || token.includes('no_response')
+    || token.includes('brak_odpowiedzi')
+  );
+}
+
+function hasExplicitMissingAssistantReplySignal(source = {}) {
+  const value = source && typeof source === 'object' ? source : {};
+  if (
+    value.hasAssistantReplyAfter === false
+    || value.hasAssistantReplyByCounters === false
+    || value.detectedHasAssistantReply === false
+    || value.restartMissingAssistantReply === true
+  ) {
+    return true;
+  }
+
+  const tokens = [
+    value.statusCode,
+    value.reason,
+    value.error,
+    value.statusText,
+    value.saveError,
+    value.bridgeError,
+    value.progressStatusCode,
+    value.progressReason,
+    value.progressError,
+    value.progressStatusText,
+    value.retryReason,
+    value.restartDecisionReason
+  ];
+  if (Array.isArray(value.issueFlags)) tokens.push(...value.issueFlags);
+  if (Array.isArray(value.processIssueFlags)) tokens.push(...value.processIssueFlags);
+
+  return tokens.some((token) => isMissingAssistantReplySignalToken(token));
+}
+
 function buildCompanyResumePlanFromAudit(audit, options = {}) {
   const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
   const promptCount = Number.isInteger(audit?.promptCatalogCount) && audit.promptCatalogCount > 0
@@ -20589,15 +21081,19 @@ function buildCompanyResumePlanFromAudit(audit, options = {}) {
 
   if (selectedRow) {
     detectedPromptNumber = selectedRow.promptNumber;
-    hasAssistantReplyAfter = selectedRow.hasAssistantReplyAfter === true;
-    assistantReplyPassThreshold = selectedRow.assistantReplyPassThreshold === true;
+    hasAssistantReplyAfter = typeof selectedRow?.hasAssistantReplyAfter === 'boolean'
+      ? selectedRow.hasAssistantReplyAfter
+      : null;
+    assistantReplyPassThreshold = typeof selectedRow?.assistantReplyPassThreshold === 'boolean'
+      ? selectedRow.assistantReplyPassThreshold
+      : null;
     shouldAdvancePrompt = forceRepeatLastPrompt
       ? false
-      : hasAssistantReplyAfter;
+      : (hasAssistantReplyAfter !== false);
     retryReason = forceRepeatLastPrompt
       ? 'force_repeat_last_prompt'
       : (
-        !hasAssistantReplyAfter
+        hasAssistantReplyAfter === false
           ? 'missing_assistant_reply'
           : ''
       );
@@ -20744,10 +21240,15 @@ function openResumeStagePopup(startIndex, title = '', options = {}) {
   const params = new URLSearchParams();
   const targetTabId = Number.isInteger(options?.targetTabId) ? options.targetTabId : null;
   const targetWindowId = Number.isInteger(options?.targetWindowId) ? options.targetWindowId : null;
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
   if (Number.isInteger(startIndex)) params.set('startIndex', String(startIndex));
   if (title) params.set('title', title);
   if (Number.isInteger(targetTabId)) params.set('targetTabId', String(targetTabId));
   if (Number.isInteger(targetWindowId)) params.set('targetWindowId', String(targetWindowId));
+  if (composerThinkingEffort) params.set('composerThinkingEffort', composerThinkingEffort);
+  if (!composerThinkingEffort && options?.useStoredComposerThinkingEffort === true) {
+    params.set('useStoredComposerThinkingEffort', '1');
+  }
   const query = params.toString();
   const targetUrl = chrome.runtime.getURL('resume-stage.html' + (query ? ('?' + query) : ''));
 
@@ -20778,6 +21279,14 @@ async function handleProcessResumeNextStageMessage(message) {
       ...(finalStagePersistence ? { finalStagePersistence } : {})
     };
   };
+  const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
+  const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
+  let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
+  if (resolvedComposerThinkingEffort) {
+    await setStoredResumeComposerThinkingEffort(resolvedComposerThinkingEffort);
+  } else if (useStoredComposerThinkingEffort) {
+    resolvedComposerThinkingEffort = await getStoredResumeComposerThinkingEffort();
+  }
   if (!runId) {
     const tabId = Number.isInteger(message?.tabId) ? message.tabId : null;
     if (!Number.isInteger(tabId)) {
@@ -20829,6 +21338,11 @@ async function handleProcessResumeNextStageMessage(message) {
         ? 'missing_assistant_reply'
         : 'missing_assistant_reply_by_count';
     }
+    if (message?.forceRepeatLastPrompt === true && Number.isInteger(detectedPromptIndex)) {
+      retrySamePrompt = true;
+      retryReason = 'force_repeat_last_prompt';
+      nextStartIndex = detectedPromptIndex;
+    }
 
     if (promptCount > 1) {
       nextStartIndex = Math.min(Math.max(nextStartIndex, 1), promptCount - 1);
@@ -20869,7 +21383,9 @@ async function handleProcessResumeNextStageMessage(message) {
       const title = typeof message?.title === 'string' ? message.title.trim() : '';
       openResumeStagePopup(nextStartIndex, title || (chatTab.title || ''), {
         targetTabId: chatTab.id,
-        targetWindowId: chatTab.windowId
+        targetWindowId: chatTab.windowId,
+        composerThinkingEffort: resolvedComposerThinkingEffort,
+        useStoredComposerThinkingEffort
       });
       return {
         success: true,
@@ -20890,7 +21406,8 @@ async function handleProcessResumeNextStageMessage(message) {
     const resumeResult = await resumeFromStage(nextStartIndex, {
       targetTabId: chatTab.id,
       suppressAlerts: true,
-      processTitle: resumeTitle || undefined
+      processTitle: resumeTitle || undefined,
+      composerThinkingEffort: resolvedComposerThinkingEffort
     });
 
     if (!resumeResult?.success) {
@@ -20933,7 +21450,8 @@ async function handleProcessResumeNextStageMessage(message) {
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
       retrySamePrompt,
-      retryReason
+      retryReason,
+      composerThinkingEffort: resolvedComposerThinkingEffort || ''
     };
   }
 
@@ -20952,8 +21470,6 @@ async function handleProcessResumeNextStageMessage(message) {
   const progressPromptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
     ? process.currentPrompt
     : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : null);
-  const processStatus = normalizeProcessStatus(process?.status || '');
-  const processNeedsAction = process?.needsAction === true;
   const minStartIndex = PROMPTS_COMPANY.length > 1 ? 1 : 0;
   let detectedPromptIndex = null;
   let detectedMethod = '';
@@ -20982,11 +21498,14 @@ async function handleProcessResumeNextStageMessage(message) {
     if (Number.isInteger(boundedProgressPromptNumber) && boundedProgressPromptNumber > 0) {
       detectedPromptIndex = boundedProgressPromptNumber - 1;
       detectedMethod = 'fallback_saved_process_progress';
-      const shouldAdvancePrompt = !(processNeedsAction || isFailedProcessStatus(processStatus));
+      const missingAssistantReplySignal = hasExplicitMissingAssistantReplySignal(process);
+      const shouldAdvancePrompt = message?.forceRepeatLastPrompt === true
+        ? false
+        : !missingAssistantReplySignal;
       retrySamePrompt = !shouldAdvancePrompt;
-      retryReason = retrySamePrompt
-        ? (processNeedsAction ? 'saved_stage_needs_action' : 'saved_stage_failed_status')
-        : '';
+      retryReason = message?.forceRepeatLastPrompt === true
+        ? 'force_repeat_last_prompt'
+        : (missingAssistantReplySignal ? 'missing_assistant_reply' : '');
       nextStartIndex = computeNextResumeIndex(
         detectedPromptIndex,
         PROMPTS_COMPANY.length,
@@ -21023,7 +21542,9 @@ async function handleProcessResumeNextStageMessage(message) {
   if (message?.openDialogOnly) {
     openResumeStagePopup(nextStartIndex, title, {
       targetTabId: chatTab.id,
-      targetWindowId: chatTab.windowId
+      targetWindowId: chatTab.windowId,
+      composerThinkingEffort: resolvedComposerThinkingEffort,
+      useStoredComposerThinkingEffort
     });
     return {
       success: true,
@@ -21041,7 +21562,8 @@ async function handleProcessResumeNextStageMessage(message) {
   const resumeResult = await resumeFromStage(nextStartIndex, {
     targetTabId: chatTab.id,
     suppressAlerts: true,
-    processTitle: title || undefined
+    processTitle: title || undefined,
+    composerThinkingEffort: resolvedComposerThinkingEffort
   });
 
   if (!resumeResult?.success) {
@@ -21115,7 +21637,8 @@ async function handleProcessResumeNextStageMessage(message) {
     detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
     detectedMethod,
     retrySamePrompt,
-    retryReason
+    retryReason,
+    composerThinkingEffort: resolvedComposerThinkingEffort || ''
   };
 }
 
@@ -22298,7 +22821,7 @@ function extractPortfolioFinalResponseFromText(rawText) {
       }
       const schema = normalizeStructuredWatchlistValue(parsed.schema).toLowerCase();
       const status = normalizeStructuredWatchlistValue(parsed.status).toUpperCase();
-      const hasPortfolioShape = (
+      const hasLegacyPortfolioShape = (
         parsed.save && typeof parsed.save === 'object' && !Array.isArray(parsed.save)
       ) || (
         parsed.totals && typeof parsed.totals === 'object' && !Array.isArray(parsed.totals)
@@ -22313,9 +22836,24 @@ function extractPortfolioFinalResponseFromText(rawText) {
       ) || (
         Array.isArray(parsed.positions) && Array.isArray(parsed.layers)
       );
-      if ((schema === 'portfolio.final_response.v1' || status) && hasPortfolioShape) {
+      const hasPortfolioSummary = (
+        typeof parsed.thesis_construction_summary === 'string'
+        || typeof parsed.author_thesis_commentary === 'string'
+      );
+      const hasPortfolioConstructionCommentary = (
+        typeof parsed.portfolio_construction_commentary === 'string'
+        || typeof parsed.portfolio_decision_narrative === 'string'
+      );
+      const hasTextPortfolioShape = (
+        hasPortfolioSummary
+        && hasPortfolioConstructionCommentary
+        && Array.isArray(parsed.layers)
+        && Array.isArray(parsed.positions)
+      );
+      const isPortfolioSchema = schema === 'portfolio.final_response.v1' || schema === 'portfolio.final_response.v2';
+      if (hasTextPortfolioShape || ((isPortfolioSchema || status) && hasLegacyPortfolioShape)) {
         return {
-          schema: schema || 'portfolio.final_response.v1',
+          schema: schema || (hasTextPortfolioShape ? 'portfolio.final_response.v2' : 'portfolio.final_response.v1'),
           payload: parsed,
           text: candidate
         };
@@ -22460,6 +22998,213 @@ function normalizePortfolioFeedbackSubmitDispatchPayload(rawPayload, meta) {
   return submitPayload;
 }
 
+function normalizePortfolioFinalResponseFeedbackSubmitPayload(rawFinalResponse, meta) {
+  const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const parsed = parseJsonObjectCandidate(rawFinalResponse);
+  if (!parsed) return null;
+
+  const candidates = [];
+  const pushCandidate = (candidate) => {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      candidates.push(candidate);
+    }
+  };
+  pushCandidate(parsed);
+  pushCandidate(parsed.payload);
+  pushCandidate(parsed.portfolioFinalResponse?.payload);
+  pushCandidate(parseJsonObjectCandidate(parsed.text));
+  pushCandidate(parseJsonObjectCandidate(parsed.responseText));
+
+  const isPortfolioFinalResponse = (candidate) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return false;
+    }
+    const hasPortfolioSummary = (
+      typeof candidate.thesis_construction_summary === 'string'
+      || typeof candidate.author_thesis_commentary === 'string'
+    );
+    const hasPortfolioConstructionCommentary = (
+      typeof candidate.portfolio_construction_commentary === 'string'
+      || typeof candidate.portfolio_decision_narrative === 'string'
+    );
+    return hasPortfolioSummary
+      && hasPortfolioConstructionCommentary
+      && Array.isArray(candidate.layers)
+      && Array.isArray(candidate.positions);
+  };
+  const finalResponse = candidates.find(isPortfolioFinalResponse);
+  if (!finalResponse) return null;
+
+  const firstText = (...values) => {
+    for (const value of values) {
+      const normalized = normalizeStructuredWatchlistValue(value);
+      if (normalized) return normalized;
+    }
+    return '';
+  };
+  const firstNumber = (...values) => {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+    return null;
+  };
+  const normalizeLayerVote = (value) => {
+    const normalized = normalizeStructuredWatchlistValue(value).toUpperCase();
+    return ['INCREASE', 'REDUCE', 'HOLD', 'ROTATE', 'CLEANUP'].includes(normalized)
+      ? normalized
+      : 'HOLD';
+  };
+  const normalizePositionAction = (value, row = {}) => {
+    const normalized = normalizeStructuredWatchlistValue(value).toUpperCase();
+    return ['INCREASE', 'REDUCE', 'HOLD', 'EXIT', 'WATCH'].includes(normalized)
+      ? normalized
+      : (() => {
+        const currentQty = firstNumber(row.current_qty, row.currentQty, row.qty, row.quantity);
+        const targetQty = firstNumber(row.target_qty, row.targetQty);
+        if (currentQty !== null && targetQty !== null) {
+          if (targetQty <= 0 && currentQty > 0) return 'EXIT';
+          if (targetQty > currentQty) return 'INCREASE';
+          if (targetQty < currentQty) return 'REDUCE';
+          return 'HOLD';
+        }
+        const currentWeight = firstNumber(row.current_weight_pct, row.currentWeightPct);
+        const targetWeight = firstNumber(row.target_weight_pct, row.targetWeightPct);
+        if (currentWeight !== null && targetWeight !== null) {
+          if (targetWeight <= 0 && currentWeight > 0) return 'EXIT';
+          if (targetWeight > currentWeight) return 'INCREASE';
+          if (targetWeight < currentWeight) return 'REDUCE';
+        }
+        return 'HOLD';
+      })();
+  };
+  const stringList = (value) => Array.isArray(value)
+    ? value.map((item) => normalizeStructuredWatchlistValue(item)).filter(Boolean)
+    : [];
+
+  const gaps = stringList(finalResponse.portfolio_gaps);
+  const warnings = stringList(finalResponse.warnings);
+  const errors = stringList(finalResponse.errors);
+  if (errors.length > 0) {
+    return null;
+  }
+  const commentary = firstText(finalResponse.thesis_construction_summary, finalResponse.author_thesis_commentary);
+  const narrative = firstText(finalResponse.portfolio_construction_commentary, finalResponse.portfolio_decision_narrative);
+  const reviewFeedbackParts = [
+    narrative,
+    commentary,
+    gaps.length ? `Luki portfela: ${gaps.join(' ')}` : ''
+  ].filter(Boolean);
+
+  const layerVotes = finalResponse.layers
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => {
+      const layerId = firstText(row.layer_id, row.layer);
+      if (!layerId) return null;
+      const commentaryText = firstText(row.layer_business_thesis, row.layer_commentary, row.feedback_text, row.why_this_pct);
+      return {
+        layer_id: layerId,
+        layer_name: firstText(row.layer_name, row.name),
+        current_pct: firstNumber(row.current_pct, row.current_weight_pct, row.currentWeightPct),
+        target_pct: firstNumber(row.target_pct, row.proposed_pct, row.target_weight_pct, row.targetWeightPct),
+        vote: normalizeLayerVote(row.vote || row.action),
+        problem: firstText(row.problem, commentaryText),
+        why_this_pct: firstText(row.why_this_pct, commentaryText),
+        author_rank: firstNumber(row.author_rank, row.layer_rank),
+        exposure_quality: firstText(row.exposure_quality),
+        thesis_ref: 'portfolio.final_response.v2'
+      };
+    })
+    .filter(Boolean);
+
+  const positionVotes = finalResponse.positions
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => {
+      const symbol = firstText(row.symbol);
+      const layerId = firstText(row.layer_id, row.layer);
+      if (!symbol || !layerId) return null;
+      const thesis = firstText(row.position_thesis, row.feedback_text, row.why_this_action);
+      const currentQty = firstNumber(row.current_qty, row.currentQty, row.qty, row.quantity);
+      const targetQty = firstNumber(row.target_qty, row.targetQty);
+      const qtyDelta = currentQty !== null && targetQty !== null ? targetQty - currentQty : firstNumber(row.qty_delta, row.qtyDelta);
+      return {
+        symbol,
+        company: firstText(row.company, row.name),
+        layer_id: layerId,
+        action: normalizePositionAction(row.action, row),
+        current_qty: currentQty,
+        target_qty: targetQty,
+        qty_delta: qtyDelta,
+        current_weight_pct: firstNumber(row.current_weight_pct, row.currentWeightPct),
+        target_weight_pct: firstNumber(row.target_weight_pct, row.targetWeightPct),
+        target_value_base: firstNumber(row.target_value_base, row.targetValueBase),
+        conviction: firstNumber(row.conviction),
+        stop_loss_price: firstNumber(row.stop_loss_price, row.stop_loss),
+        take_profit_price: firstNumber(row.take_profit_price, row.take_profit),
+        value_capture_assessment: firstText(row.value_capture_assessment),
+        feedback_text: thesis,
+        why_this_action: firstText(row.why_this_action, thesis),
+        author_layer_rank: firstNumber(row.author_layer_rank, row.layer_rank),
+        thesis_ref: 'portfolio.final_response.v2',
+        evidence: {
+          author_layer_rank: firstNumber(row.author_layer_rank, row.layer_rank),
+          value_capture_assessment: firstText(row.value_capture_assessment),
+          current_qty: currentQty,
+          target_qty: targetQty,
+          qty_delta: qtyDelta
+        }
+      };
+    })
+    .filter(Boolean);
+
+  if (layerVotes.length === 0 && positionVotes.length === 0) {
+    return null;
+  }
+
+  const baseRunId = normalizeStructuredWatchlistValue(parsed.runId || parsed.run_id || safeMeta.runId);
+  const baseResponseId = normalizeStructuredWatchlistValue(parsed.responseId || parsed.response_id || safeMeta.responseId);
+  const source = firstText(parsed.source, safeMeta.source, 'Portfolio final response');
+  const sourceTitle = firstText(parsed.sourceTitle, parsed.source_title, safeMeta.sourceTitle, source);
+  const account = firstText(parsed.account, safeMeta.account, 'U22088457');
+  const stage = parsed.stage && typeof parsed.stage === 'object' && !Array.isArray(parsed.stage)
+    ? cloneJsonCompatibleValue(parsed.stage)
+    : (
+      safeMeta.stage && typeof safeMeta.stage === 'object' && !Array.isArray(safeMeta.stage)
+        ? cloneJsonCompatibleValue(safeMeta.stage)
+        : {}
+    );
+  stage.source_final_response_schema = 'portfolio.final_response.v2';
+
+  return normalizePortfolioFeedbackSubmitDispatchPayload(
+    {
+      schema: 'portfolio.feedback.submit.v1',
+      tool: 'portfolio.feedback.submit',
+      responseId: baseResponseId,
+      runId: baseRunId || null,
+      source,
+      sourceTitle,
+      analysisType: 'portfolio_feedback_submit',
+      timestamp: parsed.timestamp ?? safeMeta.timestamp ?? Date.now(),
+      account,
+      review: {
+        review_id: baseResponseId ? `${baseResponseId}:portfolio_final_feedback` : '',
+        portfolio_feedback: reviewFeedbackParts.join('\n\n') || 'Portfolio final response feedback.',
+        main_problem: firstText(gaps[0], warnings[0]),
+        main_change: narrative
+      },
+      layer_votes: layerVotes,
+      position_votes: positionVotes,
+      action_plan: [],
+      entry_strategy: [],
+      stage,
+      conversationUrl: parsed.conversationUrl || parsed.conversation_url || safeMeta.conversationUrl,
+      conversationLogs: parsed.conversationLogs || parsed.conversation_logs || safeMeta.conversationLogs
+    },
+    safeMeta
+  );
+}
+
 function extractPortfolioFeedbackSubmitPayloadFromFinalResponse(rawText, meta) {
   const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
   const finalResponse = parseJsonObjectCandidate(rawText);
@@ -22467,12 +23212,14 @@ function extractPortfolioFeedbackSubmitPayloadFromFinalResponse(rawText, meta) {
   const direct = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse, safeMeta);
   if (direct) return direct;
   if (Object.prototype.hasOwnProperty.call(finalResponse, 'feedback_payload')) {
-    return normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.feedback_payload, safeMeta);
+    const feedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.feedback_payload, safeMeta);
+    if (feedbackPayload) return feedbackPayload;
   }
-  if (!Object.prototype.hasOwnProperty.call(finalResponse, 'mcp_feedback_json')) {
-    return null;
+  if (Object.prototype.hasOwnProperty.call(finalResponse, 'mcp_feedback_json')) {
+    const mcpPayload = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.mcp_feedback_json, safeMeta);
+    if (mcpPayload) return mcpPayload;
   }
-  return normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.mcp_feedback_json, safeMeta);
+  return normalizePortfolioFinalResponseFeedbackSubmitPayload(finalResponse, safeMeta);
 }
 
 function buildResponseContractValidation(rawText) {
@@ -22480,7 +23227,7 @@ function buildResponseContractValidation(rawText) {
   if (portfolioFinalResponse) {
     return {
       valid: true,
-      kind: 'portfolio.final_response.v1',
+      kind: portfolioFinalResponse.schema || 'portfolio.final_response.v2',
       portfolioFinalResponse
     };
   }
@@ -22596,6 +23343,11 @@ function mapDispatchDecisionRecord(record) {
 
 function normalizeWatchlistDispatchPayload(response) {
   if (!response || typeof response !== 'object') return null;
+  const customSchema = normalizeStructuredWatchlistValue(response.schema || response.responseSchema);
+  const normalizedCustomSchema = customSchema.toLowerCase();
+  if (normalizedCustomSchema === 'portfolio.final_response.v2') {
+    return extractPortfolioFeedbackSubmitPayloadFromFinalResponse(response, response);
+  }
   const portfolioFeedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(response);
   if (portfolioFeedbackPayload) {
     return portfolioFeedbackPayload;
@@ -22604,8 +23356,7 @@ function normalizeWatchlistDispatchPayload(response) {
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
-  const customSchema = normalizeStructuredWatchlistValue(response.schema || response.responseSchema);
-  const unstructuredSchema = customSchema && customSchema.toLowerCase() !== 'economist.response.v2'
+  const unstructuredSchema = customSchema && normalizedCustomSchema !== 'economist.response.v2'
     ? customSchema
     : 'economist.response.v1';
   const sourceRecordSuffix = normalizeStructuredWatchlistValue(
@@ -22825,6 +23576,15 @@ function normalizeWatchlistDispatchPayload(response) {
 
 function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const portfolioFinalPayload = extractPortfolioFeedbackSubmitPayloadFromFinalResponse(rawPayload, rawPayload);
+  if (portfolioFinalPayload) {
+    applyChatGptComputationStatePatch(portfolioFinalPayload, rawPayload);
+    return portfolioFinalPayload;
+  }
+  const rawSchema = normalizeStructuredWatchlistValue(rawPayload.schema || rawPayload.responseSchema).toLowerCase();
+  if (rawSchema === 'portfolio.final_response.v2') {
+    return null;
+  }
   const portfolioFeedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(rawPayload);
   if (portfolioFeedbackPayload) {
     applyChatGptComputationStatePatch(portfolioFeedbackPayload, rawPayload);
@@ -24638,6 +25398,215 @@ async function getWatchlistDispatchStatus(forceReload = false) {
   };
 }
 
+function normalizeWatchlistIntakeHealthPayload(rawPayload, fallback = {}) {
+  const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+  const database = payload.database && typeof payload.database === 'object' ? payload.database : {};
+  const dbLatencyMs = Number.isInteger(database.latency_ms)
+    ? database.latency_ms
+    : (Number.isInteger(database.latencyMs) ? database.latencyMs : null);
+  const dbOk = database.ok === true;
+  const healthStatus = typeof payload.status === 'string' && payload.status.trim()
+    ? payload.status.trim()
+    : (dbOk ? 'ok' : 'unknown');
+  return {
+    success: payload.success === true && dbOk,
+    healthState: dbOk ? 'ok' : healthStatus,
+    backendReachable: fallback.backendReachable === true,
+    authOk: fallback.authOk === true,
+    dbConnected: dbOk,
+    databaseLatencyMs: dbLatencyMs,
+    intakeStatus: healthStatus,
+    healthError: typeof database.error === 'string' && database.error.trim()
+      ? truncateDispatchLogText(database.error, 240)
+      : '',
+    healthErrorType: typeof database.error_type === 'string' && database.error_type.trim()
+      ? truncateDispatchLogText(database.error_type, 80)
+      : '',
+    status: Number.isInteger(fallback.status) ? fallback.status : null,
+    requestId: typeof fallback.requestId === 'string' ? fallback.requestId : '',
+    checkedAt: Date.now(),
+    intakeUrl: typeof fallback.intakeUrl === 'string' ? fallback.intakeUrl : ''
+  };
+}
+
+async function probeWatchlistIntakeHealth(dispatchConfig, options = {}) {
+  const config = dispatchConfig && typeof dispatchConfig === 'object' ? dispatchConfig : {};
+  if (!config.ok) {
+    return {
+      success: false,
+      healthState: 'configuration_missing',
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      databaseLatencyMs: null,
+      intakeStatus: '',
+      healthError: config.reason || 'missing_dispatch_credentials',
+      healthErrorType: 'configuration',
+      status: null,
+      requestId: '',
+      checkedAt: Date.now(),
+      intakeUrl: config.intakeUrl || ''
+    };
+  }
+
+  const timeoutMs = Number.isInteger(options?.timeoutMs) && options.timeoutMs > 0
+    ? Math.max(1000, options.timeoutMs)
+    : Math.max(1000, Number(WATCHLIST_DISPATCH.verifyTimeoutMs || WATCHLIST_DISPATCH.timeoutMs || 0) || 12000);
+  const candidates = buildWatchlistDispatchUrlCandidates(config.intakeUrl);
+  let lastFailure = {
+    success: false,
+    healthState: 'status_unavailable',
+    backendReachable: false,
+    authOk: false,
+    dbConnected: false,
+    databaseLatencyMs: null,
+    intakeStatus: '',
+    healthError: 'status_unavailable',
+    healthErrorType: '',
+    status: null,
+    requestId: '',
+    checkedAt: Date.now(),
+    intakeUrl: ''
+  };
+
+  for (const candidate of candidates) {
+    const controller = new AbortController();
+    let timeoutId = null;
+    try {
+      const buildRequest = typeof WatchlistApiUtils.buildSignedGetIntakeStatusRequest === 'function'
+        ? WatchlistApiUtils.buildSignedGetIntakeStatusRequest
+        : WatchlistApiUtils.buildSignedJsonRequest;
+      const signedRequest = await buildRequest({
+        intakeUrl: candidate,
+        keyId: config.keyId,
+        secret: config.secret,
+        path: WATCHLIST_INTAKE_STATUS_PATH,
+        method: 'GET'
+      });
+      const endpoint = new URL(signedRequest?.url || '');
+      const response = await Promise.race([
+        fetch(endpoint.toString(), {
+          method: 'GET',
+          headers: signedRequest.headers || {},
+          signal: controller.signal
+        }),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            try {
+              controller.abort();
+            } catch {
+              // Ignore abort exceptions in timeout branch.
+            }
+            reject(createDispatchTimeoutError(timeoutMs));
+          }, timeoutMs);
+        })
+      ]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
+      const requestId = response.headers?.get?.('x-request-id') || response.headers?.get?.('x-correlation-id') || '';
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        return {
+          success: false,
+          healthState: 'auth_failed',
+          backendReachable: true,
+          authOk: false,
+          dbConnected: false,
+          databaseLatencyMs: null,
+          intakeStatus: '',
+          healthError: typeof payload?.detail === 'string' ? payload.detail : `http_${response.status}`,
+          healthErrorType: 'auth',
+          status: response.status,
+          requestId,
+          checkedAt: Date.now(),
+          intakeUrl: endpoint.toString()
+        };
+      }
+      if (!response.ok) {
+        lastFailure = {
+          success: false,
+          healthState: 'http_error',
+          backendReachable: true,
+          authOk: true,
+          dbConnected: false,
+          databaseLatencyMs: null,
+          intakeStatus: '',
+          healthError: typeof payload?.detail === 'string' ? payload.detail : `http_${response.status}`,
+          healthErrorType: 'http',
+          status: response.status,
+          requestId,
+          checkedAt: Date.now(),
+          intakeUrl: endpoint.toString()
+        };
+        continue;
+      }
+
+      return normalizeWatchlistIntakeHealthPayload(payload, {
+        backendReachable: true,
+        authOk: true,
+        status: response.status,
+        requestId,
+        intakeUrl: endpoint.toString()
+      });
+    } catch (error) {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      lastFailure = {
+        success: false,
+        healthState: error?.name === 'TimeoutError' ? 'timeout' : 'network_error',
+        backendReachable: false,
+        authOk: false,
+        dbConnected: false,
+        databaseLatencyMs: null,
+        intakeStatus: '',
+        healthError: truncateDispatchLogText(error?.message || String(error), 240) || 'network_error',
+        healthErrorType: error?.name || typeof error || 'network',
+        status: null,
+        requestId: '',
+        checkedAt: Date.now(),
+        intakeUrl: candidate
+      };
+    }
+  }
+
+  return lastFailure;
+}
+
+async function getWatchlistDispatchHealth(forceReload = false) {
+  const status = await getWatchlistDispatchStatus(forceReload);
+  if (!status.configured) {
+    return {
+      ...status,
+      success: false,
+      healthState: 'configuration_missing',
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      databaseLatencyMs: null,
+      intakeStatus: '',
+      healthError: status.reason || 'missing_dispatch_credentials',
+      checkedAt: Date.now()
+    };
+  }
+
+  const nowTs = Date.now();
+  if (!forceReload && watchlistDispatchHealthCache
+    && Number.isInteger(watchlistDispatchHealthCache.checkedAt)
+    && (nowTs - watchlistDispatchHealthCache.checkedAt) < WATCHLIST_DISPATCH_HEALTH_CACHE_TTL_MS) {
+    return { ...status, ...watchlistDispatchHealthCache };
+  }
+
+  const config = await resolveWatchlistDispatchConfiguration(forceReload);
+  const probe = await probeWatchlistIntakeHealth(config);
+  watchlistDispatchHealthCache = probe;
+  return { ...status, ...probe };
+}
+
 function buildExtensionHeartbeatCheck(name, ok, detail = '') {
   return {
     name: typeof name === 'string' ? name : '',
@@ -25047,6 +26016,7 @@ async function setWatchlistDispatchToken(rawInput) {
     keyId,
     keyIdSource: 'storage_local',
   };
+  watchlistDispatchHealthCache = null;
   return { success: true, source: 'storage_local', localSaved, syncSaved };
 }
 
@@ -25068,6 +26038,7 @@ async function clearWatchlistDispatchToken() {
   }
 
   watchlistDispatchCredentialsCache = null;
+  watchlistDispatchHealthCache = null;
   return {
     success: true,
     hasToken: false,
@@ -27340,6 +28311,12 @@ function getAnalysisLaunchQueuedCount(result, fallback = 0) {
   return Math.max(0, Number.isInteger(fallback) ? fallback : 0);
 }
 
+function getAnalysisLaunchBypassCount(result, fallback = 0) {
+  if (Number.isInteger(result?.queueBypassCount)) return Math.max(0, result.queueBypassCount);
+  if (Number.isInteger(result?.launchedCount)) return Math.max(0, result.launchedCount);
+  return Math.max(0, Number.isInteger(fallback) ? fallback : 0);
+}
+
 function pickAnalysisLaunchMetric(primaryResult, portfolioResult, key, fallback = 0) {
   if (Number.isInteger(portfolioResult?.[key])) return portfolioResult[key];
   if (Number.isInteger(primaryResult?.[key])) return primaryResult[key];
@@ -27372,7 +28349,9 @@ function mergeAnalysisLaunchResults(primaryResult, portfolioResult = null, optio
     : 0;
   const primaryQueuedCount = getAnalysisLaunchQueuedCount(primaryResult, primaryFallbackQueued);
   const portfolioQueuedCount = getAnalysisLaunchQueuedCount(portfolioResult, 0);
+  const portfolioLaunchedCount = getAnalysisLaunchBypassCount(portfolioResult, 0);
   const portfolioQueued = !!portfolioResult && portfolioQueuedCount > 0;
+  const portfolioLaunched = !!portfolioResult && portfolioLaunchedCount > 0;
   const primarySuccess = primaryResult?.success !== false;
   const portfolioSuccess = !portfolioResult || portfolioResult.success !== false;
   const queuedCount = primaryQueuedCount + portfolioQueuedCount;
@@ -27383,8 +28362,11 @@ function mergeAnalysisLaunchResults(primaryResult, portfolioResult = null, optio
       ? options.analysisType.trim()
       : (typeof primaryResult?.analysisType === 'string' ? primaryResult.analysisType : ANALYSIS_TYPE_COMPANY),
     extraPortfolioQueued: portfolioQueued,
+    extraPortfolioLaunched: portfolioLaunched,
+    extraPortfolioStarted: portfolioQueued || portfolioLaunched,
     companyQueuedCount: primaryQueuedCount,
     portfolioQueuedCount,
+    portfolioLaunchedCount,
     portfolioResult,
     queued: queuedCount,
     queuedCount,
@@ -28280,12 +29262,14 @@ async function saveResponse(
           normalizedResponseId
         )
       : null;
-    const skipWatchlistDispatch = saveOptions.skipWatchlistDispatch === true
-      || normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO;
-    const skipWatchlistDispatchReason = saveOptions.skipWatchlistDispatchReason
-      || (normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
-        ? 'portfolio_analysis_saved_locally'
-        : 'dispatch_skipped_by_options');
+    const dispatchSkipDecision = resolveSaveResponseDispatchSkipDecision(
+      analysisType,
+      responseSchema,
+      sourceRecordSuffix,
+      saveOptions
+    );
+    const skipWatchlistDispatch = dispatchSkipDecision.skip;
+    const skipWatchlistDispatchReason = dispatchSkipDecision.reason;
     if (normalizedRunId && !skipProcessPersistencePatch) {
       await upsertProcess(normalizedRunId, {
         lifecycleStatus: 'finalizing',
@@ -28481,12 +29465,14 @@ async function saveResponse(
       'captured',
       `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, source=${conversationAnalysis.snapshotSource}`
     );
-    const normalizedSaveAnalysisType = typeof normalizeAnalysisTypeForPromptChain === 'function'
-      ? normalizeAnalysisTypeForPromptChain(analysisType)
-      : normalizeStructuredWatchlistValue(analysisType).toLowerCase();
-    const shouldExtractPortfolioFeedbackSubmit = responseSchema.toLowerCase() === 'portfolio.final_response.v1'
-      || sourceRecordSuffix === 'portfolio_final_json'
-      || normalizedSaveAnalysisType === ANALYSIS_TYPE_PORTFOLIO;
+    const normalizedSaveAnalysisType = dispatchSkipDecision.normalizedAnalysisType;
+    const normalizedResponseSchema = responseSchema.toLowerCase();
+    const shouldExtractPortfolioFeedbackSubmit = normalizedResponseSchema === 'portfolio.final_response.v1'
+      || normalizedResponseSchema === 'portfolio.final_response.v2'
+      || (
+        sourceRecordSuffix === 'portfolio_final_json'
+        || normalizedSaveAnalysisType === ANALYSIS_TYPE_PORTFOLIO
+      );
     const portfolioFeedbackDispatchPayload = shouldExtractPortfolioFeedbackSubmit
       ? extractPortfolioFeedbackSubmitPayloadFromFinalResponse(responseText, {
         runId: normalizedRunId,
@@ -28526,14 +29512,18 @@ async function saveResponse(
         'extracted',
         `responseId=${portfolioFeedbackDispatchPayload.responseId || 'n/a'}, layers=${Array.isArray(portfolioFeedbackDispatchPayload.layer_votes) ? portfolioFeedbackDispatchPayload.layer_votes.length : 0}, positions=${Array.isArray(portfolioFeedbackDispatchPayload.position_votes) ? portfolioFeedbackDispatchPayload.position_votes.length : 0}`
       );
+    } else if (shouldExtractPortfolioFeedbackSubmit) {
+      appendDispatchProcessLog(
+        'portfolio_feedback_submit',
+        'missing',
+        'reason=extract_failed'
+      );
     }
 
     try {
       if (effectiveSkipWatchlistDispatch) {
         dispatchOutcome.queueSkipped = true;
         dispatchOutcome.queueSkipReason = effectiveSkipWatchlistDispatchReason;
-        dispatchOutcome.failureStage = 'queue';
-        dispatchOutcome.failureReason = effectiveSkipWatchlistDispatchReason;
         appendDispatchProcessLog('queue_result', 'skipped', `reason=${effectiveSkipWatchlistDispatchReason}`);
         console.log(
           `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${effectiveSkipWatchlistDispatchReason}`
@@ -28856,6 +29846,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ? (message.sourceRecordSuffix || message.source_record_suffix)
           : '',
         skipWatchlistDispatch: message.skipWatchlistDispatch === true,
+        allowPortfolioFeedbackDispatch: message.allowPortfolioFeedbackDispatch === true,
         skipProcessPersistencePatch: message.skipProcessPersistencePatch === true
       }
     )
@@ -29705,6 +30696,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         sendResponse({ success: false, error: error?.message || 'status_failed' });
       });
     return true;
+  } else if (message.type === 'GET_WATCHLIST_DISPATCH_HEALTH') {
+    getWatchlistDispatchHealth(Boolean(message?.forceReload))
+      .then((status) => sendResponse({ success: status?.success === true, ...status }))
+      .catch((error) => {
+        console.warn('[copy-flow] [dispatch:health-failed]', error);
+        sendResponse({
+          success: false,
+          healthState: 'health_check_failed',
+          backendReachable: false,
+          authOk: false,
+          dbConnected: false,
+          error: error?.message || 'health_failed'
+        });
+      });
+    return true;
   } else if (message.type === 'GET_WATCHLIST_DISPATCH_PROCESS_LOGS') {
     const limit = Number.isInteger(message?.limit) ? message.limit : 120;
     getWatchlistDispatchProcessLogs(limit)
@@ -30277,6 +31283,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const detach = message?.detach === true;
     const targetTabId = Number.isInteger(message?.targetTabId) ? message.targetTabId : null;
     const targetWindowId = Number.isInteger(message?.targetWindowId) ? message.targetWindowId : null;
+    const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
+    const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
     const resumeOptions = {
       reloadBeforeResume,
       detach
@@ -30295,9 +31303,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       reloadBeforeResume,
       detach,
       targetTabId,
-      targetWindowId
+      targetWindowId,
+      composerThinkingEffort: explicitComposerThinkingEffort || '',
+      useStoredComposerThinkingEffort
     });
-    resumeFromStage(message.startIndex, resumeOptions)
+    (async () => {
+      let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
+      if (resolvedComposerThinkingEffort) {
+        await setStoredResumeComposerThinkingEffort(resolvedComposerThinkingEffort);
+      } else if (useStoredComposerThinkingEffort) {
+        resolvedComposerThinkingEffort = await getStoredResumeComposerThinkingEffort();
+      }
+      if (resolvedComposerThinkingEffort) {
+        resumeOptions.composerThinkingEffort = resolvedComposerThinkingEffort;
+      }
+      return resumeFromStage(message.startIndex, resumeOptions);
+    })()
       .then((result) => {
         const normalizedResult = result || { success: false, error: 'resume_result_missing' };
         reportAdminActionEvent('resume_stage_start', {
@@ -30436,9 +31457,11 @@ async function resumeFromStage(startIndex, options = {}) {
       return { success: false, error: 'start_index_out_of_range' };
     }
 
-    const processTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
+    const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
+    const rawProcessTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
       ? options.processTitle.trim()
       : `Resume from Stage ${startIndex + 1}`;
+    const processTitle = formatResumeProcessTitleWithThinkingEffort(rawProcessTitle, composerThinkingEffort);
     const reloadBeforeResume = options?.reloadBeforeResume !== false;
     const targetWindowId = Number.isInteger(options?.targetWindowId)
       ? options.targetWindowId
@@ -30453,15 +31476,14 @@ async function resumeFromStage(startIndex, options = {}) {
       resumeStartIndex: startIndex,
       reloadBeforeResume,
       forceRepeatLastPrompt: options?.forceRepeatLastPrompt === true,
+      bypassPause: options?.bypassPause !== false,
       skipStagePreflight: options?.skipStagePreflight === true,
       minStartIndex: Number.isInteger(options?.minStartIndex) ? options.minStartIndex : undefined,
       stagePlanMaxWaitMs: Number.isInteger(options?.stagePlanMaxWaitMs) ? options.stagePlanMaxWaitMs : undefined,
       precomputedStagePlan: options?.precomputedStagePlan && typeof options.precomputedStagePlan === 'object'
         ? options.precomputedStagePlan
         : undefined,
-      composerThinkingEffort: typeof options?.composerThinkingEffort === 'string'
-        ? options.composerThinkingEffort
-        : '',
+      composerThinkingEffort,
       invocationWindowId: targetWindowId,
       sourceWindowId: activeTab.windowId,
       sourceUrl: getTabEffectiveUrl(activeTab),
@@ -30692,6 +31714,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     ? options.queueJobId.trim()
     : '';
   const queueManaged = !!queueJobId;
+  const queueBatchId = typeof options?.queueBatchId === 'string' && options.queueBatchId.trim()
+    ? options.queueBatchId.trim()
+    : '';
+  const manualPdfBatchId = typeof options?.manualPdfBatchId === 'string' && options.manualPdfBatchId.trim()
+    ? options.manualPdfBatchId.trim()
+    : '';
+  const manualPdfProviderId = typeof options?.manualPdfProviderId === 'string' && options.manualPdfProviderId.trim()
+    ? options.manualPdfProviderId.trim()
+    : '';
   const remoteJobContext = options?.remote && typeof options.remote === 'object'
     ? sanitizeRemoteAnalysisQueueJobMetadata(options.remote)
     : null;
@@ -30752,6 +31783,9 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
       ...(invocationWindowId !== null ? { invocationWindowId } : {}),
       ...(sourceWindowId !== null ? { sourceWindowId } : {}),
+      ...(queueBatchId ? { queueBatchId } : {}),
+      ...(manualPdfBatchId ? { manualPdfBatchId } : {}),
+      ...(manualPdfProviderId ? { manualPdfProviderId } : {}),
       ...(queueManaged
         ? {
           queueManaged: true,
@@ -31485,13 +32519,22 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     } else {
       finalStatus = 'failed';
       finalPhase = 'response_wait';
-      finalStatusCode = 'process.invalid_result';
-      finalStatusText = 'Nieoczekiwany wynik';
-      finalReason = 'invalid_result';
+      finalStatusCode = !result
+        ? 'process.missing_execute_result_payload'
+        : 'process.invalid_result';
+      finalStatusText = !result
+        ? 'Brak payloadu executeScript'
+        : 'Nieoczekiwany wynik';
+      finalReason = !result
+        ? 'missing_execute_result_payload'
+        : 'invalid_result';
+      finalError = !result
+        ? 'executeScript returned no result object'
+        : '';
       await renderFinalCounterStatusOnTab(chatTabId, {
         heading: 'Blad procesu',
         tone: 'error',
-        lines: ['Powod: invalid_result'],
+        lines: [`Powod: ${finalReason}`],
         autoCloseMs: 0
       });
     }
@@ -31570,6 +32613,16 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     if (sourceTabs.length === 0) {
       console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
       return getAnalysisQueueStatusSnapshot();
+    }
+
+    if (shouldBypassAnalysisQueueForAnalysisType(analysisType)) {
+      console.log(`[${analysisType}] Uruchamiam ${sourceTabs.length} analiz poza kolejka slotow`);
+      return launchAnalysisJobsOutsideQueue(sourceTabs, promptChain, chatUrl, analysisType, {
+        ...options,
+        reason: typeof options?.reason === 'string' && options.reason.trim()
+          ? options.reason.trim()
+          : 'process_articles_queue_bypass'
+      });
     }
 
     const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
@@ -32415,13 +33468,22 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         console.error(`lastResponse: ${result?.lastResponse}`);
         finalStatus = 'failed';
         finalPhase = 'response_wait';
-        finalStatusCode = 'process.invalid_result';
-        finalStatusText = 'Nieoczekiwany wynik';
-        finalReason = 'invalid_result';
+        finalStatusCode = !result
+          ? 'process.missing_execute_result_payload'
+          : 'process.invalid_result';
+        finalStatusText = !result
+          ? 'Brak payloadu executeScript'
+          : 'Nieoczekiwany wynik';
+        finalReason = !result
+          ? 'missing_execute_result_payload'
+          : 'invalid_result';
+        finalError = !result
+          ? 'executeScript returned no result object'
+          : '';
         await renderFinalCounterStatusOnTab(chatTabId, {
           heading: 'Blad procesu',
           tone: 'error',
-          lines: ['Powod: invalid_result'],
+          lines: [`Powod: ${finalReason}`],
           autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
@@ -33163,25 +34225,78 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
     }
   );
 
-  const enqueueResult = await enqueueAnalysisJobs(queueJobs, {
-    reason: 'manual_pdf_enqueue'
-  });
-  registerManualPdfQueueBatch(batchId, safeProviderId, enqueueResult?.jobs || []);
+  const queuedPdfJobs = queueJobs.filter((job) => !shouldBypassAnalysisQueueForAnalysisType(job?.analysisType));
+  const bypassPdfJobs = queueJobs.filter((job) => shouldBypassAnalysisQueueForAnalysisType(job?.analysisType));
+  const emptyQueueSnapshot = queuedPdfJobs.length === 0
+    ? await getAnalysisQueueStatusSnapshot()
+    : null;
+  const enqueueResult = queuedPdfJobs.length > 0
+    ? await enqueueAnalysisJobs(queuedPdfJobs, {
+        reason: 'manual_pdf_enqueue'
+      })
+    : {
+        success: true,
+        jobs: [],
+        queuedCount: 0,
+        maxConcurrent: Number.isInteger(emptyQueueSnapshot?.maxConcurrent) ? emptyQueueSnapshot.maxConcurrent : null,
+        queueSize: Number.isInteger(emptyQueueSnapshot?.queueSize) ? emptyQueueSnapshot.queueSize : 0,
+        activeSlots: Number.isInteger(emptyQueueSnapshot?.activeSlots) ? emptyQueueSnapshot.activeSlots : 0,
+        reservedSlots: Number.isInteger(emptyQueueSnapshot?.reservedSlots) ? emptyQueueSnapshot.reservedSlots : 0,
+        liveSlots: Number.isInteger(emptyQueueSnapshot?.liveSlots) ? emptyQueueSnapshot.liveSlots : 0,
+        startingSlots: Number.isInteger(emptyQueueSnapshot?.startingSlots) ? emptyQueueSnapshot.startingSlots : 0
+      };
+  const bypassResult = bypassPdfJobs.length > 0
+    ? await launchAnalysisJobsOutsideQueue(
+        bypassPdfJobs.map((job) => ({
+          ...job.tabSnapshot,
+          sourceKind: job.sourceKind,
+          sourceUrl: job.sourceUrl,
+          sourceMaterialId: job.sourceMaterialId,
+          sourceMaterialHash: job.sourceMaterialHash,
+          sourceMaterialLength: job.sourceMaterialLength,
+          sourceMaterialStored: job.sourceMaterialStored === true
+        })),
+        bypassPdfJobs[0].promptChainSnapshot,
+        bypassPdfJobs[0].chatUrl,
+        bypassPdfJobs[0].analysisType,
+        {
+          sourceKind: 'manual_pdf',
+          queueBatchId: batchId,
+          manualPdfBatchId: batchId,
+          manualPdfProviderId: safeProviderId,
+          reason: 'manual_pdf_portfolio_queue_bypass'
+        }
+      )
+    : null;
+  registerManualPdfQueueBatch(batchId, safeProviderId, [
+    ...(Array.isArray(enqueueResult?.jobs) ? enqueueResult.jobs : []),
+    ...(Array.isArray(bypassResult?.jobs) ? bypassResult.jobs : [])
+  ]);
+  const bypassCount = Number.isInteger(bypassResult?.queueBypassCount)
+    ? Math.max(0, bypassResult.queueBypassCount)
+    : 0;
+  const portfolioQueuedCount = Math.max(0, portfolioJobCount - bypassCount);
   return {
     success: true,
     mode: 'pdf',
     analysisType: normalizedAnalysisType,
-    extraPortfolioQueued: portfolioJobCount > 0,
+    extraPortfolioQueued: portfolioQueuedCount > 0,
+    extraPortfolioLaunched: bypassCount > 0,
+    extraPortfolioStarted: portfolioJobCount > 0,
     companyQueuedCount: companyJobCount,
-    portfolioQueuedCount: portfolioJobCount,
+    portfolioQueuedCount,
+    portfolioLaunchedCount: bypassCount,
+    launchedCount: bypassCount,
+    queueBypassCount: bypassCount,
+    queueBypass: bypassCount > 0,
     queued: enqueueResult?.queuedCount || 0,
     queuedCount: enqueueResult?.queuedCount || 0,
-    maxConcurrent: Number.isInteger(enqueueResult?.maxConcurrent) ? enqueueResult.maxConcurrent : null,
-    queueSize: Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : 0,
-    activeSlots: Number.isInteger(enqueueResult?.activeSlots) ? enqueueResult.activeSlots : 0,
-    reservedSlots: Number.isInteger(enqueueResult?.reservedSlots) ? enqueueResult.reservedSlots : 0,
-    liveSlots: Number.isInteger(enqueueResult?.liveSlots) ? enqueueResult.liveSlots : 0,
-    startingSlots: Number.isInteger(enqueueResult?.startingSlots) ? enqueueResult.startingSlots : 0,
+    maxConcurrent: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'maxConcurrent', null),
+    queueSize: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'queueSize', 0),
+    activeSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'activeSlots', 0),
+    reservedSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'reservedSlots', 0),
+    liveSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'liveSlots', 0),
+    startingSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'startingSlots', 0),
     batchId
   };
 }
@@ -33827,6 +34942,13 @@ async function injectToChat(
       return (text || '').replace(/\s+/g, ' ').trim();
     }
 
+    function normalizeChatGptActionText(value) {
+      return compactText(String(value ?? ''))
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+    }
+
     // executeScript serializes only this injected function body, so any UI
     // classifier used here must stay local instead of referencing background
     // helpers from the service worker scope.
@@ -33837,10 +34959,18 @@ async function injectToChat(
         .toLowerCase();
     }
 
-    function isInjectedChatGptLimitOrRestrictionText(text) {
+    function isInjectedChatGptLimitOrRestrictionText(text, source = 'text') {
       const lowered = normalizeInjectedChatGptUiText(text);
       if (!lowered) return false;
-      return /\blimit\s*:/.test(lowered);
+      const sourceKey = normalizeInjectedChatGptUiText(source);
+      const trustedUiSource = (
+        sourceKey.includes('alert') ||
+        sourceKey.includes('status') ||
+        sourceKey.includes('error') ||
+        sourceKey.includes('banner') ||
+        sourceKey.includes('toast')
+      );
+      return trustedUiSource && /^(?:limit|rate limit|usage limit)\s*:/.test(lowered) && lowered.length <= 240;
     }
 
     function normalizeDataGapStageId(value) {
@@ -34669,6 +35799,19 @@ async function injectToChat(
         responseCount = nextResponses.length;
       }
 
+      if (options?.skipWatchlistDispatch === true) {
+        return {
+          success: true,
+          responseId: normalizedResponseId,
+          responseStored,
+          outboxQueued: false,
+          dispatchSkipped: true,
+          dispatchSkipReason: 'skip_watchlist_dispatch',
+          responseCount,
+          queueSize: 0
+        };
+      }
+
       const dispatchPayload = normalizeWatchlistDispatchPayload({
         ...(savedResponse && typeof savedResponse === 'object' ? savedResponse : responseRecord),
         ...(() => {
@@ -35470,10 +36613,15 @@ async function injectToChat(
       if (responseOptions.skipWatchlistDispatch === true) {
         messagePayload.skipWatchlistDispatch = true;
       }
+      if (responseOptions.allowPortfolioFeedbackDispatch === true) {
+        messagePayload.allowPortfolioFeedbackDispatch = true;
+      }
       if (responseOptions.skipProcessPersistencePatch === true) {
         messagePayload.skipProcessPersistencePatch = true;
       }
-      applySourceMaterialMetaForSave(messagePayload, { includeText: true });
+      applySourceMaterialMetaForSave(messagePayload, {
+        includeText: responseOptions.includeSourceMaterialText !== false
+      });
 
       const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);
       if (!saveAttempt.ok) {
@@ -35585,20 +36733,21 @@ async function injectToChat(
         responseId,
         selectedPrompt,
         selectedStageIndex,
-        'portfolio_prompt1_value_chain_ranking',
+        PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE,
         {
-          schema: 'portfolio.prompt_first_response.v1',
-          analysisType: 'portfolio_prompt1_value_chain_ranking',
-          source: 'Portfolio Prompt 1: Value Chain Ranking',
+          schema: PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA,
+          analysisType: PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE,
+          source: PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE,
           sourceTitle: sourceTitleForSave || articleTitle || 'Portfolio Prompt 1',
-          sourceRecordSuffix: 'portfolio_prompt1_value_chain_ranking',
+          sourceRecordSuffix: PORTFOLIO_PROMPT_ONE_RESPONSE_REASON,
           deferredFlushReason: 'portfolio_prompt1_runtime_bridge_fast_ack',
-          dispatchFlushReason: 'portfolio_prompt1_value_chain_ranking',
+          dispatchFlushReason: PORTFOLIO_PROMPT_ONE_RESPONSE_REASON,
           skipProcessPersistencePatch: true,
+          includeSourceMaterialText: false,
           stageMeta: {
             source: 'portfolio_prompt_process',
             category: 'portfolio_prompt_copy',
-            artifact_name: 'Portfolio Prompt 1: Value Chain Ranking'
+            artifact_name: PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE
           }
         }
       );
@@ -36053,7 +37202,7 @@ async function injectToChat(
 
     function detectGenerationBlockerStateFromText(text, source = 'text') {
       const blockerText = compactText(text || '');
-      if (!blockerText || !isInjectedChatGptLimitOrRestrictionText(blockerText)) {
+      if (!blockerText || !isInjectedChatGptLimitOrRestrictionText(blockerText, source)) {
         return null;
       }
       return buildGenerationBlockerState({ text: blockerText, source });
@@ -36081,20 +37230,19 @@ async function injectToChat(
         textCandidates.push({ text: normalizedText, source });
       };
 
-      appendCandidate(state.lastAssistantText, 'last_assistant_text');
-      appendCandidate(state.lastAssistantTurnText, 'last_assistant_turn');
       appendCandidate(state.lastAlertText, 'last_alert_text');
 
       const scopedContainers = [state.lastAssistant, state.lastAssistantContainer].filter(Boolean);
       for (const container of scopedContainers) {
-        const scopedCandidates = [
-          ...container.querySelectorAll('[role="alert"]'),
-          ...container.querySelectorAll('[role="status"]'),
-          ...container.querySelectorAll('[class*="error"]'),
-          ...container.querySelectorAll('[class*="text"]')
+        const scopedCandidateGroups = [
+          { source: 'scoped_alert', nodes: container.querySelectorAll('[role="alert"]') },
+          { source: 'scoped_status', nodes: container.querySelectorAll('[role="status"]') },
+          { source: 'scoped_error', nodes: container.querySelectorAll('[class*="error"]') }
         ];
-        scopedCandidates.forEach((node) => {
-          appendCandidate(node?.textContent || '', 'scoped_candidate');
+        scopedCandidateGroups.forEach((group) => {
+          Array.from(group.nodes).forEach((node) => {
+            appendCandidate(node?.textContent || '', group.source);
+          });
         });
       }
 
@@ -36378,12 +37526,12 @@ async function injectToChat(
 
     function elementTextForActionMatch(element) {
       if (!(element instanceof HTMLElement)) return '';
-      return compactText([
+      return normalizeChatGptActionText([
         element.innerText || '',
         element.textContent || '',
         element.getAttribute('aria-label') || '',
         element.getAttribute('title') || ''
-      ].join(' ')).toLowerCase();
+      ].join(' '));
     }
 
     function isRetryActionElement(element) {
@@ -36397,6 +37545,7 @@ async function injectToChat(
         text.includes('try again') ||
         text.includes('regenerate') ||
         text.includes('sprobuj ponownie') ||
+        text.includes('ponow probe') ||
         text.includes('ponow')
       );
     }
@@ -36450,10 +37599,26 @@ async function injectToChat(
       return scopes.filter((scope) => hasRetryableChatGptGenerationErrorInElement(scope));
     }
 
+    function findVisibleRetryActionButton(excludedCandidates = new Set()) {
+      const candidates = [
+        ...document.querySelectorAll('button'),
+        ...document.querySelectorAll('[role="button"]')
+      ];
+      for (const candidate of candidates) {
+        if (excludedCandidates.has(candidate)) continue;
+        if (isRetryActionElement(candidate)) {
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    function hasVisibleRetryActionButton() {
+      return !!findVisibleRetryActionButton();
+    }
+
     function findRetryButtonForRetryableGenerationError() {
       const scopes = collectRetryableErrorScopes();
-      if (!scopes.length) return null;
-
       const seenCandidates = new Set();
       for (const scope of scopes) {
         const candidates = [
@@ -36469,18 +37634,7 @@ async function injectToChat(
         }
       }
 
-      const globalCandidates = [
-        ...document.querySelectorAll('button'),
-        ...document.querySelectorAll('[role="button"]')
-      ];
-      for (const candidate of globalCandidates) {
-        if (seenCandidates.has(candidate)) continue;
-        if (isRetryActionElement(candidate)) {
-          return candidate;
-        }
-      }
-
-      return null;
+      return findVisibleRetryActionButton(seenCandidates);
     }
 
     async function clickRetryForRetryableGenerationError(phase = 'unknown') {
@@ -36518,7 +37672,10 @@ async function injectToChat(
       if (hasHardGenerationErrorMessage()) {
         return true;
       }
-      return collectRetryableErrorScopes().length > 0;
+      if (collectRetryableErrorScopes().length > 0) {
+        return true;
+      }
+      return hasVisibleRetryActionButton();
     }
 
     async function detectPromptSentDespiteFailure(snapshot, promptText, maxWaitMs = 6000) {
@@ -36552,6 +37709,13 @@ async function injectToChat(
 
       if (captureGenerationBlockerState()) {
         return 'blocked';
+      }
+
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('timeout_classification');
+        if (retryResult.clicked) {
+          return 'still_generating';
+        }
       }
 
       if (hasHardGenerationErrorMessage()) {
@@ -37992,6 +39156,86 @@ async function injectToChat(
     return false;
   }
 
+  function getLastAssistantMessageElement() {
+    const assistantMessages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    return assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
+  }
+
+  function isInComposerArea(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    return !!(
+      element.closest('form') ||
+      element.closest('[data-testid*="composer" i]') ||
+      element.closest('[id*="composer" i]') ||
+      element.closest('[data-testid="composer-input"]') ||
+      element.closest('footer')
+    );
+  }
+
+  function isInLastAssistantMessage(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const lastAssistantMsg = getLastAssistantMessageElement();
+    return !!(lastAssistantMsg && lastAssistantMsg.contains(element));
+  }
+
+  function isElementVisibleForStatus(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const rect = element.getBoundingClientRect();
+    if (!rect || rect.width < 1 || rect.height < 1) return false;
+    const style = window.getComputedStyle(element);
+    if (!style) return false;
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden') return false;
+    if (Number.parseFloat(style.opacity || '1') === 0) return false;
+    if (element.closest('[aria-hidden="true"]')) return false;
+    return true;
+  }
+
+  function findVisibleGenerationIndicator(selectors, options = {}) {
+    const selectorText = Array.isArray(selectors) ? selectors.filter(Boolean).join(', ') : String(selectors || '');
+    if (!selectorText) return null;
+
+    const roots = [];
+    if (options?.includeLastAssistant !== false) {
+      const lastAssistantMsg = getLastAssistantMessageElement();
+      if (lastAssistantMsg) roots.push(lastAssistantMsg);
+    }
+    if (options?.includeComposer === true) {
+      const composerRoot = document.querySelector('form') ||
+        document.querySelector('[data-testid*="composer" i]') ||
+        document.querySelector('[id*="composer" i]') ||
+        document.querySelector('footer');
+      if (composerRoot) roots.push(composerRoot);
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    const pushCandidate = (candidate) => {
+      if (!(candidate instanceof HTMLElement)) return;
+      if (seen.has(candidate)) return;
+      seen.add(candidate);
+      candidates.push(candidate);
+    };
+
+    if (roots.length > 0) {
+      roots.forEach((root) => {
+        if (!(root instanceof HTMLElement)) return;
+        if (root.matches(selectorText)) pushCandidate(root);
+        root.querySelectorAll(selectorText).forEach(pushCandidate);
+      });
+    } else {
+      document.querySelectorAll(selectorText).forEach(pushCandidate);
+    }
+
+    return candidates.find((candidate) => isElementVisibleForStatus(candidate)) || null;
+  }
+
+  function hasPendingUserTurnByDom() {
+    const userMessages = document.querySelectorAll('[data-message-author-role="user"]').length;
+    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+    return userMessages > 0 && userMessages > assistantMessages;
+  }
+
   function findActiveStopButton() {
     const selectors = [
       '[data-testid="stop-button"]',
@@ -38030,17 +39274,15 @@ async function injectToChat(
         continue;
       }
 
-      const inComposerArea = !!(
-        candidate.closest('form') ||
-        candidate.closest('[data-testid*="composer" i]') ||
-        candidate.closest('[id*="composer" i]') ||
-        candidate.closest('footer')
-      );
-      if (candidate.matches('[data-testid="stop-button"]') || inComposerArea) {
+      const inComposerArea = isInComposerArea(candidate);
+      const inLastAssistantMessage = isInLastAssistantMessage(candidate);
+      if (inComposerArea) {
         return candidate;
       }
 
-      fallback = fallback || candidate;
+      if (inLastAssistantMessage) {
+        fallback = fallback || candidate;
+      }
     }
 
     return fallback;
@@ -38054,49 +39296,50 @@ async function injectToChat(
       return { generating: true, reason: 'stopButton', element: stopButton };
     }
     
-    // 2. Thinking indicators - TYLKO w ostatniej wiadomości assistant!
-    // Znajdź ostatnią wiadomość assistant
-    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (assistantMessages.length > 0) {
-      const lastAssistantMsg = assistantMessages[assistantMessages.length - 1];
-      
-      // Sprawdź thinking indicator TYLKO w ostatniej wiadomości
-      const thinkingInLastMsg = lastAssistantMsg.querySelector('[class*="thinking"]') ||
-                                lastAssistantMsg.querySelector('[class*="Thinking"]') ||
-                                lastAssistantMsg.querySelector('[data-testid*="thinking"]') ||
-                                lastAssistantMsg.querySelector('[aria-label*="Thinking"]') ||
-                                lastAssistantMsg.querySelector('[aria-label*="thinking"]');
-      if (thinkingInLastMsg) {
-        return { generating: true, reason: 'thinkingIndicator', element: thinkingInLastMsg };
-      }
+    // 2. Thinking indicators - only visible indicators in the latest assistant turn.
+    const thinkingInLastMsg = findVisibleGenerationIndicator([
+      '[class*="thinking"]',
+      '[class*="Thinking"]',
+      '[data-testid*="thinking"]',
+      '[aria-label*="Thinking"]',
+      '[aria-label*="thinking"]'
+    ]);
+    if (thinkingInLastMsg) {
+      return { generating: true, reason: 'thinkingIndicator', element: thinkingInLastMsg };
     }
     
-    // 3. Update indicators
-    const updateIndicators = document.querySelector('[aria-label*="Update"]') ||
-                            document.querySelector('[aria-label*="update"]') ||
-                            document.querySelector('[class*="updating"]') ||
-                            document.querySelector('[class*="Updating"]') ||
-                            document.querySelector('[data-testid*="update"]');
+    // 3. Update indicators scoped to the active turn/composer. Global hidden app spinners are noisy.
+    const updateIndicators = findVisibleGenerationIndicator([
+      '[aria-label*="Update"]',
+      '[aria-label*="update"]',
+      '[class*="updating"]',
+      '[class*="Updating"]',
+      '[data-testid*="update"]'
+    ], { includeComposer: true });
     if (updateIndicators) {
       return { generating: true, reason: 'updateIndicator', element: updateIndicators };
     }
     
-    // 4. Streaming indicators
-    const streamingIndicators = document.querySelector('[class*="streaming"]') ||
-                               document.querySelector('[class*="Streaming"]') ||
-                               document.querySelector('[data-testid*="streaming"]') ||
-                               document.querySelector('[aria-label*="Streaming"]');
+    // 4. Streaming indicators scoped to the active turn/composer.
+    const streamingIndicators = findVisibleGenerationIndicator([
+      '[class*="streaming"]',
+      '[class*="Streaming"]',
+      '[data-testid*="streaming"]',
+      '[aria-label*="Streaming"]'
+    ], { includeComposer: true });
     if (streamingIndicators) {
       return { generating: true, reason: 'streamingIndicator', element: streamingIndicators };
     }
     
-    // 5. Typing/Loading indicators
-    const typingIndicators = document.querySelector('[class*="typing"]') ||
-                            document.querySelector('[class*="Typing"]') ||
-                            document.querySelector('[class*="loading"]') ||
-                            document.querySelector('[class*="Loading"]') ||
-                            document.querySelector('[aria-label*="typing"]') ||
-                            document.querySelector('[aria-label*="loading"]');
+    // 5. Typing/loading indicators scoped to the active turn/composer.
+    const typingIndicators = findVisibleGenerationIndicator([
+      '[class*="typing"]',
+      '[class*="Typing"]',
+      '[class*="loading"]',
+      '[class*="Loading"]',
+      '[aria-label*="typing"]',
+      '[aria-label*="loading"]'
+    ], { includeComposer: true });
     if (typingIndicators) {
       return { generating: true, reason: 'typingIndicator', element: typingIndicators };
     }
@@ -38104,7 +39347,10 @@ async function injectToChat(
     // 6. Editor disabled (fallback - mniej pewny)
     const editor = document.querySelector('[role="textbox"]') ||
                   document.querySelector('[contenteditable]');
-    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+    const editorDisabled = editor
+      && isElementVisibleForInteraction(editor)
+      && editor.getAttribute('contenteditable') === 'false'
+      && hasPendingUserTurnByDom();
     if (editorDisabled) {
       return { generating: true, reason: 'editorDisabled', element: editor };
     }
@@ -38151,18 +39397,15 @@ async function injectToChat(
     let responseSeenInDOM = false;
     let lastObservedResponseCount = initialAssistantCount;
     let generationErrorRetryAttempts = 0;
-    const maxGenerationErrorRetryAttempts = 2;
     const tryRecoverFromGenerationError = async (phase) => {
       if (!hasRetryableChatGptGenerationErrorMessage()) return false;
-      if (generationErrorRetryAttempts >= maxGenerationErrorRetryAttempts) {
-        return false;
-      }
       const retryResult = await clickRetryForRetryableGenerationError(phase);
       if (!retryResult.clicked) {
         console.warn(`[chatgpt-retry] Nie udalo sie kliknac Retry (${retryResult.reason || 'unknown'}).`);
         return false;
       }
       generationErrorRetryAttempts += 1;
+      console.warn(`[chatgpt-retry] Retry attempt #${generationErrorRetryAttempts} accepted in ${phase}.`);
       responseSeenInDOM = false;
       lastObservedResponseCount = getAssistantSnapshot().count;
       await new Promise((resolve) => setTimeout(resolve, 1200));
@@ -38245,6 +39488,24 @@ async function injectToChat(
     let logInterval = 0;
     let lastAssistantText = initialAssistantText;
     let lastAssistantChangeAt = Date.now();
+    let lastPhase2GeneratingActivityAt = Date.now();
+    let lastPhase2GenerationSignature = '';
+    let phase2StaleGenerationOverrideWarned = false;
+    const phase2StaleGeneratingReadyOverrideMs = 45_000;
+    const phase2StaleGeneratingFailMs = 180_000;
+    const getPhase2GenerationSignature = (genStatus) => {
+      if (!genStatus?.generating) return '';
+      const element = genStatus.element instanceof HTMLElement ? genStatus.element : null;
+      if (!element) return `${genStatus.reason || 'unknown'}|no-element`;
+      return [
+        genStatus.reason || 'unknown',
+        element.tagName || '',
+        element.id || '',
+        element.getAttribute('data-testid') || '',
+        element.getAttribute('aria-label') || '',
+        compactText(element.textContent || '').slice(0, 80)
+      ].join('|');
+    };
 
     while (true) {
       if (shouldStopNow()) return false;
@@ -38275,6 +39536,18 @@ async function injectToChat(
                         document.querySelector('button[aria-label*="Send"]');
 
       const genStatus = isGenerating();
+      if (!genStatus.generating) {
+        lastPhase2GenerationSignature = '';
+        lastPhase2GeneratingActivityAt = Date.now();
+        phase2StaleGenerationOverrideWarned = false;
+      } else {
+        const generationSignature = getPhase2GenerationSignature(genStatus);
+        if (generationSignature !== lastPhase2GenerationSignature) {
+          lastPhase2GenerationSignature = generationSignature;
+          lastPhase2GeneratingActivityAt = Date.now();
+          phase2StaleGenerationOverrideWarned = false;
+        }
+      }
 
       if (logInterval % 10 === 0) {
         const phase2Elapsed = Math.round((Date.now() - phase2StartTime) / 1000);
@@ -38322,6 +39595,8 @@ async function injectToChat(
       if (textChangedNow) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
+        lastPhase2GeneratingActivityAt = Date.now();
+        phase2StaleGenerationOverrideWarned = false;
       }
 
       const hasNewAssistantMessage = currentResponseCount > initialAssistantCount;
@@ -38352,13 +39627,30 @@ async function injectToChat(
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
 
-      if (genStatus.generating || textChangedNow || responseCountChanged || hasProgressText) {
+      if (textChangedNow || responseCountChanged || hasProgressText) {
         phase2IdleSince = Date.now();
+        lastPhase2GeneratingActivityAt = Date.now();
+        phase2StaleGenerationOverrideWarned = false;
       }
 
       const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && !hasProgressText;
+      const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastPhase2GeneratingActivityAt) : 0;
+      const generationLooksStaleReady = genStatus.generating
+        && editorReady
+        && responseSeenInDOM
+        && textStable
+        && !hasProgressText
+        && staleGeneratingForMs >= phase2StaleGeneratingReadyOverrideMs;
+      if (generationLooksStaleReady && !phase2StaleGenerationOverrideWarned) {
+        phase2StaleGenerationOverrideWarned = true;
+        console.warn('[FAZA 2] Ignoruje stale generating indicator; response DOM is stable.', {
+          reason: genStatus.reason,
+          staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+          responseCount: currentResponseCount
+        });
+      }
 
-      if (isReady) {
+      if (isReady || generationLooksStaleReady) {
         consecutiveReady += 1;
         if (consecutiveReady >= 1) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -38383,6 +39675,11 @@ async function injectToChat(
         return false;
       }
 
+      if (genStatus.generating && !generationLooksStaleReady && staleGeneratingForMs >= phase2StaleGeneratingFailMs && !hasProgressText) {
+        console.error(`[FAZA 2] Timeout stale-generating po ${Math.round(staleGeneratingForMs / 1000)}s (reason=${genStatus.reason}).`);
+        return false;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
@@ -38399,6 +39696,23 @@ async function injectToChat(
           blocked: true,
           error: initialBlocker.blockerText || initialBlocker.statusText || 'Wymaga akcji: limit/restriction w ChatGPT.'
         };
+      }
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('connection_check');
+        if (retryResult.clicked) {
+          const retryWaitOk = await waitForResponse(responseWaitMs, {
+            currentPrompt: preChainCurrentPrompt,
+            totalPrompts: totalPromptsForRun,
+            stageName: preChainCurrentPrompt > 0 ? `Prompt ${preChainCurrentPrompt}` : 'ChatGPT retry'
+          });
+          if (!retryWaitOk && hasRetryableChatGptGenerationErrorMessage()) {
+            return {
+              healthy: false,
+              retryClicked: true,
+              error: 'Kliknieto Retry, ale ChatGPT nadal pokazuje blad generowania.'
+            };
+          }
+        }
       }
       // Sprawdź czy są błędy w konsoli (HTTP2, 404, itp.)
       const hasConnectionErrors = await checkForConnectionErrors();
@@ -38933,8 +40247,9 @@ async function injectToChat(
       try {
         const parsed = JSON.parse(candidate);
         if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        const schema = typeof parsed.schema === 'string' ? parsed.schema.trim().toLowerCase() : '';
         const status = typeof parsed.status === 'string' ? parsed.status.trim() : '';
-        const hasPortfolioShape = (
+        const hasLegacyPortfolioShape = (
           parsed.save && typeof parsed.save === 'object' && !Array.isArray(parsed.save)
         ) || (
           parsed.totals && typeof parsed.totals === 'object' && !Array.isArray(parsed.totals)
@@ -38949,7 +40264,22 @@ async function injectToChat(
         ) || (
           Array.isArray(parsed.positions) && Array.isArray(parsed.layers)
         );
-        if (status && hasPortfolioShape) {
+        const hasPortfolioSummary = (
+          typeof parsed.thesis_construction_summary === 'string'
+          || typeof parsed.author_thesis_commentary === 'string'
+        );
+        const hasPortfolioConstructionCommentary = (
+          typeof parsed.portfolio_construction_commentary === 'string'
+          || typeof parsed.portfolio_decision_narrative === 'string'
+        );
+        const hasTextPortfolioShape = (
+          hasPortfolioSummary
+          && hasPortfolioConstructionCommentary
+          && Array.isArray(parsed.positions)
+          && Array.isArray(parsed.layers)
+        );
+        const isPortfolioSchema = schema === 'portfolio.final_response.v1' || schema === 'portfolio.final_response.v2';
+        if (hasTextPortfolioShape || ((status || isPortfolioSchema) && hasLegacyPortfolioShape)) {
           return candidate;
         }
       } catch (_error) {
@@ -39186,6 +40516,24 @@ async function injectToChat(
     let lastAssistantText = '';
     let lastAssistantChangeAt = Date.now();
     let readyIdleSince = Date.now();
+    let lastGeneratingActivityAt = Date.now();
+    let lastGenerationSignature = '';
+    let staleGenerationOverrideWarned = false;
+    const staleGeneratingReadyOverrideMs = 45_000;
+    const staleGeneratingFailMs = 180_000;
+    const getGenerationSignature = (genStatus) => {
+      if (!genStatus?.generating) return '';
+      const element = genStatus.element instanceof HTMLElement ? genStatus.element : null;
+      if (!element) return `${genStatus.reason || 'unknown'}|no-element`;
+      return [
+        genStatus.reason || 'unknown',
+        element.tagName || '',
+        element.id || '',
+        element.getAttribute('data-testid') || '',
+        element.getAttribute('aria-label') || '',
+        compactText(element.textContent || '').slice(0, 80)
+      ].join('|');
+    };
     const initialAssistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (initialAssistantMessages.length > 0) {
       const lastMsg = initialAssistantMessages[initialAssistantMessages.length - 1];
@@ -39207,12 +40555,36 @@ async function injectToChat(
         console.warn('⚠️ Wykryto limit/restriction podczas czekania na gotowość interfejsu.');
         return false;
       }
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('interface_ready');
+        if (retryResult.clicked) {
+          readyIdleSince = Date.now();
+          consecutiveReady = 0;
+          if (counter) {
+            updateCounter(counter, promptIndex, promptTotal, 'ChatGPT error - Retry');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+      }
       // Sprawdź wszystkie elementy interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
                      document.querySelector('div[contenteditable="true"]');
       
       // POPRAWKA: Użyj isGenerating() zamiast tylko sprawdzania stopButton
       const genStatus = isGenerating();
+      if (!genStatus.generating) {
+        lastGenerationSignature = '';
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
+      } else {
+        const generationSignature = getGenerationSignature(genStatus);
+        if (generationSignature !== lastGenerationSignature) {
+          lastGenerationSignature = generationSignature;
+          lastGeneratingActivityAt = Date.now();
+          staleGenerationOverrideWarned = false;
+        }
+      }
       
       // Interface jest gotowy gdy:
       // 1. BRAK wskaźników generowania (isGenerating() == false)
@@ -39226,6 +40598,8 @@ async function injectToChat(
       if (textChangedNow) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
       }
       const progressText = (currentLastText || '').toLowerCase();
       const hasProgressText = progressText.includes('research in progress') ||
@@ -39237,11 +40611,32 @@ async function injectToChat(
         progressText.includes('collecting sources') ||
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
-      if (genStatus.generating || textChangedNow || hasProgressText) {
+      if (textChangedNow || hasProgressText) {
         readyIdleSince = Date.now();
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
       }
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const isReady = noGeneration && editorReady && textStable && !hasProgressText;
+      const currentUserCount = document.querySelectorAll('[data-message-author-role="user"]').length;
+      const currentAssistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+      const conversationLooksBalanced = currentAssistantCount > 0 && currentAssistantCount >= currentUserCount;
+      const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastGeneratingActivityAt) : 0;
+      const generationLooksStale = genStatus.generating
+        && editorReady
+        && textStable
+        && !hasProgressText
+        && conversationLooksBalanced
+        && staleGeneratingForMs >= staleGeneratingReadyOverrideMs;
+      if (generationLooksStale && !staleGenerationOverrideWarned) {
+        staleGenerationOverrideWarned = true;
+        console.warn('[interface-ready] Stale generating indicator ignored; editor and conversation look ready.', {
+          reason: genStatus.reason,
+          staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+          userCount: currentUserCount,
+          assistantCount: currentAssistantCount
+        });
+      }
+      const isReady = (noGeneration || generationLooksStale) && editorReady && textStable && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -39278,9 +40673,16 @@ async function injectToChat(
           editorReady: editorReady,
           textStable: textStable,
           hasProgressText: hasProgressText,
+          conversationLooksBalanced,
+          staleGeneratingFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
           consecutiveReady: consecutiveReady,
           stalledFor: `${Math.round((Date.now() - readyIdleSince) / 1000)}s`
         });
+      }
+
+      if (genStatus.generating && !generationLooksStale && staleGeneratingForMs >= staleGeneratingFailMs && !hasProgressText) {
+        console.error(`❌ Timeout stale-generating interfejsu (${Math.round(staleGeneratingForMs / 1000)}s, reason=${genStatus.reason})`);
+        return false;
       }
 
       if (effectiveMaxWaitMs > 0 && !genStatus.generating && (Date.now() - readyIdleSince) >= effectiveMaxWaitMs) {
@@ -40126,14 +41528,21 @@ async function injectToChat(
         registerStageCompletion(stage0PromptIndex, stage0Response, stage0Validated);
         if (stage0Response && stage0Response.trim().length > 0) {
           console.log(`Stage 0 captured (${stage0Response.length} znakow) - bedzie wstawione w prompt chain`);
-          const portfolioPromptOneCopy = await copyPortfolioPromptOneResponseToDatabase(stage0Response);
-          if (portfolioPromptOneCopy?.attempted) {
-            console[portfolioPromptOneCopy.ok ? 'log' : 'warn']('[copy-flow] [portfolio-prompt1:result]', {
-              responseId: portfolioPromptOneCopy.responseId || '',
-              ok: portfolioPromptOneCopy.ok === true,
-              error: portfolioPromptOneCopy.error || ''
+          copyPortfolioPromptOneResponseToDatabase(stage0Response)
+            .then((portfolioPromptOneCopy) => {
+              if (portfolioPromptOneCopy?.attempted) {
+                console[portfolioPromptOneCopy.ok ? 'log' : 'warn']('[copy-flow] [portfolio-prompt1:result]', {
+                  responseId: portfolioPromptOneCopy.responseId || '',
+                  ok: portfolioPromptOneCopy.ok === true,
+                  error: portfolioPromptOneCopy.error || ''
+                });
+              }
+            })
+            .catch((error) => {
+              console.warn('[copy-flow] [portfolio-prompt1:background-copy-failed]', {
+                error: error?.message || String(error)
+              });
             });
-          }
         } else {
           console.warn('Nie udalo sie pobrac Stage 0 (pusty tekst) - prompt chain bez wstawienia');
           stage0Response = '';
@@ -40592,14 +42001,11 @@ async function injectToChat(
                 phase: 'capture_validate'
               });
             }
-            if (
-              isRetryableChatGptGenerationErrorText(responseText) &&
-              validationGenerationErrorRetryAttempts < 2
-            ) {
+            if (isRetryableChatGptGenerationErrorText(responseText) || hasRetryableChatGptGenerationErrorMessage()) {
               const retryResult = await clickRetryForRetryableGenerationError('validation');
               if (retryResult.clicked) {
                 validationGenerationErrorRetryAttempts += 1;
-                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'ChatGPT error - Retry');
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `ChatGPT error - Retry #${validationGenerationErrorRetryAttempts}`);
                 await new Promise((resolve) => setTimeout(resolve, 1200));
                 await waitForResponse(responseWaitMs, {
                   currentPrompt: absoluteCurrentPrompt,
@@ -40963,9 +42369,9 @@ async function injectToChat(
             selectedResponseReason,
             isPortfolioAnalysis
               ? {
-                schema: 'portfolio.final_response.v1',
+                schema: 'portfolio.final_response.v2',
                 sourceRecordSuffix: 'portfolio_final_json',
-                skipWatchlistDispatch: true,
+                allowPortfolioFeedbackDispatch: true,
                 dispatchFlushReason: 'portfolio_final_json',
                 stageMeta: {
                   selected_response_kind: 'portfolio_final_json'
