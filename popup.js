@@ -1375,6 +1375,7 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
     const payload = {
       type: 'RUN_ANALYSIS',
       origin: typeof options?.origin === 'string' ? options.origin : 'popup-run-analysis',
+      includePortfolio: false,
     };
     if (Number.isInteger(options?.windowId)) {
       payload.windowId = options.windowId;

@@ -30009,7 +30009,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         remote: message?.remote === true,
         executionMode: typeof message?.executionMode === 'string' ? message.executionMode : '',
         runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
-        selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : ''
+        selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : '',
+        includePortfolio: message?.includePortfolio === true
       });
       reportAdminActionEvent('run_analysis', {
         level: runResult?.success === true ? 'info' : 'warn',
@@ -33806,6 +33807,7 @@ async function runAnalysis(options = {}) {
       : (typeof options?.selectedRunnerId === 'string' && options.selectedRunnerId.trim()
         ? options.selectedRunnerId.trim()
         : await getStoredSelectedRemoteRunnerId());
+    const includePortfolio = options?.includePortfolio === true;
 
     if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId) && executionMode !== 'remote') {
       const preUngroupResult = await ungroupChatGptTabsInWindow(invocationWindowId, {
@@ -33861,12 +33863,16 @@ async function runAnalysis(options = {}) {
       return { success: false, error: 'prompts_not_loaded' };
     }
     console.log(`✅ Analiza spółki: ${PROMPTS_COMPANY.length} promptów`);
-    const portfolioPromptsReady = await ensurePortfolioPromptsReady();
-    if (!portfolioPromptsReady || PROMPTS_PORTFOLIO.length === 0) {
-      console.error("❌ Brak promptów dla Portfolio Analysis w prompts-portfolio.txt");
-      return { success: false, error: 'portfolio_prompts_not_loaded' };
+    if (includePortfolio) {
+      const portfolioPromptsReady = await ensurePortfolioPromptsReady();
+      if (!portfolioPromptsReady || PROMPTS_PORTFOLIO.length === 0) {
+        console.error("❌ Brak promptów dla Portfolio Analysis w prompts-portfolio.txt");
+        return { success: false, error: 'portfolio_prompts_not_loaded' };
+      }
+      console.log(`✅ Portfolio Analysis: ${PROMPTS_PORTFOLIO.length} promptów`);
+    } else {
+      console.log('↪️ Portfolio Analysis: pominiete dla RUN_ANALYSIS');
     }
-    console.log(`✅ Portfolio Analysis: ${PROMPTS_PORTFOLIO.length} promptów`);
     
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
@@ -33879,10 +33885,14 @@ async function runAnalysis(options = {}) {
 
     console.log(`✅ Znaleziono ${orderedTabs.length} artykułów łącznie`);
     
-    // KROK 3: Uruchom analizę company i automatyczny portfolio dla wszystkich znalezionych artykułów
-    console.log("\n🚀 Krok 3: Uruchamianie analizy company + portfolio");
+    // KROK 3: Uruchom analizę company; portfolio tylko gdy zostalo jawnie wlaczone.
+    console.log(includePortfolio
+      ? "\n🚀 Krok 3: Uruchamianie analizy company + portfolio"
+      : "\n🚀 Krok 3: Uruchamianie analizy company");
     console.log(`   - Analiza spółki: ${orderedTabs.length} artykułów`);
-    console.log(`   - Portfolio Analysis: ${orderedTabs.length} artykułów`);
+    if (includePortfolio) {
+      console.log(`   - Portfolio Analysis: ${orderedTabs.length} artykułów`);
+    }
 
     if (executionMode === 'remote') {
       if (!selectedRunnerId) {
@@ -33900,24 +33910,29 @@ async function runAnalysis(options = {}) {
           totalTabs: orderedTabs.length
         };
       }
-      const preparedPortfolioBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_PORTFOLIO, ANALYSIS_TYPE_PORTFOLIO, {
-        runnerId: selectedRunnerId
-      });
-      if (preparedPortfolioBatch?.success !== true) {
-        return {
-          success: false,
-          error: preparedPortfolioBatch?.error || 'portfolio_remote_prepare_failed',
-          skippedCount: Array.isArray(preparedPortfolioBatch?.skipped) ? preparedPortfolioBatch.skipped.length : 0,
-          totalTabs: orderedTabs.length
-        };
+      let preparedPortfolioBatch = null;
+      if (includePortfolio) {
+        preparedPortfolioBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_PORTFOLIO, ANALYSIS_TYPE_PORTFOLIO, {
+          runnerId: selectedRunnerId
+        });
+        if (preparedPortfolioBatch?.success !== true) {
+          return {
+            success: false,
+            error: preparedPortfolioBatch?.error || 'portfolio_remote_prepare_failed',
+            skippedCount: Array.isArray(preparedPortfolioBatch?.skipped) ? preparedPortfolioBatch.skipped.length : 0,
+            totalTabs: orderedTabs.length
+          };
+        }
       }
 
       const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, selectedRunnerId, {
         invocationWindowId
       });
-      const portfolioRemoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedPortfolioBatch, selectedRunnerId, {
-        invocationWindowId
-      });
+      const portfolioRemoteResult = includePortfolio
+        ? await submitPreparedAnalysisBatchToRemoteRunner(preparedPortfolioBatch, selectedRunnerId, {
+            invocationWindowId
+          })
+        : null;
       const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
         analysisType: ANALYSIS_TYPE_COMPANY,
         mode: 'remote_tabs',
@@ -33935,10 +33950,12 @@ async function runAnalysis(options = {}) {
       invocationWindowId,
       reason: 'run_analysis_enqueue'
     });
-    const portfolioQueueResult = await processArticles(orderedTabs, PROMPTS_PORTFOLIO, getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
-      invocationWindowId,
-      reason: 'run_analysis_portfolio_enqueue'
-    });
+    const portfolioQueueResult = includePortfolio
+      ? await processArticles(orderedTabs, PROMPTS_PORTFOLIO, getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
+          invocationWindowId,
+          reason: 'run_analysis_portfolio_enqueue'
+        })
+      : null;
     const mergedQueueResult = mergeAnalysisLaunchResults(queueResult, portfolioQueueResult, {
       analysisType: ANALYSIS_TYPE_COMPANY,
       mode: 'local_tabs',
@@ -38028,6 +38045,8 @@ async function injectToChat(
 
     function inferChatGptModeKindFromText(text) {
       if (containsWord(text, 'thinking')) return 'thinking';
+      if (normalizeDomText(text).includes('zaawansowan')) return 'thinking';
+      if (containsWord(text, 'advanced')) return 'thinking';
       if (containsWord(text, 'instant')) return 'instant';
       if (containsWord(text, 'auto')) return 'auto';
       return '';
@@ -38158,8 +38177,8 @@ async function injectToChat(
     function getThinkingEffortKeywords(effort) {
       if (effort === 'light') return ['light', 'lekki'];
       if (effort === 'standard') return ['standard'];
-      if (effort === 'extended') return ['extended', 'rozszerzony'];
-      if (effort === 'heavy') return ['heavy', 'ciezki'];
+      if (effort === 'extended') return ['extended', 'rozszerzon'];
+      if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
       return [];
     }
 
@@ -38173,6 +38192,8 @@ async function injectToChat(
         || normalizedText.includes('standard thinking')
         || normalizedText.includes('light thinking')
         || normalizedText.includes('thinking')
+        || normalizedText.includes('advanced')
+        || normalizedText.includes('zaawansowan')
         || normalizedText.includes('myslen')
         || normalizedText.includes('wysilek')
       );
@@ -38271,38 +38292,110 @@ async function injectToChat(
       const selector = [
         'button.__composer-pill[aria-haspopup="menu"]',
         'button.__composer-pill',
-        'button[aria-haspopup="menu"][class*="composer-pill"]'
+        'button[aria-haspopup="menu"][class*="composer-pill"]',
+        'button[class*="composer-pill"]',
+        '[role="button"][class*="composer-pill"]',
+        'button[aria-haspopup="menu"]',
+        '[role="button"][aria-haspopup="menu"]',
+        '[aria-haspopup="menu"]',
+        'button',
+        '[role="button"]',
+        '[tabindex="0"]',
+        'button[data-testid*="composer"]',
+        '[role="button"][data-testid*="composer"]',
+        'button[data-testid*="model"]',
+        '[role="button"][data-testid*="model"]'
       ].join(', ');
       const candidates = Array.from(document.querySelectorAll(selector));
-      return candidates.filter((button) => isElementVisibleForInteraction(button));
+      const seen = new Set();
+      return candidates.filter((button) => {
+        if (!(button instanceof HTMLElement)) return false;
+        if (seen.has(button)) return false;
+        seen.add(button);
+        if (!isElementVisibleForInteraction(button)) return false;
+        if (button.closest('[data-message-author-role]')) return false;
+        const text = getElementMatchText(button);
+        if (!hasThinkingContextToken(text) && !isThinkingEffortMenuLabel(text)) return false;
+        const className = normalizeDomText(button.className || '');
+        const isComposerControl = !!(
+          className.includes('composer-pill')
+          || button.closest('form')
+          || button.closest('[data-testid*="composer"]')
+          || button.closest('[id*="composer"]')
+        );
+        const hasMenuSignal = !!(
+          button.getAttribute('aria-haspopup')
+          || button.getAttribute('aria-expanded')
+          || button.closest('[role="menu"]')
+          || button.closest('[data-radix-popper-content-wrapper]')
+        );
+        const isStrongThinkingEffortControl = text.includes('zaawansowan') && isThinkingEffortMenuLabel(text);
+        return isStrongThinkingEffortControl || isComposerControl || hasMenuSignal;
+      });
+    }
+
+    function scoreThinkingEffortPillButton(button, effort = '') {
+      if (!(button instanceof HTMLElement)) return -1;
+      const text = getElementMatchText(button);
+      const className = normalizeDomText(button.className || '');
+      const id = normalizeDomText(button.id || '');
+      const hasThinkingSignal = hasThinkingContextToken(text) || isThinkingEffortMenuLabel(text);
+      if (effort && !matchesThinkingEffortLabel(text, effort)) return -1;
+      if (!effort && !hasThinkingSignal) return -1;
+
+      let score = 0;
+      if (hasThinkingContextToken(text)) score += 120;
+      if (isThinkingEffortMenuLabel(text)) score += 80;
+      if (text.includes('zaawansowan')) score += 120;
+      if (text.includes('advanced')) score += 120;
+      if (matchesThinkingEffortLabel(text, 'extended')) score += 90;
+      if (containsWord(text, 'pro')) score += 20;
+      if (button.getAttribute('aria-haspopup')) score += 60;
+      if (button.getAttribute('aria-expanded')) score += 30;
+      if (button.closest('form')) score += 40;
+      if (button.closest('[data-testid*="composer"]') || button.closest('[id*="composer"]')) score += 35;
+      if (effort && matchesThinkingEffortLabel(text, effort)) score += 180;
+      if (className.includes('__composer-pill') || className.includes('composer-pill')) score += 30;
+      if (id.startsWith('radix-')) score += 8;
+      return score;
+    }
+
+    function getThinkingEffortPillButtons(targetEffort = '') {
+      const effort = normalizeThinkingEffortLocal(targetEffort);
+      const candidates = getThinkingPillCandidates();
+      if (!candidates.length) return [];
+      return candidates
+        .map((button) => ({
+          button,
+          score: scoreThinkingEffortPillButton(button, effort)
+        }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((item) => item.button);
     }
 
     function findThinkingEffortPillButton(targetEffort = '') {
-      const candidates = getThinkingPillCandidates();
-      if (!candidates.length) return null;
+      return getThinkingEffortPillButtons(targetEffort)[0] || null;
+    }
 
-      let best = null;
-      let bestScore = -1;
-      for (const button of candidates) {
-        const text = getElementMatchText(button);
-        const className = normalizeDomText(button.className || '');
-        const id = normalizeDomText(button.id || '');
-        let score = 0;
+    function isModelModeSwitcherText(text) {
+      const normalizedText = normalizeDomText(text);
+      return (
+        containsWord(text, 'instant')
+        || containsWord(text, 'thinking')
+        || containsWord(text, 'auto')
+        || containsWord(text, 'advanced')
+        || normalizedText.includes('zaawansowan')
+      );
+    }
 
-        if (hasThinkingContextToken(text)) score += 120;
-        if (isThinkingEffortMenuLabel(text)) score += 80;
-        if (targetEffort && matchesThinkingEffortLabel(text, targetEffort)) score += 180;
-        if (className.includes('__composer-pill')) score += 30;
-        if (id.startsWith('radix-')) score += 8;
-
-        if (score > bestScore) {
-          bestScore = score;
-          best = button;
-        }
-      }
-
-      if (best) return best;
-      return candidates[0] || null;
+    function isComposerModeSwitcherButton(button) {
+      if (!(button instanceof HTMLElement)) return false;
+      const className = normalizeDomText(button.className || '');
+      if (!className.includes('composer-pill')) return false;
+      const text = getElementMatchText(button);
+      if (!isModelModeSwitcherText(text)) return false;
+      return !isThinkingEffortMenuLabel(text);
     }
 
     function isLikelyComposerButton(element) {
@@ -38320,7 +38413,7 @@ async function injectToChat(
       return candidates.filter((button) => {
         if (!(button instanceof HTMLElement)) return false;
         if (!isElementVisibleForInteraction(button)) return false;
-        if (isLikelyComposerButton(button)) return false;
+        if (isLikelyComposerButton(button) && !isComposerModeSwitcherButton(button)) return false;
         return true;
       });
     }
@@ -38352,9 +38445,10 @@ async function injectToChat(
         const className = normalizeDomText(button.className || '');
         let score = 0;
 
+        if (isComposerModeSwitcherButton(button)) score += 220;
         if (text.includes('chatgpt')) score += 180;
         if (text.includes('gpt')) score += 120;
-        if (containsWord(text, 'thinking') || containsWord(text, 'instant') || containsWord(text, 'auto') || containsWord(text, 'pro')) score += 90;
+        if (isModelModeSwitcherText(text) || containsWord(text, 'pro')) score += 90;
         if (containsWord(text, 'model')) score += 50;
         if (button.closest('header') || button.closest('nav')) score += 30;
         if (className.includes('model')) score += 25;
@@ -38397,6 +38491,31 @@ async function injectToChat(
       return exact || fallback;
     }
 
+    function isThinkingModeSelectedFromVisibleMenu() {
+      const thinkingModeItem = findThinkingModeMenuItem();
+      return !!(thinkingModeItem && isMenuItemChecked(thinkingModeItem));
+    }
+
+    function isThinkingModeReadyInComposer() {
+      if (findThinkingEffortPillButton('')) return true;
+      if (isThinkingModeSelectedFromVisibleMenu()) return true;
+      const switcher = findModelSwitcherButton();
+      const switcherLabel = getElementMatchText(switcher);
+      return inferChatGptModeKindFromText(switcherLabel) === 'thinking';
+    }
+
+    function getThinkingModeDebugSnapshot(extra = {}) {
+      const switcher = findModelSwitcherButton();
+      const effortPill = findThinkingEffortPillButton('');
+      return {
+        ...(extra && typeof extra === 'object' ? extra : {}),
+        modelSwitcherLabel: getElementReadableText(switcher),
+        effortPillLabel: getElementReadableText(effortPill),
+        visibleModelItems: getVisibleModelModeMenuItems().map((item) => getElementReadableText(item)).slice(0, 8),
+        visibleEffortItems: getVisibleThinkingEffortMenuItems().map((item) => getElementReadableText(item)).slice(0, 8)
+      };
+    }
+
     async function openModelModeMenu(maxWaitMs = 3200) {
       const startedAt = Date.now();
       while (Date.now() - startedAt < maxWaitMs) {
@@ -38425,7 +38544,12 @@ async function injectToChat(
 
       while (Date.now() - startedAt < maxWaitMs) {
         attempts += 1;
-        if (findThinkingEffortPillButton(effort)) {
+        if (isThinkingModeReadyInComposer()) {
+          console.log('[thinking-mode] thinking mode already ready', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
+          closeThinkingEffortMenuBestEffort();
           return { success: true, attempts };
         }
 
@@ -38437,14 +38561,36 @@ async function injectToChat(
 
         const thinkingModeItem = findThinkingModeMenuItem();
         if (thinkingModeItem && !isMenuItemChecked(thinkingModeItem)) {
+          console.log('[thinking-mode] selecting Thinking mode', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts,
+            targetLabel: getElementReadableText(thinkingModeItem)
+          }));
           await activateElement(thinkingModeItem);
           await new Promise((resolve) => setTimeout(resolve, 260));
+        } else if (!thinkingModeItem) {
+          console.warn('[thinking-mode] Thinking item not found in model mode menu', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
+        }
+        if (isThinkingModeReadyInComposer()) {
+          console.log('[thinking-mode] thinking mode ready after mode menu', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
+          closeThinkingEffortMenuBestEffort();
+          return { success: true, attempts };
         }
 
         closeThinkingEffortMenuBestEffort();
         await new Promise((resolve) => setTimeout(resolve, 260));
 
-        if (findThinkingEffortPillButton(effort)) {
+        if (isThinkingModeReadyInComposer()) {
+          console.log('[thinking-mode] thinking mode ready after settle', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
           return { success: true, attempts };
         }
       }
@@ -38453,10 +38599,20 @@ async function injectToChat(
     }
 
     function getVisibleThinkingEffortMenuItems() {
-      const all = Array.from(document.querySelectorAll('[role="menuitemradio"]'));
+      const selector = [
+        '[role="menuitemradio"]',
+        '[role="menuitem"]',
+        '[role="menu"] button',
+        '[data-radix-popper-content-wrapper] button',
+        '[data-radix-menu-content] button'
+      ].join(', ');
+      const all = Array.from(document.querySelectorAll(selector));
       return all.filter((item) => {
         if (!(item instanceof HTMLElement)) return false;
         if (!isElementVisibleForInteraction(item)) return false;
+        if (item.matches('button') && !item.closest('[role="menu"], [data-radix-popper-content-wrapper], [data-radix-menu-content]')) {
+          return false;
+        }
         const text = getElementMatchText(item);
         return isThinkingEffortMenuLabel(text);
       });
@@ -38480,7 +38636,7 @@ async function injectToChat(
       for (const labelNode of labelCandidates) {
         const text = getElementMatchText(labelNode);
         if (!matchesThinkingEffortLabel(text, effort)) continue;
-        const container = labelNode.closest('[role="menuitemradio"]');
+        const container = labelNode.closest('[role="menuitemradio"], [role="menuitem"], button');
         if (container && isElementVisibleForInteraction(container)) {
           return container;
         }
@@ -38532,19 +38688,35 @@ async function injectToChat(
           return true;
         }
 
-        let button = findThinkingEffortPillButton(effort);
-        if (!button) {
-          await ensureThinkingModeReadyForEffort(effort, 3500);
-          button = findThinkingEffortPillButton(effort);
-        }
-        if (button) {
-          await activateElement(button);
+        let buttons = [
+          ...getThinkingEffortPillButtons(effort),
+          ...getThinkingEffortPillButtons('')
+        ].filter((button, index, all) => button && all.indexOf(button) === index);
+        if (!buttons.length) {
+          await ensureThinkingModeReadyForEffort('', 3500);
+          buttons = [
+            ...getThinkingEffortPillButtons(effort),
+            ...getThinkingEffortPillButtons('')
+          ].filter((button, index, all) => button && all.indexOf(button) === index);
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 170));
-        const postClickItems = getVisibleThinkingEffortMenuItems();
-        if (postClickItems.length > 0) {
-          return true;
+        for (const button of buttons) {
+          console.log('[thinking-effort] opening effort menu from pill', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            buttonLabel: getElementReadableText(button)
+          }));
+          await activateElement(button);
+
+          await new Promise((resolve) => setTimeout(resolve, 450));
+          const postClickItems = getVisibleThinkingEffortMenuItems();
+          if (postClickItems.length > 0) {
+            console.log('[thinking-effort] effort menu opened', {
+              requestedEffort: effort,
+              buttonLabel: getElementReadableText(button),
+              visibleItems: postClickItems.map((item) => getElementReadableText(item)).slice(0, 8)
+            });
+            return true;
+          }
         }
       }
 
@@ -38603,6 +38775,11 @@ async function injectToChat(
           continue;
         }
 
+        console.log('[thinking-effort] selecting effort item', {
+          effort,
+          attempt,
+          targetLabel: getElementReadableText(targetItem)
+        });
         await activateElement(targetItem);
         await new Promise((resolve) => setTimeout(resolve, 260));
 
@@ -38675,6 +38852,74 @@ async function injectToChat(
         success: false,
         effort: requestedComposerThinkingEffort,
         error: result?.error || 'thinking_effort_not_set'
+      };
+    }
+
+    async function ensureThinkingModeBeforeRun(counterRef = null) {
+      const maxAttempts = 3;
+      let lastResult = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        updateCounter(
+          counterRef,
+          preChainCurrentPrompt,
+          totalPromptsForRun,
+          requestedComposerThinkingEffort
+            ? `Wlaczam Thinking (${requestedComposerThinkingEffort})...`
+            : 'Wlaczam tryb Thinking...'
+        );
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          currentPrompt: preChainCurrentPrompt,
+          totalPrompts: totalPromptsForRun,
+          phase: 'editor_ready',
+          statusText: requestedComposerThinkingEffort
+            ? `Wlaczam Thinking (${requestedComposerThinkingEffort})`
+            : 'Wlaczam tryb Thinking',
+          reason: 'ensure_thinking_mode',
+          thinkingModeAttempt: attempt,
+          thinkingModeMaxAttempts: maxAttempts,
+          needsAction: false
+        });
+
+        const thinkingModeReady = await ensureThinkingModeReadyForEffort(requestedComposerThinkingEffort || '', 9000);
+        lastResult = thinkingModeReady || null;
+        if (!thinkingModeReady?.success) {
+          await new Promise((resolve) => setTimeout(resolve, 420));
+          continue;
+        }
+
+        if (!requestedComposerThinkingEffort) {
+          notifyProcess('PROCESS_PROGRESS', {
+            status: 'running',
+            currentPrompt: preChainCurrentPrompt,
+            totalPrompts: totalPromptsForRun,
+            phase: 'editor_ready',
+            statusText: 'Thinking gotowy',
+            reason: 'thinking_mode_set',
+            needsAction: false
+          });
+          return {
+            success: true,
+            mode: 'thinking',
+            details: thinkingModeReady
+          };
+        }
+
+        const effortResult = await ensureRequestedComposerThinkingEffort(counterRef);
+        lastResult = effortResult || lastResult;
+        if (effortResult?.success) {
+          return effortResult;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 420));
+      }
+
+      return {
+        success: false,
+        effort: requestedComposerThinkingEffort || '',
+        error: requestedComposerThinkingEffort ? 'thinking_effort_not_set' : 'thinking_mode_not_set',
+        details: lastResult
       };
     }
 
@@ -39538,6 +39783,162 @@ async function injectToChat(
     
     return { generating: false, reason: 'none', element: null };
   }
+
+  function findChatGptContinueGeneratingButton() {
+    const candidates = Array.from(document.querySelectorAll('button'));
+    for (const button of candidates) {
+      if (!(button instanceof HTMLElement)) continue;
+      if (button.id === 'continue-wait-btn' || button.id === 'continue-skip-btn') continue;
+      if (!isElementVisibleForInteraction(button)) continue;
+      if (button.disabled) continue;
+
+      const label = normalizeChatGptActionText(getElementReadableText(button));
+      if (!label) continue;
+
+      const hasContinueIntent = label.includes('continue') || label.includes('kontynuuj');
+      const hasGenerationIntent = (
+        label === 'continue' ||
+        label === 'kontynuuj' ||
+        label.includes('generat') ||
+        label.includes('response') ||
+        label.includes('answer') ||
+        label.includes('odpowiedz') ||
+        label.includes('odpowiedzi') ||
+        label.includes('generowanie')
+      );
+      if (hasContinueIntent && hasGenerationIntent) {
+        return button;
+      }
+    }
+    return null;
+  }
+
+  async function clickChatGptContinueGeneratingIfAvailable(reason = 'incomplete_response') {
+    const continueButton = findChatGptContinueGeneratingButton();
+    if (!continueButton) {
+      return { clicked: false, reason: 'not_found' };
+    }
+
+    try {
+      continueButton.click();
+      console.warn('[response-completion] Kliknieto natywne Continue w ChatGPT', {
+        reason,
+        label: getElementReadableText(continueButton)
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return { clicked: true, reason: 'clicked' };
+    } catch (error) {
+      console.warn('[response-completion] Nie udalo sie kliknac natywnego Continue', {
+        reason,
+        error: error?.message || String(error)
+      });
+      return { clicked: false, reason: 'click_failed', error: error?.message || String(error) };
+    }
+  }
+
+  async function waitForChatGptGenerationFinishedBeforeNextPrompt(
+    maxWaitMs,
+    counter = null,
+    progressMeta = {}
+  ) {
+    const safeMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
+    const waitProgress = progressMeta && typeof progressMeta === 'object' ? progressMeta : {};
+    const waitCurrentPrompt = Number.isInteger(waitProgress.currentPrompt) ? waitProgress.currentPrompt : preChainCurrentPrompt;
+    const waitTotalPrompts = Number.isInteger(waitProgress.totalPrompts) ? waitProgress.totalPrompts : totalPromptsForRun;
+    const waitStageIndex = Number.isInteger(waitProgress.stageIndex) ? waitProgress.stageIndex : null;
+    const waitStageName = typeof waitProgress.stageName === 'string' && waitProgress.stageName.trim()
+      ? waitProgress.stageName.trim()
+      : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
+    const startTime = Date.now();
+    let stableReadyHits = 0;
+    let clickedContinue = false;
+    let lastHeartbeatAt = Date.now();
+    let lastAssistantText = (() => {
+      const lastMsg = getLastAssistantMessageElement();
+      return lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
+    })();
+    let lastAssistantChangeAt = Date.now();
+
+    while (true) {
+      if (shouldStopNow()) {
+        return { finished: false, reason: 'force_stopped', clickedContinue };
+      }
+      if (captureGenerationBlockerState()) {
+        return { finished: false, reason: 'blocked', clickedContinue };
+      }
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('generation_finish_guard');
+        if (retryResult.clicked) {
+          stableReadyHits = 0;
+          lastAssistantChangeAt = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+      }
+
+      const continueButton = findChatGptContinueGeneratingButton();
+      if (continueButton) {
+        const continueResult = await clickChatGptContinueGeneratingIfAvailable('generation_finish_guard');
+        if (continueResult.clicked) {
+          clickedContinue = true;
+          stableReadyHits = 0;
+          lastAssistantChangeAt = Date.now();
+          continue;
+        }
+      }
+
+      const genStatus = isGenerating();
+      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                     document.querySelector('div[contenteditable="true"]') ||
+                     document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
+      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const lastMsg = getLastAssistantMessageElement();
+      const currentLastText = lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
+      if (currentLastText && currentLastText !== lastAssistantText) {
+        lastAssistantText = currentLastText;
+        lastAssistantChangeAt = Date.now();
+        stableReadyHits = 0;
+      }
+
+      const textStable = Date.now() - lastAssistantChangeAt >= 3000;
+      const generationFinished = !genStatus.generating && editorReady && textStable && !findChatGptContinueGeneratingButton();
+      if (generationFinished) {
+        stableReadyHits += 1;
+        if (stableReadyHits >= 2) {
+          return { finished: true, reason: 'generation_finished', clickedContinue };
+        }
+      } else {
+        stableReadyHits = 0;
+        if (counter) {
+          updateCounter(counter, waitCurrentPrompt, waitTotalPrompts, 'Czekam az ChatGPT skonczy generowac...');
+        }
+      }
+
+      if (runId && Date.now() - lastHeartbeatAt >= 30_000) {
+        lastHeartbeatAt = Date.now();
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          lifecycleStatus: 'running',
+          currentPrompt: waitCurrentPrompt,
+          totalPrompts: waitTotalPrompts,
+          ...(waitStageIndex !== null ? { stageIndex: waitStageIndex } : {}),
+          ...(waitStageName ? { stageName: waitStageName } : {}),
+          phase: 'generation_finish_guard',
+          statusCode: 'chat.generation_finish_guard',
+          statusText: 'Czekam az ChatGPT skonczy generowac odpowiedz',
+          reason: genStatus.generating ? (genStatus.reason || 'generating') : 'interface_not_stable',
+          needsAction: false,
+          chatGptGenerating: genStatus.generating === true ? 'yes' : 'no'
+        });
+      }
+
+      if (safeMaxWaitMs > 0 && (Date.now() - startTime) >= safeMaxWaitMs) {
+        return { finished: false, reason: 'timeout', clickedContinue };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
   
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
   // Snapshot ostatniej odpowiedzi assistant
@@ -40355,6 +40756,121 @@ async function injectToChat(
 
     console.log(`📊 Walidacja: ✅ OK (${text.length} >= ${minLength} znaków)`);
     return true;
+  }
+
+  function extractPromptStageIdForCompletionContract(promptText, promptNumber = 0) {
+    const head = typeof promptText === 'string' ? promptText.slice(0, 2600) : '';
+    const directMatch = head.match(/^\s*#?\s*STAGE\s+(\d+)(?!\d)/im);
+    if (directMatch) {
+      return String(Number.parseInt(directMatch[1], 10));
+    }
+
+    const roleMatch = head.match(/\brole\s*:\s*stage\s+(\d+)(?!\d)/i)
+      || head.match(/\brole\s+is\s+stage\s+(\d+)(?!\d)/i);
+    if (roleMatch) {
+      return String(Number.parseInt(roleMatch[1], 10));
+    }
+
+    const safePromptNumber = Number.isInteger(promptNumber) ? promptNumber : 0;
+    if (safePromptNumber > 0 && safePromptNumber <= 16 && /\bSTAGE\b/i.test(head)) {
+      return String(Math.max(0, safePromptNumber - 1));
+    }
+    return '';
+  }
+
+  function buildStageResponseCompletionContract(promptText, promptNumber = 0) {
+    const rawPrompt = typeof promptText === 'string' ? promptText : '';
+    const markers = [];
+    const stageId = extractPromptStageIdForCompletionContract(rawPrompt, promptNumber);
+    const requiresEndHandoff = /===\s*END\s+HANDOFF\s*===/i.test(rawPrompt);
+
+    if (requiresEndHandoff) {
+      if (stageId) {
+        markers.push({
+          label: `=== STAGE ${stageId} ... HANDOFF ===`,
+          pattern: new RegExp(`===\\s*STAGE\\s*${escapeRegexLocal(stageId)}(?!\\d)[^=\\n]*HANDOFF\\s*===`, 'i')
+        });
+      }
+      markers.push({
+        label: '=== END HANDOFF ===',
+        pattern: /===\s*END\s+HANDOFF\s*===/i
+      });
+    }
+
+    return {
+      stageId,
+      markers,
+      requiresJsonArray: /\bfinal\s+(?:answer|output)\s+must\s+be\s+only\s+the\s+JSON\s+array\b/i.test(rawPrompt)
+    };
+  }
+
+  function responseTextContainsCompleteJsonArray(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return false;
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const arrayStart = raw.indexOf('[');
+    const arrayEnd = raw.lastIndexOf(']');
+    if (arrayStart >= 0 && arrayEnd > arrayStart) {
+      candidates.push(raw.slice(arrayStart, arrayEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        if (Array.isArray(JSON.parse(candidate))) {
+          return true;
+        }
+      } catch (_error) {
+        // Try next candidate.
+      }
+    }
+    return false;
+  }
+
+  function validateStageResponseForPrompt(text, promptText, promptNumber = 0) {
+    const safeText = typeof text === 'string' ? text : '';
+    if (!validateResponse(safeText)) {
+      return {
+        valid: false,
+        reason: compactText(safeText) ? 'basic_response_invalid' : 'empty_response',
+        statusText: compactText(safeText) ? 'Odpowiedz za krotka albo bledna' : 'Brak odpowiedzi'
+      };
+    }
+
+    const completionContract = buildStageResponseCompletionContract(promptText, promptNumber);
+    for (const marker of completionContract.markers) {
+      if (!marker.pattern.test(safeText)) {
+        return {
+          valid: false,
+          reason: 'missing_completion_marker',
+          missingMarker: marker.label,
+          stageId: completionContract.stageId,
+          statusText: `Odpowiedz niepelna - brak ${marker.label}`
+        };
+      }
+    }
+
+    if (completionContract.requiresJsonArray && !responseTextContainsCompleteJsonArray(safeText)) {
+      return {
+        valid: false,
+        reason: 'invalid_or_incomplete_json_array',
+        stageId: completionContract.stageId,
+        statusText: 'Odpowiedz niepelna - JSON array nie jest domkniety'
+      };
+    }
+
+    return {
+      valid: true,
+      reason: 'ok',
+      stageId: completionContract.stageId,
+      statusText: 'Odpowiedz kompletna'
+    };
   }
 
   function extractStage12InvestmentJsonText(text) {
@@ -41394,6 +41910,7 @@ async function injectToChat(
     await new Promise(resolve => setTimeout(resolve, 500));
     
     console.log("✓ Klikam Send...");
+    const sendClickSnapshot = getPromptDomSnapshot();
     submitButton.click();
     
     // WERYFIKACJA: Sprawdź czy kliknięcie zadziałało
@@ -41431,25 +41948,31 @@ async function injectToChat(
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const hasMessages = userMessages.length > 0 || assistantMessages.length > 0;
+      const baseUserCount = Number.isInteger(sendClickSnapshot.userCount) ? sendClickSnapshot.userCount : 0;
+      const userAdvancedSinceClick = userMessages.length > baseUserCount;
       
       // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
       const hasStopButton = !!stopBtn;
-      
-      // ALTERNATYWNY wskaźnik: interface zablokowany + są jakieś wiadomości w DOM
-      const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
-      
+
       // NOWY wskaźnik: sprawdź czy nasza wiadomość pojawiła się w DOM
       let messageInDOM = false;
       if (userMessages.length > 0) {
         const lastUserMessage = userMessages[userMessages.length - 1];
         const messageText = lastUserMessage.textContent || lastUserMessage.innerText || '';
-        // Sprawdź czy ostatnia wiadomość użytkownika zawiera fragment naszego prompta
-        const promptFragment = normalizedPromptText.substring(0, 50);
-        if (messageText.includes(promptFragment)) {
+        const normalizedMessageText = compactText(messageText);
+        const previousLastUserText = typeof sendClickSnapshot.lastUserText === 'string'
+          ? sendClickSnapshot.lastUserText
+          : '';
+        const userMessageChangedSinceClick = normalizedMessageText && normalizedMessageText !== previousLastUserText;
+        const promptFragment = getPromptProbeFragment(normalizedPromptText);
+        if ((userAdvancedSinceClick || userMessageChangedSinceClick) && (!promptFragment || normalizedMessageText.includes(promptFragment))) {
           messageInDOM = true;
-          console.log(`✅ Znaleziono naszą wiadomość w DOM (${messageText.length} znaków)`);
+          console.log(`✅ Znaleziono naszą wiadomość w DOM (${normalizedMessageText.length} znaków)`);
         }
       }
+
+      // ALTERNATYWNY wskaźnik: interface zablokowany po nowym user turnie.
+      const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages && userAdvancedSinceClick;
       
       // Jeśli którykolwiek z PEWNYCH wskaźników potwierdza wysłanie:
       if (hasStopButton || interfaceBlocked || messageInDOM) {
@@ -41460,6 +41983,7 @@ async function injectToChat(
           sendDisabled,
           userMsgCount: userMessages.length,
           assistantMsgCount: assistantMessages.length,
+          userAdvancedSinceClick,
           messageInDOM
         });
         verified = true;
@@ -41585,27 +42109,27 @@ async function injectToChat(
       
       // Stwórz licznik
       const counter = createCounter();
-      const thinkingEffortResult = await ensureRequestedComposerThinkingEffort(counter);
+      const thinkingModeResult = await ensureThinkingModeBeforeRun(counter);
       if (shouldStopNow()) {
         return forceStopResult();
       }
-      if (!thinkingEffortResult?.success) {
+      if (!thinkingModeResult?.success) {
         const effortLabel = requestedComposerThinkingEffort || 'unknown';
-        const effortError = thinkingEffortResult?.error || 'thinking_effort_not_set';
-        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, `Thinking ${effortLabel}: nie ustawiono, kontynuuje`);
+        const effortError = thinkingModeResult?.error || 'thinking_mode_not_set';
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, 'Thinking: nie potwierdzono, kontynuuje');
         notifyProcess('PROCESS_PROGRESS', {
           status: 'running',
           lifecycleStatus: 'running',
           currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
           phase: 'editor_ready',
-          statusCode: 'chat.thinking_effort_not_set',
-          statusText: `Nie ustawiono thinking ${effortLabel}; kontynuuje`,
-          reason: 'thinking_effort_warn',
+          statusCode: 'chat.thinking_mode_unconfirmed',
+          statusText: `Nie potwierdzono trybu Thinking${requestedComposerThinkingEffort ? ` (${effortLabel})` : ''}; kontynuuje`,
+          reason: 'thinking_mode_unconfirmed',
           error: effortError,
           needsAction: false
         });
-        console.warn('[thinking-effort] requested effort not set; continuing prompt chain', {
+        console.warn('[thinking-mode] mode not confirmed after setup attempts; continuing prompt chain', {
           effort: effortLabel,
           error: effortError
         });
@@ -42198,13 +42722,23 @@ async function injectToChat(
               }
             }
             const dataGapDirective = parseDataGapDirectiveResponse(responseText);
-            const isValid = validateResponse(responseText);
+            const stageResponseValidation = validateStageResponseForPrompt(
+              responseText,
+              prompt,
+              absoluteCurrentPrompt
+            );
+            const isValid = stageResponseValidation.valid;
             
             if (!isValid) {
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
-              console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Odpowiedz za krotka');
+              console.error(`❌ Długość: ${responseText.length} znaków; powód: ${stageResponseValidation.reason}${stageResponseValidation.missingMarker ? ` (${stageResponseValidation.missingMarker})` : ''}`);
+              updateCounter(
+                counter,
+                absoluteCurrentPrompt,
+                totalPromptsForRun,
+                stageResponseValidation.statusText || 'Odpowiedz niepoprawna'
+              );
               if (!compactText(responseText)) {
                 const resendAfterEmptyResponse = await resendPromptAfterMissingResponse(
                   'empty_response',
@@ -42248,9 +42782,51 @@ async function injectToChat(
                   });
                 }
               }
+              const shouldTryNativeContinue = compactText(responseText) && (
+                stageResponseValidation.reason === 'missing_completion_marker' ||
+                stageResponseValidation.reason === 'invalid_or_incomplete_json_array' ||
+                stageResponseValidation.reason === 'basic_response_invalid'
+              );
+              if (shouldTryNativeContinue) {
+                const nativeContinueResult = await clickChatGptContinueGeneratingIfAvailable(stageResponseValidation.reason);
+                if (nativeContinueResult.clicked) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Kontynuuje ucieta odpowiedz...');
+                  await waitForResponse(responseWaitMs, {
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    stageName: `Prompt ${absoluteCurrentPrompt}`
+                  });
+                  if (shouldStopNow()) {
+                    return forceStopResult();
+                  }
+                  continue;
+                }
+              }
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
+              const mustWaitForCompleteResponse = (
+                stageResponseValidation.reason === 'missing_completion_marker' ||
+                stageResponseValidation.reason === 'invalid_or_incomplete_json_array'
+              );
               
-              if (action === 'skip') {
+              if (action === 'skip' && mustWaitForCompleteResponse) {
+                console.warn('[response-completion] Ignoruje skip dla niepelnej odpowiedzi etapu', {
+                  prompt: absoluteCurrentPrompt,
+                  reason: stageResponseValidation.reason,
+                  missingMarker: stageResponseValidation.missingMarker || ''
+                });
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Nie wysylam kolejnego etapu - odpowiedz niepelna');
+                await waitForResponse(responseWaitMs, {
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  stageName: `Prompt ${absoluteCurrentPrompt}`
+                });
+                if (shouldStopNow()) {
+                  return forceStopResult();
+                }
+                continue;
+              } else if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - akceptuję krótką odpowiedź i idę dalej`);
                 responseValid = true; // Wyjdź z pętli walidacji
                 break;
@@ -42272,6 +42848,49 @@ async function injectToChat(
               }
               
               // Powtórz walidację
+              continue;
+            }
+
+            updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam az ChatGPT skonczy generowac...');
+            const generationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt(
+              responseWaitMs,
+              counter,
+              {
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`
+              }
+            );
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
+            if (!generationFinished.finished) {
+              console.warn('[response-completion] Nie wysylam kolejnego etapu - generowanie nadal nie jest zakonczone', {
+                prompt: absoluteCurrentPrompt,
+                reason: generationFinished.reason,
+                clickedContinue: generationFinished.clickedContinue === true
+              });
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Nie wysylam kolejnego etapu - ChatGPT nadal generuje');
+              const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'generation_not_finished');
+              console.warn('[response-completion] Decyzja po generation_not_finished', {
+                prompt: absoluteCurrentPrompt,
+                action
+              });
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`
+              });
+              if (shouldStopNow()) {
+                return forceStopResult();
+              }
+              continue;
+            }
+            const postGenerationResponseText = await getLastResponseText();
+            if (postGenerationResponseText !== responseText || generationFinished.clickedContinue) {
+              responseText = postGenerationResponseText;
               continue;
             }
             

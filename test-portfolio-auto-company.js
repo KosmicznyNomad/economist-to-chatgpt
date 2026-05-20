@@ -281,9 +281,28 @@ function buildContext() {
   return context;
 }
 
-async function testPopupRunQueuesPortfolioAutomatically() {
+async function testPopupRunQueuesCompanyOnlyByDefault() {
   const context = buildContext();
   const result = await context.runAnalysis({ remote: false });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.queuedCount, 2);
+  assert.strictEqual(result.companyQueuedCount, 2);
+  assert.strictEqual(result.portfolioQueuedCount, 0);
+  assert.strictEqual(result.portfolioLaunchedCount, 0);
+  assert.strictEqual(result.extraPortfolioQueued, false);
+  assert.strictEqual(result.extraPortfolioLaunched, false);
+  assert.strictEqual(result.extraPortfolioStarted, false);
+  assert.strictEqual(context.processArticleCalls.length, 1);
+  assert.strictEqual(context.processArticleCalls[0].analysisType, 'company');
+  assert.strictEqual(context.processArticleCalls[0].chatUrl, 'https://chat.example');
+  assert.deepStrictEqual(context.processArticleCalls[0].promptChain, ['company prompt']);
+  assert.strictEqual(context.processArticleCalls[0].options.reason, 'run_analysis_enqueue');
+}
+
+async function testRunAnalysisCanExplicitlyIncludePortfolio() {
+  const context = buildContext();
+  const result = await context.runAnalysis({ remote: false, includePortfolio: true });
 
   assert.strictEqual(result.success, true);
   assert.strictEqual(result.queuedCount, 2);
@@ -295,9 +314,6 @@ async function testPopupRunQueuesPortfolioAutomatically() {
   assert.strictEqual(result.extraPortfolioStarted, true);
   assert.strictEqual(context.processArticleCalls.length, 2);
   assert.strictEqual(context.processArticleCalls[0].analysisType, 'company');
-  assert.strictEqual(context.processArticleCalls[0].chatUrl, 'https://chat.example');
-  assert.deepStrictEqual(context.processArticleCalls[0].promptChain, ['company prompt']);
-  assert.strictEqual(context.processArticleCalls[0].options.reason, 'run_analysis_enqueue');
   assert.strictEqual(context.processArticleCalls[1].analysisType, 'portfolio');
   assert.strictEqual(
     context.processArticleCalls[1].chatUrl,
@@ -412,6 +428,7 @@ function testManualSourceShowsSinglePortfolioActionWithoutModeToggle() {
   assert.strictEqual(manualSourceJs.includes('includePortfolioAnalysis'), false);
   assert.strictEqual(manualSourceJs.includes('getSelectedAnalysisType'), false);
   assert.strictEqual(popupJs.includes('options.analysisType'), false);
+  assert.strictEqual(popupJs.includes('includePortfolio: false'), true);
   assert.strictEqual(manualSourceHtml.includes('Uruchom zestaw promptow'), true);
   assert.strictEqual(manualSourceJs.includes('analysisType: normalizedLaunchType'), true);
   assert.strictEqual(manualSourceJs.includes('PORTFOLIO_ONLY_LOCAL_LABEL'), true);
@@ -577,7 +594,8 @@ function testPortfolioPromptOneResponseIsCopiedToDatabase() {
 }
 
 async function main() {
-  await testPopupRunQueuesPortfolioAutomatically();
+  await testPopupRunQueuesCompanyOnlyByDefault();
+  await testRunAnalysisCanExplicitlyIncludePortfolio();
   await testManualTextSharesOneSourceAcrossCompanyAndPortfolio();
   await testManualPortfolioOnlyQueuesOnePortfolioProcess();
   testSourceTextPlaceholderInjectionSupportsPortfolioArticleAlias();
