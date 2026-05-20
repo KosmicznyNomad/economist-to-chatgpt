@@ -382,6 +382,22 @@ Produce ONE winning thesis, one passed contract-form chain, and a compact Stage 
 
 **Inheritance rule**: Every stage must use the immediate prior handoff as its primary input. Search the wider conversation only if a required field is missing from that handoff. Once a valid handoff exists, earlier prose may clarify but may not override it.
 
+=== INHERITANCE RULE (global, applies to all stages) ===
+
+Each stage inherits from prior stages.
+
+- If the prior stage was executed in this conversation (any analysis, handoff,
+  prose, table, or partial output is visible in context) — USE IT as input.
+  Reconstruct missing fields from available content. Continue with normal
+  execution. Missing individual metrics, fields, or numbers are handled via
+  Proxy Ladder, ASSUMPTION/INFERENCE labels, and confidence downgrades —
+  never via stopping execution.
+
+- DATA_GAP_STAGE=X is reserved ONLY for the case where prior stage X has no
+  trace whatsoever in the conversation context — i.e. the stage was never run.
+
+=== END INHERITANCE RULE ===
+
 # Process (Execute in Order)
 
 ## Step 0 — Evidence Ledger + Worldview Reconstruction
@@ -641,12 +657,6 @@ STAGE 1 — SUB-SEGMENT VALIDATION
 
 You are an investment research engineer working within a multi-stage investment analysis pipeline. Your task is to transform an inherited investment thesis into an operational "market map in invoice form," then generate and evaluate candidate sub-segments to identify the evidence-qualified set for downstream company selection.
 
-INHERITANCE LOCK:
-Before any work, search context for '=== STAGE 0 HANDOFF ==='.
-Extract: WINNING_THESIS, CONTROL_TOKENS, THESIS_SOURCE_META, CONTRACT_MAP, DISCONFIRMERS.
-If found: USE THEM as primary inputs. Do not reconstruct Stage 0.
-If Stage 0 inputs not available in context: output DATA_GAP_STAGE=0 and STOP.
-
 CONTEXT
 Use === STAGE 0 HANDOFF === as the primary dataset.
 Search wider conversation only if a required field is missing from that handoff.
@@ -654,7 +664,7 @@ If a valid Stage 0 handoff exists, earlier prose may clarify but may not overrid
 Only after that should you use the internet to verify facts and fill gaps.
 
 **Important framing**: This is a strictly engineering stage. You are NOT creating new investment narratives or validating whether the thesis is true. Your role is to translate the thesis into concrete specifications—what is purchased, by whom, under what contract structure, what blocks it, and when it materializes—so that the next stage can select companies by their exposure to specific invoice line items rather than by broad industry labels.
-**Inputs**: Inherit from '=== STAGE 0 HANDOFF ===' block: WINNING_THESIS, THESIS_RATIONALE, THESIS_SOURCE_META, CONTRACT_MAP, CONTROL_TOKENS, DISCONFIRMERS. See INHERITANCE LOCK above.
+**Inputs**: Inherit from '=== STAGE 0 HANDOFF ===' block: WINNING_THESIS, THESIS_RATIONALE, THESIS_SOURCE_META, CONTRACT_MAP, CONTROL_TOKENS, DISCONFIRMERS.
 
 
 
@@ -993,11 +1003,6 @@ If fewer than the nominal target count pass, output fewer names and explain whic
 
 Downstream stages should run only for companies advanced from the prior stage. Do not add companies to satisfy a fixed count.
 
-INHERITANCE LOCK:
-Search context for '=== STAGE 1 HANDOFF ==='.
-Extract: WINNING_THESIS, THESIS_SOURCE, SELECTED_SUB-SEGMENTS with invoice-first definitions.
-If found: USE THEM. Do not reconstruct Stage 1.
-If Stage 1 inputs not available in context: output DATA_GAP_STAGE=1 and STOP.
 ## Input: Thesis + Stage 1 Sub-Segment Validation Outputs
 
 ## Context
@@ -2085,26 +2090,6 @@ Ten etap tworzy:
 - core growth stack,
 - instructions for Stage 10 and Stage 11.
 
-INHERITANCE LOCK
-
-Before any analysis, search context for:
-
-1. === STAGE 0 HANDOFF ===
-2. === STAGE 1 HANDOFF ===
-3. === STAGE 2 FUNDAMENTAL HANDOFF ===
-4. Stage 3 Artifact 3 / Stage 3 Handoff Objects
-
-If Stage 2 or Stage 3 inputs not available in context:
-output DATA_GAP_STAGE=[missing stage] and stop.
-
-Do not reconstruct prior stages.
-Do not change selected subsegments.
-Do not change traction scores.
-Do not change thesis evidence tier.
-Do not replace Stage 3 proof with your own intuition.
-
-Use inherited handoffs as controlling inputs.
-
 MANDATORY INTERNET RESEARCH
 
 Use internet research for every company.
@@ -2948,22 +2933,6 @@ Produkuje:
 - Stage 10 instructions,
 - Stage 11 instructions.
 
-INHERITANCE LOCK
-
-Before any work, search context for:
-
-1. === STAGE 4 CORE RECONSTRUCTION HANDOFF ===
-2. === STAGE 1 HANDOFF ===
-3. === STAGE 2 FUNDAMENTAL HANDOFF ===
-4. Stage 3 Artifact 3 / Handoff Objects
-
-If Stage 4 inputs not available in context:
-output DATA_GAP_STAGE=4 and stop.
-
-Do not reconstruct Stage 4.
-Do not change CORE numbers directly unless the Stage 4 handoff itself allows a revision.
-Do not override sourced company data with sector memory.
-
 MCP / ISKIERKA RETRIEVAL
 
 Use MCP / Iskierka sector-context search.
@@ -3531,18 +3500,6 @@ This stage exists to prevent two common errors:
 TIME ANCHOR: Use Anchor Date Rule from the Global Definitions block.
 
 ROLE
-INHERITANCE LOCK (CRITICAL — this is where drift historically occurs):
-1. Search context for '=== STAGE 1 HANDOFF ===' → extract sub-segments, invoice pools, delivered pools
-2. Search context for Stage 2 universe → extract evidence-qualified companies with sub-segment mapping
-3. Search context for Stage 3 Artifact 3 (Handoff Objects) → extract TS/TQ/CP/TractionClass, THESIS_MARGIN_PROXY, ACCOUNTING_CONVERSION_PROFILE, WORKING_CAPITAL_DRAG per company
-4. Search context for '=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===' → extract CORE_ADOPTED, CORE_CONFIDENCE, CORE_DECISION_GRADE, CORE_WEDGE_BOUNDARY, CORE_GROWTH_STACK, MARKET_GAP_AUDIT, STAGE10_INSTRUCTIONS, STAGE11_INSTRUCTIONS
-5. Search context for '=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===' if available → extract CORE_DECISION_GRADE_AFTER_MCP, confidence adjustment, MCP-adjusted Stage 10/11 instructions, boundary implications
-6. Search context for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract BUSINESS_MODEL_LANE, NORMALIZED_BASELINE, FUNDAMENTAL_QUALITY, PRIMARY_VALUATION_LANE, QUICK_VALUATION_VERDICT, QUALITY_FLAGS, FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK, COMPANY_IMPACT_MODE
-Stage 1, Stage 2 universe, Stage 3 inputs, and Stage 4 inputs must be available in context before proceeding.
-If required inputs not available in context: output DATA_GAP_STAGE=[missing stage] and STOP.
-If Stage 4 inputs not available in context: output DATA_GAP_STAGE=4 and STOP.
-Do NOT reconstruct Stage 3 traction scores. Do NOT substitute Stage 2 exposure estimates for Stage 3 traction data.
-If Stage 2 fundamental inputs are available in context: USE THEM. Do not reconstruct those fields unless specific fields are missing.
 
 You are the investment analyst running Stage 6 in a thesis-driven workflow.
 You are evaluating the full candidate set produced in Stage 2.
@@ -3637,7 +3594,7 @@ Data discipline (prevents silent "assume" errors, allows explicit proxies):
 
 Proxy Ladder: use the Global Definitions block. Stage 6 addition:
 - Level D includes EV-first proxy: infer net debt = EV − MarketCap; approximate shares = MarketCap/Price + dilution add-on (2-5% mature, 5-10% growth).
-- If price unobtainable: mark DATA_GAPS, Decision = DROP.
+- If price unobtainable after Proxy Ladder exhaustion: Decision = DROP.
 
 You MUST inherit the company-to-sub-segment mapping from Stage 2, which must itself be sourced from Stage 1 Handoff Packs (invoice items, buyer/contract mechanism, timing funnel, invoice pool + delivered pool ranges, confidence).
 
@@ -7113,53 +7070,7 @@ Nie używaj markdownu.
 Nie zwracaj nic poza JSON-em.
 PRIMARY jako pierwszy rekord, SECONDARY jako drugi tylko jeśli istnieje drugi rekord.
 --- PROMPT SEPARATOR ---
-STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS
-Zadanie: wstaw dokładnie wygenerowany JSON Stage 14 do bazy przez MCP Iskierka.
-
-Źródło danych dla tego etapu to wygenerowany output Stage 14 / Prompt 15 z 18, niekoniecznie bezpośrednio poprzednia wiadomość.
-
-Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszy poprawny finalny JSON Stage 14, czyli obiekt JSON z polem records będącym tablicą.
-
-Ignoruj wiadomości techniczne Stage 15, wyniki MCP, statusy narzędzi, komentarze oraz inne teksty, które nie są obiektem JSON z polem records będącym tablicą. Nie używaj Stage 16 ani tablic sektorowych jako źródła dla Stage 15.
-
-Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
-
-Jeśli nie da się znaleźć obiektu JSON z polem records będącym tablicą, zwróć dokładnie:
-
-DATA_GAP_STAGE=14
-
-Użyj MCP server:
-
-iskierka
-
-Użyj MCP tool:
-
-stage12_research_rows_upsert
-
-Jeśli starsza lista narzędzi MCP pokazuje wariant z kropką, użyj tego samego toola jako `stage12_research_rows.upsert`.
-
-Wywołaj tool dokładnie tak:
-
-{
-  "records": <WYGENEROWANY_JSON_STAGE_14.records>
-}
-
-Przekaż wyłącznie tablicę `records`. Nie przekazuj `schema`, `stage`, `status`, `generated_by`, `validation_status`, `source_material_id`, `source_run_id`, `links`, dat technicznych ani informacji o modelu.
-
-Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/history endpoints ani `watchlist-company-context`. Stage 14 ma trafić do `psm_research_rows` przez dedykowany writer `stage12_research_rows_upsert` / alias `stage12_research_rows.upsert`.
-
-Po próbie zapisu zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 14, żeby pipeline mógł przejść do Stage 16.
-
-Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian.
-
-Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znaleziony wygenerowany JSON Stage 14 bez zmian, chyba że w historii rozmowy w ogóle nie było obiektu JSON z polem records będącym tablicą; wtedy użyj DATA_GAP_STAGE=14.
-
-FINAL OUTPUT RULE DLA PROMPTU 16:
-Odpowiedź Promptu 16 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 14, zwróć wyłącznie znaleziony obiekt JSON Stage 14 bez zmian.
-
-Nie zwracaj podsumowania MCP, nie zwracaj statusu zapisu, nie zwracaj pustej odpowiedzi, nie używaj markdownu.
---- PROMPT SEPARATOR ---
-STAGE 16 — SECTOR INTELLIGENCE MEMORY ROW WRITER
+STAGE 15 — SECTOR INTELLIGENCE MEMORY ROW WRITER
 economist.sector_memory_rows.v5
 
 OBJECTIVE
@@ -7827,71 +7738,3 @@ Use this exact format:
     "opis": "..."
   }
 ]
---- PROMPT SEPARATOR ---
-STAGE 17 — MCP WRITE SECTOR MEMORY ROWS
-Zadanie: wstaw dokładnie wygenerowany JSON Stage 16 do pamięci sektorowej przez MCP Iskierka.
-
-Źródło danych dla tego etapu to wygenerowany output Stage 16 / Prompt 17 z 18, niekoniecznie bezpośrednio poprzednia wiadomość.
-
-Nie zakładaj, że JSON jest w ostatniej wiadomości assistant. Przejrzyj wcześniejsze wiadomości assistant w tej rozmowie od najnowszej do najstarszej i wybierz najnowszą poprawną finalną tablicę JSON Stage 16, czyli top-level tablicę rekordów:
-
-[
-  {
-    "sektor": "...",
-    "podsektor": "...",
-    "opis": "..."
-  }
-]
-
-Ignoruj wiadomości techniczne Stage 17, wyniki MCP, statusy narzędzi, komentarze, Stage 14 final investment records oraz inne teksty, które nie są top-level tablicą rekordów z polami `sektor`, `podsektor`, `opis`.
-
-Nie poprawiaj, nie streszczaj i nie rekonstruuj rekordów. Nie zmieniaj pól, kolejności ani treści.
-
-Jeśli nie da się znaleźć poprawnej tablicy JSON, zwróć dokładnie:
-
-DATA_GAP_STAGE=16
-
-Użyj MCP server:
-
-iskierka
-
-Użyj MCP tool:
-
-sector_context.upsert_stage13
-
-Jeśli lista narzędzi MCP pokazuje wariant bez kropek, użyj tego samego toola jako `sector_context_upsert_stage13`.
-
-Wywołaj tool dokładnie tak:
-
-{
-  "items": <WYGENEROWANY_JSON_STAGE_16>
-}
-
-Jeśli wygenerowany JSON Stage 16 to pusta tablica, wywołaj:
-
-{
-  "items": []
-}
-
-Przekaż wyłącznie tablicę rekordów jako `items`. Nie przekazuj `source_material_id`, `source_run_id`, `stage`, `generated_by`, `status`, `validation_status`, `min_opis_chars`, `created_at`, `updated_at`, `links`, dat technicznych ani informacji o modelu.
-
-Nie używaj `context_packs.upsert`, `stage12_research_rows.upsert`, endpointów research rows ani `watchlist-company-context`. Stage 16 ma trafić do pamięci sektorowej przez `sector_context.upsert_stage13`.
-
-Po próbie zapisu zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 16 bez zmian. To jest tryb kopiowania: odpowiedź tego etapu ma być kopią wygenerowanego Stage 16, żeby pipeline mógł zakończyć etap techniczny bez blokowania procesu.
-
-Jeśli MCP tool nie jest dostępny, lista narzędzi jest nieświeża, wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny, nie wypisuj żadnego komunikatu o niedostępności MCP, statusu, komentarza ani markdownu. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 16 bez zmian.
-
-Jeśli MCP tool zwróci błąd walidacji danych, też nie rekonstruuj rekordów. Zwróć dokładnie znalezioną wygenerowaną tablicę JSON Stage 16 bez zmian, chyba że w historii rozmowy w ogóle nie było poprawnej tablicy JSON Stage 16; wtedy użyj `DATA_GAP_STAGE=16`.
-
-FINAL OUTPUT RULE DLA PROMPTU 18:
-Odpowiedź Promptu 18 musi być JSON-em, nie tekstem operacyjnym. Jeśli znaleziono Stage 16, zwróć wyłącznie pełną tablicę JSON Stage 16:
-
-[
-  {
-    "sektor": "...",
-    "podsektor": "...",
-    "opis": "..."
-  }
-]
-
-Nie dodawaj opisu, statusu MCP, podsumowania, markdownu ani tekstu przed albo po JSON-ie. Jeśli MCP nie jest dostępne, nadal zwróć tę samą tablicę JSON. Jeśli Stage 16 nie istnieje w historii, zwróć wyłącznie `DATA_GAP_STAGE=16`.

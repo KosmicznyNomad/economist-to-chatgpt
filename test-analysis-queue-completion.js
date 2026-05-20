@@ -337,6 +337,7 @@ async function main() {
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
+    'isDataGapTerminalProcess',
     'isProcessWindowAutoCloseEnabled',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
@@ -538,6 +539,24 @@ async function main() {
   assert.strictEqual(savedStoppedDecision.closeWindow, true);
   assert.strictEqual(savedStoppedDecision.reason, 'dispatch_confirmed');
 
+  const dataGapStoppedDecision = context.resolveAnalysisQueueReleaseDecision(
+    { jobId: 'aq-1', runId: 'run-1' },
+    {
+      id: 'run-1',
+      status: 'stopped',
+      lifecycleStatus: 'stopped',
+      reason: 'data_gap_stage',
+      statusCode: 'process.data_gap_stage',
+      dataGapDetected: true,
+      dataGapStageId: '4'
+    },
+    1000
+  );
+  assert.strictEqual(dataGapStoppedDecision.action, 'release');
+  assert.strictEqual(dataGapStoppedDecision.closeWindow, true);
+  assert.strictEqual(dataGapStoppedDecision.reason, 'data_gap_stage');
+  assert.strictEqual(dataGapStoppedDecision.slotReleaseReason, 'data_gap_stage');
+
   context.analysisQueueState = {
     waitingJobs: [
       { jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: 2 }
@@ -664,6 +683,40 @@ async function main() {
   assert(
     context.upserts.some((entry) => entry.runId === 'run-2' && entry.patch.queueState === 'active'),
     'Next queued process should become active after slot release.'
+  );
+
+  context.analysisQueueState = {
+    waitingJobs: [
+      { jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: 2 }
+    ],
+    activeJobs: [
+      { jobId: 'aq-1', runId: 'run-1', sequence: 1, createdAt: 1, slotReservedAt: 1 }
+    ],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry = new Map([
+    ['run-1', {
+      id: 'run-1',
+      status: 'stopped',
+      lifecycleStatus: 'stopped',
+      reason: 'data_gap_stage',
+      statusCode: 'process.data_gap_stage',
+      dataGapDetected: true,
+      dataGapStageId: '4',
+      queueState: 'active',
+      slotReserved: true
+    }]
+  ]);
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  await context.reconcileAnalysisQueueState('test_data_gap_stage_release');
+  assert.deepStrictEqual(context.startedJobs.map((entry) => entry.runId), ['run-2']);
+  assert.deepStrictEqual(context.closedRuns, ['run-1']);
+  assert(
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'slot_released' && entry.patch.slotReleaseReason === 'data_gap_stage'),
+    'DATA_GAP_STAGE should release the active slot and request window close.'
   );
 
   console.log('analysis queue completion test: ok');

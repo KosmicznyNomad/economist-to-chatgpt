@@ -447,6 +447,81 @@ function isInjectRateLimitBlockedResult(result) {
   );
 }
 
+function resolveDataGapStageIdFromObject(source = {}) {
+  if (!source || typeof source !== 'object') return '';
+  const candidates = [
+    source.dataGapStageId,
+    source.dataGapStage,
+    source.stageId,
+    source.missingStageId
+  ];
+  for (const candidate of candidates) {
+    const stageId = normalizeDataGapStageIdValue(candidate);
+    if (stageId) return stageId;
+  }
+  const errorText = typeof source.error === 'string' ? source.error.trim() : '';
+  const errorMatch = errorText.match(/^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i);
+  if (errorMatch) return normalizeDataGapStageIdValue(errorMatch[1]);
+  return '';
+}
+
+function isInjectDataGapTerminalResult(result) {
+  return !!(
+    result
+    && typeof result === 'object'
+    && result.success === false
+    && (
+      result.dataGapTerminal === true
+      || result.dataGapDetected === true
+      || result.reason === 'data_gap_stage'
+      || result.statusCode === 'process.data_gap_stage'
+    )
+  );
+}
+
+function isDataGapTerminalProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  return process.dataGapDetected === true
+    || process.reason === 'data_gap_stage'
+    || process.statusCode === 'process.data_gap_stage';
+}
+
+function buildInjectDataGapTerminalSummary(result = {}, fallback = {}) {
+  const stageId = resolveDataGapStageIdFromObject(result) || '?';
+  const currentPrompt = Number.isInteger(result?.currentPrompt)
+    ? result.currentPrompt
+    : (Number.isInteger(fallback?.currentPrompt) ? fallback.currentPrompt : 0);
+  const totalPrompts = Number.isInteger(result?.totalPrompts)
+    ? result.totalPrompts
+    : (Number.isInteger(fallback?.totalPrompts) ? fallback.totalPrompts : 0);
+  const stageIndex = Number.isInteger(result?.stageIndex)
+    ? result.stageIndex
+    : (Number.isInteger(fallback?.stageIndex)
+      ? fallback.stageIndex
+      : (currentPrompt > 0 ? currentPrompt - 1 : null));
+  const statusText = `DATA_GAP_STAGE=${stageId} - zamykam karte`;
+  return {
+    lifecycleStatus: 'stopped',
+    phase: 'data_gap_stage',
+    actionRequired: 'none',
+    needsAction: false,
+    statusCode: 'process.data_gap_stage',
+    statusText,
+    reason: 'data_gap_stage',
+    error: `DATA_GAP_STAGE=${stageId}`,
+    heading: 'DATA_GAP_STAGE',
+    tone: 'warn',
+    logLines: [
+      `Wykryto DATA_GAP_STAGE=${stageId}.`,
+      'Karta zostanie zamknieta, a kolejka uruchomi nastepny job.'
+    ],
+    currentPrompt,
+    totalPrompts,
+    stageIndex,
+    stageName: Number.isInteger(stageIndex) ? `Prompt ${stageIndex + 1}` : ''
+  };
+}
+
 function buildInjectRateLimitNeedsActionPatch(result = {}, fallback = {}) {
   const currentPrompt = Number.isInteger(result?.currentPrompt)
     ? result.currentPrompt
@@ -4993,65 +5068,46 @@ function toNonNegativeInt(value, fallback = 0) {
   return normalized;
 }
 
-const DATA_GAPS_STOP_COMMAND = 'DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN';
-const DATA_GAPS_STOP_COMMAND_REGEX = /SYSTEM_COMMAND:\s*DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN/i;
-const DATA_GAPS_CATEGORY_REGEX = /CATEGORY:\s*DATA_GAPS\b/i;
-const DATA_GAPS_MISSING_INPUTS_REGEX = /MISSING_INPUTS:\s*([^\n\r]+)/i;
-// Accept both standalone "DATA_GAP(S)" and suffixed variants like
-// "data_gap_unresolved" used in runtime reason/status codes.
-const DATA_GAPS_GENERIC_REGEX = /\bDATA[_\s-]?GAPS?(?:\b|[_-])/i;
+const DATA_GAP_STAGE_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i;
 
-function parseDataGapsStopFromText(text) {
-  const normalized = typeof text === 'string' ? text.trim() : '';
-  if (!normalized) {
-    return {
-      detected: false,
-      hasCommand: false,
-      hasCategory: false,
-      missingInputsText: '',
-      missingInputs: []
-    };
-  }
-  const hasCommand = DATA_GAPS_STOP_COMMAND_REGEX.test(normalized);
-  const hasCategory = DATA_GAPS_CATEGORY_REGEX.test(normalized);
-  const hasDataGapToken = DATA_GAPS_GENERIC_REGEX.test(normalized);
-  const missingInputsMatch = normalized.match(DATA_GAPS_MISSING_INPUTS_REGEX);
-  const missingInputsText = missingInputsMatch?.[1]
-    ? compactWhitespace(missingInputsMatch[1]).slice(0, 320)
-    : '';
-  const missingInputs = missingInputsText
-    ? missingInputsText
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0)
-        .slice(0, 12)
-    : [];
-  const detected = hasCommand || (hasCategory && hasDataGapToken);
-  return {
-    detected,
-    hasCommand,
-    hasCategory,
-    missingInputsText,
-    missingInputs
-  };
+function normalizeDataGapStageIdValue(value) {
+  const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  if (!raw) return '';
+  const compact = raw.replace(/\s+/g, '').toUpperCase();
+  const match = compact.match(/^(\d+)$/);
+  if (!match) return '';
+  return String(Number.parseInt(match[1], 10));
 }
 
-function looksLikeDataGapMarker(value) {
-  if (typeof value !== 'string' || !value.trim()) return false;
-  return DATA_GAPS_GENERIC_REGEX.test(value);
+function parseStandaloneDataGapStageDirective(text) {
+  if (typeof text !== 'string') {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length !== 1) {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  const match = lines[0].match(DATA_GAP_STAGE_DIRECTIVE_REGEX);
+  if (!match) {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  const stageId = normalizeDataGapStageIdValue(match[1]);
+  if (!stageId) {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  return { detected: true, stageId, rawLine: lines[0] };
 }
 
 function isDataGapMonitorRow(row) {
   if (!row || typeof row !== 'object') return false;
   if (row.dataGapDetected === true) return true;
-  return [
-    row.reason,
-    row.restartDecisionReason,
-    row.restartDispatchStatus,
-    row.recognitionSummary,
-    row.resumeDecisionSource,
-    row.recognitionSource
-  ].some((value) => looksLikeDataGapMarker(value));
+  return row.reason === 'data_gap_stage'
+    || row.reason === 'data_gap_unresolved'
+    || row.statusCode === 'process.data_gap_stage'
+    || row.statusCode === 'process.data_gap_unresolved';
 }
 
 function normalizeReloadResumeSummary(rawSummary) {
@@ -9560,6 +9616,14 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   }
 
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (isDataGapTerminalProcess(process)) {
+    return {
+      action: 'release',
+      closeWindow: isProcessWindowAutoCloseEnabled(),
+      reason: 'data_gap_stage',
+      slotReleaseReason: 'data_gap_stage'
+    };
+  }
   if (status === 'finalizing' || status === 'completed') {
     if (!hasProcessReachedFinalStage(process)) {
       return {
@@ -9990,15 +10054,16 @@ function resolveProcessWindowCloseRetryPlan(process) {
   }
   const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   const closeableSavedResponse = hasProcessCloseableSavedResponse(process);
-  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing' && !closeableSavedResponse) {
+  const dataGapTerminal = isDataGapTerminalProcess(process);
+  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing' && !closeableSavedResponse && !dataGapTerminal) {
     return { needed: false, reason: 'status_not_closeable', delivery: getProcessQueueDeliveryState(process) };
   }
-  if (!hasProcessReachedFinalStage(process) && !closeableSavedResponse) {
+  if (!hasProcessReachedFinalStage(process) && !closeableSavedResponse && !dataGapTerminal) {
     return { needed: false, reason: 'not_final_stage', delivery: getProcessQueueDeliveryState(process) };
   }
 
   const delivery = getProcessQueueDeliveryState(process);
-  if (delivery.saveOk !== true) {
+  if (delivery.saveOk !== true && !dataGapTerminal) {
     return { needed: false, reason: 'save_not_confirmed', delivery };
   }
 
@@ -10019,7 +10084,9 @@ function resolveProcessWindowCloseRetryPlan(process) {
 
   return {
     needed: true,
-    reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed',
+    reason: dataGapTerminal
+      ? 'data_gap_stage'
+      : (delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed'),
     delivery
   };
 }
@@ -13922,22 +13989,8 @@ const DEFAULT_STAGE_METADATA_COMPANY = [
     promptIndex: 15,
     promptNumber: 16,
     stageId: '15',
-    stageName: "Stage 15: MCP Write Final Investment Records",
-    description: "Persist the generated Stage 14 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 14 JSON forward."
-  },
-  {
-    promptIndex: 16,
-    promptNumber: 17,
-    stageId: '16',
-    stageName: "Stage 16: Sector Intelligence Memory Row Writer",
+    stageName: "Stage 15: Sector Intelligence Memory Row Writer",
     description: "Durable sector intelligence records for future portfolio positioning and company analyses."
-  },
-  {
-    promptIndex: 17,
-    promptNumber: 18,
-    stageId: '17',
-    stageName: "Stage 17: MCP Write Sector Memory Rows",
-    description: "Persist the generated Stage 16 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 16 JSON forward."
   }
 ];
 
@@ -13965,9 +14018,7 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['12', 12],
   ['13', 13],
   ['14', 14],
-  ['15', 15],
-  ['16', 16],
-  ['17', 17]
+  ['15', 15]
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -14960,6 +15011,74 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         success: false,
         error: 'rate_limit_blocked',
         needsAction: true,
+        processId
+      };
+    }
+
+    if (isInjectDataGapTerminalResult(result)) {
+      const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
+        currentPrompt: executionPromptOffset,
+        totalPrompts: PROMPTS_COMPANY.length
+      });
+      const resultLastResponse = typeof result?.lastResponse === 'string'
+        ? result.lastResponse
+        : '';
+      const MAX_COMPLETED_RESPONSE_CHARS = 180000;
+      const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+      const storedCompletedResponse = completedResponseTruncated
+        ? resultLastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+        : resultLastResponse;
+      const dataGapConversationUrl = normalizeChatConversationUrl(result?.conversationUrl)
+        || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
+      await renderFinalCounterStatusOnTab(tabId, {
+        heading: dataGapSummary.heading,
+        tone: dataGapSummary.tone,
+        lines: dataGapSummary.logLines,
+        autoCloseMs: 0
+      });
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType: 'company',
+        lifecycleStatus: dataGapSummary.lifecycleStatus,
+        status: dataGapSummary.lifecycleStatus,
+        phase: dataGapSummary.phase,
+        actionRequired: dataGapSummary.actionRequired,
+        statusCode: dataGapSummary.statusCode,
+        statusText: dataGapSummary.statusText,
+        reason: dataGapSummary.reason,
+        error: dataGapSummary.error,
+        needsAction: dataGapSummary.needsAction,
+        currentPrompt: dataGapSummary.currentPrompt,
+        totalPrompts: dataGapSummary.totalPrompts,
+        ...(Number.isInteger(dataGapSummary.stageIndex)
+          ? {
+            stageIndex: dataGapSummary.stageIndex,
+            stageName: dataGapSummary.stageName
+          }
+          : {}),
+        ...(dataGapConversationUrl ? { chatUrl: dataGapConversationUrl } : {}),
+        dataGapDetected: true,
+        dataGapSignal: 'assistant_data_gap_stage',
+        dataGapStageId: resolveDataGapStageIdFromObject(result),
+        dataGapMissingInputs: '',
+        ...(typeof result?.lastResponse === 'string'
+          ? {
+            completedResponseText: storedCompletedResponse,
+            completedResponseLength: resultLastResponse.length,
+            completedResponseTruncated,
+            completedResponseCapturedAt: Date.now(),
+            completedResponseSaved: false
+          }
+          : {}),
+        autoRecovery: null,
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
+      return {
+        success: false,
+        stopped: true,
+        reason: 'data_gap_stage',
+        error: dataGapSummary.error,
         processId
       };
     }
@@ -17365,16 +17484,11 @@ async function runResetScanStartAllTabs(options = {}) {
       const context = processContexts[index] || {};
       const process = context?.process || null;
       const key = getResultKey(context, index);
-      const processDataGapSignal = parseDataGapsStopFromText([
+      const processDataGapDirective = parseStandaloneDataGapStageDirective([
         typeof process?.statusText === 'string' ? process.statusText : '',
         typeof process?.reason === 'string' ? process.reason : '',
         typeof process?.error === 'string' ? process.error : ''
       ].filter(Boolean).join('\n'));
-      const processMentionsDataGap = (
-        looksLikeDataGapMarker(process?.reason || '')
-        || looksLikeDataGapMarker(process?.statusText || '')
-        || looksLikeDataGapMarker(process?.error || '')
-      );
       const row = {
         key,
         runId: typeof process?.id === 'string' && process.id.trim() ? process.id.trim() : '',
@@ -17435,11 +17549,10 @@ async function runResetScanStartAllTabs(options = {}) {
         restartDecisionSource: '',
         restartDispatchStatus: '',
         restartMissingAssistantReply: null,
-        dataGapDetected: processDataGapSignal.detected || processMentionsDataGap,
-        dataGapSignal: processDataGapSignal.detected
-          ? 'process_state'
-          : (processMentionsDataGap ? 'process_marker' : ''),
-        dataGapMissingInputs: processDataGapSignal.missingInputsText || '',
+        dataGapDetected: processDataGapDirective.detected,
+        dataGapSignal: processDataGapDirective.detected ? 'process_data_gap_stage' : '',
+        dataGapStageId: processDataGapDirective.stageId || '',
+        dataGapMissingInputs: '',
         resumeDecisionSource: '',
         recognitionStage: '',
         recognitionStatus: '',
@@ -17459,15 +17572,13 @@ async function runResetScanStartAllTabs(options = {}) {
       };
       appendRecognitionStep(row, 'init', 'queued', 'process_enqueued_for_reload_resume');
       if (row.dataGapDetected) {
-        const dataGapDetail = row.dataGapMissingInputs
-          ? `source=${row.dataGapSignal || 'process_state'}, missing_inputs=${row.dataGapMissingInputs}`
-          : `source=${row.dataGapSignal || 'process_state'}`;
+        const dataGapDetail = `source=${row.dataGapSignal || 'process_state'}, stage=${row.dataGapStageId || 'unknown'}`;
         appendRecognitionStep(row, 'data_gap', 'detected', dataGapDetail);
-        console.warn('[reset-scan-start] Data gap marker inherited from process state', {
+        console.warn('[reset-scan-start] DATA_GAP_STAGE directive inherited from process state', {
           runId: row.runId || '',
           tabId: row.tabId,
           signal: row.dataGapSignal || '',
-          missingInputs: row.dataGapMissingInputs || ''
+          stageId: row.dataGapStageId || ''
         });
       }
 
@@ -17891,24 +18002,23 @@ async function runResetScanStartAllTabs(options = {}) {
         row.assistantMessageCount = Number.isInteger(extraction.assistantCount) ? extraction.assistantCount : 0;
         row.responseBlockCount = row.assistantMessageCount;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
-        const dataGapStopSignal = parseDataGapsStopFromText(extraction.lastAssistantText || '');
-        if (dataGapStopSignal.detected) {
+        const dataGapDirectiveSignal = parseStandaloneDataGapStageDirective(extraction.lastAssistantText || '');
+        if (dataGapDirectiveSignal.detected) {
           row.dataGapDetected = true;
-          row.dataGapSignal = 'assistant_system_command';
-          row.dataGapMissingInputs = dataGapStopSignal.missingInputsText || '';
-          const dataGapDetail = row.dataGapMissingInputs
-            ? `source=assistant_system_command, missing_inputs=${row.dataGapMissingInputs}`
-            : 'source=assistant_system_command';
+          row.dataGapSignal = 'assistant_data_gap_stage';
+          row.dataGapStageId = dataGapDirectiveSignal.stageId || '';
+          row.dataGapMissingInputs = '';
+          const dataGapDetail = `source=assistant_data_gap_stage, stage=${row.dataGapStageId || 'unknown'}`;
           appendRecognitionStep(row, 'data_gap', 'detected', dataGapDetail);
-          console.warn('[reset-scan-start] Detected DATA_GAPS stop command in assistant response', {
+          console.warn('[reset-scan-start] Detected DATA_GAP_STAGE directive in assistant response', {
             runId: row.runId || '',
             tabId: row.tabId,
-            missingInputs: row.dataGapMissingInputs || ''
+            stageId: row.dataGapStageId || ''
           });
           await appendReloadResumeMonitorEvent(monitorSessionId, {
             level: 'warn',
             code: 'data_gap_detected',
-            message: `Tab ${row.tabId}: wykryto DATA_GAPS stop${row.dataGapMissingInputs ? ` (${row.dataGapMissingInputs})` : ''}`
+            message: `Tab ${row.tabId}: wykryto DATA_GAP_STAGE=${row.dataGapStageId || '?'}`
           });
         }
         appendRecognitionStep(
@@ -18688,7 +18798,7 @@ async function runResetScanStartAllTabs(options = {}) {
       await appendReloadResumeMonitorEvent(monitorSessionId, {
         level: 'warn',
         code: 'data_gap_summary',
-        message: `Wykryto DATA_GAPS w ${summary.data_gaps_detected} procesach`
+        message: `Wykryto DATA_GAP_STAGE w ${summary.data_gaps_detected} procesach`
       });
     }
 
@@ -20583,10 +20693,10 @@ async function countCompanyConversationMessages(tabId, options = {}) {
   if (missingPromptNumbers.length > 0) processIssueFlags.push('unrecognized_prompt_stage');
   if (unmatchedRows.length > 0) processIssueFlags.push('unmatched_user_messages');
   if (sequenceIssues.length > 0) processIssueFlags.push('sequence_issue');
-  const dataGapStopSignal = parseDataGapsStopFromText(scanned?.lastAssistantText || '');
-  const dataGapStopDetected = dataGapStopSignal.detected;
-  if (dataGapStopDetected) processIssueFlags.push('data_gap_stop');
-  const processState = (missingReplyRows.length > 0 || dataGapStopDetected)
+  const dataGapDirectiveSignal = parseStandaloneDataGapStageDirective(scanned?.lastAssistantText || '');
+  const dataGapDirectiveDetected = dataGapDirectiveSignal.detected;
+  if (dataGapDirectiveDetected) processIssueFlags.push('data_gap_stage');
+  const processState = (missingReplyRows.length > 0 || dataGapDirectiveDetected)
     ? 'needs_action'
     : ((lowQualityReplyRows.length > 0 || processIssueFlags.length > 0) ? 'warning' : 'ok');
   const runResets = [];
@@ -20685,17 +20795,13 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       const missingReplyStageText = missingReplyPromptNumbers.map((value) => `P${value}`).join(',');
       const lowQualityStageText = lowQualityReplyPromptNumbers.map((value) => `P${value}`).join(',');
       const unrecognizedStageText = missingPromptNumbers.map((value) => `P${value}`).join(',');
-      const dataGapInputsText = dataGapStopSignal.missingInputs.length > 0
-        ? dataGapStopSignal.missingInputs.join(',')
-        : '';
       const summaryMessage = [
         `state=${processState}`,
         processIssueText ? `issues=${processIssueText}` : '',
         missingReplyStageText ? `missing_reply=${missingReplyStageText}` : '',
         lowQualityStageText ? `low_quality=${lowQualityStageText}` : '',
         unrecognizedStageText ? `unrecognized=${unrecognizedStageText}` : '',
-        dataGapStopDetected ? `data_gap_stop=${DATA_GAPS_STOP_COMMAND}` : '',
-        dataGapInputsText ? `data_gap_inputs=${dataGapInputsText}` : '',
+        dataGapDirectiveDetected ? `data_gap_stage=${dataGapDirectiveSignal.stageId}` : '',
         sequenceIssues.length > 0 ? `sequence_issues=${sequenceIssues.length}` : ''
       ].filter(Boolean).join(' | ');
       const signature = [
@@ -20748,9 +20854,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       duplicatePromptNumbers,
       promptRepliesMissing,
       promptRepliesBelowThreshold,
-      dataGapStopDetected,
-      dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
-      dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
+	      dataGapDirectiveDetected,
+	      dataGapStageId: dataGapDirectiveSignal.stageId || '',
       auditPromptFrontier,
       activeProcessPromptNumber: Number.isInteger(activeProcessForTab?.currentPrompt)
         ? activeProcessForTab.currentPrompt
@@ -20825,8 +20930,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       promptRepliesPassingThreshold,
       promptRepliesBelowThreshold: effectivePromptRepliesBelowThreshold,
       missingReplyPromptCount: missingReplyPromptNumbers.length,
-      dataGapStopDetected: dataGapStopDetected ? 1 : 0,
-      dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
+	      dataGapStopDetected: dataGapDirectiveDetected ? 1 : 0,
+	      dataGapStageDetected: dataGapDirectiveDetected ? 1 : 0,
       lowQualityReplyPromptCount: lowQualityReplyPromptNumbers.length
     },
     verification: {
@@ -20834,7 +20939,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       allMatchedPromptsHaveReply: effectivePromptRepliesMissing === 0,
       allMatchedRepliesPassThreshold: effectivePromptRepliesBelowThreshold === 0,
       sequenceNonDecreasing: sequenceIssues.length === 0,
-      dataGapStopDetected,
+	      dataGapStopDetected: dataGapDirectiveDetected,
+	      dataGapStageDetected: dataGapDirectiveDetected,
       userMetaTruncated: scanned?.userMetaTruncated === true
     },
     auditPromptFrontier,
@@ -20848,9 +20954,11 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     duplicatePromptNumbers,
     missingReplyPromptNumbers,
     lowQualityReplyPromptNumbers,
-    dataGapStopDetected,
-    dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
-    dataGapMissingInputsList: dataGapStopSignal.missingInputs,
+	    dataGapStopDetected: dataGapDirectiveDetected,
+	    dataGapStageDetected: dataGapDirectiveDetected,
+	    dataGapStageId: dataGapDirectiveSignal.stageId || '',
+	    dataGapMissingInputs: '',
+	    dataGapMissingInputsList: [],
     missingReplyRows,
     lowQualityReplyRows,
     promptCoverage,
@@ -29087,10 +29195,10 @@ async function saveSectorMemoryResponse(
     schema: 'economist.sector_memory_rows.v5',
     responseId: normalizedResponseId,
     runId: normalizedRunId || null,
-    source: typeof source === 'string' && source.trim() ? source.trim() : 'ChatGPT Stage 16 sector intelligence memory',
+    source: typeof source === 'string' && source.trim() ? source.trim() : 'ChatGPT Stage 15 sector intelligence memory',
     analysisType: 'sector_memory',
     timestamp: new Date(capturedAt).toISOString(),
-    stage: 'stage_16',
+    stage: 'stage_15',
     generatedBy: 'chatgpt',
     sourceRunId: normalizedRunId || '',
     sourceMaterialId: normalizedSourceMeta.sourceMaterialId || '',
@@ -29108,7 +29216,7 @@ async function saveSectorMemoryResponse(
       captured_prompt: promptNumber,
       selected_response_reason: typeof stageMeta?.sector_memory_response_reason === 'string' && stageMeta.sector_memory_response_reason.trim()
         ? stageMeta.sector_memory_response_reason.trim()
-        : 'stage16_sector_memory_json',
+        : 'sector_memory_json',
       copy_fingerprint: copyFingerprint,
       local_copy_saved: localCopy?.success === true
     }
@@ -29163,11 +29271,11 @@ async function persistSectorMemoryResponseFromResult(result, options = {}) {
   }
   const promptNumber = Number.isInteger(result?.sectorMemoryResponsePrompt)
     ? result.sectorMemoryResponsePrompt
-    : 17;
+    : 16;
   const responseId = buildSectorMemoryResponseId(options?.runId || '', responseText, promptNumber);
   return saveSectorMemoryResponse(
     responseText,
-    options?.source || 'ChatGPT Stage 16 sector intelligence memory',
+    options?.source || 'ChatGPT Stage 15 sector intelligence memory',
     options?.runId || null,
     responseId,
     options?.conversationUrl || null,
@@ -29179,7 +29287,7 @@ async function persistSectorMemoryResponseFromResult(result, options = {}) {
         : (promptNumber > 0 ? promptNumber - 1 : null),
       sector_memory_response_reason: typeof result?.sectorMemoryResponseReason === 'string'
         ? result.sectorMemoryResponseReason
-        : 'stage16_sector_memory_json'
+        : 'sector_memory_json'
     }
   );
 }
@@ -32234,6 +32342,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     let completedResponsePatch = {};
     let sectorMemoryResponsePatch = {};
     let persistencePatch = null;
+    let dataGapPatch = {};
     if (isInjectRateLimitBlockedResult(result)) {
       const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
         executionPromptOffset,
@@ -32295,17 +32404,42 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         sectorMemoryResponseSaved: false,
         sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
           ? result.sectorMemoryResponsePrompt
-          : 17,
+          : 16,
         sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
           ? result.sectorMemoryResponseStageIndex
-          : 16,
+          : 15,
         sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
           ? result.sectorMemoryResponseReason
-          : 'stage16_sector_memory_json'
+          : 'sector_memory_json'
       };
     }
 
-    if (result && result.success && hasResultLastResponse) {
+    if (isInjectDataGapTerminalResult(result)) {
+      const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
+        currentPrompt: executionPromptOffset,
+        totalPrompts: processTotalPrompts
+      });
+      finalStatus = dataGapSummary.lifecycleStatus;
+      finalPhase = dataGapSummary.phase;
+      finalStatusCode = dataGapSummary.statusCode;
+      finalStatusText = dataGapSummary.statusText;
+      finalReason = dataGapSummary.reason;
+      finalError = dataGapSummary.error;
+      finalActionRequired = dataGapSummary.actionRequired;
+      finalNeedsAction = dataGapSummary.needsAction;
+      dataGapPatch = {
+        dataGapDetected: true,
+        dataGapSignal: 'assistant_data_gap_stage',
+        dataGapStageId: resolveDataGapStageIdFromObject(result),
+        dataGapMissingInputs: ''
+      };
+      await renderFinalCounterStatusOnTab(chatTabId, {
+        heading: dataGapSummary.heading,
+        tone: dataGapSummary.tone,
+        lines: dataGapSummary.logLines,
+        autoCloseMs: 0
+      });
+    } else if (result && result.success && hasResultLastResponse) {
       const stageMeta = {};
       if (Number.isInteger(result?.selectedResponsePrompt)) {
         stageMeta.selected_response_prompt = result.selectedResponsePrompt;
@@ -32557,6 +32691,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
       ...(Object.keys(completedResponsePatch).length > 0 ? completedResponsePatch : {}),
       ...(Object.keys(sectorMemoryResponsePatch).length > 0 ? sectorMemoryResponsePatch : {}),
+      ...(Object.keys(dataGapPatch).length > 0 ? dataGapPatch : {}),
       ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
         ? {
           currentPrompt: processTotalPrompts,
@@ -32569,6 +32704,18 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             : {
               stageName: 'Start'
             })
+        }
+        : {}),
+      ...(finalReason === 'data_gap_stage'
+        ? {
+          currentPrompt: Number.isInteger(result?.currentPrompt) ? result.currentPrompt : executionPromptOffset,
+          totalPrompts: processTotalPrompts,
+          ...(Number.isInteger(result?.stageIndex)
+            ? {
+              stageIndex: result.stageIndex,
+              stageName: `Prompt ${result.stageIndex + 1}`
+            }
+            : {})
         }
         : {}),
       finishedAt: Date.now(),
@@ -33142,6 +33289,7 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       let completedResponsePatch = {};
       let sectorMemoryResponsePatch = {};
       let persistencePatch = null;
+      let dataGapPatch = {};
       if (isInjectRateLimitBlockedResult(result)) {
         const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
           executionPromptOffset,
@@ -33204,17 +33352,43 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           sectorMemoryResponseSaved: false,
           sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
             ? result.sectorMemoryResponsePrompt
-            : 17,
+            : 16,
           sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
             ? result.sectorMemoryResponseStageIndex
-            : 16,
+            : 15,
           sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
             ? result.sectorMemoryResponseReason
-            : 'stage16_sector_memory_json'
+            : 'sector_memory_json'
         };
       }
       
-      if (result && result.success && hasResultLastResponse) {
+      if (isInjectDataGapTerminalResult(result)) {
+        const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
+          currentPrompt: executionPromptOffset,
+          totalPrompts: processTotalPrompts
+        });
+        finalStatus = dataGapSummary.lifecycleStatus;
+        finalPhase = dataGapSummary.phase;
+        finalStatusCode = dataGapSummary.statusCode;
+        finalStatusText = dataGapSummary.statusText;
+        finalReason = dataGapSummary.reason;
+        finalError = dataGapSummary.error;
+        finalActionRequired = dataGapSummary.actionRequired;
+        finalNeedsAction = dataGapSummary.needsAction;
+        dataGapPatch = {
+          dataGapDetected: true,
+          dataGapSignal: 'assistant_data_gap_stage',
+          dataGapStageId: resolveDataGapStageIdFromObject(result),
+          dataGapMissingInputs: ''
+        };
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: dataGapSummary.heading,
+          tone: dataGapSummary.tone,
+          lines: dataGapSummary.logLines,
+          autoCloseMs: 0
+        });
+        console.log(`${'='.repeat(80)}\n`);
+      } else if (result && result.success && hasResultLastResponse) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
         console.log(`Zapisuję odpowiedź: ${resultLastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
@@ -33503,17 +33677,18 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         error: finalError,
         autoRecovery: null,
         ...(injectMetrics ? { injectMetrics } : {}),
-        ...(persistencePatch ? persistencePatch : {}),
-        ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
-        ...(Object.keys(completedResponsePatch).length > 0
-          ? completedResponsePatch
-          : {}),
-        ...(Object.keys(sectorMemoryResponsePatch).length > 0
-          ? sectorMemoryResponsePatch
-          : {}),
-        ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
-          ? {
-            currentPrompt: processTotalPrompts,
+	        ...(persistencePatch ? persistencePatch : {}),
+	        ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
+	        ...(Object.keys(completedResponsePatch).length > 0
+	          ? completedResponsePatch
+	          : {}),
+	        ...(Object.keys(sectorMemoryResponsePatch).length > 0
+	          ? sectorMemoryResponsePatch
+	          : {}),
+	        ...(Object.keys(dataGapPatch).length > 0 ? dataGapPatch : {}),
+	        ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
+	          ? {
+	            currentPrompt: processTotalPrompts,
             totalPrompts: processTotalPrompts,
             ...(processTotalPrompts > 0
               ? {
@@ -33522,12 +33697,24 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
               }
               : {
                 stageName: 'Start'
-              })
-          }
-          : {}),
-        finishedAt: Date.now(),
-        timestamp: Date.now()
-      });
+	              })
+	          }
+	          : {}),
+	        ...(finalReason === 'data_gap_stage'
+	          ? {
+	            currentPrompt: Number.isInteger(result?.currentPrompt) ? result.currentPrompt : executionPromptOffset,
+	            totalPrompts: processTotalPrompts,
+	            ...(Number.isInteger(result?.stageIndex)
+	              ? {
+	                stageIndex: result.stageIndex,
+	                stageName: `Prompt ${result.stageIndex + 1}`
+	              }
+	              : {})
+	          }
+	          : {}),
+	        finishedAt: Date.now(),
+	        timestamp: Date.now()
+	      });
 
       const processSuccess = finalStatus === 'completed';
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
@@ -34986,21 +35173,15 @@ async function injectToChat(
       if (typeof text !== 'string') return null;
       const lines = text
         .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      if (lines.length === 0) return null;
-      const match = lines[0].match(DATA_GAP_DIRECTIVE_REGEX);
-      if (!match) return null;
-      const stageId = normalizeDataGapStageId(match[1]);
-      if (!stageId) return null;
-      // Accept multi-line format (DATA_GAP_STAGE + optional MISSING/RECOVERY lines)
-      // but only if every additional line is a known DATA_GAP annotation.
-      const ALLOWED_EXTRA_LINE = /^(?:MISSING|RECOVERY)\s*:/i;
-      for (let idx = 1; idx < lines.length; idx += 1) {
-        if (!ALLOWED_EXTRA_LINE.test(lines[idx])) return null;
-      }
-      return {
-        stageId,
+	      .map((line) => line.trim())
+	      .filter((line) => line.length > 0);
+	      if (lines.length !== 1) return null;
+	      const match = lines[0].match(DATA_GAP_DIRECTIVE_REGEX);
+	      if (!match) return null;
+	      const stageId = normalizeDataGapStageId(match[1]);
+	      if (!stageId) return null;
+	      return {
+	        stageId,
         rawLine: lines[0]
       };
     }
@@ -40309,7 +40490,7 @@ async function injectToChat(
     return true;
   }
 
-  function extractStage16SectorMemoryJsonText(text) {
+  function extractSectorMemoryJsonText(text) {
     const raw = typeof text === 'string' ? text.trim() : '';
     if (!raw) return '';
 
@@ -40347,22 +40528,22 @@ async function injectToChat(
     return '';
   }
 
-  function rememberStage16SectorMemoryJson(promptNumber, responseText) {
-    const candidate = extractStage16SectorMemoryJsonText(responseText);
+  function rememberSectorMemoryJson(promptNumber, responseText) {
+    const candidate = extractSectorMemoryJsonText(responseText);
     if (!candidate) return false;
-    const canonicalStage14Prompt = 17;
-    const hasExistingStage14 = typeof window._stage16SectorMemoryResponseToSave === 'string'
-      && window._stage16SectorMemoryResponseToSave.trim();
-    if (hasExistingStage14 && Number.isInteger(promptNumber) && promptNumber > canonicalStage14Prompt) {
+    const canonicalSectorMemoryPrompt = 16;
+    const hasExistingSectorMemory = typeof window._sectorMemoryResponseToSave === 'string'
+      && window._sectorMemoryResponseToSave.trim();
+    if (hasExistingSectorMemory && Number.isInteger(promptNumber) && promptNumber > canonicalSectorMemoryPrompt) {
       console.log(
-        `[copy-flow] [capture:stage16-sector-json-skip-copy] prompt=${promptNumber} keptPrompt=${window._stage16SectorMemoryResponsePrompt || canonicalStage14Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+        `[copy-flow] [capture:sector-memory-json-skip-copy] prompt=${promptNumber} keptPrompt=${window._sectorMemoryResponsePrompt || canonicalSectorMemoryPrompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
       );
       return true;
     }
-    window._stage16SectorMemoryResponseToSave = candidate;
-    window._stage16SectorMemoryResponsePrompt = canonicalStage14Prompt;
+    window._sectorMemoryResponseToSave = candidate;
+    window._sectorMemoryResponsePrompt = canonicalSectorMemoryPrompt;
     console.log(
-      `[copy-flow] [capture:stage16-sector-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalStage14Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+      `[copy-flow] [capture:sector-memory-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalSectorMemoryPrompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
     );
     return true;
   }
@@ -42101,148 +42282,45 @@ async function injectToChat(
 
           if (responseDataGapDirective) {
             const dataGapStageId = responseDataGapDirective.stageId;
-            logDataGap('ROLLBACK_TRIGGERED_BY_RESPONSE', {
+            logDataGap('TERMINAL_RESPONSE_DETECTED', {
               requestedStageId: dataGapStageId,
               currentPrompt: absoluteCurrentPrompt,
               localPromptIndex: i,
               totalPromptsInRun: totalPromptsForRun
             }, 'warn');
             console.warn(
-              `[data-gap] Wykryto DATA_GAP_STAGE=${dataGapStageId} na promptcie ${absoluteCurrentPrompt} - uruchamiam rollback i replay etapow`
+              `[data-gap] Wykryto DATA_GAP_STAGE=${dataGapStageId} na promptcie ${absoluteCurrentPrompt} - zatrzymuje proces i zamykam karte`
             );
             updateCounter(
               counter,
               absoluteCurrentPrompt,
               totalPromptsForRun,
-              `Data gap: stage ${dataGapStageId} - uzupelniam`
+              `Data gap: stage ${dataGapStageId} - zamykam karte`
             );
-            const queueResult = await queueMissingPromptForDataGap(
+            stopSwKeepalive();
+            return {
+              success: false,
+              stopped: true,
+              dataGapTerminal: true,
+              dataGapDetected: true,
+              dataGapSignal: 'assistant_data_gap_stage',
               dataGapStageId,
-              prompt,
-              i,
-              absoluteCurrentPrompt
-            );
-            if (!queueResult.inserted) {
-              const dataGapError = queueResult.error || 'data_gap_queue_failed';
-              logDataGap('ROLLBACK_FAILED', {
-                requestedStageId: dataGapStageId,
-                currentPrompt: absoluteCurrentPrompt,
-                error: dataGapError,
-                replayKey: queueResult.replayKey || '',
-                replayCount: queueResult.replayCount
-              }, 'error');
-              console.error(
-                `[data-gap] Nie udało się dołączyć brakującego etapu ${dataGapStageId}: ${dataGapError}`,
-                queueResult
-              );
-              notifyProcess('PROCESS_PROGRESS', {
-                status: 'failed',
-                lifecycleStatus: 'failed',
-                currentPrompt: absoluteCurrentPrompt,
-                totalPrompts: totalPromptsForRun,
-                stageIndex: absoluteStageIndex,
-                stageName: `Prompt ${absoluteCurrentPrompt}`,
-                phase: 'capture_validate',
-                actionRequired: 'none',
-                statusCode: 'process.data_gap_unresolved',
-                statusText: `DATA_GAP nierozwiazany (${dataGapStageId})`,
-                reason: 'data_gap_unresolved',
-                error: dataGapError,
-                needsAction: false
-              });
-              stopSwKeepalive();
-              return {
-                success: false,
-                lastResponse: '',
-                error: `DATA_GAP unresolved for stage ${dataGapStageId}: ${dataGapError}`,
-                metrics: buildMetricsSnapshot({
-                  completed: false,
-                  reason: 'data_gap_unresolved',
-                  dataGapStage: dataGapStageId
-                })
-              };
-            }
-
-            const rewindPromptNumber = Number.isInteger(queueResult.promptNumber) && queueResult.promptNumber > 0
-              ? queueResult.promptNumber
-              : (
-                canonicalPromptLookup?.promptNumberByStageId instanceof Map && canonicalPromptLookup.promptNumberByStageId.has(queueResult.stageId)
-                  ? canonicalPromptLookup.promptNumberByStageId.get(queueResult.stageId)
-                  : findPromptNumberByStageIdInCanonicalPrompts(canonicalPromptLookup?.prompts, queueResult.stageId)
-              );
-            const rewindTargetPrompt = Number.isInteger(rewindPromptNumber) && rewindPromptNumber > 0
-              ? rewindPromptNumber
-              : absoluteCurrentPrompt;
-            const rewindMetrics = rewindExecutionMetricsFromPrompt(rewindTargetPrompt);
-            const rewindStageIndex = rewindTargetPrompt > 0 ? (rewindTargetPrompt - 1) : absoluteStageIndex;
-            const rewindFromPrompt = absoluteCurrentPrompt;
-            const rewindStartIndex = Number.isInteger(queueResult.insertedAtIndex)
-              ? queueResult.insertedAtIndex
-              : (i + 1);
-            const rewindEndIndex = (
-              Number.isInteger(queueResult.insertedAtIndex)
-              && Number.isInteger(queueResult.insertedCount)
-              && queueResult.insertedCount > 0
-            )
-              ? (queueResult.insertedAtIndex + queueResult.insertedCount - 1)
-              : null;
-            dataGapRewindState = {
-              stageId: queueResult.stageId,
-              rewindPromptNumber: rewindTargetPrompt,
-              fromPromptNumber: rewindFromPrompt,
-              startChainIndex: rewindStartIndex,
-              endChainIndex: rewindEndIndex,
-              mode: queueResult.mode
-            };
-
-            updateCounter(
-              counter,
-              rewindTargetPrompt,
-              totalPromptsForRun,
-              `↩️ DATA_GAP rewind do P${rewindTargetPrompt}`
-            );
-            notifyProcess('PROCESS_PROGRESS', {
-              status: 'running',
-              lifecycleStatus: 'running',
-              currentPrompt: rewindTargetPrompt,
+              lastResponse: responseText || responseDataGapDirective.rawLine || '',
+              conversationUrl: typeof location?.href === 'string' ? location.href : '',
+              currentPrompt: absoluteCurrentPrompt,
               totalPrompts: totalPromptsForRun,
-              stageIndex: rewindStageIndex,
-              stageName: `Prompt ${rewindTargetPrompt}`,
-              phase: 'prompt_send',
-              statusCode: 'process.data_gap_rewind',
-              statusText: `DATA_GAP rewind -> Prompt ${rewindTargetPrompt}`,
-              reason: 'data_gap_rewind_applied',
-              allowLowerProgress: true,
-              needsAction: false
-            });
-            logDataGap('ROLLBACK_QUEUED', {
-              stageId: queueResult.stageId,
-              mode: queueResult.mode,
-              source: queueResult.source,
-              replayCount: queueResult.replayCount,
-              promptNumber: queueResult.promptNumber,
-              currentPromptNumber: queueResult.currentPromptNumber,
-              rewindPromptNumber: rewindTargetPrompt,
-              rewindFromPrompt,
-              insertedCount: queueResult.insertedCount,
-              insertedAtIndex: queueResult.insertedAtIndex,
-              chainLengthBefore: queueResult.chainLengthBefore,
-              chainLengthAfter: queueResult.chainLengthAfter,
-              rewindMetrics
-            }, 'warn');
-            console.log('[data-gap] Prompt dolaczony', {
-              stageId: queueResult.stageId,
-              mode: queueResult.mode,
-              source: queueResult.source,
-              replayCount: queueResult.replayCount,
-              promptRange: formatPromptNumberRange(queueResult.promptNumber, queueResult.currentPromptNumber),
-              insertedCount: queueResult.insertedCount,
-              rewindTargetPrompt,
-              rewindFromPrompt
-            });
-            const gapDelayMs = 900;
-            await new Promise((resolve) => setTimeout(resolve, gapDelayMs));
-            continue;
+              stageIndex: absoluteStageIndex,
+              stageName: `Prompt ${absoluteCurrentPrompt}`,
+              phase: 'data_gap_stage',
+              statusCode: 'process.data_gap_stage',
+              reason: 'data_gap_stage',
+              error: `DATA_GAP_STAGE=${dataGapStageId}`,
+              metrics: buildMetricsSnapshot({
+                completed: false,
+                reason: 'data_gap_stage',
+                dataGapStage: dataGapStageId
+              })
+            };
           }
         
         console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
@@ -42261,7 +42339,7 @@ async function injectToChat(
         const stageValidated = validateResponse(responseText);
         registerStageCompletion(absoluteCurrentPrompt, responseText, stageValidated);
         rememberStage12InvestmentJson(absoluteCurrentPrompt, responseText);
-        rememberStage16SectorMemoryJson(absoluteCurrentPrompt, responseText);
+        rememberSectorMemoryJson(absoluteCurrentPrompt, responseText);
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -42316,16 +42394,16 @@ async function injectToChat(
           : Math.max(counterCurrent, 1);
         updateCounter(counter, counterCurrent, counterTotal, 'Prompt chain zakonczony. Trwa zapis do bazy...');
         
-        // Company chains zapisują Stage 14 JSON, bo ostatni prompt może być write-only.
+        // Company chains zapisują Stage 14 JSON nawet jeśli później powstaje osobny JSON pamięci sektorowej.
         // Portfolio chains są JSON-only na końcu, więc zapisujemy finalny JSON z ostatniego prompta.
         const lastPromptResponse = window._lastResponseToSave || '';
         const stage12Response = window._stage12ResponseToSave || '';
         const stage12ResponsePrompt = Number.isInteger(window._stage12ResponsePrompt)
           ? window._stage12ResponsePrompt
           : null;
-        const stage16SectorMemoryResponse = window._stage16SectorMemoryResponseToSave || '';
-        const stage16SectorMemoryResponsePrompt = Number.isInteger(window._stage16SectorMemoryResponsePrompt)
-          ? window._stage16SectorMemoryResponsePrompt
+        const sectorMemoryResponse = window._sectorMemoryResponseToSave || '';
+        const sectorMemoryResponsePrompt = Number.isInteger(window._sectorMemoryResponsePrompt)
+          ? window._sectorMemoryResponsePrompt
           : null;
         const portfolioFinalJsonResponse = isPortfolioAnalysis
           ? (extractPortfolioFinalJsonText(lastPromptResponse) || lastPromptResponse)
@@ -42340,13 +42418,13 @@ async function injectToChat(
         delete window._lastResponseToSave;
         delete window._stage12ResponseToSave;
         delete window._stage12ResponsePrompt;
-        delete window._stage16SectorMemoryResponseToSave;
-        delete window._stage16SectorMemoryResponsePrompt;
+        delete window._sectorMemoryResponseToSave;
+        delete window._sectorMemoryResponsePrompt;
         console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków, reason=${selectedResponseReason})`);
         console.log(`[copy-flow] [capture:return] prompt=${useStage12InvestmentResponse ? stage12ResponsePrompt : completedPrompt} completedPrompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)} reason=${selectedResponseReason}`);
-        if (stage16SectorMemoryResponse) {
+        if (sectorMemoryResponse) {
           console.log(
-            `[copy-flow] [capture:return-sector-memory] prompt=${stage16SectorMemoryResponsePrompt || 17} completedPrompt=${completedPrompt} len=${stage16SectorMemoryResponse.length} fp=${computeCopyFingerprint(stage16SectorMemoryResponse)} reason=stage16_sector_memory_json`
+            `[copy-flow] [capture:return-sector-memory] prompt=${sectorMemoryResponsePrompt || 16} completedPrompt=${completedPrompt} len=${sectorMemoryResponse.length} fp=${computeCopyFingerprint(sectorMemoryResponse)} reason=sector_memory_json`
           );
         }
         const selectedPrompt = useStage12InvestmentResponse && Number.isInteger(stage12ResponsePrompt)
@@ -42509,15 +42587,15 @@ async function injectToChat(
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
           selectedResponseReason,
-          sectorMemoryResponse: stage16SectorMemoryResponse,
-          sectorMemoryResponsePrompt: stage16SectorMemoryResponse
-            ? (stage16SectorMemoryResponsePrompt || 17)
+          sectorMemoryResponse,
+          sectorMemoryResponsePrompt: sectorMemoryResponse
+            ? (sectorMemoryResponsePrompt || 16)
             : null,
-          sectorMemoryResponseStageIndex: stage16SectorMemoryResponse
-            ? ((stage16SectorMemoryResponsePrompt || 17) - 1)
+          sectorMemoryResponseStageIndex: sectorMemoryResponse
+            ? ((sectorMemoryResponsePrompt || 16) - 1)
             : null,
-          sectorMemoryResponseReason: stage16SectorMemoryResponse
-            ? 'stage16_sector_memory_json'
+          sectorMemoryResponseReason: sectorMemoryResponse
+            ? 'sector_memory_json'
             : '',
           persistedViaMessage,
           persistedSaveResult,

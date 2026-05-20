@@ -299,6 +299,7 @@ async function main() {
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
+    'isDataGapTerminalProcess',
     'isProcessWindowAutoCloseEnabled',
     'normalizeProcessWindowCloseState',
     'inspectProcessWindowContext',
@@ -511,6 +512,21 @@ async function main() {
 
   assert.strictEqual(urlOnlyPlan.needed, true);
   assert.strictEqual(urlOnlyPlan.reason, 'local_save_completed');
+
+  const dataGapPlan = context.resolveProcessWindowCloseRetryPlan({
+    id: 'run-data-gap',
+    status: 'stopped',
+    lifecycleStatus: 'stopped',
+    reason: 'data_gap_stage',
+    statusCode: 'process.data_gap_stage',
+    dataGapDetected: true,
+    dataGapStageId: '4',
+    tabId: 701,
+    windowId: 702
+  });
+
+  assert.strictEqual(dataGapPlan.needed, true);
+  assert.strictEqual(dataGapPlan.reason, 'data_gap_stage');
 
   console.log('test-process-window-close-retry.js: ok');
 }

@@ -135,7 +135,7 @@ function buildVmContext(overrides = {}) {
     CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'www.chatgpt.com', 'chat.openai.com', 'www.chat.openai.com']),
     INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
     INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje',
-    PROMPTS_COMPANY: new Array(18).fill('prompt'),
+    PROMPTS_COMPANY: new Array(16).fill('prompt'),
     processRegistry: new Map(),
     normalizeWatchlistVerifyState(value) {
       return typeof value === 'string' ? value.trim().toLowerCase() : '';

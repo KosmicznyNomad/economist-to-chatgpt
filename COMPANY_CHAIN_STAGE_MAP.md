@@ -8,7 +8,7 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 - Backward-compatible field: `stageNames`.
 - Structured field: `stageMetadata`.
 
-## Prompt Index Mapping (18 prompts)
+## Prompt Index Mapping (16 prompts)
 - `promptIndex` is 0-based in code.
 - `promptNumber` is 1-based in UI and logs.
 
@@ -29,14 +29,12 @@ This document is the readable contract for `prompts-company.txt` and runtime sta
 | 13 | 12 | 12 | Stage 12: Four-Gate Decision | Per-company WATCH/AVOID gates, integrity checks, value/proof gates, and execution plan handoff. |
 | 14 | 13 | 13 | Stage 13: Composite Rank | Cross-company composite ranking with PRIMARY/SECONDARY selection. |
 | 15 | 14 | 14 | Stage 14: Final Investment Record Builder | Final structured watchlist records for downstream ingestion. |
-| 16 | 15 | 15 | Stage 15: MCP Write Final Investment Records | Persist the generated Stage 14 records through the dedicated Iskierka stage12 research-row MCP writer, then copy the generated Stage 14 JSON forward. |
-| 17 | 16 | 16 | Stage 16: Sector Intelligence Memory Row Writer | Durable sector intelligence records for future portfolio positioning and company analyses. |
-| 18 | 17 | 17 | Stage 17: MCP Write Sector Memory Rows | Persist the generated Stage 16 sector-memory rows through the Iskierka sector-context MCP tool, then copy the generated Stage 16 JSON forward. |
+| 16 | 15 | 15 | Stage 15: Sector Intelligence Memory Row Writer | Durable sector intelligence records for future portfolio positioning and company analyses. |
 
 ## Stage Id Rules
 Runtime stage ids are numeric only.
 - `0` -> `promptIndex 0`
-- `1` through `17` -> their matching stage prompt by numeric id
+- `1` through `15` -> their matching stage prompt by numeric id
 - `setup` -> `promptIndex 1` remains as a UI compatibility alias for the Stage 1 prompt
 
 There are no current `A`, `B`, `.5`, or boundary pseudo-stage ids in the active company chain. If a boundary is missing, the prompt should request the owning numeric stage, for example `DATA_GAP_STAGE=4`.

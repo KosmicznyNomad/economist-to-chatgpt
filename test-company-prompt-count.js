@@ -235,9 +235,9 @@ function parsePromptChainText(rawText) {
   return [normalizedText.trim()];
 }
 
-function testCompanyPromptCatalogIsEighteenPrompts() {
+function testCompanyPromptCatalogIsSixteenPrompts() {
   const prompts = parsePromptChainText(promptsText);
-  assert.strictEqual(prompts.length, 18, 'Company prompt chain should contain exactly 18 prompts.');
+  assert.strictEqual(prompts.length, 16, 'Company prompt chain should contain exactly 16 prompts.');
 
   const stageMetadataBlockMatch = backgroundSource.match(/const DEFAULT_STAGE_METADATA_COMPANY = \[[\s\S]*?\n\];/);
   assert(stageMetadataBlockMatch, 'Stage metadata block should exist.');
@@ -245,19 +245,19 @@ function testCompanyPromptCatalogIsEighteenPrompts() {
   const promptNumbers = [...stageMetadataBlockMatch[0].matchAll(/promptNumber:\s*(\d+)/g)].map((match) => Number(match[1]));
   assert.deepStrictEqual(
     promptNumbers,
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
-    'Stage metadata prompt numbers should align to the 18-prompt chain.'
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
+    'Stage metadata prompt numbers should align to the 16-prompt chain.'
   );
   const stageIds = [...stageMetadataBlockMatch[0].matchAll(/stageId:\s*'([^']+)'/g)].map((match) => match[1]);
   assert.deepStrictEqual(
     stageIds,
-    ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'],
+    ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'],
     'Stage metadata ids should use consecutive numeric stage ids in prompt order.'
   );
 
   assert(
-    stageMapText.includes('## Prompt Index Mapping (18 prompts)'),
-    'Stage map should document the same 18-prompt total.'
+    stageMapText.includes('## Prompt Index Mapping (16 prompts)'),
+    'Stage map should document the same 16-prompt total.'
   );
   assert(
     backgroundSource.includes('function refreshCompanyStageMetadataFromPrompts'),
@@ -265,14 +265,13 @@ function testCompanyPromptCatalogIsEighteenPrompts() {
   );
 }
 
-function testMcpWritePromptsUseIskierkaToolNames() {
+function testCompanyPromptFinalOutputsAreDataGapOrJsonOnly() {
   const prompts = parsePromptChainText(promptsText);
   const stage5McpPrompt = prompts.find((prompt) => (
     prompt.includes('STAGE 5') && prompt.includes('MCP SECTOR OVERLAY')
   )) || '';
   const stage14RecordPrompt = prompts[14] || '';
-  const stage15WritePrompt = prompts[15] || '';
-  const stage17WritePrompt = prompts[17] || '';
+  const sectorMemoryPrompt = prompts[15] || '';
 
   assert(
     stage5McpPrompt.includes('Retrieve sector memory entries using combinations of:'),
@@ -295,129 +294,45 @@ function testMcpWritePromptsUseIskierkaToolNames() {
     stage14RecordPrompt.includes('records ma dokładnie 2 rekordy'),
     'Stage 14 final instruction should require exactly two records.'
   );
-
   assert(
-    stage15WritePrompt.includes('stage12_research_rows.upsert'),
-    'Stage 15 should point at the dedicated Iskierka stage12_research_rows.upsert tool.'
+    sectorMemoryPrompt.includes('Return only a JSON array.'),
+    'Sector-memory prompt should output only the JSON array captured by the extension.'
   );
   assert(
-    stage15WritePrompt.includes('Użyj MCP server:\n\niskierka'),
-    'Stage 15 should target the Iskierka MCP server.'
+    !promptsText.includes('STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS')
+      && !promptsText.includes('STAGE 17 — MCP WRITE SECTOR MEMORY ROWS'),
+    'Company prompts should not contain separate MCP write/copy prompts.'
   );
   assert(
-    stage15WritePrompt.includes('stage12_research_rows_upsert'),
-    'Stage 15 should include the current Claude-safe stage12_research_rows_upsert tool name.'
+    !promptsText.includes('stage12_research_rows_upsert')
+      && !promptsText.includes('stage12_research_rows.upsert')
+      && !promptsText.includes('sector_context.upsert_stage13')
+      && !promptsText.includes('sector_context_upsert_stage13'),
+    'Final prompt outputs should be JSON-only; persistence is handled by the extension.'
   );
   assert(
-    stage15WritePrompt.includes('Stage 14 / Prompt 15 z 18'),
-    'Stage 15 should identify the generated Stage 14 source by the new 18-prompt structure.'
-  );
-  assert(
-    stage15WritePrompt.includes('obiekt JSON z polem records będącym tablicą'),
-    'Stage 15 should locate the generated Stage 14 JSON by records array shape.'
-  );
-  assert(
-    !stage15WritePrompt.includes('"schema": "economist.response.v2"'),
-    'Stage 15 should not locate the generated Stage 14 JSON by legacy schema.'
-  );
-  assert(
-    !stage15WritePrompt.includes('Weź wyłącznie bezpośrednio poprzednią wiadomość assistant'),
-    'Stage 15 should not be pinned to the immediately previous assistant message.'
-  );
-  assert(
-    stage15WritePrompt.includes('tryb kopiowania'),
-    'Stage 15 should fall back to copying the previous Stage 14 JSON.'
-  );
-  assert(
-    stage15WritePrompt.includes('FINAL OUTPUT RULE DLA PROMPTU 16'),
-    'Prompt 16 should have an explicit final JSON output rule.'
-  );
-  assert(
-    stage15WritePrompt.includes('Odpowiedź Promptu 16 musi być JSON-em'),
-    'Prompt 16 should be required to output JSON, not operational text.'
-  );
-  assert(
-    stage15WritePrompt.includes('nie wypisuj żadnego komunikatu o niedostępności MCP'),
-    'Stage 15 should explicitly suppress MCP unavailable sentinel output.'
-  );
-  assert(
-    stage15WritePrompt.includes('wywołanie nie może zostać wykonane albo zapis zwróci błąd techniczny'),
-    'Stage 15 should treat technical write failures as copy-through events.'
-  );
-  assert(
-    stage15WritePrompt.includes('Nie używaj `context_packs.upsert`'),
-    'Stage 15 should explicitly forbid context_packs.upsert as a Stage 14 fallback.'
-  );
-  assert(
-    !stage15WritePrompt.includes('context_packs_upsert'),
-    'Stage 15 should not suggest the context_packs_upsert tool alias.'
-  );
-  assert(
-    !stage15WritePrompt.includes('upsert_stage12_research_rows'),
-    'Stage 15 should not suggest the old upsert_stage12_research_rows tool name.'
-  );
-  assert(
-    stage17WritePrompt.includes('sector_context.upsert_stage13'),
-    'Stage 17 should point at the Iskierka sector_context.upsert_stage13 tool.'
-  );
-  assert(
-    stage17WritePrompt.includes('Użyj MCP server:\n\niskierka'),
-    'Stage 17 should target the Iskierka MCP server.'
-  );
-  assert(
-    stage17WritePrompt.includes('sector_context_upsert_stage13'),
-    'Stage 17 should include the current Claude-safe sector_context_upsert_stage13 tool name.'
-  );
-  assert(
-    stage17WritePrompt.includes('Nie używaj `context_packs.upsert`'),
-    'Stage 17 should explicitly forbid context_packs.upsert as a sector-memory fallback.'
-  );
-  assert(
-    stage17WritePrompt.includes('Stage 16 / Prompt 17 z 18'),
-    'Stage 17 should identify the generated Stage 16 source by the new 18-prompt structure.'
-  );
-  assert(
-    stage17WritePrompt.includes('top-level tablicę rekordów'),
-    'Stage 17 should locate the generated Stage 16 JSON by top-level array shape.'
-  );
-  assert(
-    !stage17WritePrompt.includes('Weź wyłącznie bezpośrednio poprzednią wiadomość assistant'),
-    'Stage 17 should not be pinned to the immediately previous assistant message.'
-  );
-  assert(
-    stage17WritePrompt.includes('tryb kopiowania'),
-    'Stage 17 should fall back to copying the previous Stage 16 JSON array.'
-  );
-  assert(
-    stage17WritePrompt.includes('FINAL OUTPUT RULE DLA PROMPTU 18'),
-    'Prompt 18 should have an explicit final JSON output rule.'
-  );
-  assert(
-    !stage15WritePrompt.includes('MCP_TOOL_UNAVAILABLE') && !stage17WritePrompt.includes('MCP_TOOL_UNAVAILABLE'),
-    'MCP write prompts should not emit unavailable sentinel outputs.'
-  );
-  assert(
-    !promptsText.includes('Użyj MCP server:\n\nwatchlist-company-context'),
-    'MCP write prompts should not target the old watchlist-company-context server.'
+    !promptsText.includes('DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN')
+      && !backgroundSource.includes('DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN'),
+    'Legacy DATA_GAPS_STOP sentinel should not be emitted or recognized.'
   );
 }
 
-function testStage16SectorMemoryFallbackIsWired() {
+function testSectorMemoryFallbackIsWired() {
   assert(
     backgroundSource.includes("(!schema || schema === 'economist.response.v2')"),
     'Final investment JSON capture should accept both schema-tagged Stage 14 records and older records-only outputs.'
   );
   assert(
-    backgroundSource.includes('function extractStage16SectorMemoryJsonText'),
-    'Background should be able to extract the Stage 16 sector-memory JSON array.'
+    backgroundSource.includes('function extractSectorMemoryJsonText'),
+    'Background should be able to extract the sector-memory JSON array.'
   );
   assert(
-    backgroundSource.includes('rememberStage16SectorMemoryJson(absoluteCurrentPrompt, responseText);'),
-    'Prompt loop should remember Stage 16 sector-memory JSON independently from the final investment record.'
+    backgroundSource.includes('rememberSectorMemoryJson(absoluteCurrentPrompt, responseText);'),
+    'Prompt loop should remember sector-memory JSON independently from the final investment record.'
   );
   assert(
-    backgroundSource.includes('sectorMemoryResponse: stage16SectorMemoryResponse'),
-    'Injected result should return the captured Stage 16 sector-memory response.'
+    backgroundSource.includes('sectorMemoryResponse,'),
+    'Injected result should return the captured sector-memory response.'
   );
   assert(
     backgroundSource.includes('"/api/v1/intake/sector-memory-rows"'),
@@ -471,15 +386,19 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     JSON,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
-    PROMPTS_COMPANY: new Array(18).fill('prompt'),
-    sanitizeAnalysisQueueJob(job) {
-      return job;
-    },
+	    PROMPTS_COMPANY: new Array(16).fill('prompt'),
+	    normalizeComposerThinkingEffort(value) {
+	      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+	      return ['light', 'standard', 'extended', 'heavy'].includes(normalized) ? normalized : '';
+	    },
+	    sanitizeAnalysisQueueJob(job) {
+	      return job;
+	    },
     resolvePromptCountForQueuedJob(job) {
       if (Array.isArray(job?.promptChainSnapshot) && job.promptChainSnapshot.length > 0) {
         return job.promptChainSnapshot.length;
       }
-      return 18;
+      return 16;
     }
   });
 
@@ -502,7 +421,7 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     resumeTargetTabId: 101
   });
   assert.strictEqual(firstPromptPatch.currentPrompt, 1);
-  assert.strictEqual(firstPromptPatch.totalPrompts, 18);
+  assert.strictEqual(firstPromptPatch.totalPrompts, 16);
   assert.strictEqual(firstPromptPatch.stageIndex, 0);
   assert.strictEqual(firstPromptPatch.stageName, 'Prompt 1');
 
@@ -512,19 +431,19 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     analysisType: 'company',
     kind: 'resume_stage',
     createdAt: 1,
-    resumeStartIndex: 17,
+    resumeStartIndex: 15,
     resumeTargetTabId: 202
   });
-  assert.strictEqual(finalPromptPatch.currentPrompt, 18);
-  assert.strictEqual(finalPromptPatch.totalPrompts, 18);
-  assert.strictEqual(finalPromptPatch.stageIndex, 17);
-  assert.strictEqual(finalPromptPatch.stageName, 'Prompt 18');
+  assert.strictEqual(finalPromptPatch.currentPrompt, 16);
+  assert.strictEqual(finalPromptPatch.totalPrompts, 16);
+  assert.strictEqual(finalPromptPatch.stageIndex, 15);
+  assert.strictEqual(finalPromptPatch.stageName, 'Prompt 16');
 }
 
 function main() {
-  testCompanyPromptCatalogIsEighteenPrompts();
-  testMcpWritePromptsUseIskierkaToolNames();
-  testStage16SectorMemoryFallbackIsWired();
+  testCompanyPromptCatalogIsSixteenPrompts();
+  testCompanyPromptFinalOutputsAreDataGapOrJsonOnly();
+  testSectorMemoryFallbackIsWired();
   testStage14InvestmentJsonExtractorAcceptsCurrentAndLegacyShape();
   testResumeQueuePatchUsesNextPromptNumber();
   console.log('test-company-prompt-count.js: ok');

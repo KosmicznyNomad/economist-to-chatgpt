@@ -1011,7 +1011,7 @@ const COMPANY_COUNT_PROCESS_ISSUE_LABELS = {
   assistant_reply_below_threshold: 'odpowiedzi ponizej progu jakosci',
   unrecognized_prompt_stage: 'nierozpoznane etapy promptow',
   sequence_issue: 'naruszona kolejnosc etapow',
-  data_gap_stop: 'wykryto sygnal DATA_GAPS_STOP',
+  data_gap_stage: 'wykryto DATA_GAP_STAGE',
   unmatched_user_messages: 'nierozpoznane wiadomosci user'
 };
 
@@ -1047,7 +1047,7 @@ function formatCompanyProcessCounterAlert(response) {
   const totals = response?.totals && typeof response.totals === 'object' ? response.totals : {};
   const missingReplyCount = Number.isInteger(totals?.promptRepliesMissing) ? totals.promptRepliesMissing : 0;
   const lowQualityCount = Number.isInteger(totals?.promptRepliesBelowThreshold) ? totals.promptRepliesBelowThreshold : 0;
-  const dataGapStopDetected = response?.dataGapStopDetected === true
+  const dataGapStageDetected = response?.dataGapStopDetected === true
     || (Number.isInteger(totals?.dataGapStopDetected) && totals.dataGapStopDetected > 0);
   const dataGapMissingInputsList = Array.isArray(response?.dataGapMissingInputsList)
     ? response.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
@@ -1059,7 +1059,7 @@ function formatCompanyProcessCounterAlert(response) {
     ? response.lowQualityReplyPromptNumbers
     : [];
 
-  if (missingReplyCount <= 0 && lowQualityCount <= 0 && !dataGapStopDetected) {
+  if (missingReplyCount <= 0 && lowQualityCount <= 0 && !dataGapStageDetected) {
     return 'Licznik procesu: OK (brak brakujacych i niskiej jakosci odpowiedzi).';
   }
 
@@ -1076,11 +1076,11 @@ function formatCompanyProcessCounterAlert(response) {
       : '';
     parts.push(`jakosc_niska=${lowQualityCount}${lowQualityPromptText}`);
   }
-  if (dataGapStopDetected) {
-    const missingInputsText = dataGapMissingInputsList.length > 0
-      ? `; missing_inputs=${dataGapMissingInputsList.join(',')}`
+  if (dataGapStageDetected) {
+    const stageText = typeof response?.dataGapStageId === 'string' && response.dataGapStageId.trim()
+      ? `; stage=${response.dataGapStageId.trim()}`
       : '';
-    parts.push(`data_gaps_stop=1${missingInputsText}`);
+    parts.push(`data_gap_stage=1${stageText}`);
   }
   return `Licznik procesu: WYMAGA AKCJI (${parts.join(' | ')}).`;
 }
@@ -1126,7 +1126,7 @@ function formatCompanyConversationCountStatus(response) {
   const unmatchedUserSamples = Array.isArray(response?.unmatchedUserSamples) ? response.unmatchedUserSamples : [];
   const sequenceIssues = Array.isArray(response?.sequenceIssues) ? response.sequenceIssues : [];
   const runResets = Array.isArray(response?.runResets) ? response.runResets : [];
-  const dataGapStopDetected = response?.dataGapStopDetected === true
+  const dataGapStageDetected = response?.dataGapStopDetected === true
     || (Number.isInteger(totals?.dataGapStopDetected) && totals.dataGapStopDetected > 0);
   const dataGapMissingInputsList = Array.isArray(response?.dataGapMissingInputsList)
     ? response.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
@@ -1167,9 +1167,12 @@ function formatCompanyConversationCountStatus(response) {
   lines.push(`Rozpoznanie wiadomosci: instancje_promptow=${matchedPromptMessages}, etapy_unique=${recognizedUniquePrompts}/${promptCatalogCount}, nierozpoznane_user=${unmatchedUserMessages}, skutecznosc=${recognitionRate}%, runy=${totals.detectedRuns || 0}`);
   lines.push(`Odpowiedzi (instancje): present=${totals.promptRepliesPresent || 0}, missing=${totals.promptRepliesMissing || 0}, quality_ok=${totals.promptRepliesPassingThreshold || 0}, quality_low=${totals.promptRepliesBelowThreshold || 0} (prog: ${thresholds.minAssistantWords || 0} slow, ${thresholds.minAssistantSentences || 0} zdan)`);
   lines.push(`Odpowiedzi (etapy): missing=${missingReplyStageCount}, quality_low=${lowQualityStageCount}`);
-  lines.push(`Data gaps: stop_marker=${dataGapStopDetected ? 'TAK' : 'NIE'}, missing_inputs=${dataGapStopDetected ? dataGapMissingInputsResolved : 'brak'}`);
+  const dataGapStageText = typeof response?.dataGapStageId === 'string' && response.dataGapStageId.trim()
+    ? response.dataGapStageId.trim()
+    : '?';
+  lines.push(`Data gap directive: ${dataGapStageDetected ? `DATA_GAP_STAGE=${dataGapStageText}` : 'NIE'}`);
   const resolvedProcessState = processState || (
-    ((totals.promptRepliesMissing || 0) > 0 || dataGapStopDetected)
+    ((totals.promptRepliesMissing || 0) > 0 || dataGapStageDetected)
       ? 'needs_action'
       : ((totals.promptRepliesBelowThreshold || 0) > 0 ? 'warning' : 'ok')
   );
@@ -1200,8 +1203,8 @@ function formatCompanyConversationCountStatus(response) {
   if ((totals.promptRepliesMissing || 0) > 0) {
     lines.push('Akcja procesu: uruchom "Powtorz ostatni prompt (wszystkie)" albo "Wznow wszystkie".');
   }
-  if (dataGapStopDetected) {
-    lines.push(`Akcja data gaps: uzupelnij brakujace dane (${dataGapMissingInputsResolved}), potem wznow pipeline od etapu data-gap.`);
+  if (dataGapStageDetected) {
+    lines.push(`Akcja data gap: wtyczka zamknie karte procesu i zwolni slot kolejki; nastepny job ruszy automatycznie.`);
   }
 
   const lowQualityItemsText = lowQualityReplyRows
@@ -1221,7 +1224,7 @@ function formatCompanyConversationCountStatus(response) {
   lines.push(`Duplikaty promptow: ${duplicateText}`);
 
   lines.push(
-    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}, data_gaps=${verification.dataGapStopDetected ? 'NIE' : 'OK'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
+    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}, data_gap_stage=${verification.dataGapStopDetected ? 'TAK' : 'NIE'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
   );
   lines.push('');
 

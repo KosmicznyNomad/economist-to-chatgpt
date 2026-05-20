@@ -231,8 +231,9 @@ const reasonLabels = {
   auto_recovery_invalid_response: 'Auto-resend po niepoprawnej odpowiedzi',
   auto_recovery_textarea_not_found: 'Auto-resend: brak pola wpisywania',
   auto_recovery_provider_invalid_response: 'Auto-resend: niepoprawna odpowiedz providera',
-  data_gap_unresolved: 'DATA_GAPS nierozwiazany',
-  data_gap_rewind_applied: 'DATA_GAPS rewind zastosowany'
+  data_gap_stage: 'DATA_GAP_STAGE - karta zamknieta',
+  data_gap_unresolved: 'DATA_GAP_STAGE nierozwiazany',
+  data_gap_rewind_applied: 'DATA_GAP_STAGE rewind zastosowany'
 };
 const persistenceErrorLabels = {
   runtime_unavailable: 'most runtime niedostepny',
@@ -951,7 +952,7 @@ function normalizeCompanyConversationAudit(rawAudit) {
 
   const dataGapStopDetected = rawAudit?.dataGapStopDetected === true
     || verification?.dataGapStopDetected === true
-    || processIssueFlags.includes('data_gap_stop');
+    || processIssueFlags.includes('data_gap_stage');
   const dataGapMissingInputsList = Array.isArray(rawAudit?.dataGapMissingInputsList)
     ? rawAudit.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
     : [];
@@ -971,9 +972,10 @@ function normalizeCompanyConversationAudit(rawAudit) {
     promptRepliesBelowThreshold,
     missingReplyPromptNumbers,
     lowQualityReplyPromptNumbers,
-    missingPromptNumbers,
-    dataGapStopDetected,
-    dataGapMissingInputsList,
+	    missingPromptNumbers,
+	    dataGapStopDetected,
+	    dataGapStageId: typeof rawAudit?.dataGapStageId === 'string' ? rawAudit.dataGapStageId.trim() : '',
+	    dataGapMissingInputsList,
     dataGapMissingInputsText,
     processIssueFlags,
     stageMappingCheck: {
@@ -1067,6 +1069,7 @@ function isStoppedStatus(status) {
 }
 
 const priorityReasonWeights = Object.freeze({
+  data_gap_stage: 44,
   data_gap_unresolved: 42,
   missing_assistant_reply: 34,
   timeout: 28,
@@ -1226,7 +1229,7 @@ function getViewScopeLabel() {
     case 'failed':
       return 'status blad';
     case 'data_gap':
-      return 'DATA_GAPS';
+      return 'DATA_GAP_STAGE';
     default:
       return 'wszystkie aktywne';
   }
@@ -1515,7 +1518,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   if (processSummary) {
     const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Okna ${queueLiveSlots}/${queueMax} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
     const details = [
-      `DATA_GAPS: ${dataGapCount}`,
+      `DATA_GAP_STAGE: ${dataGapCount}`,
       `Braki odpowiedzi: ${missingReplyCount}`,
       `Sredni postep aktywnych: ${avgProgress}%`,
       `Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`,
@@ -3367,12 +3370,10 @@ function formatConversationAuditText(audit) {
   }
 
   if (audit.dataGapStopDetected) {
-    const missingInputsText = audit.dataGapMissingInputsList.length > 0
-      ? audit.dataGapMissingInputsList.join(', ')
-      : (audit.dataGapMissingInputsText || 'brak');
-    lines.push(`DATA_GAPS: TAK | missing_inputs: ${missingInputsText}`);
+    const stageText = audit.dataGapStageId || '?';
+    lines.push(`DATA_GAP_STAGE: ${stageText}`);
   } else {
-    lines.push('DATA_GAPS: NIE');
+    lines.push('DATA_GAP_STAGE: NIE');
   }
 
   if (Array.isArray(audit.processIssueFlags) && audit.processIssueFlags.length > 0) {

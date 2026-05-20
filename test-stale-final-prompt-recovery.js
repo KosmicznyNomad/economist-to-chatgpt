@@ -286,9 +286,9 @@ async function main() {
     status: 'running',
     lifecycleStatus: 'running',
     phase: 'prompt_send',
-    currentPrompt: 18,
-    totalPrompts: 18,
-    stageIndex: 17,
+    currentPrompt: 16,
+    totalPrompts: 16,
+    stageIndex: 15,
     tabId: 55,
     title: 'Alpha Corp',
     analysisType: 'company',
@@ -332,9 +332,9 @@ async function main() {
   const stage12HistoryProcess = {
     ...process,
     id: 'run-final-stage14-history',
-    currentPrompt: 18,
-    totalPrompts: 18,
-    stageIndex: 17,
+    currentPrompt: 16,
+    totalPrompts: 16,
+    stageIndex: 15,
     lastProgressAt: nowTs - (12 * 60 * 1000)
   };
 
