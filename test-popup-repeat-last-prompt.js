@@ -213,6 +213,9 @@ function createContext() {
     }
   };
   vm.createContext(context);
+  vm.runInContext(extractFunctionSource(popupSource, 'executeResumeAllFromPopup'), context, {
+    filename: 'popup.js'
+  });
   vm.runInContext(extractFunctionSource(popupSource, 'executeRepeatLastPromptAllFromPopup'), context, {
     filename: 'popup.js'
   });
@@ -244,6 +247,50 @@ async function testRepeatLastPromptUsesStoredEffortByDefault() {
   assert.strictEqual(statuses[0].isError, false);
 }
 
+async function testResumeAllUsesStoredEffortByDefault() {
+  const { context, runtimeMessages, statuses } = createContext();
+  const button = {
+    disabled: false,
+    textContent: 'Wznow wszystkie',
+    innerHTML: 'Wznow wszystkie'
+  };
+
+  await context.executeResumeAllFromPopup(button);
+
+  assert.strictEqual(runtimeMessages.length, 1);
+  assert.deepStrictEqual(toPlainObject(runtimeMessages[0]), {
+    type: 'DETECT_LAST_COMPANY_PROMPT_AND_RESUME',
+    origin: 'popup-resume-all',
+    scope: 'active_company_invest_processes',
+    monitorSessionId: 'monitor:popup-resume-all',
+    openMonitorWindow: true,
+    monitorAutoCloseAfterMs: 40000,
+    useStoredComposerThinkingEffort: true
+  });
+  assert.strictEqual(button.disabled, false);
+  assert.strictEqual(button.innerHTML, 'Wznow wszystkie');
+  assert.strictEqual(statuses[0].isError, false);
+}
+
+async function testResumeAllForwardsExplicitEffort() {
+  const { context, runtimeMessages } = createContext();
+  const button = {
+    disabled: false,
+    textContent: 'Wznow wszystkie',
+    innerHTML: 'Wznow wszystkie'
+  };
+
+  await context.executeResumeAllFromPopup(button, {
+    origin: 'popup-resume-test',
+    composerThinkingEffort: ' HEAVY '
+  });
+
+  assert.strictEqual(runtimeMessages.length, 1);
+  assert.strictEqual(runtimeMessages[0].origin, 'popup-resume-test');
+  assert.strictEqual(runtimeMessages[0].composerThinkingEffort, 'heavy');
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(runtimeMessages[0], 'useStoredComposerThinkingEffort'), false);
+}
+
 async function testRepeatLastPromptForwardsExplicitEffort() {
   const { context, runtimeMessages } = createContext();
   const button = { disabled: false, textContent: 'Powtorz ostatni prompt (wszystkie)' };
@@ -260,6 +307,8 @@ async function testRepeatLastPromptForwardsExplicitEffort() {
 }
 
 async function main() {
+  await testResumeAllUsesStoredEffortByDefault();
+  await testResumeAllForwardsExplicitEffort();
   await testRepeatLastPromptUsesStoredEffortByDefault();
   await testRepeatLastPromptForwardsExplicitEffort();
   console.log('test-popup-repeat-last-prompt.js passed');

@@ -28,28 +28,38 @@ GLOBAL PREAMBLE
 ARTICLE MECHANISM PRIMACY
 
 The system's edge is article fidelity, not company quality. The pipeline
-exists to extract a hidden or underappreciated capital flow from a
-specialist article and find the cleanest investable public expression
-of that flow.
+exists to extract a hidden or underappreciated mechanism from a
+specialist article and find the cleanest public equity expression
+of that mechanism.
+
+Later stages decide whether that expression is buyable now, buyable only
+after price/proof confirmation, or useful only as sector memory.
 
 Hierarchy of evidence:
 1. Article mechanism (what changed in the world)
 2. Capital flow map (who pays whom, on what invoice, through which gate)
 3. Public capture (which company sits at the flow)
 4. Market neglect (gap between article reveal and consensus framing)
-5. Stock materiality (can the flow move EBIT/FCF/duration/multiple)
+5. Stock materiality (can the mechanism move revenue, EBIT, FCF, EPS,
+   segment economics, duration, multiple, downside floor, or consensus expectations)
 6. Capture durability (is economics retained or pass-through)
 7. CORE safety (may we buy this company)
 8. Valuation sanity (is success already priced)
 
-CORE quality is rank 7, not rank 1. A best-in-class company with weak
-article fidelity, low market neglect, or de minimis stock materiality
-does NOT win PRIMARY. It may at best win SECONDARY as a defensive
-adjacent expression, with explicit labelling.
+CORE quality is rank 7, not rank 1.
 
-If no candidate has strong article fidelity AND material flow AND market
-neglect, the system reports "best available expression" with reduced
-sizing — not a full-conviction PRIMARY masquerading as a high-quality pick.
+A best-in-class company with weak article fidelity, low market neglect,
+or de minimis stock materiality does not win an actionable PRIMARY.
+
+It may still appear as a conditional watch record if it is a valid
+article-derived expression, but the blocker must be stated clearly:
+price, proof, timing, realism, duration, or CORE uncertainty.
+
+If no candidate has strong article fidelity, material stock impact,
+market neglect, and current actionability, the system reports the best
+available expression as a conditional watch record.
+
+Current sizing is 0% until the price or proof condition is met.
 
 LAYERS OF ECONOMIC EVIDENCE
 
@@ -59,15 +69,26 @@ Sectors differ — defense procurement, energy infrastructure, healthcare reimbu
 
 CORE COMPLETENESS PRINCIPLE
 
-CORE serves as a contamination audit and safety filter, not as the
-engine of investment selection. Its job is to answer "may we buy this
-company?" — never "why should we buy this company?".
+CORE serves as a contamination audit and safety filter, not as a generic
+reason to invest.
+
+Its job is to answer "may we buy this company?" — not "why should we buy
+this company?" in isolation.
+
+However, if the article reveals that the market misprices an existing
+segment, cycle position, duration, margin structure, capacity rent, or
+earnings trajectory, that CORE or segment rebase may be part of the
+article-derived thesis.
 
 Within that role, CORE must remain a complete going-concern valuation
 of the whole business. Stripping CORE down to a no-thesis stub creates
 artificial WEDGE inflation and is forbidden. Equally forbidden is
-inflating CORE quality into a reason to invest when article-derived
-WEDGE is small or absent.
+inflating generic CORE quality into a reason to invest when article-derived
+stock materiality is small or absent.
+
+A small narrow WEDGE does not by itself make the thesis immaterial if
+the correct route is segment rebase, core rebase, capacity rent, pricing,
+utilization, duration extension, or option conversion.
 
 CORE is NOT:
 - a no-growth stub,
@@ -93,17 +114,36 @@ CORE MUST exclude only:
 - speculative future M&A,
 - unvalidated option value,
 - multiple expansion unsupported by cash-flow economics,
-- any role as a primary reason to invest; CORE may VETO, REDUCE SIZING,
-  or RAISE EVIDENCE BAR, but CORE may not by itself promote a company
-  to PRIMARY in the absence of article-derived WEDGE.
+- any role as a standalone, non-article-driven reason to invest.
+
+CORE may VETO, REDUCE SIZING, or RAISE EVIDENCE BAR.
+
+CORE may not promote a company to an actionable PRIMARY unless the
+mispricing is traced back to the article mechanism.
+
+If the article-derived route is segment rebase, core rebase, capacity
+rent, pricing, utilization, duration extension, cycle normalization, or
+option conversion, CORE may support the case only through that route.
 
 Rule:
 Do not solve thesis double-counting by undercounting CORE.
-If current thesis-linked revenue is already in Revenue0, it belongs in CORE. Only the incremental acceleration, rebase, pricing, utilization, duration extension, or option value belongs in thesis contribution.
+
+If current thesis-linked revenue is already in Revenue0, it belongs in
+CORE.
+
+Only the incremental acceleration, rebase, pricing, utilization, duration
+extension, FCF improvement, or option value belongs in thesis contribution.
 
 ECONOMIC PRECISION RULE
 
 Do not reward numerical completeness over economic truth.
+
+Do not punish a valid thesis merely because its value transmission is not
+a separable narrow WEDGE.
+
+For existing businesses, precision should come from segment economics,
+guidance, consensus gap, margin path, utilization, pricing, FCF conversion,
+or observable KPI progression — not from invented product-level revenue bridges.
 
 Numerical precision must be earned by economic evidence.
 
@@ -188,10 +228,10 @@ Thresholds:
 - WEDGE-to-Price < 5% AND high neglect → INVESTIGATE, may signal hidden
   segment, mispricing, or misclassification
 
-A large, high-quality company with a small WEDGE relative to its market
-cap is a sector exposure, not an article-driven trade — even if the
-flow is real. Such candidates default to SMALL_STARTER sizing or
-SECTOR_MEMORY_ONLY.
+A large, high-quality company with small article-derived stock
+materiality is a sector exposure, not an article-driven trade — even if
+the mechanism is real. Such candidates default to a conditional watch
+record with 0% current sizing, or SECTOR_MEMORY_ONLY.
 
 FINAL ARTICLE-FIDELITY QC
 
@@ -203,19 +243,22 @@ A. Is PRIMARY the cleanest investable expression of the article's
    (If adjacent → must be SECONDARY at most, with explicit "adjacent
    expression" label.)
 
-B. Does PRIMARY's WEDGE trace to a specific invoice item, gate, or
-   pricing object identified in the article — not to a generic
-   sector tailwind?
+B. Does PRIMARY's article-derived value transmission trace to a specific
+   invoice item, gate, pricing object, segment rebase, core rebase, or
+   other mechanism identified in the article — not to a generic sector
+   tailwind?
 
 C. Has market neglect for PRIMARY been labelled HIGH / MEDIUM / LOW /
    ALREADY PRICED IN, with evidence?
 
 D. Has stock materiality for PRIMARY been labelled MATERIAL / MARGINAL /
-   DE MINIMIS / INVESTIGATE, with Pool × Capture × Retention math?
+   DE MINIMIS / INVESTIGATE, with Pool × Capture × Retention math or
+   equivalent segment/core rebase evidence?
 
-E. If WEDGE is DE MINIMIS, has the system explicitly downgraded to
-   "best available expression / small starter" — rather than producing
-   a full-conviction PRIMARY whose conviction silently rests on CORE?
+E. If current actionability is missing, has the system explicitly
+   downgraded to a conditional watch record with 0% current sizing until
+   price or proof conditions are met — rather than producing a
+   full-conviction PRIMARY whose conviction silently rests on CORE?
 
 F. Does sector memory capture the article's mechanisms even when no
    investable PRIMARY exists?
@@ -235,7 +278,7 @@ Before producing final rankings or records, verify:
 6. Bear_TOTAL <= Base_TOTAL <= Bull_TOTAL.
 7. Contract bear floor did not replace Bear_TOTAL if it exceeded Base_TOTAL.
 8. Composite Score did not override Gate 2 Value.
-9. Wedge_to_Price below 5% was treated as diagnostic unless CORE mispricing exists.
+9. Wedge_to_Price below 5% was treated as diagnostic unless the article mechanism supports CORE/segment rebase.
 10. Final decision explains when to buy, when not to buy, and what falsifies the case.
 
 NO SILENT ZERO RULE
@@ -253,14 +296,17 @@ NO SILENT WEDGE RULE (corollary)
 
 Just as no material segment may be silently valued at zero, no material
 article-derived mechanism may be silently dropped from the candidate's
-WEDGE accounting. If the article reveals a flow at the company and the
-system's WEDGE does not reflect it, the system must either:
-- explicitly model the flow with Pool × Capture × Retention, or
+value transmission accounting. If the article reveals a mechanism at the
+company and the system's thesis contribution does not reflect it, the
+system must either:
+- explicitly model the flow with Pool × Capture × Retention or an
+  equivalent segment/core rebase route, or
 - explicitly state why the flow does not reach the company (gate
   controlled by another party, pass-through, already in CORE base).
 
-The system may not silently default to "small WEDGE → high CORE quality
-wins" without naming the dropped mechanism.
+The system may not silently default to "small narrow WEDGE → generic CORE
+quality wins" without naming the dropped mechanism or article-derived
+rebase route.
 
 STAGE 0 — ARTICLE MECHANISM LOCK
 (formerly: Evidence Ledger + Thesis)
@@ -3992,7 +4038,7 @@ CORE diagnostic override:
 - If CORE_DECISION_GRADE = FALSE, run diagnostics only and output CORE_NOT_DECISION_GRADE. Do not issue ADVANCE / DROP based on valuation.
 - If CORE_DECISION_GRADE_AFTER_MCP = FALSE, run diagnostics only and output CORE_NOT_DECISION_GRADE_AFTER_MCP. Do not issue ADVANCE / DROP based on valuation.
 - A weak CORE cannot support a strong downstream decision.
-- A small WEDGE does not prove the stock is unattractive if CORE is not decision-grade.
+- A small narrow WEDGE does not prove the stock is unattractive if the correct route is CORE/segment rebase.
 
 | TractionClass | ADVANCE if | WATCH if | DROP if |
 |---|---|---|---|
@@ -4778,7 +4824,7 @@ If current thesis-linked revenue is already material in CORE and incremental eco
 - avoid detailed synthetic revenue and margin bridges unless supported by disclosed KPIs,
 - state that the main valuation object is CORE rebase, not a narrow wedge.
 
-If expected Wedge_to_Price is below 5%, treat the wedge as de minimis for stock selection unless CORE mispricing is independently present.
+If expected Wedge_to_Price is below 5%, treat the narrow wedge as de minimis for stock selection unless the article mechanism supports CORE/segment rebase.
 
 However, WEDGE_NPV_PER_SHARE does not mean only a narrow new-revenue wedge.
 It means the incremental thesis contribution versus CORE_ADOPTED, routed through the correct economic mechanism:
@@ -5178,7 +5224,7 @@ If price trigger is more than 50% below current price and CORE is not decision-g
 - do not pass hard buy zone to Stage 12-14.
 
 A weak CORE cannot support a strong downstream decision.
-A small WEDGE does not prove the stock is unattractive if CORE is not decision-grade.
+A small narrow WEDGE does not prove the stock is unattractive if the correct route is CORE/segment rebase.
 
 CORE PRINCIPLE: Use the Global Definitions block for valuation objects. All metrics (priced-in, asymmetry, tier) computed on TOTAL only.
 

@@ -240,6 +240,7 @@ vm.createContext(context);
   'parseJsonObjectCandidate',
   'isPortfolioFeedbackSubmitPayload',
   'normalizePortfolioFeedbackSubmitDispatchPayload',
+  'normalizePortfolioFinalResponseFeedbackSubmitPayload',
   'extractPortfolioFeedbackSubmitPayloadFromFinalResponse',
   'mapDispatchDecisionRecord',
   'normalizeWatchlistDispatchPayload',
@@ -763,70 +764,82 @@ function testDispatchPayloadPreservesChatGptComputationTelemetry() {
 
 function testPortfolioPromptOnePayloadKeepsRoutingMetadata() {
   const payload = context.normalizeWatchlistDispatchPayload({
-    schema: 'portfolio.prompt_first_response.v1',
+    schema: 'portfolio.layer_ranking.v1',
     text: 'Ranking warstw value chain: #1 infrastructure, #2 software.',
-    source: 'Portfolio Prompt 1: Value Chain Ranking',
+    source: 'Portfolio Prompt 1: Layer Ranking',
     sourceTitle: 'Source article title',
-    analysisType: 'portfolio_prompt1_value_chain_ranking',
-    sourceRecordSuffix: 'portfolio_prompt1_value_chain_ranking',
+    analysisType: 'portfolio_layer_ranking',
+    sourceRecordSuffix: 'portfolio_layer_ranking',
     responseId: 'resp-portfolio-p1',
     runId: 'run-portfolio',
     stage: {
       selected_response_prompt: 1,
       selected_response_stage_index: 0,
-      selected_response_reason: 'portfolio_prompt1_value_chain_ranking',
-      artifact_name: 'Portfolio Prompt 1: Value Chain Ranking'
+      selected_response_reason: 'portfolio_layer_ranking',
+      artifact_name: 'Portfolio Prompt 1: Layer Ranking'
     },
     timestamp: 1_710_000_000_000
   });
 
-  assert.strictEqual(payload.schema, 'portfolio.prompt_first_response.v1');
-  assert.strictEqual(payload.analysisType, 'portfolio_prompt1_value_chain_ranking');
-  assert.strictEqual(payload.sourceRecordSuffix, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(payload.schema, 'portfolio.layer_ranking.v1');
+  assert.strictEqual(payload.analysisType, 'portfolio_layer_ranking');
+  assert.strictEqual(payload.sourceRecordSuffix, 'portfolio_layer_ranking');
   assert.strictEqual(payload.stage.selected_response_prompt, 1);
-  assert.strictEqual(payload.stage.selected_response_reason, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(payload.stage.selected_response_reason, 'portfolio_layer_ranking');
 
   const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
-  assert.strictEqual(outbound.schema, 'portfolio.prompt_first_response.v1');
-  assert.strictEqual(outbound.analysisType, 'portfolio_prompt1_value_chain_ranking');
-  assert.strictEqual(outbound.sourceRecordSuffix, 'portfolio_prompt1_value_chain_ranking');
+  assert.strictEqual(outbound.schema, 'portfolio.layer_ranking.v1');
+  assert.strictEqual(outbound.analysisType, 'portfolio_layer_ranking');
+  assert.strictEqual(outbound.sourceRecordSuffix, 'portfolio_layer_ranking');
   assert.strictEqual(outbound.stage.selected_response_stage_index, 0);
 }
 
-function testPortfolioFeedbackSubmitPayloadUsesDispatchShape() {
+function testPortfolioFinalTextPayloadBecomesFeedbackSubmit() {
   const payload = context.normalizeWatchlistDispatchPayload({
-    schema: 'portfolio.feedback.submit.v1',
+    schema: 'portfolio.final_response.v2',
     responseId: 'resp-portfolio-final',
     runId: 'run-portfolio',
     source: 'Portfolio final JSON',
     sourceTitle: 'Portfolio final JSON',
-    analysisType: 'portfolio_feedback_submit',
+    analysisType: 'portfolio',
     timestamp: 1_710_000_000_000,
-    account: 'U22088457',
-    review: {
-      review_id: 'pfb-test',
-      snapshot_id: 'ibkrps-test',
-      portfolio_feedback: 'Rotate sizing.'
-    },
-    layer_votes: [{ layer_id: 'ai_hyperscalers', vote: 'REDUCE' }],
-    position_votes: [{ symbol: 'GOOGL', layer_id: 'ai_hyperscalers', action: 'REDUCE' }],
-    trades: [{ symbol: 'GOOGL', action: 'SELL' }],
-    entry_rules: [{ symbol: 'GOOGL', strategy: 'Reduce now.' }]
+    text: JSON.stringify({
+      thesis_construction_summary: 'Popyt -> bottleneck -> pricing power -> marża. Teza autora opisuje przesunięcie marży do właścicieli bottlenecku.',
+      portfolio_construction_commentary: 'Portfel jest tekstowym feedbackiem wobec tezy autora, a nie payloadem transakcyjnym.',
+      layers: [
+        {
+          layer_id: 'cloud_infrastructure',
+          layer_name: 'Cloud infrastructure',
+          vote: 'HOLD',
+          layer_business_thesis: 'Warstwa zarabia na wynajmie i sprzedaży infrastruktury cloud. Może być atrakcyjna, gdy scarcity compute daje pricing power. Warstwa ma mieszany capture.'
+        }
+      ],
+      positions: [
+        {
+          symbol: 'GOOGL',
+          layer_id: 'cloud_infrastructure',
+          current_qty: 10,
+          target_qty: 12,
+          value_capture_assessment: 'proxy',
+          position_thesis: 'GOOGL jest proxy, ale ma enterprise lock-in. Docelowa liczba akcji rośnie, bo teza premiuje platformy z dystrybucją.'
+        }
+      ],
+      portfolio_gaps: [],
+      warnings: [],
+      errors: []
+    })
   });
 
   assert.strictEqual(payload.schema, 'portfolio.feedback.submit.v1');
   assert.strictEqual(payload.responseId, 'resp-portfolio-final:portfolio_feedback_submit');
   assert.strictEqual(payload.analysisType, 'portfolio_feedback_submit');
-  assert.strictEqual(payload.account, 'U22088457');
-  assert.strictEqual(payload.review.review_id, 'pfb-test');
-  assert.strictEqual(JSON.parse(payload.text).position_votes[0].symbol, 'GOOGL');
-
-  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
-  assert.strictEqual(outbound.schema, 'portfolio.feedback.submit.v1');
-  assert.strictEqual(outbound.review.review_id, 'pfb-test');
-  assert.strictEqual(outbound.layer_votes[0].layer_id, 'ai_hyperscalers');
-  assert.strictEqual(outbound.action_plan[0].action, 'SELL');
-  assert.strictEqual(outbound.entry_strategy[0].strategy, 'Reduce now.');
+  assert.strictEqual(payload.review.review_id, 'resp-portfolio-final:portfolio_final_feedback');
+  assert.strictEqual(payload.review.portfolio_feedback.includes('tekstowym feedbackiem'), true);
+  assert.strictEqual(payload.position_votes[0].action, 'INCREASE');
+  assert.strictEqual(payload.position_votes[0].current_qty, 10);
+  assert.strictEqual(payload.position_votes[0].target_qty, 12);
+  assert.strictEqual(payload.position_votes[0].qty_delta, 2);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(payload.position_votes[0], 'priority'), false);
 }
 
 function main() {
@@ -840,7 +853,7 @@ function main() {
   testOutboundStructuredV2WithoutTextAcceptsDirectRecords();
   testDispatchPayloadPreservesChatGptComputationTelemetry();
   testPortfolioPromptOnePayloadKeepsRoutingMetadata();
-  testPortfolioFeedbackSubmitPayloadUsesDispatchShape();
+  testPortfolioFinalTextPayloadBecomesFeedbackSubmit();
   console.log('test-watchlist-dispatch-decision-contract.js: ok');
 }
 

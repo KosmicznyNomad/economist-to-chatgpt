@@ -1391,11 +1391,17 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
     }
 
     const queuedCount = Number.isInteger(response?.queuedCount) ? response.queuedCount : 0;
+    const portfolioLaunchedCount = Number.isInteger(response?.portfolioLaunchedCount)
+      ? Math.max(0, response.portfolioLaunchedCount)
+      : 0;
     const queueSummary = formatAnalysisQueueSummary(response, {
       includePrefix: false,
       includeQueue: true
     });
-    setRunStatus(`Zakolejkowano ${queuedCount} analiz. ${queueSummary}`);
+    const portfolioLaunchSummary = portfolioLaunchedCount > 0
+      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
+      : '';
+    setRunStatus(`Zakolejkowano ${queuedCount} analiz.${portfolioLaunchSummary} ${queueSummary}`);
     void refreshAnalysisQueueStatus();
   } catch (error) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
@@ -1521,6 +1527,8 @@ async function executeResumeAllFromPopup(button, options = {}) {
     };
     if (hasExplicitThinkingEffort) {
       message.composerThinkingEffort = composerThinkingEffort;
+    } else {
+      message.useStoredComposerThinkingEffort = true;
     }
     const response = await sendRuntimeMessage(message);
 

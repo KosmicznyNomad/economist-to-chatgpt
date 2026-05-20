@@ -17,6 +17,22 @@ const presetTargetTabId = Number.isInteger(presetTargetTabIdRaw) ? presetTargetT
 const presetTargetWindowId = Number.isInteger(presetTargetWindowIdRaw) ? presetTargetWindowIdRaw : null;
 const resumeTitle = urlParams.get('title') || '';
 
+function normalizeComposerThinkingEffort(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (
+    normalized === 'light'
+    || normalized === 'standard'
+    || normalized === 'extended'
+    || normalized === 'heavy'
+  ) {
+    return normalized;
+  }
+  return '';
+}
+
+const presetComposerThinkingEffort = normalizeComposerThinkingEffort(urlParams.get('composerThinkingEffort'));
+const presetUseStoredComposerThinkingEffort = urlParams.get('useStoredComposerThinkingEffort') === '1';
+
 function truncateText(text, maxLength = 80) {
   if (!text) return '';
   const compact = String(text).trim().replace(/\s+/g, ' ');
@@ -182,7 +198,7 @@ startBtn.addEventListener('click', async () => {
   if (!Number.isInteger(selectedIndex)) return;
 
   startBtn.disabled = true;
-  await sendRuntimeMessage({
+  const message = {
     type: 'RESUME_STAGE_START',
     startIndex: selectedIndex,
     targetTabId: presetTargetTabId,
@@ -190,7 +206,13 @@ startBtn.addEventListener('click', async () => {
     title: resumeTitle,
     reloadBeforeResume: true,
     detach: true
-  });
+  };
+  if (presetComposerThinkingEffort) {
+    message.composerThinkingEffort = presetComposerThinkingEffort;
+  } else if (presetUseStoredComposerThinkingEffort) {
+    message.useStoredComposerThinkingEffort = true;
+  }
+  await sendRuntimeMessage(message);
   window.close();
 });
 

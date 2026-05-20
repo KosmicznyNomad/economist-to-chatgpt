@@ -11,6 +11,10 @@ const processSummary = document.getElementById('process-summary');
 const viewFilterSelect = document.getElementById('view-filter');
 const viewQueryInput = document.getElementById('view-query');
 const viewHint = document.getElementById('view-hint');
+const dispatchHealthStatus = document.getElementById('dispatch-health-status');
+const dispatchHealthMain = document.getElementById('dispatch-health-main');
+const dispatchHealthDetail = document.getElementById('dispatch-health-detail');
+const dispatchHealthRefreshBtn = document.getElementById('dispatch-health-refresh-btn');
 
 let selectedProcessId = null;
 let currentProcesses = [];
@@ -32,6 +36,8 @@ const processCardMap = new Map();
 const processSeenAt = new Map();
 let stageNamesCompany = [];
 let stageNamesLoaded = false;
+let dispatchHealthSnapshot = null;
+let dispatchHealthInFlight = false;
 const processConversationAuditCache = new Map();
 const processConversationAuditInFlight = new Map();
 const processCompanySnapshotCache = new Map();
@@ -41,6 +47,7 @@ const PROCESS_COMPANY_SNAPSHOT_TTL_MS = 60_000;
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
 const MONITOR_UI_TICK_MS = 10_000;
+const DISPATCH_HEALTH_TICK_MS = 60_000;
 
 console.log('[panel] Monitor procesow uruchomiony');
 
@@ -57,6 +64,7 @@ async function loadStageNames() {
 async function initializeMonitor() {
   await loadStageNames();
   await refreshProcesses();
+  void refreshDispatchHealthStatus(true);
 }
 
 // Pobierz procesy przy starcie
@@ -87,6 +95,10 @@ setInterval(() => {
   if (activeProcessesCache.length === 0) return;
   updateUI(activeProcessesCache, { force: true });
 }, MONITOR_UI_TICK_MS);
+setInterval(() => {
+  if (document.hidden) return;
+  void refreshDispatchHealthStatus(false);
+}, DISPATCH_HEALTH_TICK_MS);
 installProcessMonitorRuntimeProblemLogging();
 
 function scheduleProcessRefresh(reason = 'manual', delayMs = 0) {
@@ -184,6 +196,12 @@ if (viewQueryInput) {
   });
 }
 
+if (dispatchHealthRefreshBtn) {
+  dispatchHealthRefreshBtn.addEventListener('click', () => {
+    void refreshDispatchHealthStatus(true);
+  });
+}
+
 const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
@@ -199,6 +217,7 @@ const reasonLabels = {
   auto_resume_unhandled_exception: 'Auto-resume: nieobsluzony wyjatek',
   bulk_resume_reload: 'Zatrzymano przed zbiorczym wznowieniem',
   missing_execute_result: 'Brak wyniku executeScript',
+  missing_execute_result_payload: 'Brak payloadu executeScript',
   inject_failed: 'Inject zakonczyl sie bledem',
   inject_critical_error: 'Krytyczny blad injectToChat',
   force_stopped: 'Proces zatrzymany sygnalem STOP',
@@ -285,6 +304,123 @@ function reportProblemLogFromUi(rawEntry = {}) {
     });
   } catch {
     // Ignore runtime bridge errors in UI page.
+  }
+}
+
+function formatDispatchHealthCheckedAt(ts) {
+  if (!Number.isInteger(ts) || ts <= 0) return 'nigdy';
+  try {
+    return new Date(ts).toLocaleTimeString();
+  } catch {
+    return 'n/a';
+  }
+}
+
+function getDispatchHealthTone(status) {
+  if (!status || typeof status !== 'object') return 'warn';
+  if (status.success === true && status.dbConnected === true) return 'ok';
+  if (status.configured === false || status.authOk === false || status.backendReachable === false) return 'error';
+  if (status.dbConnected === false) return 'error';
+  return 'warn';
+}
+
+function formatDispatchHealthLines(status) {
+  if (!status || typeof status !== 'object') {
+    return {
+      main: 'DB: status nieznany',
+      detail: 'Nie udalo sie odczytac statusu polaczenia.'
+    };
+  }
+  const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
+  const checkedAt = formatDispatchHealthCheckedAt(status.checkedAt);
+  const keyId = typeof status.keyId === 'string' && status.keyId.trim() ? status.keyId.trim() : '-';
+  const source = typeof status.tokenSource === 'string' && status.tokenSource.trim() ? status.tokenSource.trim() : 'missing';
+  const latency = Number.isInteger(status.databaseLatencyMs) ? `, DB ${status.databaseLatencyMs}ms` : '';
+  const lastFlush = status.lastFlush && typeof status.lastFlush === 'object'
+    ? `, last flush sent=${status.lastFlush.sent || 0}/failed=${status.lastFlush.failed || 0}`
+    : '';
+  if (status.success === true && status.dbConnected === true) {
+    return {
+      main: 'DB: OK - konfiguracja, backend i baza dzialaja',
+      detail: `Key ${keyId}, token=${source}, kolejka=${queueSize}${latency}${lastFlush}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.configured === false) {
+    return {
+      main: 'DB: NIE - brak konfiguracji wtyczki',
+      detail: `Powod: ${status.reason || status.healthError || 'missing_dispatch_credentials'}, key=${keyId}, token=${source}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.authOk === false && status.backendReachable === true) {
+    return {
+      main: 'DB: NIE - backend odpowiada, ale podpis/auth nie przechodzi',
+      detail: `HTTP ${status.status || '-'}, powod: ${status.healthError || status.reason || 'auth_failed'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.backendReachable === false) {
+    return {
+      main: 'DB: NIE - brak polaczenia z backendem',
+      detail: `${status.healthError || status.error || 'network_error'}, endpoint=${status.intakeUrl || '-'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.dbConnected === false) {
+    return {
+      main: 'DB: NIE - backend dziala, ale baza nie odpowiada',
+      detail: `${status.healthErrorType || 'db_error'}: ${status.healthError || status.intakeStatus || 'db_error'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  return {
+    main: 'DB: status niepewny',
+    detail: `${status.healthState || status.reason || 'unknown'}, kolejka=${queueSize}, sprawdzono ${checkedAt}.`
+  };
+}
+
+function renderDispatchHealthStatus(status, options = {}) {
+  if (!dispatchHealthStatus || !dispatchHealthMain || !dispatchHealthDetail) return;
+  const lines = formatDispatchHealthLines(status);
+  const tone = options.loading ? 'warn' : getDispatchHealthTone(status);
+  dispatchHealthStatus.className = `connection-status ${tone}`;
+  dispatchHealthMain.textContent = options.loading ? 'DB: sprawdzam...' : lines.main;
+  dispatchHealthDetail.textContent = options.loading
+    ? 'Weryfikuje konfiguracje, backend i polaczenie z baza.'
+    : lines.detail;
+  if (dispatchHealthRefreshBtn) {
+    dispatchHealthRefreshBtn.disabled = dispatchHealthInFlight;
+  }
+}
+
+async function refreshDispatchHealthStatus(forceReload = false) {
+  if (!dispatchHealthStatus || dispatchHealthInFlight) return dispatchHealthSnapshot;
+  dispatchHealthInFlight = true;
+  renderDispatchHealthStatus(dispatchHealthSnapshot, { loading: true });
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_WATCHLIST_DISPATCH_HEALTH',
+      forceReload
+    });
+    dispatchHealthSnapshot = response && typeof response === 'object'
+      ? response
+      : { success: false, healthState: 'empty_response', healthError: 'empty_response' };
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+    return dispatchHealthSnapshot;
+  } catch (error) {
+    dispatchHealthSnapshot = {
+      success: false,
+      configured: false,
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      healthState: 'runtime_error',
+      healthError: error?.message || String(error),
+      checkedAt: Date.now()
+    };
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+    return dispatchHealthSnapshot;
+  } finally {
+    dispatchHealthInFlight = false;
+    if (dispatchHealthRefreshBtn) {
+      dispatchHealthRefreshBtn.disabled = false;
+    }
   }
 }
 
@@ -2550,15 +2686,33 @@ async function sendProcessResumeNextStage(process, options = {}) {
     return { success: false, error: 'missing_process_id' };
   }
 
-  const response = await sendRuntimeMessage({
+  const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
+    ? options.composerThinkingEffort.trim().toLowerCase()
+    : '';
+  const hasExplicitThinkingEffort = (
+    composerThinkingEffort === 'light'
+    || composerThinkingEffort === 'standard'
+    || composerThinkingEffort === 'extended'
+    || composerThinkingEffort === 'heavy'
+  );
+  const useStoredComposerThinkingEffort = !hasExplicitThinkingEffort && options?.useStoredComposerThinkingEffort !== false;
+  const message = {
     type: 'PROCESS_RESUME_NEXT_STAGE',
     runId: process.id,
     tabId: Number.isInteger(process.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process.windowId) ? process.windowId : null,
     chatUrl: resolveChatUrl(process),
     title: process?.title || '',
-    openDialogOnly: !!options.openDialogOnly
-  });
+    openDialogOnly: !!options.openDialogOnly,
+    forceRepeatLastPrompt: options.forceRepeatLastPrompt === true
+  };
+  if (hasExplicitThinkingEffort) {
+    message.composerThinkingEffort = composerThinkingEffort;
+  } else if (useStoredComposerThinkingEffort) {
+    message.useStoredComposerThinkingEffort = true;
+  }
+
+  const response = await sendRuntimeMessage(message);
   if (response?.ok === false) {
     console.warn('[panel] PROCESS_RESUME_NEXT_STAGE failed:', response.errorMessage || response.errorCode || response.error);
     return {
@@ -2575,6 +2729,8 @@ async function sendProcessResumeNextStage(process, options = {}) {
     startPromptNumber: Number.isInteger(response?.startPromptNumber) ? response.startPromptNumber : null,
     detectedPromptNumber: Number.isInteger(response?.detectedPromptNumber) ? response.detectedPromptNumber : null,
     detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : '',
+    retrySamePrompt: response?.retrySamePrompt === true,
+    retryReason: typeof response?.retryReason === 'string' ? response.retryReason : '',
     finalStagePersistence: response?.finalStagePersistence && typeof response.finalStagePersistence === 'object'
       ? response.finalStagePersistence
       : null
@@ -2660,15 +2816,23 @@ function formatFinalStagePersistenceShort(finalStagePersistence) {
 async function resumeNextStageFromPanel(process, button, options = {}) {
   if (!process) return false;
   const openDialogOnly = !!options.openDialogOnly;
-  const originalText = (button?.dataset?.originalText || button?.textContent || (openDialogOnly ? 'Wznow od kolejnego etapu' : 'Resume next stage')).trim();
+  const forceRepeatLastPrompt = options.forceRepeatLastPrompt === true;
+  const originalText = (button?.dataset?.originalText || button?.textContent || (forceRepeatLastPrompt ? 'Powtorz ostatni' : (openDialogOnly ? 'Wznow od kolejnego etapu' : 'Resume next stage'))).trim();
   if (button) {
     button.dataset.originalText = originalText;
     button.disabled = true;
-    button.textContent = openDialogOnly ? 'Wykrywam etap...' : 'Wznawiam...';
+    button.textContent = forceRepeatLastPrompt ? 'Powtarzam...' : (openDialogOnly ? 'Wykrywam etap...' : 'Wznawiam...');
   }
 
   try {
-    const response = await sendProcessResumeNextStage(process, { openDialogOnly });
+    const resumeOptions = { openDialogOnly, forceRepeatLastPrompt };
+    if (typeof options?.composerThinkingEffort === 'string') {
+      resumeOptions.composerThinkingEffort = options.composerThinkingEffort;
+    }
+    if (options?.useStoredComposerThinkingEffort === false) {
+      resumeOptions.useStoredComposerThinkingEffort = false;
+    }
+    const response = await sendProcessResumeNextStage(process, resumeOptions);
     if (response.success) {
       if (button) {
         if (openDialogOnly) {
@@ -2679,7 +2843,7 @@ async function resumeNextStageFromPanel(process, button, options = {}) {
           button.textContent = `Final zapisany (${persistenceText})`;
         } else {
           const promptText = Number.isInteger(response.startPromptNumber) ? `Prompt ${response.startPromptNumber}` : 'kolejny etap';
-          button.textContent = `Wznowiono: ${promptText}`;
+          button.textContent = response.retrySamePrompt ? `Powtorzono: ${promptText}` : `Wznowiono: ${promptText}`;
         }
       }
       await refreshProcesses();
@@ -3022,24 +3186,39 @@ async function resumeAllProcesses() {
   if (needsActionProcesses.length === 0) return;
 
   resumeAllBtn.disabled = true;
-  // Globalne "wznow" = klikniecie "Wyslij nastepny prompt" (skip) dla kazdego zatrzymanego procesu.
-  const bulk = await sendDecisionAll('skip');
+  let resumed = 0;
+  let repeated = 0;
+  let failed = 0;
 
-  // Fallback: jesli bulk nie dostarczyl wszystkich decyzji, dopytaj stan i doslij selektywnie.
-  if (!bulk.success || bulk.delivered < needsActionProcesses.length) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    await refreshProcesses();
-    const remaining = getNeedsActionProcesses();
-    if (remaining.length > 0) {
-      const fallbackResults = await Promise.all(remaining.map((process) => sendDecision(process, 'skip')));
-      if (fallbackResults.some((result) => !result)) {
-        console.warn('[panel] Nie wszystkie decyzje RESUME_ALL zostaly dostarczone (bulk+fallback)', {
-          bulk,
-          remaining: remaining.length
-        });
+  for (let index = 0; index < needsActionProcesses.length; index += 1) {
+    const process = needsActionProcesses[index];
+    resumeAllBtn.textContent = `Wznawiam ${index + 1}/${needsActionProcesses.length}`;
+    const response = await sendProcessResumeNextStage(process, {
+      forceRepeatLastPrompt: false,
+      useStoredComposerThinkingEffort: true
+    });
+    if (response.success) {
+      if (response.retrySamePrompt) {
+        repeated += 1;
+      } else {
+        resumed += 1;
       }
+    } else {
+      failed += 1;
+      console.warn('[panel] Smart resume all failed for process', {
+        processId: process?.id,
+        title: process?.title,
+        error: response.error || 'resume_failed'
+      });
     }
+    await new Promise((resolve) => setTimeout(resolve, 80));
   }
+
+  await refreshProcesses();
+  const resultParts = [`dalej=${resumed}`];
+  if (repeated > 0) resultParts.push(`powt=${repeated}`);
+  if (failed > 0) resultParts.push(`bledy=${failed}`);
+  resumeAllBtn.textContent = `Wznowiono (${resultParts.join(', ')})`;
 
   setTimeout(() => {
     updateResumeAllButtonState();
@@ -3516,6 +3695,14 @@ function renderDetails() {
       void resumeNextStageFromPanel(selected, resumeNextBtn);
     });
     actions.appendChild(resumeNextBtn);
+
+    const repeatLastBtn = document.createElement('button');
+    repeatLastBtn.className = 'details-open details-repeat-last';
+    repeatLastBtn.textContent = 'Powtorz ostatni';
+    repeatLastBtn.addEventListener('click', () => {
+      void resumeNextStageFromPanel(selected, repeatLastBtn, { forceRepeatLastPrompt: true });
+    });
+    actions.appendChild(repeatLastBtn);
   }
 
   const copyCompletedBtn = document.createElement('button');
@@ -3605,6 +3792,3 @@ function renderDetails() {
 
   detailsContainer.appendChild(messageList);
 }
-
-
-

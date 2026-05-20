@@ -98,6 +98,52 @@
       border-color: #fecaca;
       color: #991b1b;
     }
+    .connection-status {
+      margin-bottom: 12px;
+      border: 1px solid var(--border);
+      background: #fffbeb;
+      color: #92400e;
+      border-radius: 10px;
+      padding: 9px 11px;
+      font-size: 12px;
+      line-height: 1.4;
+      display: flex;
+      justify-content: space-between;
+      gap: 12px;
+      align-items: center;
+    }
+    .connection-status.ok {
+      background: #ecfdf3;
+      color: #166534;
+      border-color: #86efac;
+    }
+    .connection-status.error {
+      background: #fef2f2;
+      color: #991b1b;
+      border-color: #fecaca;
+    }
+    .connection-status-main {
+      font-weight: 800;
+    }
+    .connection-status-detail {
+      opacity: 0.88;
+      margin-top: 2px;
+    }
+    .connection-status button {
+      border: 1px solid currentColor;
+      background: rgba(255,255,255,0.55);
+      color: inherit;
+      border-radius: 8px;
+      padding: 6px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+      white-space: nowrap;
+    }
+    .connection-status button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     .table-wrap {
       background: var(--panel);
       border: 1px solid var(--border);
@@ -152,12 +198,20 @@
     <div class="actions">
       <input class="support-input" id="support-id-input" type="text" placeholder="Support ID (opcjonalnie)" />
       <button class="btn" id="remote-btn">Zdalne</button>
+      <button class="btn" id="health-btn">DB</button>
       <button class="btn" id="refresh-btn">Odswiez</button>
       <button class="btn" id="copy-btn">Kopiuj</button>
       <button class="btn btn-danger" id="clear-btn">Wyczysc</button>
     </div>
   </div>
   <div class="meta" id="meta">Laduje...</div>
+  <div id="dispatch-health-status" class="connection-status">
+    <div>
+      <div id="dispatch-health-main" class="connection-status-main">DB: sprawdzam...</div>
+      <div id="dispatch-health-detail" class="connection-status-detail">Weryfikuje konfiguracje, backend i polaczenie z baza.</div>
+    </div>
+    <button id="dispatch-health-refresh-btn" type="button">Sprawdz</button>
+  </div>
   <div class="status" id="status" hidden></div>
   <div class="table-wrap">
     <table>

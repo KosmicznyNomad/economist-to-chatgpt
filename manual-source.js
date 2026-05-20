@@ -765,8 +765,20 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
     setQueueUiLocked(true);
     triggerButton.disabled = true;
     triggerButton.textContent = 'Kolejka uruchomiona';
+    const queuedCount = Number.isInteger(response?.queuedCount)
+      ? response.queuedCount
+      : (Number.isInteger(response?.queued) ? response.queued : 0);
+    const portfolioLaunchedCount = Number.isInteger(response?.portfolioLaunchedCount)
+      ? response.portfolioLaunchedCount
+      : (Number.isInteger(response?.queueBypassCount) ? response.queueBypassCount : 0);
+    const pdfLaunchLead = queuedCount > 0
+      ? `Zakolejkowano ${queuedCount} zadan.`
+      : `Uruchomiono ${portfolioLaunchedCount} zadan poza kolejka.`;
+    const portfolioPdfSummary = queuedCount > 0 && portfolioLaunchedCount > 0
+      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
+      : '';
     setProviderStatus(
-      `Provider aktywny. Zakolejkowano ${response?.queuedCount || response?.queued || 0} zadan, sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+      `Provider aktywny. ${pdfLaunchLead}${portfolioPdfSummary} Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
       'info'
     );
     updateSubmitButton();
@@ -785,11 +797,23 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
     );
   } else {
     triggerButton.textContent = 'Uruchomiono';
+    const queuedCount = Number.isInteger(response?.queuedCount)
+      ? response.queuedCount
+      : (Number.isInteger(response?.queued) ? response.queued : 0);
+    const portfolioLaunchedCount = Number.isInteger(response?.portfolioLaunchedCount)
+      ? response.portfolioLaunchedCount
+      : (Number.isInteger(response?.queueBypassCount) ? response.queueBypassCount : 0);
     const portfolioSuffix = launchPortfolioOnly
       ? 'portfolio'
-      : `company${response?.extraPortfolioQueued ? ' + portfolio 1x' : ''}`;
+      : `company${response?.extraPortfolioStarted ? ' + portfolio 1x' : ''}`;
+    const launchLead = queuedCount > 0
+      ? `Zakolejkowano ${queuedCount} analiz ${portfolioSuffix}.`
+      : `Uruchomiono ${portfolioLaunchedCount} analiz ${portfolioSuffix} poza kolejka.`;
+    const portfolioLaunchSummary = queuedCount > 0 && portfolioLaunchedCount > 0
+      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
+      : '';
     setProviderStatus(
-      `Zakolejkowano ${response?.queuedCount || response?.queued || 0} analiz ${portfolioSuffix}. Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+      `${launchLead}${portfolioLaunchSummary} Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
       'success'
     );
   }

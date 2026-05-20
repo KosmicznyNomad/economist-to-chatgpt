@@ -226,10 +226,14 @@ function buildContext() {
     ensurePromptChainReadyForAnalysisType: async () => true,
     processArticles: async (tabs, promptChain, chatUrl, analysisType, options) => {
       context.captured = { tabs, promptChain, chatUrl, analysisType, options };
+      const isPortfolio = analysisType === 'portfolio';
       return {
         success: true,
-        queuedCount: tabs.length,
-        queueSize: tabs.length
+        queuedCount: isPortfolio ? 0 : tabs.length,
+        launchedCount: isPortfolio ? tabs.length : 0,
+        queueBypassCount: isPortfolio ? tabs.length : 0,
+        queueBypass: isPortfolio,
+        queueSize: isPortfolio ? 0 : tabs.length
       };
     },
     submitSourceMaterialForProcess: async (source, options) => {
@@ -303,7 +307,10 @@ async function main() {
   );
 
   const portfolioResult = await context.runManualSourceAnalysis(sourceText, 'Manual portfolio source', 20, 'portfolio');
-  assert.strictEqual(portfolioResult.queuedCount, 1);
+  assert.strictEqual(portfolioResult.queuedCount, 0);
+  assert.strictEqual(portfolioResult.launchedCount, 1);
+  assert.strictEqual(portfolioResult.queueBypassCount, 1);
+  assert.strictEqual(portfolioResult.queueBypass, true);
   assert.strictEqual(context.sourceMaterialSubmissions.length, 2);
   assert.strictEqual(context.captured.tabs.length, 1);
   assert.strictEqual(context.captured.analysisType, 'portfolio');

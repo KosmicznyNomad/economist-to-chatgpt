@@ -114,6 +114,55 @@
       font-size: 12px;
       line-height: 1.35;
     }
+    .connection-status {
+      border: 1px solid var(--border);
+      background: var(--panel);
+      color: var(--muted);
+      border-radius: 10px;
+      padding: 10px 12px;
+      font-size: 12px;
+      line-height: 1.35;
+      display: flex;
+      flex-direction: column;
+      gap: 6px;
+    }
+    .connection-status.ok {
+      background: #ecfdf3;
+      color: #166534;
+      border-color: #86efac;
+    }
+    .connection-status.warn {
+      background: #fffbeb;
+      color: #92400e;
+      border-color: #fcd34d;
+    }
+    .connection-status.error {
+      background: #fef2f2;
+      color: #991b1b;
+      border-color: #fecaca;
+    }
+    .connection-status-main {
+      font-weight: 800;
+    }
+    .connection-status-detail {
+      color: inherit;
+      opacity: 0.88;
+    }
+    .connection-status button {
+      align-self: flex-start;
+      border: 1px solid currentColor;
+      background: rgba(255,255,255,0.55);
+      color: inherit;
+      border-radius: 8px;
+      padding: 5px 9px;
+      font-size: 11px;
+      font-weight: 700;
+      cursor: pointer;
+    }
+    .connection-status button:disabled {
+      opacity: 0.6;
+      cursor: not-allowed;
+    }
     .bulk-btn {
       width: 100%;
       border: 1px solid var(--border);
@@ -566,6 +615,11 @@
         <input id="view-query" class="view-query" type="text" placeholder="Filtr: tytul, reason, runId..." autocomplete="off" />
       </div>
       <div id="view-hint" class="view-hint">Widok gotowy.</div>
+      <div id="dispatch-health-status" class="connection-status warn">
+        <div id="dispatch-health-main" class="connection-status-main">DB: sprawdzam...</div>
+        <div id="dispatch-health-detail" class="connection-status-detail">Weryfikuje konfiguracje, backend i polaczenie z baza.</div>
+        <button id="dispatch-health-refresh-btn" type="button">Sprawdz teraz</button>
+      </div>
       <div id="process-summary" class="summary-bar">
         Aktywne 0 | Akcja 0 | Zakonczone 0 | Bledy 0 | Wszystkie 0
       </div>

@@ -206,8 +206,11 @@ const context = {
 vm.createContext(context);
 [
   'compactText',
+  'normalizeChatGptActionText',
   'normalizeChatGptUiText',
+  'normalizeInjectedChatGptUiText',
   'isChatGptLimitOrRestrictionText',
+  'isInjectedChatGptLimitOrRestrictionText',
   'isInjectRateLimitBlockedResult',
   'buildInjectRateLimitNeedsActionPatch',
   'isHardGenerationErrorText',
@@ -221,10 +224,14 @@ vm.createContext(context);
 function testClassifierRecognizesLimitAndRestrictionMessages() {
   assert.strictEqual(
     context.isChatGptLimitOrRestrictionText('limit: reached for this run'),
+    false
+  );
+  assert.strictEqual(
+    context.isChatGptLimitOrRestrictionText('limit: reached for this run', 'global_alert'),
     true
   );
   assert.strictEqual(
-    context.isChatGptLimitOrRestrictionText('  LIMIT : temporary block  '),
+    context.isChatGptLimitOrRestrictionText('  LIMIT : temporary block  ', 'last_alert_text'),
     true
   );
   assert.strictEqual(
@@ -242,6 +249,21 @@ function testClassifierRecognizesLimitAndRestrictionMessages() {
   assert.strictEqual(
     context.isChatGptLimitOrRestrictionText('Something went wrong while generating the response.'),
     false
+  );
+  assert.strictEqual(
+    context.isChatGptLimitOrRestrictionText(
+      '=== END HANDOFF === LIMIT: this is normal model output, not a ChatGPT UI blocker',
+      'last_assistant_text'
+    ),
+    false
+  );
+  assert.strictEqual(
+    context.isInjectedChatGptLimitOrRestrictionText('LIMIT: temporary block', 'last_assistant_turn'),
+    false
+  );
+  assert.strictEqual(
+    context.isInjectedChatGptLimitOrRestrictionText('LIMIT: temporary block', 'global_alert'),
+    true
   );
 }
 
@@ -320,6 +342,11 @@ function testRetryableGenerationErrorClassifier() {
   );
 }
 
+function testRetryActionTextNormalizationHandlesPolishLabels() {
+  assert.strictEqual(context.normalizeChatGptActionText('Ponów próbę'), 'ponow probe');
+  assert.strictEqual(context.normalizeChatGptActionText('Spróbuj ponownie'), 'sprobuj ponownie');
+}
+
 function testInjectKeepsLimitClassifierInsideInjectedScope() {
   const start = backgroundSource.indexOf('async function injectToChat(');
   const end = backgroundSource.indexOf('\nfunction sleep(', start);
@@ -330,10 +357,21 @@ function testInjectKeepsLimitClassifierInsideInjectedScope() {
 
   assert.match(injectSource, /function isInjectedChatGptLimitOrRestrictionText\s*\(/);
   assert.doesNotMatch(injectSource, /\bisChatGptLimitOrRestrictionText\s*\(/);
+  const blockerScanSource = injectSource.slice(
+    injectSource.indexOf('function captureGenerationBlockerState'),
+    injectSource.indexOf('function buildGenerationBlockedResult')
+  );
+  assert(
+    !blockerScanSource.includes('[class*="text"]'),
+    'limit detector must not scan generic assistant text nodes'
+  );
   assert.match(injectSource, /function clickRetryForRetryableGenerationError\s*\(/);
+  assert.match(injectSource, /function findVisibleRetryActionButton\s*\(/);
+  assert.match(injectSource, /hasVisibleRetryActionButton\(\)/);
   assert.match(injectSource, /statusCode:\s*'chat\.retry_generation_error'/);
   assert.match(injectSource, /lastAlert,\s*\n\s*lastAlertText:/);
   assert.match(injectSource, /isRetryableChatGptGenerationErrorText\(state\.lastAlertText\)/);
+  assert.doesNotMatch(injectSource, /maxGenerationErrorRetryAttempts/);
 }
 
 function testInjectResendsPromptBeforeManualNoResponseRecovery() {
@@ -367,6 +405,7 @@ function main() {
   testClassifierRecognizesLimitAndRestrictionMessages();
   testBlockedResultHelperAndPatchBuilder();
   testRetryableGenerationErrorClassifier();
+  testRetryActionTextNormalizationHandlesPolishLabels();
   testInjectKeepsLimitClassifierInsideInjectedScope();
   testInjectResendsPromptBeforeManualNoResponseRecovery();
   console.log('test-background-rate-limit-blocking.js passed');

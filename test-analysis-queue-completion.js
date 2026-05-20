@@ -220,6 +220,9 @@ async function main() {
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
+    PROCESS_WINDOW_CLOSE_RETRY: {
+      enabled: true
+    },
     CLOSED_PROCESS_STATUSES: new Set([
       'completed',
       'failed',
@@ -379,7 +382,7 @@ async function main() {
     }
   );
   assert.strictEqual(keepDecision.action, 'release');
-  assert.strictEqual(keepDecision.closeWindow, false);
+  assert.strictEqual(keepDecision.closeWindow, true);
   assert.strictEqual(keepDecision.reason, 'dispatch_pending');
 
   const releaseDecision = context.resolveAnalysisQueueReleaseDecision(
@@ -403,6 +406,7 @@ async function main() {
     }
   );
   assert.strictEqual(releaseDecision.action, 'release');
+  assert.strictEqual(releaseDecision.closeWindow, true);
   assert.strictEqual(releaseDecision.reason, 'dispatch_confirmed');
 
   const pendingDispatchDecision = context.resolveAnalysisQueueReleaseDecision(
@@ -427,7 +431,7 @@ async function main() {
     1000
   );
   assert.strictEqual(pendingDispatchDecision.action, 'release');
-  assert.strictEqual(pendingDispatchDecision.closeWindow, false);
+  assert.strictEqual(pendingDispatchDecision.closeWindow, true);
   assert.strictEqual(pendingDispatchDecision.reason, 'dispatch_pending');
   assert.strictEqual(pendingDispatchDecision.slotReleaseReason, 'final_stage_local_saved');
 
@@ -481,7 +485,7 @@ async function main() {
     1000
   );
   assert.strictEqual(cappedDispatchDeadlineDecision.action, 'release');
-  assert.strictEqual(cappedDispatchDeadlineDecision.closeWindow, false);
+  assert.strictEqual(cappedDispatchDeadlineDecision.closeWindow, true);
   assert.strictEqual(cappedDispatchDeadlineDecision.reason, 'dispatch_pending');
 
   const timedOutDispatchDecision = context.resolveAnalysisQueueReleaseDecision(
@@ -506,7 +510,7 @@ async function main() {
     1000
   );
   assert.strictEqual(timedOutDispatchDecision.action, 'release');
-  assert.strictEqual(timedOutDispatchDecision.closeWindow, false);
+  assert.strictEqual(timedOutDispatchDecision.closeWindow, true);
   assert.strictEqual(timedOutDispatchDecision.reason, 'dispatch_pending');
 
   const savedStoppedDecision = context.resolveAnalysisQueueReleaseDecision(
@@ -531,7 +535,7 @@ async function main() {
     1000
   );
   assert.strictEqual(savedStoppedDecision.action, 'release');
-  assert.strictEqual(savedStoppedDecision.closeWindow, false);
+  assert.strictEqual(savedStoppedDecision.closeWindow, true);
   assert.strictEqual(savedStoppedDecision.reason, 'dispatch_confirmed');
 
   context.analysisQueueState = {
@@ -568,6 +572,7 @@ async function main() {
   context.upserts = [];
   await context.reconcileAnalysisQueueState('test_await_dispatch');
   assert.deepStrictEqual(context.startedJobs.map((entry) => entry.runId), ['run-2']);
+  assert.deepStrictEqual(context.closedRuns, ['run-1']);
   assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-2']);
   assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), []);
   assert(
@@ -610,7 +615,7 @@ async function main() {
   context.closedRuns = [];
   await context.reconcileAnalysisQueueState('test_dispatch_timeout_close');
   assert.deepStrictEqual(context.startedJobs.map((entry) => entry.runId), ['run-2']);
-  assert.deepStrictEqual(context.closedRuns, []);
+  assert.deepStrictEqual(context.closedRuns, ['run-1']);
   assert(
     context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'dispatch_pending'),
     'Timed-out dispatch should release the slot without pretending dispatch was confirmed.'

@@ -224,7 +224,7 @@ async function main() {
       'www.chat.openai.com'
     ]),
     PROCESS_WINDOW_CLOSE_RETRY: {
-      enabled: false,
+      enabled: true,
       initialDelayMs: 1500,
       maxDelayMs: 60 * 1000,
       maxAttempts: 24,
@@ -346,24 +346,23 @@ async function main() {
   });
 
   assert.strictEqual(firstClose, false);
-  assert.strictEqual(removeAttempt, 0);
-  assert.strictEqual(timers.length, 0);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose, undefined);
-  assert.strictEqual(createCalls.length, 0);
+  assert.strictEqual(removeAttempt, 1);
+  assert.strictEqual(timers.length, 1);
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'retrying');
+  assert.strictEqual(createCalls.length, 1);
 
   const retryClose = await context.runProcessWindowCloseRetry('run-close', {
     origin: 'test-retry'
   });
 
-  assert.strictEqual(retryClose.closed, false);
-  assert.strictEqual(retryClose.skipped, true);
-  assert.strictEqual(retryClose.reason, 'process_window_auto_close_disabled');
-  assert.strictEqual(removeAttempt, 0);
-  assert.strictEqual(context.processRegistry.get('run-close').windowClose, undefined);
-  assert.strictEqual(auditLogs.length, 0);
+  assert.strictEqual(retryClose.closed, true);
+  assert.strictEqual(retryClose.reason, 'tab_closed');
+  assert.strictEqual(removeAttempt, 2);
+  assert.strictEqual(context.processRegistry.get('run-close').windowClose.state, 'closed');
+  assert(auditLogs.some((entry) => entry.details?.state === 'closed'));
   assert(
     clearCalls.includes('completed-process-window-close-retry'),
-    'Disabled window close should clear the durable window-close retry alarm.'
+    'Closed process should clear the durable window-close retry alarm.'
   );
 
   const removedTabIds = [];
@@ -390,9 +389,9 @@ async function main() {
     ]
   });
 
-  assert.strictEqual(staleTabClose.closed, false);
-  assert.strictEqual(staleTabClose.reason, 'process_window_auto_close_disabled');
-  assert.deepStrictEqual(removedTabIds, []);
+  assert.strictEqual(staleTabClose.closed, true);
+  assert.strictEqual(staleTabClose.reason, 'tab_closed_by_conversation_url');
+  assert.deepStrictEqual(removedTabIds, [11, 77]);
 
   const fallbackRemovedTabIds = [];
   context.chrome.tabs.query = async () => [];
@@ -415,9 +414,9 @@ async function main() {
     windowId: 22
   });
 
-  assert.strictEqual(activeChatClose.closed, false);
-  assert.strictEqual(activeChatClose.reason, 'process_window_auto_close_disabled');
-  assert.deepStrictEqual(fallbackRemovedTabIds, []);
+  assert.strictEqual(activeChatClose.closed, true);
+  assert.strictEqual(activeChatClose.reason, 'active_chatgpt_tab_closed_in_process_window');
+  assert.deepStrictEqual(fallbackRemovedTabIds, [11, 99]);
 
   const stoppedRemovedTabIds = [];
   context.processRegistry.set('run-stopped-saved', {
@@ -459,9 +458,9 @@ async function main() {
     { origin: 'test-stopped-saved-close' }
   );
 
-  assert.strictEqual(stoppedSavedClose, false);
-  assert.deepStrictEqual(stoppedRemovedTabIds, []);
-  assert.strictEqual(context.processRegistry.get('run-stopped-saved').windowClose, undefined);
+  assert.strictEqual(stoppedSavedClose, true);
+  assert.deepStrictEqual(stoppedRemovedTabIds, [501, 503]);
+  assert.strictEqual(context.processRegistry.get('run-stopped-saved').windowClose.state, 'closed');
 
   context.processRegistry.set('run-window-missing', {
     id: 'run-window-missing',
@@ -493,10 +492,9 @@ async function main() {
     origin: 'test-window-missing'
   });
 
-  assert.strictEqual(missingWindowClose.closed, false);
-  assert.strictEqual(missingWindowClose.skipped, true);
-  assert.strictEqual(missingWindowClose.reason, 'process_window_auto_close_disabled');
-  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose, undefined);
+  assert.strictEqual(missingWindowClose.closed, true);
+  assert.strictEqual(missingWindowClose.reason, 'window_missing');
+  assert.strictEqual(context.processRegistry.get('run-window-missing').windowClose.state, 'closed');
 
   const urlOnlyPlan = context.resolveProcessWindowCloseRetryPlan({
     id: 'run-url-only',
@@ -504,14 +502,15 @@ async function main() {
     lifecycleStatus: 'completed',
     currentPrompt: 15,
     totalPrompts: 15,
+    completedResponseSaved: true,
     chatUrl: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/69ef2120-5ba0-83eb-bf2e-13893c147e32',
     persistenceStatus: {
       saveOk: true
     }
   });
 
-  assert.strictEqual(urlOnlyPlan.needed, false);
-  assert.strictEqual(urlOnlyPlan.reason, 'process_window_auto_close_disabled');
+  assert.strictEqual(urlOnlyPlan.needed, true);
+  assert.strictEqual(urlOnlyPlan.reason, 'local_save_completed');
 
   console.log('test-process-window-close-retry.js: ok');
 }

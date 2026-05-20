@@ -199,8 +199,13 @@ function extractFunctionSource(source, functionName) {
 function buildContext() {
   const context = {
     console,
+    Date,
+    Math,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
+    ANALYSIS_TYPE_COMPANY: 'company',
+    ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
     captured: null,
+    launched: [],
     getAnalysisQueueStatusSnapshot: async () => ({
       success: true,
       queuedCount: 0,
@@ -227,10 +232,31 @@ function buildContext() {
     },
     sanitizePromptChainSnapshot: (promptChain) => Array.isArray(promptChain)
       ? promptChain.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
-      : []
+      : [],
+    sleep: async () => undefined,
+    executeAnalysisProcessJob: async (tab, promptChain, chatUrl, analysisType, options) => {
+      context.launched.push({ tab, promptChain, chatUrl, analysisType, options });
+      return { success: true };
+    },
+    upsertProcess: async () => true
   };
 
   vm.createContext(context);
+  [
+    'normalizeAnalysisTypeForPromptChain',
+    'sanitizeManualTextSourceId',
+    'sanitizeManualTextSourceRecord',
+    'sanitizeManualTextSourceRecords',
+    'shouldBypassAnalysisQueueForAnalysisType',
+    'findManualTextSourceForQueueBypass',
+    'hydrateManualTextForQueueBypass',
+    'generateAnalysisQueueBypassRunId',
+    'launchAnalysisJobsOutsideQueue'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
+  });
   vm.runInContext(extractFunctionSource(backgroundSource, 'normalizeSourceMaterialLength'), context, {
     filename: 'background.js'
   });
@@ -307,9 +333,36 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
   });
 }
 
+async function testPortfolioBypassesQueueSlots() {
+  const context = buildContext();
+  const tabs = [
+    { id: 'manual-portfolio-1', title: 'Portfolio text', url: 'manual://source', manualTextSourceId: 'manual-src-1' }
+  ];
+
+  const result = await context.processArticles(tabs, ['p1'], 'https://portfolio.example', 'portfolio', {
+    invocationWindowId: 44,
+    manualTextSources: [{ id: 'manual-src-1', text: 'portfolio body' }],
+    reason: 'portfolio_direct_test'
+  });
+
+  assert.strictEqual(result.queuedCount, 0);
+  assert.strictEqual(result.launchedCount, 1);
+  assert.strictEqual(result.queueBypassCount, 1);
+  assert.strictEqual(result.queueBypass, true);
+  assert.strictEqual(context.captured, null, 'Portfolio process should not be enqueued.');
+  assert.strictEqual(context.launched.length, 1);
+  assert.strictEqual(context.launched[0].analysisType, 'portfolio');
+  assert.strictEqual(context.launched[0].chatUrl, 'https://portfolio.example');
+  assert.deepStrictEqual(context.launched[0].promptChain, ['p1']);
+  assert.strictEqual(context.launched[0].options.queueBypass, true);
+  assert.strictEqual(context.launched[0].options.queueBypassReason, 'portfolio_direct_test');
+  assert.strictEqual(context.launched[0].tab.manualText, 'portfolio body');
+}
+
 async function main() {
   await testReturnsQueueSnapshotForEmptyInput();
   await testBuildsQueueJobsInsteadOfDirectExecution();
+  await testPortfolioBypassesQueueSlots();
   console.log('processArticles queue api test: ok');
 }
 

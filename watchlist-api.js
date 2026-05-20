@@ -6,6 +6,7 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createWatchlistApiUtils(root) {
   const PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
+  const INTAKE_STATUS_PATH = '/api/v1/intake/status';
   const ISKRA_RUNNERS_PATH = '/api/v1/iskra/runners';
   const ISKRA_RUNNERS_HEARTBEAT_PATH = '/api/v1/iskra/runners/heartbeat';
   const ISKRA_JOBS_PATH = '/api/v1/iskra/jobs';
@@ -412,8 +413,17 @@
     });
   }
 
+  async function buildSignedGetIntakeStatusRequest(options = {}) {
+    return buildSignedJsonRequest({
+      ...options,
+      method: 'GET',
+      path: INTAKE_STATUS_PATH
+    });
+  }
+
   return {
     PROBLEM_LOGS_QUERY_PATH,
+    INTAKE_STATUS_PATH,
     ISKRA_RUNNERS_PATH,
     ISKRA_RUNNERS_HEARTBEAT_PATH,
     ISKRA_JOBS_PATH,
@@ -437,6 +447,7 @@
     buildSignedClaimRemoteJobRequest,
     buildSignedPostRemoteJobEventRequest,
     buildSignedGetRemoteJobRequest,
-    buildSignedListRemoteJobsRequest
+    buildSignedListRemoteJobsRequest,
+    buildSignedGetIntakeStatusRequest
   };
 });

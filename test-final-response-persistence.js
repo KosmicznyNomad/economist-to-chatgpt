@@ -199,51 +199,33 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
   });
 }
 
-function makePortfolioFeedbackSubmitPayload() {
-  return {
-    schema: 'portfolio.feedback.submit.v1',
-    account: 'U22088457',
-    review: {
-      review_id: 'pfb-test',
-      snapshot_id: 'ibkrps-test',
-      portfolio_feedback: 'Rotate sizing.'
-    },
-    layer_votes: [{ layer_id: 'ai_hyperscalers', vote: 'REDUCE' }],
-    position_votes: [{ symbol: 'GOOGL', layer_id: 'ai_hyperscalers', action: 'REDUCE' }],
-    action_plan: [{ symbol: 'GOOGL', action: 'SELL' }],
-    entry_strategy: [{ symbol: 'GOOGL', strategy: 'Reduce now.' }]
-  };
-}
-
-function makePortfolioFinalResponse(status = 'SUBMIT_OK', feedbackPayload = null) {
+function makePortfolioFinalResponse() {
   return JSON.stringify({
-    status,
-    summary: {
-      main_problem: 'Problem',
-      main_change_and_capital_source: 'Change',
-      largest_risk_after_changes: 'Risk'
-    },
-    snapshot: {
-      snapshot_id: 'ibkrps-test',
-      account: 'U22088457',
-      positions_count: 1
-    },
-    layers: [],
-    positions: [],
-    trades: [],
-    entry_rules: [],
-    totals: {
-      total_sales_and_exits_usd: 0,
-      total_buys_usd: 0,
-      cash_after_drafts_usd: 0,
-      risk_reduced: '',
-      risk_increased: '',
-      success_kpi: ''
-    },
-    save: {
-      submit_ok: true
-    },
-    feedback_payload: feedbackPayload,
+    thesis_construction_summary: 'Popyt -> bottleneck -> pricing power -> marża. Autor opisuje zmianę ekonomiki rynku jako przesunięcie marży do właścicieli bottlenecku. Warstwa z pricing power przechwytuje wartość, a warstwa finansująca cudzy capex ma słabszą pozycję.',
+    portfolio_construction_commentary: 'Portfel jest mieszanką realnego capture i proxy. Największy problem to koncentracja w jednej ścieżce sukcesu zamiast kilku niezależnych mechanizmów.',
+    layers: [
+      {
+        layer_id: 'cloud_infrastructure',
+        layer_name: 'Cloud infrastructure',
+        author_rank: 1,
+        vote: 'HOLD',
+        exposure_quality: 'mixed',
+        layer_business_thesis: 'Warstwa zarabia na cloud capacity i usługach infrastrukturalnych. Może być atrakcyjna, gdy deficyt compute pozwala podnieść ceny szybciej niż koszty. Warstwa ma realny udział w tezie autora, ale portfel miesza capture z proxy.'
+      }
+    ],
+    positions: [
+      {
+        symbol: 'GOOGL',
+        layer_id: 'cloud_infrastructure',
+        author_layer_rank: 1,
+        current_qty: 10,
+        target_qty: 12,
+        value_capture_assessment: 'proxy',
+        position_thesis: 'GOOGL uczestniczy w tezie przez cloud i TPU, ale capture jest rozwodniony przez resztę biznesu. Autor premiuje właścicieli dystrybucji i compute, więc pozycja może mieć większą docelową liczbę akcji niż obecnie. Ryzykiem jest to, że capex cloud pochłonie część marży zanim pricing power agentic workflows stanie się trwały.'
+      }
+    ],
+    portfolio_gaps: ['Brakuje czystszego właściciela bottlenecku.'],
+    warnings: [],
     errors: []
   });
 }
@@ -252,6 +234,8 @@ const context = {
   console,
   JSON,
   DecisionContractUtils,
+  ANALYSIS_TYPE_COMPANY: 'company',
+  ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
   RESPONSE_CONVERSATION_LOG_MAX_ITEMS: 40,
   STRUCTURED_WATCHLIST_OPPORTUNITY_KEYS: [
     'value_chain_position',
@@ -324,11 +308,14 @@ vm.createContext(context);
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
   'extractPortfolioFinalResponseFromText',
+  'normalizeAnalysisTypeForPromptChain',
   'cloneJsonCompatibleValue',
   'parseJsonObjectCandidate',
   'isPortfolioFeedbackSubmitPayload',
   'normalizePortfolioFeedbackSubmitDispatchPayload',
+  'normalizePortfolioFinalResponseFeedbackSubmitPayload',
   'extractPortfolioFeedbackSubmitPayloadFromFinalResponse',
+  'resolveSaveResponseDispatchSkipDecision',
   'buildResponseContractValidation',
   'getCompletedProcessLocalSaveState',
   'hasCompletedProcessLocalSave',
@@ -386,18 +373,20 @@ async function testAcceptsPortfolioFinalJsonContract() {
   const responseText = makePortfolioFinalResponse();
   const result = await context.resolveCompletedProcessFinalResponseText({
     analysisType: 'portfolio',
-    currentPrompt: 4,
-    totalPrompts: 4,
+    currentPrompt: 3,
+    totalPrompts: 3,
     completedResponseText: responseText
   });
 
   assert.strictEqual(result.success, true);
-  assert.strictEqual(result.contractKind, 'portfolio.final_response.v1');
+  assert.strictEqual(result.contractKind, 'portfolio.final_response.v2');
   assert.strictEqual(result.responseText, responseText);
+  assert.strictEqual(result.contract.portfolioFinalResponse.payload.thesis_construction_summary.includes('Popyt -> bottleneck'), true);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(result.contract.portfolioFinalResponse.payload, 'prompt_1_response_copy'), false);
 }
 
-function testExtractsPortfolioFeedbackSubmitPayloadFromFinalJson() {
-  const responseText = makePortfolioFinalResponse('NIE_ZAPISANO', makePortfolioFeedbackSubmitPayload());
+function testExtractsPortfolioFeedbackSubmitPayloadFromTextFinalJson() {
+  const responseText = makePortfolioFinalResponse();
   const payload = context.extractPortfolioFeedbackSubmitPayloadFromFinalResponse(responseText, {
     runId: 'run-portfolio',
     responseId: 'resp-portfolio-final',
@@ -405,16 +394,42 @@ function testExtractsPortfolioFeedbackSubmitPayloadFromFinalJson() {
     sourceTitle: 'Portfolio final JSON'
   });
 
-  assert.ok(payload);
   assert.strictEqual(payload.schema, 'portfolio.feedback.submit.v1');
+  assert.strictEqual(payload.tool, undefined);
   assert.strictEqual(payload.responseId, 'resp-portfolio-final:portfolio_feedback_submit');
-  assert.strictEqual(payload.runId, 'run-portfolio');
   assert.strictEqual(payload.analysisType, 'portfolio_feedback_submit');
-  assert.strictEqual(payload.account, 'U22088457');
-  assert.strictEqual(payload.review.review_id, 'pfb-test');
+  assert.strictEqual(payload.review.review_id, 'resp-portfolio-final:portfolio_final_feedback');
   assert.strictEqual(payload.layer_votes.length, 1);
+  assert.strictEqual(payload.layer_votes[0].layer_id, 'cloud_infrastructure');
+  assert.strictEqual(payload.position_votes.length, 1);
   assert.strictEqual(payload.position_votes[0].symbol, 'GOOGL');
-  assert.strictEqual(JSON.parse(payload.text).review.review_id, 'pfb-test');
+  assert.strictEqual(payload.position_votes[0].action, 'INCREASE');
+  assert.strictEqual(payload.position_votes[0].current_qty, 10);
+  assert.strictEqual(payload.position_votes[0].target_qty, 12);
+  assert.strictEqual(payload.position_votes[0].qty_delta, 2);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(payload.position_votes[0], 'priority'), false);
+}
+
+function testPortfolioFinalJsonIsNotLocalOnlyDispatchSkipped() {
+  const decision = context.resolveSaveResponseDispatchSkipDecision(
+    'portfolio',
+    'portfolio.final_response.v2',
+    'portfolio_final_json',
+    { allowPortfolioFeedbackDispatch: true }
+  );
+
+  assert.strictEqual(decision.skip, false);
+  assert.strictEqual(decision.allowPortfolioFeedbackDispatch, true);
+
+  const legacyPortfolioDecision = context.resolveSaveResponseDispatchSkipDecision(
+    'portfolio',
+    '',
+    '',
+    {}
+  );
+
+  assert.strictEqual(legacyPortfolioDecision.skip, true);
+  assert.strictEqual(legacyPortfolioDecision.reason, 'portfolio_analysis_saved_locally');
 }
 
 async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {
@@ -644,7 +659,8 @@ async function main() {
   await testRejectsInvalidFinalContract();
   await testAcceptsStructuredV2FinalContract();
   await testAcceptsPortfolioFinalJsonContract();
-  testExtractsPortfolioFeedbackSubmitPayloadFromFinalJson();
+  testExtractsPortfolioFeedbackSubmitPayloadFromTextFinalJson();
+  testPortfolioFinalJsonIsNotLocalOnlyDispatchSkipped();
   await testFallsBackToCanonicalStorageWhenProcessPayloadMissing();
   testCriticalCompletedResponsePatchFlushesImmediately();
   testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot();

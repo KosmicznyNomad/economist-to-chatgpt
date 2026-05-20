@@ -140,6 +140,34 @@ async function testBuildSignedJsonRequestUsesPathOnlyInCanonicalForGet() {
   assert.ok(!('Content-Type' in signed.headers));
 }
 
+async function testBuildSignedGetIntakeStatusRequestUsesStatusEndpoint() {
+  const signed = await WatchlistApiUtils.buildSignedGetIntakeStatusRequest({
+    intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    keyId: 'extension-primary',
+    secret: 'top-secret',
+    timestamp: 1_710_000_000,
+    nonce: 'nonce-status'
+  });
+
+  assert.strictEqual(
+    signed.url,
+    'https://iskierka-watchlist.duckdns.org/api/v1/intake/status'
+  );
+  assert.strictEqual(signed.method, 'GET');
+  assert.strictEqual(signed.body, '');
+  assert.strictEqual(
+    signed.canonical,
+    [
+      'GET',
+      '/api/v1/intake/status',
+      '1710000000',
+      'nonce-status',
+      signed.bodyHash
+    ].join('\n')
+  );
+  assert.ok(/^[a-f0-9]{64}$/i.test(signed.headers['X-Watchlist-Signature']));
+}
+
 async function testBuildSignedCreateAndListRemoteHelpers() {
   const createSigned = await WatchlistApiUtils.buildSignedCreateRemoteJobRequest({
     intakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
@@ -188,6 +216,7 @@ async function main() {
   testBuildWatchlistApiUrlReplacesPathAndAddsQuery();
   await testBuildSignedProblemLogsQueryRequestProducesSignedPostRequest();
   await testBuildSignedJsonRequestUsesPathOnlyInCanonicalForGet();
+  await testBuildSignedGetIntakeStatusRequestUsesStatusEndpoint();
   await testBuildSignedCreateAndListRemoteHelpers();
   console.log('test-watchlist-api.js: ok');
 }
