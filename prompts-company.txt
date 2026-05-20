@@ -645,7 +645,7 @@ INHERITANCE LOCK:
 Before any work, search context for '=== STAGE 0 HANDOFF ==='.
 Extract: WINNING_THESIS, CONTROL_TOKENS, THESIS_SOURCE_META, CONTRACT_MAP, DISCONFIRMERS.
 If found: USE THEM as primary inputs. Do not reconstruct Stage 0.
-If NOT found: output DATA_GAP_STAGE=0 and STOP.
+If Stage 0 inputs not available in context: output DATA_GAP_STAGE=0 and STOP.
 
 CONTEXT
 Use === STAGE 0 HANDOFF === as the primary dataset.
@@ -997,7 +997,7 @@ INHERITANCE LOCK:
 Search context for '=== STAGE 1 HANDOFF ==='.
 Extract: WINNING_THESIS, THESIS_SOURCE, SELECTED_SUB-SEGMENTS with invoice-first definitions.
 If found: USE THEM. Do not reconstruct Stage 1.
-If NOT found: output DATA_GAP_STAGE=1 and STOP.
+If Stage 1 inputs not available in context: output DATA_GAP_STAGE=1 and STOP.
 ## Input: Thesis + Stage 1 Sub-Segment Validation Outputs
 
 ## Context
@@ -2094,7 +2094,7 @@ Before any analysis, search context for:
 3. === STAGE 2 FUNDAMENTAL HANDOFF ===
 4. Stage 3 Artifact 3 / Stage 3 Handoff Objects
 
-If Stage 2 or Stage 3 is missing:
+If Stage 2 or Stage 3 inputs not available in context:
 output DATA_GAP_STAGE=[missing stage] and stop.
 
 Do not reconstruct prior stages.
@@ -2957,7 +2957,7 @@ Before any work, search context for:
 3. === STAGE 2 FUNDAMENTAL HANDOFF ===
 4. Stage 3 Artifact 3 / Handoff Objects
 
-If Stage 4 is missing:
+If Stage 4 inputs not available in context:
 output DATA_GAP_STAGE=4 and stop.
 
 Do not reconstruct Stage 4.
@@ -3538,11 +3538,11 @@ INHERITANCE LOCK (CRITICAL — this is where drift historically occurs):
 4. Search context for '=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===' → extract CORE_ADOPTED, CORE_CONFIDENCE, CORE_DECISION_GRADE, CORE_WEDGE_BOUNDARY, CORE_GROWTH_STACK, MARKET_GAP_AUDIT, STAGE10_INSTRUCTIONS, STAGE11_INSTRUCTIONS
 5. Search context for '=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===' if available → extract CORE_DECISION_GRADE_AFTER_MCP, confidence adjustment, MCP-adjusted Stage 10/11 instructions, boundary implications
 6. Search context for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract BUSINESS_MODEL_LANE, NORMALIZED_BASELINE, FUNDAMENTAL_QUALITY, PRIMARY_VALUATION_LANE, QUICK_VALUATION_VERDICT, QUALITY_FLAGS, FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK, COMPANY_IMPACT_MODE
-Stage 1, Stage 2 universe, Stage 3 handoff, and Stage 4 handoff must be found before proceeding.
-If any missing: output DATA_GAP_STAGE=[missing stage] and STOP.
-If Stage 4 is missing: output DATA_GAP_STAGE=4 and STOP.
+Stage 1, Stage 2 universe, Stage 3 inputs, and Stage 4 inputs must be available in context before proceeding.
+If required inputs not available in context: output DATA_GAP_STAGE=[missing stage] and STOP.
+If Stage 4 inputs not available in context: output DATA_GAP_STAGE=4 and STOP.
 Do NOT reconstruct Stage 3 traction scores. Do NOT substitute Stage 2 exposure estimates for Stage 3 traction data.
-If Stage 2 fundamental handoff is found: USE IT. Do not reconstruct those fields unless specific fields are missing.
+If Stage 2 fundamental inputs are available in context: USE THEM. Do not reconstruct those fields unless specific fields are missing.
 
 You are the investment analyst running Stage 6 in a thesis-driven workflow.
 You are evaluating the full candidate set produced in Stage 2.
@@ -4503,7 +4503,7 @@ INHERITANCE LOCK:
 1. Search for Stage 6 output → extract per-company: DominantDriver, Asymmetry_TOTAL, WedgeRealism, PoolConfidence
 2. Search for Stage 7 output → extract per-company: moat scores, delivery gates, VOI events, operational KPIs
 3. Search for Stage 3 Artifact 3 → extract per-company: VOI_WINDOW, DOWNGRADE_TRIGGER
-All three required. If missing: output DATA_GAP_STAGE=[missing] and STOP.
+If none available in context: output DATA_GAP_STAGE=[missing] and STOP.
 
 # Context and Inputs
 
@@ -4803,13 +4803,13 @@ Before ANY calculation, execute these searches in order:
 5. Search for Stage 3 Artifact 3 → extract per-company: TractionClass, Timing Friction, Semantics Verdict, Cash Flag, THESIS_MARGIN_PROXY, ACCOUNTING_CONVERSION_PROFILE, WORKING_CAPITAL_DRAG
 6. Search for '=== STAGE 2 FUNDAMENTAL HANDOFF ===' → extract per-company: FULL_COMPANY_SEGMENT_MAP, CORE_GROWTH_STACK, ORPHAN_SEGMENTS, CORE_UNDERVALUE_RISK
 
-Stage 9, Stage 4, Stage 3, and Stage 2 must be found. If Stage 9 handoff exists: USE IT directly in Step 1 Context Pack.
+Stage 9, Stage 4, Stage 3, and Stage 2 inputs must be available in context. If Stage 9 inputs are available in context: USE THEM directly in Step 1 Context Pack.
 Do NOT "reconstruct" Stage 9 outputs from earlier stages.
 Do NOT skip Stage 9 RP/REI and substitute your own metric selection.
-If Stage 9 handoff NOT found: output DATA_GAP_STAGE=9 and STOP.
-If Stage 4 handoff NOT found: output DATA_GAP_STAGE=4 and STOP.
-If CORE/WEDGE boundary is missing from Stage 4: output DATA_GAP_STAGE=4 and STOP.
-If Stage 2 fundamental handoff is missing after the updated pipeline is expected to provide it, output DATA_GAP_STAGE=2 and STOP.
+If Stage 9 inputs not available in context: output DATA_GAP_STAGE=9 and STOP.
+If Stage 4 inputs not available in context: output DATA_GAP_STAGE=4 and STOP.
+If CORE/WEDGE boundary inputs not available in context: output DATA_GAP_STAGE=4 and STOP.
+If Stage 2 fundamental inputs not available in context after the updated pipeline is expected to provide them, output DATA_GAP_STAGE=2 and STOP.
 
 This stage quantifies the incremental thesis contribution only.
 
@@ -4911,7 +4911,7 @@ STEP 2.5 — IMPACT ROUTE SELECTION
 
 Inherit CORE/WEDGE boundary from Stage 4.
 If Stage 5 exists, inherit MCP-adjusted Stage 10 instructions.
-If boundary is missing:
+If boundary inputs not available in context:
 output exactly:
 DATA_GAP_STAGE=4
 
@@ -5193,7 +5193,7 @@ where:
 
 Do not use CORE_RAW_DCF if CORE_ADOPTED is available.
 
-If Stage 4 is missing:
+If Stage 4 inputs not available in context:
 - output DATA_GAP_STAGE=4 and STOP.
 
 If CORE_ADOPTED is missing but raw Stage 6 CORE exists:
@@ -5201,7 +5201,7 @@ If CORE_ADOPTED is missing but raw Stage 6 CORE exists:
 - flag CORE_ADOPTED_MISSING,
 - cap Tier at 3 unless the valuation signal is supported by multiple sanity and guidance/backlog consistency.
 
-If Stage 10 handoff NOT found: output DATA_GAP_STAGE=10 and STOP. Do NOT fall back to Stage 6 TOTAL.
+If Stage 10 inputs not available in context: output DATA_GAP_STAGE=10 and STOP. Do NOT fall back to Stage 6 TOTAL.
 
 CORE DECISION-GRADE BLOCK
 If CORE_DECISION_GRADE_AFTER_MCP = FALSE:
@@ -5670,7 +5670,7 @@ Before ANY gate evaluation, execute these searches:
 PROHIBITION: Do NOT use Stage 6 values for Gate 2 if Stage 11 handoff exists.
 Stage 11 TOTAL values are the ONLY valid inputs for Gate 2 (Value).
 Stage 10 WEDGE is used ONLY as diagnostic ratio (Wedge_to_Price).
-If Stage 11 handoff NOT found: output DATA_GAP_STAGE=11 and STOP.
+If Stage 11 inputs not available in context: output DATA_GAP_STAGE=11 and STOP.
 If Stage 11 says TOTAL_DIAGNOSTIC_ONLY or CORE_REBUILD_REQUIRED:
 - Gate 0 Integrity = FAIL_DIAGNOSTIC_ONLY, not a data gap,
 - Gate 2 cannot PASS,
@@ -6031,8 +6031,8 @@ Before ranking, search for:
 7. Stage 3 Artifact 3
 8. === STAGE 2 FUNDAMENTAL HANDOFF ===
 
-If Stage 12 handoff NOT found: output DATA_GAP_STAGE=12 and STOP.
-If Stage 11 handoff NOT found: output DATA_GAP_STAGE=11 and STOP.
+If Stage 12 inputs not available in context: output DATA_GAP_STAGE=12 and STOP.
+If Stage 11 inputs not available in context: output DATA_GAP_STAGE=11 and STOP.
 
 Do not rerun the Four-Gate decision.
 Do not change Stage 12 WATCH / AVOID decisions.
