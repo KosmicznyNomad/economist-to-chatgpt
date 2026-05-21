@@ -39953,6 +39953,8 @@ async function injectToChat(
     const waitStageName = typeof waitProgress.stageName === 'string' && waitProgress.stageName.trim()
       ? waitProgress.stageName.trim()
       : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
+    const waitPromptText = typeof waitProgress.promptText === 'string' ? waitProgress.promptText : '';
+    const waitPromptNumber = Number.isInteger(waitProgress.promptNumber) ? waitProgress.promptNumber : waitCurrentPrompt;
     const emitResponseWaitHeartbeat = (phase, elapsedMs = 0, extra = {}) => {
       if (!runId) return;
       const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
@@ -40073,6 +40075,7 @@ async function injectToChat(
     let lastPhase2GeneratingActivityAt = Date.now();
     let lastPhase2GenerationSignature = '';
     let phase2StaleGenerationOverrideWarned = false;
+    let phase2IncompleteStaleReadyWarnKey = '';
     const phase2StaleGeneratingReadyOverrideMs = 45_000;
     const phase2StaleGeneratingFailMs = 180_000;
     const getPhase2GenerationSignature = (genStatus) => {
@@ -40217,18 +40220,40 @@ async function injectToChat(
 
       const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && !hasProgressText;
       const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastPhase2GeneratingActivityAt) : 0;
-      const generationLooksStaleReady = genStatus.generating
+      const generationLooksStaleReadyBase = genStatus.generating
         && editorReady
         && responseSeenInDOM
         && textStable
         && !hasProgressText
         && staleGeneratingForMs >= phase2StaleGeneratingReadyOverrideMs;
+      const staleReadyCompletion = getResponseCompletionReadiness(currentLastText, waitPromptText, waitPromptNumber, {
+        forStaleGenerating: true
+      });
+      const generationLooksStaleReady = generationLooksStaleReadyBase && staleReadyCompletion.ready;
+      if (generationLooksStaleReadyBase && !staleReadyCompletion.ready) {
+        const warnKey = [
+          staleReadyCompletion.reason || 'unknown',
+          staleReadyCompletion.missingMarker || '',
+          currentLastText.length
+        ].join('|');
+        if (warnKey !== phase2IncompleteStaleReadyWarnKey) {
+          phase2IncompleteStaleReadyWarnKey = warnKey;
+          console.warn('[FAZA 2] Nie ignoruje stale generating - odpowiedz nie wyglada na kompletna.', {
+            reason: genStatus.reason,
+            staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+            responseLength: currentLastText.length,
+            completionReason: staleReadyCompletion.reason,
+            missingMarker: staleReadyCompletion.missingMarker || ''
+          });
+        }
+      }
       if (generationLooksStaleReady && !phase2StaleGenerationOverrideWarned) {
         phase2StaleGenerationOverrideWarned = true;
         console.warn('[FAZA 2] Ignoruje stale generating indicator; response DOM is stable.', {
           reason: genStatus.reason,
           staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
-          responseCount: currentResponseCount
+          responseCount: currentResponseCount,
+          completionReason: staleReadyCompletion.reason
         });
       }
 
@@ -40759,16 +40784,22 @@ async function injectToChat(
   }
 
   function extractPromptStageIdForCompletionContract(promptText, promptNumber = 0) {
-    const head = typeof promptText === 'string' ? promptText.slice(0, 2600) : '';
-    const directMatch = head.match(/^\s*#?\s*STAGE\s+(\d+)(?!\d)/im);
+    const rawPrompt = typeof promptText === 'string' ? promptText : '';
+    const directMatch = rawPrompt.match(/^\s*#?\s*STAGE\s+(\d+)(?!\d)/im);
     if (directMatch) {
       return String(Number.parseInt(directMatch[1], 10));
     }
 
+    const head = rawPrompt.slice(0, 2600);
     const roleMatch = head.match(/\brole\s*:\s*stage\s+(\d+)(?!\d)/i)
       || head.match(/\brole\s+is\s+stage\s+(\d+)(?!\d)/i);
     if (roleMatch) {
       return String(Number.parseInt(roleMatch[1], 10));
+    }
+
+    const handoffMarkerMatch = rawPrompt.match(/===\s*STAGE\s+(\d+)(?!\d)[^=\n]*HANDOFF\s*===/i);
+    if (handoffMarkerMatch) {
+      return String(Number.parseInt(handoffMarkerMatch[1], 10));
     }
 
     const safePromptNumber = Number.isInteger(promptNumber) ? promptNumber : 0;
@@ -40831,6 +40862,59 @@ async function injectToChat(
       }
     }
     return false;
+  }
+
+  function getResponseCompletionReadiness(text, promptText = '', promptNumber = 0, options = {}) {
+    const rawText = typeof text === 'string' ? text.trim() : '';
+    const normalizedText = compactText(rawText);
+    if (!normalizedText) {
+      return { ready: false, reason: 'empty_response' };
+    }
+
+    const dataGapDirective = parseDataGapDirectiveResponse(rawText);
+    if (dataGapDirective) {
+      return { ready: true, reason: 'data_gap_stage', stageId: dataGapDirective.stageId };
+    }
+
+    if (normalizedText.length < 50) {
+      return { ready: false, reason: 'too_short' };
+    }
+
+    const rawPrompt = typeof promptText === 'string' ? promptText : '';
+    const completionContract = rawPrompt
+      ? buildStageResponseCompletionContract(rawPrompt, promptNumber)
+      : { markers: [], requiresJsonArray: false, stageId: '' };
+
+    for (const marker of completionContract.markers) {
+      if (!marker.pattern.test(rawText)) {
+        return {
+          ready: false,
+          reason: 'missing_completion_marker',
+          missingMarker: marker.label,
+          stageId: completionContract.stageId
+        };
+      }
+    }
+
+    if (completionContract.requiresJsonArray && !responseTextContainsCompleteJsonArray(rawText)) {
+      return {
+        ready: false,
+        reason: 'invalid_or_incomplete_json_array',
+        stageId: completionContract.stageId
+      };
+    }
+
+    if (options?.forStaleGenerating === true && !rawPrompt && normalizedText.length < 200) {
+      return { ready: false, reason: 'too_short_for_stale_generating_override' };
+    }
+
+    return {
+      ready: true,
+      reason: completionContract.markers.length > 0 || completionContract.requiresJsonArray
+        ? 'completion_contract_satisfied'
+        : 'basic_response_ready',
+      stageId: completionContract.stageId
+    };
   }
 
   function validateStageResponseForPrompt(text, promptText, promptNumber = 0) {
@@ -41216,6 +41300,7 @@ async function injectToChat(
     let lastGeneratingActivityAt = Date.now();
     let lastGenerationSignature = '';
     let staleGenerationOverrideWarned = false;
+    let incompleteStaleReadyWarnKey = '';
     const staleGeneratingReadyOverrideMs = 45_000;
     const staleGeneratingFailMs = 180_000;
     const getGenerationSignature = (genStatus) => {
@@ -41318,19 +41403,42 @@ async function injectToChat(
       const currentAssistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
       const conversationLooksBalanced = currentAssistantCount > 0 && currentAssistantCount >= currentUserCount;
       const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastGeneratingActivityAt) : 0;
-      const generationLooksStale = genStatus.generating
+      const generationLooksStaleBase = genStatus.generating
         && editorReady
         && textStable
         && !hasProgressText
         && conversationLooksBalanced
         && staleGeneratingForMs >= staleGeneratingReadyOverrideMs;
+      const staleReadyCompletion = getResponseCompletionReadiness(currentLastText, '', promptIndex, {
+        forStaleGenerating: true
+      });
+      const generationLooksStale = generationLooksStaleBase && staleReadyCompletion.ready;
+      if (generationLooksStaleBase && !staleReadyCompletion.ready) {
+        const warnKey = [
+          staleReadyCompletion.reason || 'unknown',
+          staleReadyCompletion.missingMarker || '',
+          currentLastText.length
+        ].join('|');
+        if (warnKey !== incompleteStaleReadyWarnKey) {
+          incompleteStaleReadyWarnKey = warnKey;
+          console.warn('[interface-ready] Nie ignoruje stale generating - ostatnia odpowiedz nie wyglada na kompletna.', {
+            reason: genStatus.reason,
+            staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+            userCount: currentUserCount,
+            assistantCount: currentAssistantCount,
+            responseLength: currentLastText.length,
+            completionReason: staleReadyCompletion.reason
+          });
+        }
+      }
       if (generationLooksStale && !staleGenerationOverrideWarned) {
         staleGenerationOverrideWarned = true;
         console.warn('[interface-ready] Stale generating indicator ignored; editor and conversation look ready.', {
           reason: genStatus.reason,
           staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
           userCount: currentUserCount,
-          assistantCount: currentAssistantCount
+          assistantCount: currentAssistantCount,
+          completionReason: staleReadyCompletion.reason
         });
       }
       const isReady = (noGeneration || generationLooksStale) && editorReady && textStable && !hasProgressText;
@@ -42207,7 +42315,9 @@ async function injectToChat(
           currentPrompt: promptOffset,
           totalPrompts: totalPromptsForRun,
           stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
-          stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload'
+          stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+          promptText: payload,
+          promptNumber: promptOffset
         });
         if (shouldStopNow()) {
           return forceStopResult();
@@ -42225,12 +42335,77 @@ async function injectToChat(
             });
           }
         }
-        console.log('Artykul przetworzony');
+        console.log('Artykul przetworzony - waliduje Stage 0 przed prompt chain');
 
-        stage0Response = await getLastResponseText();
         const stage0PromptIndex = normalizePromptMetricIndex(promptOffset);
-        const stage0Validated = validateResponse(stage0Response);
-        registerStageCompletion(stage0PromptIndex, stage0Response, stage0Validated);
+        let stage0Validation = null;
+        let stage0ValidationWaitAttempts = 0;
+        while (true) {
+          if (shouldStopNow()) {
+            return forceStopResult();
+          }
+
+          stage0Response = await getLastResponseText();
+          stage0Validation = validateStageResponseForPrompt(stage0Response, payload, promptOffset);
+          if (stage0Validation.valid) {
+            break;
+          }
+
+          console.error('[stage0] Nie wysylam prompt chain - Stage 0 jest niekompletny', {
+            responseLength: stage0Response.length,
+            reason: stage0Validation.reason,
+            missingMarker: stage0Validation.missingMarker || ''
+          });
+          updateCounter(
+            counter,
+            promptOffset,
+            totalPromptsForRun,
+            stage0Validation.statusText || 'Stage 0 niekompletny'
+          );
+
+          const shouldTryNativeContinue = compactText(stage0Response) && (
+            stage0Validation.reason === 'missing_completion_marker' ||
+            stage0Validation.reason === 'invalid_or_incomplete_json_array' ||
+            stage0Validation.reason === 'basic_response_invalid'
+          );
+          if (shouldTryNativeContinue) {
+            const nativeContinueResult = await clickChatGptContinueGeneratingIfAvailable(stage0Validation.reason);
+            if (nativeContinueResult.clicked) {
+              updateCounter(counter, promptOffset, totalPromptsForRun, 'Kontynuuje uciety Stage 0...');
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: promptOffset,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+                stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+                promptText: payload,
+                promptNumber: promptOffset
+              });
+              continue;
+            }
+          }
+
+          const action = await showContinueButton(counter, promptOffset, totalPromptsForRun, 'stage0_invalid_response');
+          if (action === 'skip') {
+            console.warn('[stage0] Ignoruje skip - Stage 1 nie moze ruszyc bez kompletnego Stage 0', {
+              reason: stage0Validation.reason,
+              missingMarker: stage0Validation.missingMarker || ''
+            });
+            updateCounter(counter, promptOffset, totalPromptsForRun, 'Nie wysylam Stage 1 - Stage 0 niekompletny');
+          }
+
+          stage0ValidationWaitAttempts += 1;
+          console.log(`[stage0] Czekam ponownie na kompletna odpowiedz Stage 0 (attempt ${stage0ValidationWaitAttempts})`);
+          await waitForResponse(responseWaitMs, {
+            currentPrompt: promptOffset,
+            totalPrompts: totalPromptsForRun,
+            stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+            stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+            promptText: payload,
+            promptNumber: promptOffset
+          });
+        }
+
+        registerStageCompletion(stage0PromptIndex, stage0Response, true);
         if (stage0Response && stage0Response.trim().length > 0) {
           console.log(`Stage 0 captured (${stage0Response.length} znakow) - bedzie wstawione w prompt chain`);
           copyPortfolioPromptOneResponseToDatabase(stage0Response)
@@ -42576,7 +42751,9 @@ async function injectToChat(
               currentPrompt: absoluteCurrentPrompt,
               totalPrompts: totalPromptsForRun,
               stageIndex: absoluteStageIndex,
-              stageName: `Prompt ${absoluteCurrentPrompt}`
+              stageName: `Prompt ${absoluteCurrentPrompt}`,
+              promptText: prompt,
+              promptNumber: absoluteCurrentPrompt
             });
             if (shouldStopNow()) {
               return forceStopResult();
@@ -42716,7 +42893,9 @@ async function injectToChat(
                   currentPrompt: absoluteCurrentPrompt,
                   totalPrompts: totalPromptsForRun,
                   stageIndex: absoluteStageIndex,
-                  stageName: `Prompt ${absoluteCurrentPrompt}`
+                  stageName: `Prompt ${absoluteCurrentPrompt}`,
+                  promptText: prompt,
+                  promptNumber: absoluteCurrentPrompt
                 });
                 continue;
               }
@@ -42767,7 +42946,9 @@ async function injectToChat(
                     currentPrompt: absoluteCurrentPrompt,
                     totalPrompts: totalPromptsForRun,
                     stageIndex: absoluteStageIndex,
-                    stageName: `Prompt ${absoluteCurrentPrompt}`
+                    stageName: `Prompt ${absoluteCurrentPrompt}`,
+                    promptText: prompt,
+                    promptNumber: absoluteCurrentPrompt
                   });
                   if (shouldStopNow()) {
                     return forceStopResult();
@@ -42795,7 +42976,9 @@ async function injectToChat(
                     currentPrompt: absoluteCurrentPrompt,
                     totalPrompts: totalPromptsForRun,
                     stageIndex: absoluteStageIndex,
-                    stageName: `Prompt ${absoluteCurrentPrompt}`
+                    stageName: `Prompt ${absoluteCurrentPrompt}`,
+                    promptText: prompt,
+                    promptNumber: absoluteCurrentPrompt
                   });
                   if (shouldStopNow()) {
                     return forceStopResult();
@@ -42820,7 +43003,9 @@ async function injectToChat(
                   currentPrompt: absoluteCurrentPrompt,
                   totalPrompts: totalPromptsForRun,
                   stageIndex: absoluteStageIndex,
-                  stageName: `Prompt ${absoluteCurrentPrompt}`
+                  stageName: `Prompt ${absoluteCurrentPrompt}`,
+                  promptText: prompt,
+                  promptNumber: absoluteCurrentPrompt
                 });
                 if (shouldStopNow()) {
                   return forceStopResult();
@@ -42841,7 +43026,9 @@ async function injectToChat(
                 currentPrompt: absoluteCurrentPrompt,
                 totalPrompts: totalPromptsForRun,
                 stageIndex: absoluteStageIndex,
-                stageName: `Prompt ${absoluteCurrentPrompt}`
+                stageName: `Prompt ${absoluteCurrentPrompt}`,
+                promptText: prompt,
+                promptNumber: absoluteCurrentPrompt
               });
               if (shouldStopNow()) {
                 return forceStopResult();
@@ -42881,7 +43068,9 @@ async function injectToChat(
                 currentPrompt: absoluteCurrentPrompt,
                 totalPrompts: totalPromptsForRun,
                 stageIndex: absoluteStageIndex,
-                stageName: `Prompt ${absoluteCurrentPrompt}`
+                stageName: `Prompt ${absoluteCurrentPrompt}`,
+                promptText: prompt,
+                promptNumber: absoluteCurrentPrompt
               });
               if (shouldStopNow()) {
                 return forceStopResult();

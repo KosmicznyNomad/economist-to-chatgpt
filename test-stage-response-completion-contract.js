@@ -208,6 +208,7 @@ function loadCompletionHelpers() {
     'extractPromptStageIdForCompletionContract',
     'buildStageResponseCompletionContract',
     'responseTextContainsCompleteJsonArray',
+    'getResponseCompletionReadiness',
     'validateStageResponseForPrompt'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
@@ -264,12 +265,58 @@ SELECTED_SUB-SEGMENTS: rescue amendments, discounted secondary claims
   const completeResult = ctx.validateStageResponseForPrompt(completeStage1, stage1Prompt, 2);
   assert.strictEqual(completeResult.valid, true);
 
+  const stage0PayloadPrompt = `
+ROLE
+
+STAGE 0 - ARTICLE MECHANISM LOCK
+
+At the END of your Stage 0 output, include a clearly marked block:
+
+=== STAGE 0 HANDOFF ===
+WINNING_THESIS: [single sentence]
+=== END HANDOFF ===
+`;
+  assert.strictEqual(ctx.extractPromptStageIdForCompletionContract(stage0PayloadPrompt, 0), '0');
+
+  const oneLetterReadiness = ctx.getResponseCompletionReadiness('I', stage0PayloadPrompt, 0, {
+    forStaleGenerating: true
+  });
+  assert.strictEqual(oneLetterReadiness.ready, false);
+  assert.strictEqual(oneLetterReadiness.reason, 'too_short');
+
+  const preambleOnlyReadiness = ctx.getResponseCompletionReadiness(
+    'I will stay at Stage 0 and reconstruct the worldview before selecting the thesis.',
+    stage0PayloadPrompt,
+    0,
+    { forStaleGenerating: true }
+  );
+  assert.strictEqual(preambleOnlyReadiness.ready, false);
+  assert.strictEqual(preambleOnlyReadiness.reason, 'missing_completion_marker');
+  assert.match(preambleOnlyReadiness.missingMarker, /STAGE 0/i);
+
+  const completeStage0Readiness = ctx.getResponseCompletionReadiness(
+    `## 0. Evidence Ledger & Author Worldview
+
+=== STAGE 0 HANDOFF ===
+WINNING_THESIS: If agentic computing becomes continuous, then data-center spend shifts toward rack-scale inference systems.
+=== END HANDOFF ===`,
+    stage0PayloadPrompt,
+    0,
+    { forStaleGenerating: true }
+  );
+  assert.strictEqual(completeStage0Readiness.ready, true);
+  assert.strictEqual(completeStage0Readiness.reason, 'completion_contract_satisfied');
+
   assert.match(backgroundSource, /waitForChatGptGenerationFinishedBeforeNextPrompt\(/);
   const guardCallIndex = backgroundSource.indexOf('const generationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt');
   const stageCompletionIndex = backgroundSource.indexOf('responseDataGapDirective = dataGapDirective;');
   assert(guardCallIndex > 0, 'Expected generation-finished guard before stage completion.');
   assert(stageCompletionIndex > guardCallIndex, 'Stage completion must happen after generation-finished guard.');
   assert.match(backgroundSource, /Nie wysylam kolejnego etapu - ChatGPT nadal generuje/);
+  assert.match(backgroundSource, /promptText:\s*payload/);
+  assert.match(backgroundSource, /promptText:\s*prompt/);
+  assert.match(backgroundSource, /Nie wysylam prompt chain - Stage 0 jest niekompletny/);
+  assert.match(backgroundSource, /Stage 1 nie moze ruszyc bez kompletnego Stage 0/);
 
   console.log('test-stage-response-completion-contract.js passed');
 }
