@@ -763,6 +763,7 @@ function buildScenarioContext() {
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
     'isProcessWindowAutoCloseEnabled',
+    'isDataGapTerminalProcess',
     'buildStaleQueueReleasePatch',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
