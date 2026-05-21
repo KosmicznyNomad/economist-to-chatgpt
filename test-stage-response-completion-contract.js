@@ -242,9 +242,9 @@ function main() {
   ].join('\n\n');
 
   const truncatedResult = ctx.validateStageResponseForPrompt(truncatedStage1, stage1Prompt, 2);
-  assert.strictEqual(truncatedResult.valid, false);
-  assert.strictEqual(truncatedResult.reason, 'missing_completion_marker');
-  assert.match(truncatedResult.missingMarker, /STAGE 1/i);
+  assert.strictEqual(truncatedResult.valid, true);
+  assert.strictEqual(truncatedResult.reason, 'ok_missing_soft_markers');
+  assert(truncatedResult.missingMarkers.some((marker) => /STAGE 1/i.test(marker)));
 
   const wrongStageHandoff = `${truncatedStage1}
 
@@ -252,8 +252,9 @@ function main() {
 WINNING_THESIS: Prior-stage text that should not satisfy Stage 1 completion.
 === END HANDOFF ===`;
   const wrongStageResult = ctx.validateStageResponseForPrompt(wrongStageHandoff, stage1Prompt, 2);
-  assert.strictEqual(wrongStageResult.valid, false);
-  assert.match(wrongStageResult.missingMarker, /STAGE 1/i);
+  assert.strictEqual(wrongStageResult.valid, true);
+  assert.strictEqual(wrongStageResult.reason, 'ok_missing_soft_markers');
+  assert(wrongStageResult.missingMarkers.some((marker) => /STAGE 1/i.test(marker)));
 
   const completeStage1 = `${truncatedStage1}
 
@@ -291,8 +292,7 @@ WINNING_THESIS: [single sentence]
     { forStaleGenerating: true }
   );
   assert.strictEqual(preambleOnlyReadiness.ready, false);
-  assert.strictEqual(preambleOnlyReadiness.reason, 'missing_completion_marker');
-  assert.match(preambleOnlyReadiness.missingMarker, /STAGE 0/i);
+  assert.strictEqual(preambleOnlyReadiness.reason, 'too_short_for_stale_generating_override');
 
   const completeStage0Readiness = ctx.getResponseCompletionReadiness(
     `## 0. Evidence Ledger & Author Worldview
@@ -307,6 +307,16 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.strictEqual(completeStage0Readiness.ready, true);
   assert.strictEqual(completeStage0Readiness.reason, 'completion_contract_satisfied');
 
+  const longNoHandoffReadiness = ctx.getResponseCompletionReadiness(
+    'This is a long mechanically complete answer that has enough text to be treated as a finished DOM response after ChatGPT has stopped streaming. '.repeat(4),
+    stage0PayloadPrompt,
+    0,
+    { forStaleGenerating: true }
+  );
+  assert.strictEqual(longNoHandoffReadiness.ready, true);
+  assert.strictEqual(longNoHandoffReadiness.reason, 'basic_response_ready_missing_soft_markers');
+  assert(longNoHandoffReadiness.missingMarkers.some((marker) => /STAGE 0/i.test(marker)));
+
   assert.match(backgroundSource, /waitForChatGptGenerationFinishedBeforeNextPrompt\(/);
   const guardCallIndex = backgroundSource.indexOf('const generationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt');
   const stageCompletionIndex = backgroundSource.indexOf('responseDataGapDirective = dataGapDirective;');
@@ -317,8 +327,10 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.match(backgroundSource, /promptText:\s*prompt/);
   assert.match(backgroundSource, /Nie wysylam prompt chain - Stage 0 jest niekompletny/);
   assert.match(backgroundSource, /Stage 1 nie moze ruszyc bez kompletnego Stage 0/);
+  assert.match(backgroundSource, /Brak markerow oczekiwanych przez prompt.*soft diagnostic/);
+  assert.doesNotMatch(backgroundSource, /Nie wysylam kolejnego etapu - odpowiedz niepelna/);
   assert.match(backgroundSource, /async function getLastResponseText\(options = \{\}\)/);
-  assert.match(backgroundSource, /Latest assistant response matches current prompt contract/);
+  assert.match(backgroundSource, /Latest assistant response passes DOM\/basic completion readiness/);
   assert.match(backgroundSource, /if \(!preferLatest\)/);
   assert.match(
     backgroundSource,

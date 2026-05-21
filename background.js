@@ -40233,7 +40233,7 @@ async function injectToChat(
       if (generationLooksStaleReadyBase && !staleReadyCompletion.ready) {
         const warnKey = [
           staleReadyCompletion.reason || 'unknown',
-          staleReadyCompletion.missingMarker || '',
+          (staleReadyCompletion.missingMarkers || []).join(','),
           currentLastText.length
         ].join('|');
         if (warnKey !== phase2IncompleteStaleReadyWarnKey) {
@@ -40243,7 +40243,7 @@ async function injectToChat(
             staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
             responseLength: currentLastText.length,
             completionReason: staleReadyCompletion.reason,
-            missingMarker: staleReadyCompletion.missingMarker || ''
+            missingMarkers: staleReadyCompletion.missingMarkers || []
           });
         }
       }
@@ -40553,7 +40553,7 @@ async function injectToChat(
         if (preferLatest && expectedPromptText) {
           const expectedReadiness = getResponseCompletionReadiness(text, expectedPromptText, expectedPromptNumber);
           if (expectedReadiness.ready) {
-            console.log('[response-capture] Latest assistant response matches current prompt contract', {
+            console.log('[response-capture] Latest assistant response passes DOM/basic completion readiness', {
               assistantCount: messages.length,
               promptNumber: expectedPromptNumber,
               stageId: expectedReadiness.stageId || '',
@@ -40567,7 +40567,7 @@ async function injectToChat(
             assistantCount: messages.length,
             promptNumber: expectedPromptNumber,
             reason: expectedReadiness.reason,
-            missingMarker: expectedReadiness.missingMarker || '',
+            missingMarkers: expectedReadiness.missingMarkers || [],
             characters: text.length
           });
         }
@@ -40907,19 +40907,19 @@ async function injectToChat(
       return { ready: false, reason: 'too_short' };
     }
 
+    if (options?.forStaleGenerating === true && normalizedText.length < 200) {
+      return { ready: false, reason: 'too_short_for_stale_generating_override' };
+    }
+
     const rawPrompt = typeof promptText === 'string' ? promptText : '';
     const completionContract = rawPrompt
       ? buildStageResponseCompletionContract(rawPrompt, promptNumber)
       : { markers: [], requiresJsonArray: false, stageId: '' };
 
+    const missingMarkers = [];
     for (const marker of completionContract.markers) {
       if (!marker.pattern.test(rawText)) {
-        return {
-          ready: false,
-          reason: 'missing_completion_marker',
-          missingMarker: marker.label,
-          stageId: completionContract.stageId
-        };
+        missingMarkers.push(marker.label);
       }
     }
 
@@ -40931,16 +40931,17 @@ async function injectToChat(
       };
     }
 
-    if (options?.forStaleGenerating === true && !rawPrompt && normalizedText.length < 200) {
-      return { ready: false, reason: 'too_short_for_stale_generating_override' };
-    }
-
     return {
       ready: true,
-      reason: completionContract.markers.length > 0 || completionContract.requiresJsonArray
-        ? 'completion_contract_satisfied'
-        : 'basic_response_ready',
-      stageId: completionContract.stageId
+      reason: missingMarkers.length > 0
+        ? 'basic_response_ready_missing_soft_markers'
+        : (
+            completionContract.markers.length > 0 || completionContract.requiresJsonArray
+              ? 'completion_contract_satisfied'
+              : 'basic_response_ready'
+          ),
+      stageId: completionContract.stageId,
+      missingMarkers
     };
   }
 
@@ -40955,15 +40956,10 @@ async function injectToChat(
     }
 
     const completionContract = buildStageResponseCompletionContract(promptText, promptNumber);
+    const missingMarkers = [];
     for (const marker of completionContract.markers) {
       if (!marker.pattern.test(safeText)) {
-        return {
-          valid: false,
-          reason: 'missing_completion_marker',
-          missingMarker: marker.label,
-          stageId: completionContract.stageId,
-          statusText: `Odpowiedz niepelna - brak ${marker.label}`
-        };
+        missingMarkers.push(marker.label);
       }
     }
 
@@ -40976,10 +40972,19 @@ async function injectToChat(
       };
     }
 
+    if (missingMarkers.length > 0) {
+      console.warn('[response-validation] Brak markerow oczekiwanych przez prompt, ale DOM/tekst wskazuje zakonczona odpowiedz - traktuje jako soft diagnostic', {
+        stageId: completionContract.stageId || '',
+        missingMarkers,
+        responseLength: safeText.length
+      });
+    }
+
     return {
       valid: true,
-      reason: 'ok',
+      reason: missingMarkers.length > 0 ? 'ok_missing_soft_markers' : 'ok',
       stageId: completionContract.stageId,
+      missingMarkers,
       statusText: 'Odpowiedz kompletna'
     };
   }
@@ -41443,7 +41448,7 @@ async function injectToChat(
       if (generationLooksStaleBase && !staleReadyCompletion.ready) {
         const warnKey = [
           staleReadyCompletion.reason || 'unknown',
-          staleReadyCompletion.missingMarker || '',
+          (staleReadyCompletion.missingMarkers || []).join(','),
           currentLastText.length
         ].join('|');
         if (warnKey !== incompleteStaleReadyWarnKey) {
@@ -42385,7 +42390,7 @@ async function injectToChat(
           console.error('[stage0] Nie wysylam prompt chain - Stage 0 jest niekompletny', {
             responseLength: stage0Response.length,
             reason: stage0Validation.reason,
-            missingMarker: stage0Validation.missingMarker || ''
+            missingMarkers: stage0Validation.missingMarkers || []
           });
           updateCounter(
             counter,
@@ -42395,7 +42400,6 @@ async function injectToChat(
           );
 
           const shouldTryNativeContinue = compactText(stage0Response) && (
-            stage0Validation.reason === 'missing_completion_marker' ||
             stage0Validation.reason === 'invalid_or_incomplete_json_array' ||
             stage0Validation.reason === 'basic_response_invalid'
           );
@@ -42419,7 +42423,7 @@ async function injectToChat(
           if (action === 'skip') {
             console.warn('[stage0] Ignoruje skip - Stage 1 nie moze ruszyc bez kompletnego Stage 0', {
               reason: stage0Validation.reason,
-              missingMarker: stage0Validation.missingMarker || ''
+              missingMarkers: stage0Validation.missingMarkers || []
             });
             updateCounter(counter, promptOffset, totalPromptsForRun, 'Nie wysylam Stage 1 - Stage 0 niekompletny');
           }
@@ -42946,7 +42950,10 @@ async function injectToChat(
             if (!isValid) {
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
-              console.error(`❌ Długość: ${responseText.length} znaków; powód: ${stageResponseValidation.reason}${stageResponseValidation.missingMarker ? ` (${stageResponseValidation.missingMarker})` : ''}`);
+              const missingSoftMarkers = Array.isArray(stageResponseValidation.missingMarkers) && stageResponseValidation.missingMarkers.length > 0
+                ? ` (${stageResponseValidation.missingMarkers.join(', ')})`
+                : '';
+              console.error(`❌ Długość: ${responseText.length} znaków; powód: ${stageResponseValidation.reason}${missingSoftMarkers}`);
               updateCounter(
                 counter,
                 absoluteCurrentPrompt,
@@ -42999,7 +43006,6 @@ async function injectToChat(
                 }
               }
               const shouldTryNativeContinue = compactText(responseText) && (
-                stageResponseValidation.reason === 'missing_completion_marker' ||
                 stageResponseValidation.reason === 'invalid_or_incomplete_json_array' ||
                 stageResponseValidation.reason === 'basic_response_invalid'
               );
@@ -43023,7 +43029,6 @@ async function injectToChat(
               }
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
               const mustWaitForCompleteResponse = (
-                stageResponseValidation.reason === 'missing_completion_marker' ||
                 stageResponseValidation.reason === 'invalid_or_incomplete_json_array'
               );
               
@@ -43031,9 +43036,9 @@ async function injectToChat(
                 console.warn('[response-completion] Ignoruje skip dla niepelnej odpowiedzi etapu', {
                   prompt: absoluteCurrentPrompt,
                   reason: stageResponseValidation.reason,
-                  missingMarker: stageResponseValidation.missingMarker || ''
+                  missingMarkers: stageResponseValidation.missingMarkers || []
                 });
-                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Nie wysylam kolejnego etapu - odpowiedz niepelna');
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Nie wysylam kolejnego etapu - JSON nie jest domkniety');
                 await waitForResponse(responseWaitMs, {
                   currentPrompt: absoluteCurrentPrompt,
                   totalPrompts: totalPromptsForRun,
