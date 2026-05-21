@@ -39849,6 +39849,8 @@ async function injectToChat(
     const waitStageName = typeof waitProgress.stageName === 'string' && waitProgress.stageName.trim()
       ? waitProgress.stageName.trim()
       : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
+    const waitPromptText = typeof waitProgress.promptText === 'string' ? waitProgress.promptText : '';
+    const waitPromptNumber = Number.isInteger(waitProgress.promptNumber) ? waitProgress.promptNumber : waitCurrentPrompt;
     const startTime = Date.now();
     let stableReadyHits = 0;
     let clickedContinue = false;
@@ -39901,7 +39903,14 @@ async function injectToChat(
       }
 
       const textStable = Date.now() - lastAssistantChangeAt >= 3000;
-      const generationFinished = !genStatus.generating && editorReady && textStable && !findChatGptContinueGeneratingButton();
+      const completionReady = getResponseCompletionReadiness(currentLastText, waitPromptText, waitPromptNumber);
+      const generationFinished = (
+        !genStatus.generating
+        && editorReady
+        && textStable
+        && !findChatGptContinueGeneratingButton()
+        && completionReady.ready
+      );
       if (generationFinished) {
         stableReadyHits += 1;
         if (stableReadyHits >= 2) {
@@ -39926,7 +39935,10 @@ async function injectToChat(
           phase: 'generation_finish_guard',
           statusCode: 'chat.generation_finish_guard',
           statusText: 'Czekam az ChatGPT skonczy generowac odpowiedz',
-          reason: genStatus.generating ? (genStatus.reason || 'generating') : 'interface_not_stable',
+          reason: genStatus.generating ? (genStatus.reason || 'generating') : (completionReady.reason || 'interface_not_stable'),
+          ...(Array.isArray(completionReady.missingMarkers) && completionReady.missingMarkers.length > 0
+            ? { missingMarkers: completionReady.missingMarkers }
+            : {}),
           needsAction: false,
           chatGptGenerating: genStatus.generating === true ? 'yes' : 'no'
         });
@@ -40261,6 +40273,66 @@ async function injectToChat(
         consecutiveReady += 1;
         if (consecutiveReady >= 1) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
+
+          const confirmGenStatus = isGenerating();
+          const confirmResponseNodes = getResponseDomNodes();
+          const confirmAssistantMessages = confirmResponseNodes.nodes;
+          const confirmResponseCount = confirmAssistantMessages.length;
+          const confirmLastAssistantMsg = confirmResponseCount > 0
+            ? confirmAssistantMessages[confirmResponseCount - 1]
+            : null;
+          const confirmLastText = confirmLastAssistantMsg
+            ? compactText(confirmLastAssistantMsg.innerText || confirmLastAssistantMsg.textContent || '')
+            : '';
+          const confirmTextChanged = confirmLastText && confirmLastText !== currentLastText;
+          const confirmCountChanged = confirmResponseCount !== currentResponseCount;
+          const confirmCompletion = getResponseCompletionReadiness(
+            confirmLastText,
+            waitPromptText,
+            waitPromptNumber,
+            { forStaleGenerating: confirmGenStatus.generating === true }
+          );
+          const confirmContinueButton = findChatGptContinueGeneratingButton();
+          const confirmEditor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                                document.querySelector('div[contenteditable="true"]') ||
+                                document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
+          const confirmEditorReady = confirmEditor && confirmEditor.getAttribute('contenteditable') === 'true';
+          const confirmReady = (
+            !confirmTextChanged
+            && !confirmCountChanged
+            && confirmEditorReady
+            && !confirmContinueButton
+            && (
+              !confirmGenStatus.generating
+              || (
+                generationLooksStaleReady
+                && confirmCompletion.ready
+                && confirmGenStatus.reason === genStatus.reason
+              )
+            )
+            && confirmCompletion.ready
+          );
+
+          if (!confirmReady) {
+            if (confirmTextChanged || confirmCountChanged) {
+              lastAssistantText = confirmLastText || lastAssistantText;
+              lastAssistantChangeAt = Date.now();
+              phase2IdleSince = Date.now();
+              lastObservedResponseCount = confirmResponseCount;
+              responseSeenInDOM = responseSeenInDOM || confirmResponseCount > initialAssistantCount;
+            }
+            consecutiveReady = 0;
+            console.warn('[FAZA 2] Gotowosc niepotwierdzona po probce stabilizacyjnej - czekam dalej.', {
+              textChanged: confirmTextChanged,
+              countChanged: confirmCountChanged,
+              generating: confirmGenStatus.generating,
+              reason: confirmGenStatus.reason,
+              completionReason: confirmCompletion.reason,
+              missingMarkers: confirmCompletion.missingMarkers || []
+            });
+            await new Promise((resolve) => setTimeout(resolve, 500));
+            continue;
+          }
 
           const domMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
           const domArticles = document.querySelectorAll('article');
@@ -40841,6 +40913,10 @@ async function injectToChat(
     const markers = [];
     const stageId = extractPromptStageIdForCompletionContract(rawPrompt, promptNumber);
     const requiresEndHandoff = /===\s*END\s+HANDOFF\s*===/i.test(rawPrompt);
+    const explicitCompletionMarkers = Array.from(new Set(
+      (rawPrompt.match(/\b[A-Z][A-Z0-9]*(?:_[A-Z0-9]+)*_(?:COMPLETE|DONE)\b/g) || [])
+        .filter((marker) => marker.includes('_'))
+    ));
 
     if (requiresEndHandoff) {
       if (stageId) {
@@ -40855,10 +40931,23 @@ async function injectToChat(
       });
     }
 
+    for (const marker of explicitCompletionMarkers) {
+      markers.push({
+        label: marker,
+        pattern: new RegExp(`(^|\\n)\\s*${escapeRegexLocal(marker)}\\s*(?:\\n|$)`, 'i'),
+        hard: true
+      });
+    }
+
     return {
       stageId,
       markers,
-      requiresJsonArray: /\bfinal\s+(?:answer|output)\s+must\s+be\s+only\s+the\s+JSON\s+array\b/i.test(rawPrompt)
+      requiresJsonArray: /\bfinal\s+(?:answer|output)\s+must\s+be\s+only\s+the\s+JSON\s+array\b/i.test(rawPrompt),
+      requiresJsonObject: (
+        /zwr[oó]ć\s+wy[łl][aą]cznie\s+jeden\s+poprawny\s+JSON/i.test(rawPrompt)
+        || /return\s+only\s+one\s+valid\s+JSON/i.test(rawPrompt)
+        || /struktura\s+finalnego\s+JSON/i.test(rawPrompt)
+      )
     };
   }
 
@@ -40882,6 +40971,36 @@ async function injectToChat(
       if (!candidate) continue;
       try {
         if (Array.isArray(JSON.parse(candidate))) {
+          return true;
+        }
+      } catch (_error) {
+        // Try next candidate.
+      }
+    }
+    return false;
+  }
+
+  function responseTextContainsCompleteJsonObject(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return false;
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const objectStart = raw.indexOf('{');
+    const objectEnd = raw.lastIndexOf('}');
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      candidates.push(raw.slice(objectStart, objectEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
           return true;
         }
       } catch (_error) {
@@ -40922,6 +41041,9 @@ async function injectToChat(
         missingMarkers.push(marker.label);
       }
     }
+    const missingHardMarkers = completionContract.markers
+      .filter((marker) => marker.hard === true && !marker.pattern.test(rawText))
+      .map((marker) => marker.label);
 
     if (completionContract.requiresJsonArray && !responseTextContainsCompleteJsonArray(rawText)) {
       return {
@@ -40931,12 +41053,30 @@ async function injectToChat(
       };
     }
 
+    if (completionContract.requiresJsonObject && !responseTextContainsCompleteJsonObject(rawText)) {
+      return {
+        ready: false,
+        reason: 'invalid_or_incomplete_json_object',
+        stageId: completionContract.stageId
+      };
+    }
+
+    if (missingHardMarkers.length > 0) {
+      return {
+        ready: false,
+        reason: 'missing_completion_marker',
+        stageId: completionContract.stageId,
+        missingMarkers,
+        missingHardMarkers
+      };
+    }
+
     return {
       ready: true,
       reason: missingMarkers.length > 0
         ? 'basic_response_ready_missing_soft_markers'
         : (
-            completionContract.markers.length > 0 || completionContract.requiresJsonArray
+            completionContract.markers.length > 0 || completionContract.requiresJsonArray || completionContract.requiresJsonObject
               ? 'completion_contract_satisfied'
               : 'basic_response_ready'
           ),
@@ -40962,6 +41102,9 @@ async function injectToChat(
         missingMarkers.push(marker.label);
       }
     }
+    const missingHardMarkers = completionContract.markers
+      .filter((marker) => marker.hard === true && !marker.pattern.test(safeText))
+      .map((marker) => marker.label);
 
     if (completionContract.requiresJsonArray && !responseTextContainsCompleteJsonArray(safeText)) {
       return {
@@ -40969,6 +41112,26 @@ async function injectToChat(
         reason: 'invalid_or_incomplete_json_array',
         stageId: completionContract.stageId,
         statusText: 'Odpowiedz niepelna - JSON array nie jest domkniety'
+      };
+    }
+
+    if (completionContract.requiresJsonObject && !responseTextContainsCompleteJsonObject(safeText)) {
+      return {
+        valid: false,
+        reason: 'invalid_or_incomplete_json_object',
+        stageId: completionContract.stageId,
+        statusText: 'Odpowiedz niepelna - JSON object nie jest domkniety'
+      };
+    }
+
+    if (missingHardMarkers.length > 0) {
+      return {
+        valid: false,
+        reason: 'missing_completion_marker',
+        stageId: completionContract.stageId,
+        missingMarkers,
+        missingHardMarkers,
+        statusText: `Odpowiedz niepelna - brakuje markera ${missingHardMarkers.join(', ')}`
       };
     }
 
@@ -42384,6 +42547,55 @@ async function injectToChat(
           });
           stage0Validation = validateStageResponseForPrompt(stage0Response, payload, promptOffset);
           if (stage0Validation.valid) {
+            updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam az Prompt 1 skonczy generowac...');
+            const stage0GenerationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt(
+              responseWaitMs,
+              counter,
+              {
+                currentPrompt: promptOffset,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+                stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+                promptText: payload,
+                promptNumber: promptOffset
+              }
+            );
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
+            if (!stage0GenerationFinished.finished) {
+              console.warn('[response-completion] Nie wysylam Prompt 2 - Prompt 1 nadal nie jest zakonczony', {
+                prompt: promptOffset,
+                reason: stage0GenerationFinished.reason,
+                clickedContinue: stage0GenerationFinished.clickedContinue === true
+              });
+              updateCounter(counter, promptOffset, totalPromptsForRun, 'Nie wysylam Prompt 2 - Prompt 1 nadal generuje');
+              const action = await showContinueButton(counter, promptOffset, totalPromptsForRun, 'prompt1_generation_not_finished');
+              console.warn('[response-completion] Decyzja po prompt1_generation_not_finished', {
+                prompt: promptOffset,
+                action
+              });
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: promptOffset,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+                stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+                promptText: payload,
+                promptNumber: promptOffset
+              });
+              continue;
+            }
+
+            const postGenerationStage0Response = await getLastResponseText({
+              promptText: payload,
+              promptNumber: promptOffset,
+              preferLatest: true
+            });
+            if (postGenerationStage0Response !== stage0Response || stage0GenerationFinished.clickedContinue) {
+              stage0Response = postGenerationStage0Response;
+              continue;
+            }
+
             break;
           }
 
@@ -43086,7 +43298,9 @@ async function injectToChat(
                 currentPrompt: absoluteCurrentPrompt,
                 totalPrompts: totalPromptsForRun,
                 stageIndex: absoluteStageIndex,
-                stageName: `Prompt ${absoluteCurrentPrompt}`
+                stageName: `Prompt ${absoluteCurrentPrompt}`,
+                promptText: prompt,
+                promptNumber: absoluteCurrentPrompt
               }
             );
             if (shouldStopNow()) {

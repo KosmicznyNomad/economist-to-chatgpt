@@ -208,6 +208,7 @@ function loadCompletionHelpers() {
     'extractPromptStageIdForCompletionContract',
     'buildStageResponseCompletionContract',
     'responseTextContainsCompleteJsonArray',
+    'responseTextContainsCompleteJsonObject',
     'getResponseCompletionReadiness',
     'validateStageResponseForPrompt'
   ].forEach((functionName) => {
@@ -225,6 +226,16 @@ function parseCompanyPrompts() {
     .replace(/\r\n?/g, '\n');
   return raw
     .split(/\n(?:---\s*PROMPT\s+SEPARATOR\s*---|(?:\u25C4|\u00E2\u2014\u201E)?[ \t-]*PROMPT(?:[ _-]+)SEPARATOR[ \t-]*(?:\u25BA|\u00E2\u2013\u015F)?)\n/g)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function parsePortfolioPrompts() {
+  const raw = fs.readFileSync(path.join(__dirname, 'prompts-portfolio.txt'), 'utf8')
+    .replace(/\uFEFF/g, '')
+    .replace(/\r\n?/g, '\n');
+  return raw
+    .split(/^\s*(?:◄\s*PROMPT_SEPARATOR\s*►|---\s*PROMPT\s*SEPARATOR\s*---)\s*$/gim)
     .map((item) => item.trim())
     .filter(Boolean);
 }
@@ -317,12 +328,66 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.strictEqual(longNoHandoffReadiness.reason, 'basic_response_ready_missing_soft_markers');
   assert(longNoHandoffReadiness.missingMarkers.some((marker) => /STAGE 0/i.test(marker)));
 
+  const portfolioPrompts = parsePortfolioPrompts();
+  assert.strictEqual(portfolioPrompts.length, 3);
+  assert(portfolioPrompts[0].includes('PORTFOLIO_PROMPT_1_COMPLETE'));
+  assert(portfolioPrompts[1].includes('PORTFOLIO_PROMPT_2_COMPLETE'));
+
+  const portfolioPrompt1WithoutMarker = [
+    'PROMPT 1 - Ranking warstw value chain i proporcji',
+    'Warstwa #1 przechwytuje wiecej marzy, bo ograniczona podaz laczy sie z nieelastycznym popytem.',
+    'Warstwa #2 jest proxy i powinna miec nizsza wage, bo revenue rosnie szybciej niz FCF.'
+  ].join('\n\n');
+  const portfolioPrompt1MissingMarker = ctx.validateStageResponseForPrompt(
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1MissingMarker.valid, false);
+  assert.strictEqual(portfolioPrompt1MissingMarker.reason, 'missing_completion_marker');
+  assert.strictEqual(portfolioPrompt1MissingMarker.missingHardMarkers.length, 1);
+  assert.strictEqual(portfolioPrompt1MissingMarker.missingHardMarkers[0], 'PORTFOLIO_PROMPT_1_COMPLETE');
+
+  const portfolioPrompt1Complete = `${portfolioPrompt1WithoutMarker}
+
+PORTFOLIO_PROMPT_1_COMPLETE`;
+  const portfolioPrompt1CompleteResult = ctx.validateStageResponseForPrompt(
+    portfolioPrompt1Complete,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1CompleteResult.valid, true);
+
+  const portfolioPrompt1Readiness = ctx.getResponseCompletionReadiness(
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1Readiness.ready, false);
+  assert.strictEqual(portfolioPrompt1Readiness.reason, 'missing_completion_marker');
+
+  const portfolioPrompt3TruncatedJson = ctx.validateStageResponseForPrompt(
+    '{"thesis_construction_summary":"tekst","portfolio_construction_commentary":"tekst","layers":[',
+    portfolioPrompts[2],
+    3
+  );
+  assert.strictEqual(portfolioPrompt3TruncatedJson.valid, false);
+  assert.strictEqual(portfolioPrompt3TruncatedJson.reason, 'invalid_or_incomplete_json_object');
+
+  const portfolioPrompt3CompleteJson = ctx.validateStageResponseForPrompt(
+    '{"thesis_construction_summary":"tekst","portfolio_construction_commentary":"tekst","layers":[],"positions":[],"portfolio_gaps":[],"warnings":[],"errors":[]}',
+    portfolioPrompts[2],
+    3
+  );
+  assert.strictEqual(portfolioPrompt3CompleteJson.valid, true);
+
   assert.match(backgroundSource, /waitForChatGptGenerationFinishedBeforeNextPrompt\(/);
   const guardCallIndex = backgroundSource.indexOf('const generationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt');
   const stageCompletionIndex = backgroundSource.indexOf('responseDataGapDirective = dataGapDirective;');
   assert(guardCallIndex > 0, 'Expected generation-finished guard before stage completion.');
   assert(stageCompletionIndex > guardCallIndex, 'Stage completion must happen after generation-finished guard.');
   assert.match(backgroundSource, /Nie wysylam kolejnego etapu - ChatGPT nadal generuje/);
+  assert.match(backgroundSource, /Nie wysylam Prompt 2 - Prompt 1 nadal nie jest zakonczony/);
   assert.match(backgroundSource, /promptText:\s*payload/);
   assert.match(backgroundSource, /promptText:\s*prompt/);
   assert.match(backgroundSource, /Nie wysylam prompt chain - Stage 0 jest niekompletny/);
