@@ -40442,7 +40442,11 @@ async function injectToChat(
   }
   
   // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
-  async function getLastResponseText() {
+  async function getLastResponseText(options = {}) {
+    const captureOptions = options && typeof options === 'object' ? options : {};
+    const expectedPromptText = typeof captureOptions.promptText === 'string' ? captureOptions.promptText : '';
+    const expectedPromptNumber = Number.isInteger(captureOptions.promptNumber) ? captureOptions.promptNumber : 0;
+    const preferLatest = captureOptions.preferLatest === true || !!expectedPromptText;
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
     
     // Funkcja pomocnicza - wyciąga tylko treść głównej odpowiedzi, pomija źródła/linki
@@ -40534,28 +40538,6 @@ async function injectToChat(
       }
       
       if (messages.length > 0) {
-        const preferredStructured = findPreferredStructuredAssistantResponse(
-          Array.from(messages),
-          extractMainContent
-        );
-        if (preferredStructured && preferredStructured.text) {
-          if (preferredStructured.index !== messages.length - 1) {
-            console.log('[copy-flow] [capture:structured-fallback]', {
-              selectedAssistantIndex: preferredStructured.index + 1,
-              assistantCount: messages.length,
-              validLineCount: preferredStructured.analysis.validLineCount,
-              preferredRoleRows: preferredStructured.analysis.preferredRoleRows
-            });
-          } else {
-            console.log('[copy-flow] [capture:structured-current]', {
-              assistantCount: messages.length,
-              validLineCount: preferredStructured.analysis.validLineCount,
-              preferredRoleRows: preferredStructured.analysis.preferredRoleRows
-            });
-          }
-          return preferredStructured.text;
-        }
-
         const lastMessage = messages[messages.length - 1];
         
         // Sprawdź czy to nie jest tylko thinking indicator
@@ -40568,6 +40550,51 @@ async function injectToChat(
         }
         
         const text = extractMainContent(lastMessage);
+        if (preferLatest && expectedPromptText) {
+          const expectedReadiness = getResponseCompletionReadiness(text, expectedPromptText, expectedPromptNumber);
+          if (expectedReadiness.ready) {
+            console.log('[response-capture] Latest assistant response matches current prompt contract', {
+              assistantCount: messages.length,
+              promptNumber: expectedPromptNumber,
+              stageId: expectedReadiness.stageId || '',
+              reason: expectedReadiness.reason,
+              characters: text.length
+            });
+            return text;
+          }
+
+          console.warn('[response-capture] Latest assistant response does not yet match current prompt contract', {
+            assistantCount: messages.length,
+            promptNumber: expectedPromptNumber,
+            reason: expectedReadiness.reason,
+            missingMarker: expectedReadiness.missingMarker || '',
+            characters: text.length
+          });
+        }
+
+        if (!preferLatest) {
+          const preferredStructured = findPreferredStructuredAssistantResponse(
+            Array.from(messages),
+            extractMainContent
+          );
+          if (preferredStructured && preferredStructured.text) {
+            if (preferredStructured.index !== messages.length - 1) {
+              console.log('[copy-flow] [capture:structured-fallback]', {
+                selectedAssistantIndex: preferredStructured.index + 1,
+                assistantCount: messages.length,
+                validLineCount: preferredStructured.analysis.validLineCount,
+                preferredRoleRows: preferredStructured.analysis.preferredRoleRows
+              });
+            } else {
+              console.log('[copy-flow] [capture:structured-current]', {
+                assistantCount: messages.length,
+                validLineCount: preferredStructured.analysis.validLineCount,
+                preferredRoleRows: preferredStructured.analysis.preferredRoleRows
+              });
+            }
+            return preferredStructured.text;
+          }
+        }
         
         // Jeśli znaleziono niepustą odpowiedź - sukces!
         if (text.length > 0) {
@@ -42345,7 +42372,11 @@ async function injectToChat(
             return forceStopResult();
           }
 
-          stage0Response = await getLastResponseText();
+          stage0Response = await getLastResponseText({
+            promptText: payload,
+            promptNumber: promptOffset,
+            preferLatest: true
+          });
           stage0Validation = validateStageResponseForPrompt(stage0Response, payload, promptOffset);
           if (stage0Validation.valid) {
             break;
@@ -42871,7 +42902,11 @@ async function injectToChat(
               return forceStopResult();
             }
             console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
-            responseText = await getLastResponseText();
+            responseText = await getLastResponseText({
+              promptText: prompt,
+              promptNumber: absoluteCurrentPrompt,
+              preferLatest: true
+            });
             const validationBlocker = captureGenerationBlockerState(responseText, 'validation_text');
             if (validationBlocker) {
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
@@ -43077,7 +43112,11 @@ async function injectToChat(
               }
               continue;
             }
-            const postGenerationResponseText = await getLastResponseText();
+            const postGenerationResponseText = await getLastResponseText({
+              promptText: prompt,
+              promptNumber: absoluteCurrentPrompt,
+              preferLatest: true
+            });
             if (postGenerationResponseText !== responseText || generationFinished.clickedContinue) {
               responseText = postGenerationResponseText;
               continue;

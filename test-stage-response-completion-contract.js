@@ -317,6 +317,13 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.match(backgroundSource, /promptText:\s*prompt/);
   assert.match(backgroundSource, /Nie wysylam prompt chain - Stage 0 jest niekompletny/);
   assert.match(backgroundSource, /Stage 1 nie moze ruszyc bez kompletnego Stage 0/);
+  assert.match(backgroundSource, /async function getLastResponseText\(options = \{\}\)/);
+  assert.match(backgroundSource, /Latest assistant response matches current prompt contract/);
+  assert.match(backgroundSource, /if \(!preferLatest\)/);
+  assert.match(
+    backgroundSource,
+    /responseText = await getLastResponseText\(\{\s*promptText: prompt,\s*promptNumber: absoluteCurrentPrompt,\s*preferLatest: true/s
+  );
 
   console.log('test-stage-response-completion-contract.js passed');
 }
