@@ -2104,6 +2104,12 @@ not model explicitly. Stage 5 surfaces these patterns.
 
 MCP RETRIEVAL
 
+Preferred path: if analysis.evidence_bundle is available, call it first
+with the Stage 1 sector/mechanism and the Stage 4 company tickers. Use
+its data_sources and context_plain as the retrieval audit trail. Only
+fall back to separate sector_context.search, context_packs.search, and
+companies.context calls when the bundle tool is unavailable or too broad.
+
 Use MCP/Iskierka to find sectoral contexts matching:
 - Sector and sub-segment from Stage 1
 - Business type from Stage 2-4
@@ -2116,6 +2122,31 @@ Retrieve sector memory entries using combinations of:
 - Invoice item plus gate type
 - Sector risk plus capital allocation pattern
 - Thesis mechanism plus monetization route
+
+Do not call list_resources/resources/list for Stage 5 analytical
+retrieval. Resource lists are UI/discovery metadata, not sector
+evidence, and they can consume the context window without answering the
+sector-memory question. Use sector_context.search, context_packs.search,
+companies.context, or other narrow domain tools instead.
+
+TOOL ERROR PROTOCOL
+
+Distinguish three states exactly:
+
+1. Retrieved rows: a domain MCP call succeeds and returns items.
+2. Available but no match: a domain MCP call succeeds with items=[] or
+   returned_count=0 and no error flag.
+3. Unavailable: any call returns is_error=true, mcp_network_error,
+   network_error, timeout, auth/http failure, "Connection failed", or a
+   malformed/non-JSON response.
+
+If a call is unavailable, do not describe it as "no exact match" and do
+not broaden the query as if the failed call proved absence of sector
+memory. Retry once with a simpler narrow query if possible. If the retry
+also fails, set MCP_STATUS to unavailable, set CORE_CONFIDENCE_ADJUSTMENT
+to unchanged, and make ADJUSTMENT_REASON say that MCP transport failed.
+Never fabricate a sector overlay from general knowledge while labeling
+it as MCP-derived.
 
 Treat sector memory as precedent and challenge material, not as vote
 counting. If several MCP rows repeat the same point, do not count duplicates as independent evidence.
@@ -2198,7 +2229,7 @@ For each company, write a short paragraph (maximum 6 sentences):
 [For each company:]
 COMPANY:
 TICKER:
-MCP_STATUS: available / unavailable
+MCP_STATUS: available / available_no_match / unavailable
 PRIMARY_ARCHETYPE: [one line]
 KEY_SECTORAL_RISK: [one sentence or "none material"]
 KEY_SECTORAL_OPPORTUNITY: [one sentence or "none material"]

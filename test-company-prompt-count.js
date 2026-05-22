@@ -278,8 +278,24 @@ function testCompanyPromptFinalOutputsAreDataGapOrJsonOnly() {
     'Stage 5 should define sector-memory retrieval inputs.'
   );
   assert(
+    stage5McpPrompt.includes('if analysis.evidence_bundle is available, call it first'),
+    'Stage 5 should prefer the simplified evidence bundle read path.'
+  );
+  assert(
     stage5McpPrompt.includes('mark MCP_UNAVAILABLE'),
     'Stage 5 should mark MCP unavailability explicitly.'
+  );
+  assert(
+    stage5McpPrompt.includes('Do not call list_resources/resources/list for Stage 5 analytical'),
+    'Stage 5 should avoid broad resource listing for sector-memory retrieval.'
+  );
+  assert(
+    stage5McpPrompt.includes('If a call is unavailable, do not describe it as "no exact match"'),
+    'Stage 5 should distinguish MCP transport errors from empty search results.'
+  );
+  assert(
+    stage5McpPrompt.includes('MCP_STATUS: available / available_no_match / unavailable'),
+    'Stage 5 handoff should represent successful empty retrieval separately from MCP unavailability.'
   );
   assert(
     stage5McpPrompt.includes('do not count duplicates as independent evidence'),
