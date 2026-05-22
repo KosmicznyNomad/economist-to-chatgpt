@@ -201,6 +201,9 @@ function loadCompletionHelpers() {
 
   [
     'compactText',
+    'computeCopyFingerprint',
+    'normalizeResponseBaselineSnapshot',
+    'assistantResponseAdvancedSinceSnapshot',
     'normalizeDataGapStageId',
     'parseDataGapDirectiveResponse',
     'escapeRegexLocal',
@@ -307,6 +310,24 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.strictEqual(completeStage0Readiness.ready, true);
   assert.strictEqual(completeStage0Readiness.reason, 'completion_contract_satisfied');
 
+  const staleBaseline = {
+    assistantCount: 3,
+    lastAssistantText: 'Prior assistant response',
+    lastAssistantTurnText: 'Prior assistant response'
+  };
+  assert.strictEqual(
+    ctx.assistantResponseAdvancedSinceSnapshot(3, 'Prior assistant response', staleBaseline, 10),
+    false
+  );
+  assert.strictEqual(
+    ctx.assistantResponseAdvancedSinceSnapshot(4, 'Prior assistant response', staleBaseline, 10),
+    true
+  );
+  assert.strictEqual(
+    ctx.assistantResponseAdvancedSinceSnapshot(3, 'Fresh assistant response for the newly sent prompt.', staleBaseline, 10),
+    true
+  );
+
   const longNoHandoffReadiness = ctx.getResponseCompletionReadiness(
     'This is a long mechanically complete answer that has enough text to be treated as a finished DOM response after ChatGPT has stopped streaming. '.repeat(4),
     stage0PayloadPrompt,
@@ -329,6 +350,9 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.match(backgroundSource, /Stage 1 nie moze ruszyc bez kompletnego Stage 0/);
   assert.match(backgroundSource, /Brak markerow oczekiwanych przez prompt.*soft diagnostic/);
   assert.doesNotMatch(backgroundSource, /Nie wysylam kolejnego etapu - odpowiedz niepelna/);
+  assert.match(backgroundSource, /Latest assistant response is stale for current prompt/);
+  assert.match(backgroundSource, /responseBaselineSnapshot:\s*promptSnapshotBeforeSend/);
+  assert.match(backgroundSource, /requireFreshResponse:\s*true/);
   assert.match(backgroundSource, /async function getLastResponseText\(options = \{\}\)/);
   assert.match(backgroundSource, /Latest assistant response passes DOM\/basic completion readiness/);
   assert.match(backgroundSource, /if \(!preferLatest\)/);

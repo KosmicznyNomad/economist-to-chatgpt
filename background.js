@@ -37633,6 +37633,45 @@ async function injectToChat(
       };
     }
 
+    function normalizeResponseBaselineSnapshot(snapshot) {
+      if (!snapshot || typeof snapshot !== 'object') return null;
+      const assistantCount = Number.isInteger(snapshot.assistantCount) ? snapshot.assistantCount : null;
+      const lastAssistantText = compactText(
+        typeof snapshot.lastAssistantText === 'string' ? snapshot.lastAssistantText : ''
+      );
+      const lastAssistantTurnText = compactText(
+        typeof snapshot.lastAssistantTurnText === 'string' ? snapshot.lastAssistantTurnText : ''
+      );
+      if (assistantCount === null && !lastAssistantText && !lastAssistantTurnText) return null;
+      return {
+        assistantCount,
+        lastAssistantText,
+        lastAssistantTurnText
+      };
+    }
+
+    function assistantResponseAdvancedSinceSnapshot(assistantCount, assistantText, snapshot, minDelta = 30) {
+      const baseline = normalizeResponseBaselineSnapshot(snapshot);
+      if (!baseline) return true;
+      const currentCount = Number.isInteger(assistantCount) ? assistantCount : null;
+      if (currentCount !== null && baseline.assistantCount !== null && currentCount > baseline.assistantCount) {
+        return true;
+      }
+
+      const currentText = compactText(typeof assistantText === 'string' ? assistantText : '');
+      if (!currentText) return false;
+
+      const baselineTexts = [baseline.lastAssistantText, baseline.lastAssistantTurnText].filter(Boolean);
+      if (baselineTexts.length === 0) return currentText.length >= 50;
+
+      return baselineTexts.every((baselineText) => {
+        if (currentText === baselineText) return false;
+        const lengthDelta = Math.abs(currentText.length - baselineText.length);
+        if (lengthDelta >= minDelta) return true;
+        return currentText.length >= 50 && computeCopyFingerprint(currentText) !== computeCopyFingerprint(baselineText);
+      });
+    }
+
     function hasAssistantAdvancedSince(snapshot, minDelta = 30) {
       const base = snapshot && typeof snapshot === 'object' ? snapshot : {};
       const current = getPromptDomSnapshot();
@@ -37903,7 +37942,6 @@ async function injectToChat(
 
     async function classifyTimeoutOutcome(snapshot, promptText) {
       const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
-      const promptFragment = getPromptProbeFragment(promptText);
 
       if (captureGenerationBlockerState()) {
         return 'blocked';
@@ -37928,10 +37966,7 @@ async function injectToChat(
       }
 
       const generation = isGenerating();
-      const current = getPromptDomSnapshot();
-      const userAdvanced = current.userCount > (Number.isInteger(base.userCount) ? base.userCount : 0);
-      const userMatchesPrompt = !promptFragment || current.lastUserText.includes(promptFragment);
-      if (generation.generating || (userAdvanced && userMatchesPrompt)) {
+      if (generation.generating) {
         return 'still_generating';
       }
 
@@ -39955,6 +39990,8 @@ async function injectToChat(
       : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
     const waitPromptText = typeof waitProgress.promptText === 'string' ? waitProgress.promptText : '';
     const waitPromptNumber = Number.isInteger(waitProgress.promptNumber) ? waitProgress.promptNumber : waitCurrentPrompt;
+    const responseBaselineSnapshot = normalizeResponseBaselineSnapshot(waitProgress.responseBaselineSnapshot);
+    const requireFreshResponse = waitProgress.requireFreshResponse === true || !!responseBaselineSnapshot;
     const emitResponseWaitHeartbeat = (phase, elapsedMs = 0, extra = {}) => {
       if (!runId) return;
       const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
@@ -39973,7 +40010,13 @@ async function injectToChat(
         ...extra
       });
     };
-    const initialSnapshot = getAssistantSnapshot();
+    const initialSnapshot = responseBaselineSnapshot
+      ? {
+          count: Number.isInteger(responseBaselineSnapshot.assistantCount) ? responseBaselineSnapshot.assistantCount : 0,
+          lastText: responseBaselineSnapshot.lastAssistantText || responseBaselineSnapshot.lastAssistantTurnText || '',
+          source: 'prompt_baseline'
+        }
+      : getAssistantSnapshot();
     const initialAssistantCount = initialSnapshot.count;
     const initialAssistantText = initialSnapshot.lastText || '';
     const initialAssistantLength = initialAssistantText.length;
@@ -40028,12 +40071,15 @@ async function injectToChat(
       const lastTextChanged = lastAssistantText && lastAssistantText !== initialAssistantText;
       const lengthDelta = Math.abs(lastAssistantText.length - initialAssistantLength);
       const meaningfulTextChange = lastTextChanged && lengthDelta >= MIN_RESPONSE_DELTA;
+      const freshResponseStarted = responseBaselineSnapshot
+        ? assistantResponseAdvancedSinceSnapshot(phase1ResponseNodes.length, lastAssistantText, responseBaselineSnapshot, MIN_RESPONSE_DELTA)
+        : (hasNewContent || meaningfulTextChange);
 
-      if (hasNewContent || meaningfulTextChange) {
+      if (freshResponseStarted) {
         responseSeenInDOM = true;
       }
 
-      if (genStatus.generating || hasNewContent || meaningfulTextChange) {
+      if (genStatus.generating || freshResponseStarted) {
         responseStarted = true;
         break;
       }
@@ -40154,6 +40200,7 @@ async function injectToChat(
         lastResponseWaitHeartbeatAt = Date.now();
         emitResponseWaitHeartbeat('response_wait_phase2', Date.now() - phase2StartTime, {
           responseSeenInDOM,
+          requireFreshResponse,
           chatGptGenerating: genStatus.generating === true ? 'yes' : 'no',
           chatGptGenerationReason: typeof genStatus.reason === 'string' ? genStatus.reason : ''
         });
@@ -40192,7 +40239,10 @@ async function injectToChat(
       const phase2TextChanged = currentLastText && currentLastText !== initialAssistantText;
       const phase2LengthDelta = Math.abs(currentLastText.length - initialAssistantLength);
       const meaningfulTextChange = phase2TextChanged && phase2LengthDelta >= MIN_RESPONSE_DELTA;
-      if (hasNewAssistantMessage || meaningfulTextChange) {
+      const freshResponseSeen = responseBaselineSnapshot
+        ? assistantResponseAdvancedSinceSnapshot(currentResponseCount, currentLastText, responseBaselineSnapshot, MIN_RESPONSE_DELTA)
+        : (hasNewAssistantMessage || meaningfulTextChange);
+      if (freshResponseSeen) {
         responseSeenInDOM = true;
       }
 
@@ -40447,6 +40497,8 @@ async function injectToChat(
     const expectedPromptText = typeof captureOptions.promptText === 'string' ? captureOptions.promptText : '';
     const expectedPromptNumber = Number.isInteger(captureOptions.promptNumber) ? captureOptions.promptNumber : 0;
     const preferLatest = captureOptions.preferLatest === true || !!expectedPromptText;
+    const responseBaselineSnapshot = normalizeResponseBaselineSnapshot(captureOptions.responseBaselineSnapshot);
+    const requireFreshResponse = captureOptions.requireFreshResponse === true || !!responseBaselineSnapshot;
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
     
     // Funkcja pomocnicza - wyciąga tylko treść głównej odpowiedzi, pomija źródła/linki
@@ -40550,6 +40602,19 @@ async function injectToChat(
         }
         
         const text = extractMainContent(lastMessage);
+        if (
+          requireFreshResponse &&
+          !assistantResponseAdvancedSinceSnapshot(messages.length, text, responseBaselineSnapshot, 10)
+        ) {
+          console.warn('[response-capture] Latest assistant response is stale for current prompt; waiting for a fresh assistant turn', {
+            assistantCount: messages.length,
+            baselineAssistantCount: responseBaselineSnapshot?.assistantCount ?? null,
+            promptNumber: expectedPromptNumber,
+            characters: text.length
+          });
+          continue;
+        }
+
         if (preferLatest && expectedPromptText) {
           const expectedReadiness = getResponseCompletionReadiness(text, expectedPromptText, expectedPromptNumber);
           if (expectedReadiness.ready) {
@@ -40672,6 +40737,17 @@ async function injectToChat(
           const assistantMsg = turn.querySelector('[data-message-author-role="assistant"]');
           if (assistantMsg) {
             const text = extractMainContent(assistantMsg);
+            if (
+              requireFreshResponse &&
+              !assistantResponseAdvancedSinceSnapshot(
+                document.querySelectorAll('[data-message-author-role="assistant"]').length,
+                text,
+                responseBaselineSnapshot,
+                10
+              )
+            ) {
+              continue;
+            }
             if (text.length > 0) {
               console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2): ${text.length} znaków`);
               console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -40685,6 +40761,17 @@ async function injectToChat(
         for (let i = turnContainers.length - 1; i >= 0; i--) {
           const turn = turnContainers[i];
           const text = extractMainContent(turn);
+          if (
+            requireFreshResponse &&
+            !assistantResponseAdvancedSinceSnapshot(
+              document.querySelectorAll('[data-message-author-role="assistant"]').length,
+              text,
+              responseBaselineSnapshot,
+              10
+            )
+          ) {
+            continue;
+          }
           if (text.length > 50) { // Minimum 50 znaków
             console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2b): ${text.length} znaków`);
             console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -40708,6 +40795,17 @@ async function injectToChat(
       if (articles.length > 0) {
         const lastArticle = articles[articles.length - 1];
         const text = extractMainContent(lastArticle);
+        if (
+          requireFreshResponse &&
+          !assistantResponseAdvancedSinceSnapshot(
+            document.querySelectorAll('[data-message-author-role="assistant"]').length,
+            text,
+            responseBaselineSnapshot,
+            10
+          )
+        ) {
+          continue;
+        }
         if (text.length > 0) {
           console.log(`✅ Znaleziono odpowiedź przez article (fallback 3): ${text.length} znaków`);
           console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -40739,6 +40837,17 @@ async function injectToChat(
           // Weź ostatni element
           const lastElement = elements[elements.length - 1];
           const text = extractMainContent(lastElement);
+          if (
+            requireFreshResponse &&
+            !assistantResponseAdvancedSinceSnapshot(
+              document.querySelectorAll('[data-message-author-role="assistant"]').length,
+              text,
+              responseBaselineSnapshot,
+              10
+            )
+          ) {
+            continue;
+          }
           if (text.length > 50) { // Minimum 50 znaków
             console.log(`✅ Znaleziono odpowiedź przez ${selector} (fallback 4): ${text.length} znaków`);
             console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -42349,7 +42458,9 @@ async function injectToChat(
           stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
           stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
           promptText: payload,
-          promptNumber: promptOffset
+          promptNumber: promptOffset,
+          responseBaselineSnapshot: payloadPromptSnapshot,
+          requireFreshResponse: true
         });
         if (shouldStopNow()) {
           return forceStopResult();
@@ -42380,7 +42491,9 @@ async function injectToChat(
           stage0Response = await getLastResponseText({
             promptText: payload,
             promptNumber: promptOffset,
-            preferLatest: true
+            preferLatest: true,
+            responseBaselineSnapshot: payloadPromptSnapshot,
+            requireFreshResponse: true
           });
           stage0Validation = validateStageResponseForPrompt(stage0Response, payload, promptOffset);
           if (stage0Validation.valid) {
@@ -42413,7 +42526,9 @@ async function injectToChat(
                 stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
                 stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
                 promptText: payload,
-                promptNumber: promptOffset
+                promptNumber: promptOffset,
+                responseBaselineSnapshot: payloadPromptSnapshot,
+                requireFreshResponse: true
               });
               continue;
             }
@@ -42436,7 +42551,9 @@ async function injectToChat(
             stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
             stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
             promptText: payload,
-            promptNumber: promptOffset
+            promptNumber: promptOffset,
+            responseBaselineSnapshot: payloadPromptSnapshot,
+            requireFreshResponse: true
           });
         }
 
@@ -42541,7 +42658,17 @@ async function injectToChat(
         function startSwKeepalive() {
           if (_swKeepaliveTimer) return;
           _swKeepaliveTimer = setInterval(() => {
-            if (!chrome?.runtime?.sendMessage) {
+            let sendMessage = null;
+            try {
+              sendMessage = chrome?.runtime?.sendMessage;
+            } catch (error) {
+              _swKeepaliveErrors++;
+              if (_swKeepaliveErrors <= 5) {
+                console.warn(`[sw-keepalive] chrome.runtime unavailable (errors=${_swKeepaliveErrors}): ${error?.message || error}`);
+              }
+              return;
+            }
+            if (typeof sendMessage !== 'function') {
               _swKeepaliveErrors++;
               if (_swKeepaliveErrors <= 3) {
                 console.warn(`[sw-keepalive] chrome.runtime unavailable (errors=${_swKeepaliveErrors})`);
@@ -42549,7 +42676,17 @@ async function injectToChat(
               return;
             }
             _swKeepaliveCount++;
-            chrome.runtime.sendMessage({ type: 'KEEPALIVE', seq: _swKeepaliveCount }).catch((err) => {
+            let keepalivePromise = null;
+            try {
+              keepalivePromise = sendMessage.call(chrome.runtime, { type: 'KEEPALIVE', seq: _swKeepaliveCount });
+            } catch (err) {
+              _swKeepaliveErrors++;
+              if (_swKeepaliveErrors <= 5) {
+                console.warn(`[sw-keepalive] ping #${_swKeepaliveCount} threw: ${err?.message || err}`);
+              }
+              return;
+            }
+            Promise.resolve(keepalivePromise).catch((err) => {
               _swKeepaliveErrors++;
               if (_swKeepaliveErrors <= 5) {
                 console.warn(`[sw-keepalive] ping #${_swKeepaliveCount} failed: ${err?.message || err}`);
@@ -42788,7 +42925,9 @@ async function injectToChat(
               stageIndex: absoluteStageIndex,
               stageName: `Prompt ${absoluteCurrentPrompt}`,
               promptText: prompt,
-              promptNumber: absoluteCurrentPrompt
+              promptNumber: absoluteCurrentPrompt,
+              responseBaselineSnapshot: promptSnapshotBeforeSend,
+              requireFreshResponse: true
             });
             if (shouldStopNow()) {
               return forceStopResult();
@@ -42909,7 +43048,9 @@ async function injectToChat(
             responseText = await getLastResponseText({
               promptText: prompt,
               promptNumber: absoluteCurrentPrompt,
-              preferLatest: true
+              preferLatest: true,
+              responseBaselineSnapshot: promptSnapshotBeforeSend,
+              requireFreshResponse: true
             });
             const validationBlocker = captureGenerationBlockerState(responseText, 'validation_text');
             if (validationBlocker) {
@@ -42934,7 +43075,9 @@ async function injectToChat(
                   stageIndex: absoluteStageIndex,
                   stageName: `Prompt ${absoluteCurrentPrompt}`,
                   promptText: prompt,
-                  promptNumber: absoluteCurrentPrompt
+                  promptNumber: absoluteCurrentPrompt,
+                  responseBaselineSnapshot: promptSnapshotBeforeSend,
+                  requireFreshResponse: true
                 });
                 continue;
               }
@@ -42990,7 +43133,9 @@ async function injectToChat(
                     stageIndex: absoluteStageIndex,
                     stageName: `Prompt ${absoluteCurrentPrompt}`,
                     promptText: prompt,
-                    promptNumber: absoluteCurrentPrompt
+                    promptNumber: absoluteCurrentPrompt,
+                    responseBaselineSnapshot: promptSnapshotBeforeSend,
+                    requireFreshResponse: true
                   });
                   if (shouldStopNow()) {
                     return forceStopResult();
@@ -43019,7 +43164,9 @@ async function injectToChat(
                     stageIndex: absoluteStageIndex,
                     stageName: `Prompt ${absoluteCurrentPrompt}`,
                     promptText: prompt,
-                    promptNumber: absoluteCurrentPrompt
+                    promptNumber: absoluteCurrentPrompt,
+                    responseBaselineSnapshot: promptSnapshotBeforeSend,
+                    requireFreshResponse: true
                   });
                   if (shouldStopNow()) {
                     return forceStopResult();
@@ -43045,7 +43192,9 @@ async function injectToChat(
                   stageIndex: absoluteStageIndex,
                   stageName: `Prompt ${absoluteCurrentPrompt}`,
                   promptText: prompt,
-                  promptNumber: absoluteCurrentPrompt
+                  promptNumber: absoluteCurrentPrompt,
+                  responseBaselineSnapshot: promptSnapshotBeforeSend,
+                  requireFreshResponse: true
                 });
                 if (shouldStopNow()) {
                   return forceStopResult();
@@ -43068,7 +43217,9 @@ async function injectToChat(
                 stageIndex: absoluteStageIndex,
                 stageName: `Prompt ${absoluteCurrentPrompt}`,
                 promptText: prompt,
-                promptNumber: absoluteCurrentPrompt
+                promptNumber: absoluteCurrentPrompt,
+                responseBaselineSnapshot: promptSnapshotBeforeSend,
+                requireFreshResponse: true
               });
               if (shouldStopNow()) {
                 return forceStopResult();
@@ -43110,7 +43261,9 @@ async function injectToChat(
                 stageIndex: absoluteStageIndex,
                 stageName: `Prompt ${absoluteCurrentPrompt}`,
                 promptText: prompt,
-                promptNumber: absoluteCurrentPrompt
+                promptNumber: absoluteCurrentPrompt,
+                responseBaselineSnapshot: promptSnapshotBeforeSend,
+                requireFreshResponse: true
               });
               if (shouldStopNow()) {
                 return forceStopResult();
@@ -43120,7 +43273,9 @@ async function injectToChat(
             const postGenerationResponseText = await getLastResponseText({
               promptText: prompt,
               promptNumber: absoluteCurrentPrompt,
-              preferLatest: true
+              preferLatest: true,
+              responseBaselineSnapshot: promptSnapshotBeforeSend,
+              requireFreshResponse: true
             });
             if (postGenerationResponseText !== responseText || generationFinished.clickedContinue) {
               responseText = postGenerationResponseText;
