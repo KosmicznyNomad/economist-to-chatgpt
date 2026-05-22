@@ -277,6 +277,9 @@ rzeczywisty portfel. Musi być wystarczająco konkretny żeby przy
 każdej pozycji portfela móc zapytać: czy ta firma jest w warstwie #1
 czy #4 z rankingu, i czy jej waga w portfelu to odzwierciedla?
 
+Na samym końcu odpowiedzi dodaj osobną linię:
+PORTFOLIO_PROMPT_1_COMPLETE
+
 ◄PROMPT_SEPARATOR►
 
 PROMPT 2 - Mapowanie portfela na warstwy i target sizing
@@ -776,6 +779,9 @@ Najważniejsze luki koncepcyjne koszyka istotnego dla tezy autora.
 
 Jeśli snapshot jest pusty albo niekompletny, napisz STATUS: NIE_ZAPISANO
 i krótko opisz brakujące dane. Nie udawaj pełnej analizy.
+
+Na samym końcu odpowiedzi dodaj osobną linię:
+PORTFOLIO_PROMPT_2_COMPLETE
 
 ◄PROMPT_SEPARATOR►
 

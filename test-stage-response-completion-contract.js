@@ -194,8 +194,13 @@ function loadCompletionHelpers() {
     console,
     JSON,
     Number,
+    Promise,
     RegExp,
     String,
+    setTimeout: (callback) => {
+      callback();
+      return 0;
+    },
     DATA_GAP_DIRECTIVE_REGEX: /^\s*DATA_GAP_STAGE\s*=\s*([0-9]+)\s*$/i
   });
 
@@ -208,8 +213,11 @@ function loadCompletionHelpers() {
     'extractPromptStageIdForCompletionContract',
     'buildStageResponseCompletionContract',
     'responseTextContainsCompleteJsonArray',
+    'responseTextContainsCompleteJsonObject',
     'getResponseCompletionReadiness',
-    'validateStageResponseForPrompt'
+    'validateStageResponseForPrompt',
+    'getResponseDomNodes',
+    'getLastResponseText'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
@@ -229,11 +237,115 @@ function parseCompanyPrompts() {
     .filter(Boolean);
 }
 
-function main() {
+function parsePortfolioPrompts() {
+  const raw = fs.readFileSync(path.join(__dirname, 'prompts-portfolio.txt'), 'utf8')
+    .replace(/\uFEFF/g, '')
+    .replace(/\r\n?/g, '\n');
+  return raw
+    .split(/^\s*(?:◄\s*PROMPT_SEPARATOR\s*►|---\s*PROMPT\s*SEPARATOR\s*---)\s*$/gim)
+    .map((item) => item.trim())
+    .filter(Boolean);
+}
+
+function makeAssistantElement(text) {
+  return {
+    innerText: text,
+    textContent: text,
+    children: [],
+    className: '',
+    innerHTML: text,
+    cloneNode() {
+      return {
+        innerText: text,
+        textContent: text,
+        querySelectorAll() {
+          return [];
+        }
+      };
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+}
+
+function makeDomNode({ text = '', assistantChild = null, assistantAncestor = null, userAncestor = null, matchesAssistant = false } = {}) {
+  return {
+    innerText: text,
+    textContent: text,
+    matches(selector) {
+      return selector === '[data-message-author-role="assistant"]' && matchesAssistant;
+    },
+    querySelector(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return assistantChild;
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    closest(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return assistantAncestor;
+      if (selector === '[data-message-author-role="user"]') return userAncestor;
+      return null;
+    }
+  };
+}
+
+function installAssistantTextSequence(ctx, texts) {
+  let assistantSelectorCalls = 0;
+  ctx.document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') {
+        const index = Math.min(assistantSelectorCalls, texts.length - 1);
+        assistantSelectorCalls += 1;
+        return [makeAssistantElement(texts[index])];
+      }
+      return [];
+    }
+  };
+  return () => assistantSelectorCalls;
+}
+
+async function main() {
   const ctx = loadCompletionHelpers();
   const prompts = parseCompanyPrompts();
   const stage1Prompt = prompts[1];
   assert(stage1Prompt.includes('STAGE 1'), 'Expected real Stage 1 prompt fixture.');
+
+  const userPromptNode = makeDomNode({ text: 'STAGE 15 prompt that asks for JSON array.' });
+  ctx.document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [];
+      if (selector === '[data-testid^="conversation-turn-"]') return [userPromptNode];
+      if (selector === 'article') return [userPromptNode];
+      if (selector === 'div[class*="markdown"]') {
+        return [makeDomNode({ text: 'User prompt markdown', userAncestor: userPromptNode })];
+      }
+      return [];
+    }
+  };
+  const userOnlyResponseNodes = ctx.getResponseDomNodes();
+  assert.strictEqual(userOnlyResponseNodes.source, 'none');
+  assert.strictEqual(userOnlyResponseNodes.nodes.length, 0);
+
+  const assistantChild = makeDomNode({ text: 'Assistant response JSON: []', matchesAssistant: true });
+  const turnWithAssistant = makeDomNode({ assistantChild });
+  ctx.document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [];
+      if (selector === '[data-testid^="conversation-turn-"]') return [userPromptNode, turnWithAssistant];
+      if (selector === 'article') return [];
+      if (selector === 'div[class*="markdown"]') return [];
+      return [];
+    }
+  };
+  const assistantTurnResponseNodes = ctx.getResponseDomNodes();
+  assert.strictEqual(assistantTurnResponseNodes.source, 'conversation_turn_assistant');
+  assert.strictEqual(assistantTurnResponseNodes.nodes.length, 1);
+  assert.strictEqual(assistantTurnResponseNodes.nodes[0].innerText, assistantChild.innerText);
 
   const truncatedStage1 = [
     'I found the Stage 0 handoff in the prior output and will treat it as locked input.',
@@ -307,6 +419,29 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.strictEqual(completeStage0Readiness.ready, true);
   assert.strictEqual(completeStage0Readiness.reason, 'completion_contract_satisfied');
 
+  const companyPrompts = parseCompanyPrompts();
+  assert(companyPrompts.length >= 6);
+  const companyPrompt6 = companyPrompts[5];
+  const completeStage5 = `Synopsys, Inc. (SNPS)
+
+Sector overlay reviewed the Stage 4 CORE boundary and kept current EDA revenue in CORE while reserving above-base pricing, RPO quality, and capacity-rent proof for later rebase work.
+
+=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===
+COMPANY: Synopsys, Inc.
+TICKER: SNPS
+CORE_DECISION_GRADE_AFTER_MCP: TRUE
+=== END HANDOFF ===`;
+  const completeStage5Readiness = ctx.getResponseCompletionReadiness(
+    completeStage5,
+    companyPrompt6,
+    6,
+    { forStaleGenerating: true }
+  );
+  assert.strictEqual(completeStage5Readiness.ready, true);
+  assert.strictEqual(completeStage5Readiness.reason, 'completion_contract_satisfied');
+  const completeStage5Validation = ctx.validateStageResponseForPrompt(completeStage5, companyPrompt6, 6);
+  assert.strictEqual(completeStage5Validation.valid, true);
+
   const longNoHandoffReadiness = ctx.getResponseCompletionReadiness(
     'This is a long mechanically complete answer that has enough text to be treated as a finished DOM response after ChatGPT has stopped streaming. '.repeat(4),
     stage0PayloadPrompt,
@@ -317,12 +452,79 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.strictEqual(longNoHandoffReadiness.reason, 'basic_response_ready_missing_soft_markers');
   assert(longNoHandoffReadiness.missingMarkers.some((marker) => /STAGE 0/i.test(marker)));
 
+  const portfolioPrompts = parsePortfolioPrompts();
+  assert.strictEqual(portfolioPrompts.length, 3);
+  assert(portfolioPrompts[0].includes('PORTFOLIO_PROMPT_1_COMPLETE'));
+  assert(portfolioPrompts[1].includes('PORTFOLIO_PROMPT_2_COMPLETE'));
+
+  const portfolioPrompt1WithoutMarker = [
+    'PROMPT 1 - Ranking warstw value chain i proporcji',
+    'Warstwa #1 przechwytuje wiecej marzy, bo ograniczona podaz laczy sie z nieelastycznym popytem.',
+    'Warstwa #2 jest proxy i powinna miec nizsza wage, bo revenue rosnie szybciej niz FCF.'
+  ].join('\n\n');
+  const portfolioPrompt1MissingMarker = ctx.validateStageResponseForPrompt(
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1MissingMarker.valid, false);
+  assert.strictEqual(portfolioPrompt1MissingMarker.reason, 'missing_completion_marker');
+  assert.strictEqual(portfolioPrompt1MissingMarker.missingHardMarkers.length, 1);
+  assert.strictEqual(portfolioPrompt1MissingMarker.missingHardMarkers[0], 'PORTFOLIO_PROMPT_1_COMPLETE');
+
+  const portfolioPrompt1Complete = `${portfolioPrompt1WithoutMarker}
+
+PORTFOLIO_PROMPT_1_COMPLETE`;
+  const portfolioPrompt1CompleteResult = ctx.validateStageResponseForPrompt(
+    portfolioPrompt1Complete,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1CompleteResult.valid, true);
+
+  const portfolioPrompt1Readiness = ctx.getResponseCompletionReadiness(
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1Readiness.ready, false);
+  assert.strictEqual(portfolioPrompt1Readiness.reason, 'missing_completion_marker');
+
+  const getAssistantSelectorCalls = installAssistantTextSequence(ctx, [
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompt1Complete
+  ]);
+  const capturedPortfolioPrompt1 = await ctx.getLastResponseText({
+    promptText: portfolioPrompts[0],
+    promptNumber: 1,
+    preferLatest: true
+  });
+  assert.strictEqual(capturedPortfolioPrompt1, portfolioPrompt1Complete);
+  assert(getAssistantSelectorCalls() >= 3);
+
+  const portfolioPrompt3TruncatedJson = ctx.validateStageResponseForPrompt(
+    '{"thesis_construction_summary":"tekst","portfolio_construction_commentary":"tekst","layers":[',
+    portfolioPrompts[2],
+    3
+  );
+  assert.strictEqual(portfolioPrompt3TruncatedJson.valid, false);
+  assert.strictEqual(portfolioPrompt3TruncatedJson.reason, 'invalid_or_incomplete_json_object');
+
+  const portfolioPrompt3CompleteJson = ctx.validateStageResponseForPrompt(
+    '{"thesis_construction_summary":"tekst","portfolio_construction_commentary":"tekst","layers":[],"positions":[],"portfolio_gaps":[],"warnings":[],"errors":[]}',
+    portfolioPrompts[2],
+    3
+  );
+  assert.strictEqual(portfolioPrompt3CompleteJson.valid, true);
+
   assert.match(backgroundSource, /waitForChatGptGenerationFinishedBeforeNextPrompt\(/);
   const guardCallIndex = backgroundSource.indexOf('const generationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt');
   const stageCompletionIndex = backgroundSource.indexOf('responseDataGapDirective = dataGapDirective;');
   assert(guardCallIndex > 0, 'Expected generation-finished guard before stage completion.');
   assert(stageCompletionIndex > guardCallIndex, 'Stage completion must happen after generation-finished guard.');
   assert.match(backgroundSource, /Nie wysylam kolejnego etapu - ChatGPT nadal generuje/);
+  assert.match(backgroundSource, /Nie wysylam Prompt 2 - Prompt 1 nadal nie jest zakonczony/);
   assert.match(backgroundSource, /promptText:\s*payload/);
   assert.match(backgroundSource, /promptText:\s*prompt/);
   assert.match(backgroundSource, /Nie wysylam prompt chain - Stage 0 jest niekompletny/);
@@ -331,6 +533,10 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.doesNotMatch(backgroundSource, /Nie wysylam kolejnego etapu - odpowiedz niepelna/);
   assert.match(backgroundSource, /async function getLastResponseText\(options = \{\}\)/);
   assert.match(backgroundSource, /Latest assistant response passes DOM\/basic completion readiness/);
+  assert.match(backgroundSource, /tryAcceptLatestResponseByContract\(/);
+  assert.match(backgroundSource, /timeout_before_manual_action/);
+  assert.match(backgroundSource, /invalid_response_before_manual_action/);
+  assert.match(backgroundSource, /classifyTimeoutOutcome\(snapshot, promptText, promptNumber = 0\)/);
   assert.match(backgroundSource, /if \(!preferLatest\)/);
   assert.match(
     backgroundSource,
@@ -340,4 +546,7 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   console.log('test-stage-response-completion-contract.js passed');
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

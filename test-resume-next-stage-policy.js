@@ -242,7 +242,7 @@ assert.strictEqual(
 );
 assert.strictEqual(
   context.formatResumeProcessTitleWithThinkingEffort('Company run', 'extended'),
-  'Company run [EXTENDED]'
+  'Company run [HEAVY]'
 );
 assert.strictEqual(
   context.formatResumeProcessTitleWithThinkingEffort('Auto Start [HEAVY]: Prompt 7', 'heavy'),

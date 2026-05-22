@@ -209,6 +209,10 @@ async function main() {
     suppressions: [],
     remoteEvents: [],
     isClosedProcessStatus: () => false,
+    isProcessWindowAutoCloseEnabled: () => false,
+    removeTabSafe: async () => false,
+    queryTabsInWindowSafe: async () => ({ tabs: [] }),
+    removeWindowSafe: async () => false,
     upsertProcess: async (runId, patch) => {
       context.upserts.push({ runId, patch: clone(patch) });
       return { id: runId, ...clone(patch) };

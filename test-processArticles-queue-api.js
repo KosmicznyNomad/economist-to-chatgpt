@@ -204,6 +204,7 @@ function buildContext() {
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
+    DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT: 'heavy',
     captured: null,
     launched: [],
     getAnalysisQueueStatusSnapshot: async () => ({
@@ -233,6 +234,13 @@ function buildContext() {
     sanitizePromptChainSnapshot: (promptChain) => Array.isArray(promptChain)
       ? promptChain.filter((item) => typeof item === 'string' && item.trim()).map((item) => item.trim())
       : [],
+    normalizeComposerThinkingEffort: (value) => {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized === 'extended'
+        ? 'heavy'
+        : (['light', 'standard', 'heavy', 'pro'].includes(normalized) ? normalized : '');
+    },
+    computePromptChainHash: async (promptChain) => `hash:${Array.isArray(promptChain) ? promptChain.join('|') : ''}`,
     sleep: async () => undefined,
     executeAnalysisProcessJob: async (tab, promptChain, chatUrl, analysisType, options) => {
       context.launched.push({ tab, promptChain, chatUrl, analysisType, options });
@@ -312,9 +320,11 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     sourceUrl: 'manual://source',
     chatUrl: 'https://chat.example',
     promptChainSnapshot: ['p1'],
+    promptHash: 'hash:p1',
     queueBatchId: 'batch-1',
     manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
+    manualPdfProviderId: 'provider-1',
+    composerThinkingEffort: 'heavy'
   });
   assert.deepStrictEqual(toPlainJson(context.captured.jobs[1]), {
     kind: 'article_analysis',
@@ -327,9 +337,11 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     sourceUrl: 'manual://pdf',
     chatUrl: 'https://chat.example',
     promptChainSnapshot: ['p1'],
+    promptHash: 'hash:p1',
     queueBatchId: 'batch-1',
     manualPdfBatchId: 'pdf-batch-1',
-    manualPdfProviderId: 'provider-1'
+    manualPdfProviderId: 'provider-1',
+    composerThinkingEffort: 'heavy'
   });
 }
 
@@ -356,6 +368,7 @@ async function testPortfolioBypassesQueueSlots() {
   assert.deepStrictEqual(context.launched[0].promptChain, ['p1']);
   assert.strictEqual(context.launched[0].options.queueBypass, true);
   assert.strictEqual(context.launched[0].options.queueBypassReason, 'portfolio_direct_test');
+  assert.strictEqual(context.launched[0].options.composerThinkingEffort, 'heavy');
   assert.strictEqual(context.launched[0].tab.manualText, 'portfolio body');
 }
 

@@ -213,6 +213,12 @@ function createContext() {
     }
   };
   vm.createContext(context);
+  vm.runInContext(extractFunctionSource(popupSource, 'normalizePopupComposerThinkingEffort'), context, {
+    filename: 'popup.js'
+  });
+  vm.runInContext(extractFunctionSource(popupSource, 'humanizePopupThinkingEffort'), context, {
+    filename: 'popup.js'
+  });
   vm.runInContext(extractFunctionSource(popupSource, 'executeResumeAllFromPopup'), context, {
     filename: 'popup.js'
   });

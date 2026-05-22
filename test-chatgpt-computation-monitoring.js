@@ -241,7 +241,7 @@ function testFormatChatGptComputationSummary() {
   ]);
 
   const summary = ctx.formatChatGptComputationSummary({
-    composerThinkingEffort: 'extended',
+    composerThinkingEffort: 'heavy',
     chatGptModeKind: 'thinking',
     chatGptModelSwitcherLabel: 'ChatGPT Pro',
     chatGptThinkingEffortDetected: 'heavy'
@@ -249,7 +249,19 @@ function testFormatChatGptComputationSummary() {
 
   assert.strictEqual(
     summary,
-    'Model ChatGPT Pro | Tryb Thinking | Thinking Heavy (req Extended)'
+    'Model ChatGPT Pro | Tryb Thinking | Thinking Heavy'
+  );
+
+  const proSummary = ctx.formatChatGptComputationSummary({
+    composerThinkingEffort: 'pro',
+    chatGptModeKind: 'thinking',
+    chatGptModelSwitcherLabel: 'ChatGPT Pro',
+    chatGptThinkingEffortDetected: 'pro'
+  });
+
+  assert.strictEqual(
+    proSummary,
+    'Model ChatGPT Pro | Tryb Thinking | Thinking Pro'
   );
 }
 

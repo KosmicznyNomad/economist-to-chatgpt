@@ -166,7 +166,8 @@ const context = vm.createContext({
 });
 
 assert.match(backgroundSource, /deferDispatchFlush:\s*true/);
-assert.match(backgroundSource, /deferredFlushReason:\s*'runtime_bridge_fast_ack'/);
+assert.match(backgroundSource, /deferredFlushReason:\s*typeof message\.deferredFlushReason/);
+assert.match(backgroundSource, /:\s*'runtime_bridge_fast_ack'/);
 assert.match(backgroundSource, /startDeferredSaveResponseFlush\(saveResult\)/);
 assert.match(backgroundSource, /await updateProcessDispatchAfterFlushOutcome\(saveResult,\s*mergedDispatch,\s*mergedLog\);/);
 

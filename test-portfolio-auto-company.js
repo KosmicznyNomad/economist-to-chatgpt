@@ -202,6 +202,7 @@ function buildContext() {
     Math,
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
+    DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT: 'heavy',
     SOURCE_TEXT_PLACEHOLDER_REGEX: /\{\{\s*(?:articlecontent|article)\s*\}\}/gi,
     PROMPTS_COMPANY: ['company prompt'],
     PROMPTS_PORTFOLIO: ['portfolio prompt'],
@@ -212,6 +213,12 @@ function buildContext() {
     ensureCompanyPromptsReady: async () => true,
     ensurePortfolioPromptsReady: async () => true,
     ensurePromptChainReadyForAnalysisType: async () => true,
+    normalizeComposerThinkingEffort: (value) => {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized === 'extended'
+        ? 'heavy'
+        : (['light', 'standard', 'heavy', 'pro'].includes(normalized) ? normalized : '');
+    },
     normalizeRemoteExecutionMode: (value) => (value === 'remote' ? 'remote' : 'local'),
     getStoredRemoteExecutionMode: async () => 'local',
     getStoredSelectedRemoteRunnerId: async () => '',
@@ -298,6 +305,7 @@ async function testPopupRunQueuesCompanyOnlyByDefault() {
   assert.strictEqual(context.processArticleCalls[0].chatUrl, 'https://chat.example');
   assert.deepStrictEqual(context.processArticleCalls[0].promptChain, ['company prompt']);
   assert.strictEqual(context.processArticleCalls[0].options.reason, 'run_analysis_enqueue');
+  assert.strictEqual(context.processArticleCalls[0].options.composerThinkingEffort, 'heavy');
 }
 
 async function testRunAnalysisCanExplicitlyIncludePortfolio() {
@@ -321,6 +329,8 @@ async function testRunAnalysisCanExplicitlyIncludePortfolio() {
   );
   assert.deepStrictEqual(context.processArticleCalls[1].promptChain, ['portfolio prompt']);
   assert.strictEqual(context.processArticleCalls[1].options.reason, 'run_analysis_portfolio_enqueue');
+  assert.strictEqual(context.processArticleCalls[0].options.composerThinkingEffort, 'heavy');
+  assert.strictEqual(context.processArticleCalls[1].options.composerThinkingEffort, 'heavy');
 }
 
 async function testManualTextSharesOneSourceAcrossCompanyAndPortfolio() {
@@ -442,6 +452,7 @@ function testPortfolioPromptChainHasThreePrompts() {
   assert.strictEqual(prompts.length, 3);
   assert.ok(prompts[0].includes('{{article}}'));
   assert.ok(prompts[0].includes('Ranking warstw value chain'));
+  assert.ok(prompts[0].includes('PORTFOLIO_PROMPT_1_COMPLETE'));
 
   const context = buildContext();
   const injectedFirstPrompt = context.injectSourceTextIntoPromptTemplate(prompts[0], 'SOURCE_BODY');
@@ -489,6 +500,7 @@ function testPortfolioPromptChainHasThreePrompts() {
   assert.ok(!prompts[1].includes('"current_weight_pct"'));
   assert.ok(prompts[1].includes('current_qty'));
   assert.ok(prompts[1].includes('target_qty'));
+  assert.ok(prompts[1].includes('PORTFOLIO_PROMPT_2_COMPLETE'));
   assert.ok(prompts[1].includes('Nie używaj pól action ani priority'));
   assert.ok(!prompts[1].includes('"business_model"'));
   assert.ok(!prompts[1].includes('"valuation_anchor"'));
@@ -586,10 +598,13 @@ function testPortfolioPromptOneResponseIsCopiedToDatabase() {
   assert.ok(backgroundSource.includes('copyPortfolioPromptOneResponseToDatabase'));
   assert.ok(backgroundSource.includes('portfolio.layer_ranking.v1'));
   assert.ok(backgroundSource.includes('portfolio_layer_ranking'));
-  assert.match(
-    backgroundSource,
-    /stage0Response\s*=\s*await getLastResponseText\(\)[\s\S]{0,900}copyPortfolioPromptOneResponseToDatabase\(stage0Response\)/
-  );
+  const stage0CaptureIndex = backgroundSource.indexOf('stage0Response = await getLastResponseText({');
+  const stage0GenerationGuardIndex = backgroundSource.indexOf('const stage0GenerationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt');
+  const promptOneCopyIndex = backgroundSource.indexOf('copyPortfolioPromptOneResponseToDatabase(stage0Response)');
+  assert.ok(stage0CaptureIndex > 0);
+  assert.ok(stage0GenerationGuardIndex > stage0CaptureIndex);
+  assert.ok(promptOneCopyIndex > stage0GenerationGuardIndex);
+  assert.ok(backgroundSource.includes('Nie wysylam Prompt 2 - Prompt 1 nadal nie jest zakonczony'));
   assert.ok(backgroundSource.includes('skipProcessPersistencePatch: true'));
 }
 

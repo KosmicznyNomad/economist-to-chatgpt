@@ -389,7 +389,9 @@ function testResumeQueuePatchUsesNextPromptNumber() {
 	    PROMPTS_COMPANY: new Array(16).fill('prompt'),
 	    normalizeComposerThinkingEffort(value) {
 	      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-	      return ['light', 'standard', 'extended', 'heavy'].includes(normalized) ? normalized : '';
+	      return normalized === 'extended'
+          ? 'heavy'
+          : (['light', 'standard', 'heavy', 'pro'].includes(normalized) ? normalized : '');
 	    },
 	    sanitizeAnalysisQueueJob(job) {
 	      return job;
