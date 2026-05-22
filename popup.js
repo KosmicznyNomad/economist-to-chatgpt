@@ -128,6 +128,35 @@ const repeatLastPromptAllBtn = document.getElementById('repeatLastPromptAllBtn')
 const countCompanyMessagesBtn = document.getElementById('countCompanyMessagesBtn');
 const resumeAllExtendedBtn = document.getElementById('resumeAllExtendedBtn');
 const resumeAllHeavyBtn = document.getElementById('resumeAllHeavyBtn');
+
+function normalizePopupComposerThinkingEffort(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (!normalized) return '';
+  if (
+    normalized === 'advanced'
+    || normalized === 'zaawansowany'
+    || normalized === 'zaawansowane'
+    || normalized === 'zaawansowan'
+    || normalized === 'zaa'
+    || normalized === 'extended'
+  ) {
+    return 'heavy';
+  }
+  if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') return 'standard';
+  if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') return 'light';
+  if (normalized === 'pro') return 'pro';
+  if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') return normalized;
+  return '';
+}
+
+function humanizePopupThinkingEffort(value) {
+  const normalized = normalizePopupComposerThinkingEffort(value);
+  if (normalized === 'heavy') return 'zaawansowany';
+  if (normalized === 'pro') return 'pro';
+  if (normalized === 'standard') return 'średni';
+  if (normalized === 'light') return 'błyskawiczny';
+  return '';
+}
 const restoreProcessWindowsStatus = document.getElementById('restoreProcessWindowsStatus');
 const autoRestoreToggleBtn = document.getElementById('autoRestoreToggleBtn');
 const autoRestoreStatus = document.getElementById('autoRestoreStatus');
@@ -1367,15 +1396,18 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
   if (!button) return;
 
   const originalHtml = button.innerHTML;
+  const composerThinkingEffort = normalizePopupComposerThinkingEffort(options?.composerThinkingEffort) || 'heavy';
+  const composerThinkingEffortLabel = humanizePopupThinkingEffort(composerThinkingEffort) || composerThinkingEffort;
   button.disabled = true;
   button.textContent = 'Uruchamiam...';
-  setRunStatus('Uruchamiam analizy...');
+  setRunStatus(`Uruchamiam analizy (${composerThinkingEffortLabel})...`);
 
   try {
     const payload = {
       type: 'RUN_ANALYSIS',
       origin: typeof options?.origin === 'string' ? options.origin : 'popup-run-analysis',
       includePortfolio: false,
+      composerThinkingEffort,
     };
     if (Number.isInteger(options?.windowId)) {
       payload.windowId = options.windowId;
@@ -1500,23 +1532,22 @@ async function executeResumeAllFromPopup(button, options = {}) {
   if (!button) return;
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-resume-all';
-  const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
-    ? options.composerThinkingEffort.trim().toLowerCase()
-    : '';
+  const composerThinkingEffort = normalizePopupComposerThinkingEffort(options?.composerThinkingEffort);
+  const composerThinkingEffortLabel = humanizePopupThinkingEffort(composerThinkingEffort) || composerThinkingEffort;
   const hasExplicitThinkingEffort = (
     composerThinkingEffort === 'light'
     || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
     || composerThinkingEffort === 'heavy'
+    || composerThinkingEffort === 'pro'
   );
-  const effortSuffix = composerThinkingEffort ? ` (${composerThinkingEffort})` : '';
+  const effortSuffix = composerThinkingEffortLabel ? ` (${composerThinkingEffortLabel})` : '';
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
   button.textContent = `Wznawiam${effortSuffix}...`;
   setRunStatus(
-    composerThinkingEffort
-      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
+    composerThinkingEffortLabel
+      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffortLabel}.`
       : 'Wznowienie aktywnych procesow company (INVEST)...'
   );
 
@@ -1567,14 +1598,12 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   if (!button) return;
 
   const origin = typeof options?.origin === 'string' ? options.origin : 'popup-repeat-last-prompt-all';
-  const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
-    ? options.composerThinkingEffort.trim().toLowerCase()
-    : '';
+  const composerThinkingEffort = normalizePopupComposerThinkingEffort(options?.composerThinkingEffort);
   const hasExplicitThinkingEffort = (
     composerThinkingEffort === 'light'
     || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
     || composerThinkingEffort === 'heavy'
+    || composerThinkingEffort === 'pro'
   );
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalText = button.textContent;
@@ -2229,6 +2258,7 @@ if (runBtn) {
       void executeRunAnalysisFromPopup(runBtn, {
         windowId,
         origin: 'popup-run-analysis',
+        composerThinkingEffort: 'heavy',
       });
     });
   });
@@ -2247,7 +2277,7 @@ if (resumeAllExtendedBtn) {
   resumeAllExtendedBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllExtendedBtn, {
       origin: 'popup-resume-all-extended',
-      composerThinkingEffort: 'extended',
+      composerThinkingEffort: 'heavy',
     });
   });
 }
@@ -2255,8 +2285,8 @@ if (resumeAllExtendedBtn) {
 if (resumeAllHeavyBtn) {
   resumeAllHeavyBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllHeavyBtn, {
-      origin: 'popup-resume-all-heavy',
-      composerThinkingEffort: 'heavy',
+      origin: 'popup-resume-all-pro',
+      composerThinkingEffort: 'pro',
     });
   });
 }

@@ -51,6 +51,120 @@ const DISPATCH_HEALTH_TICK_MS = 60_000;
 
 console.log('[panel] Monitor procesow uruchomiony');
 
+async function maybeRunAutoDecisionFromUrl() {
+  let params = null;
+  try {
+    params = new URLSearchParams(window.location.search || '');
+  } catch (_error) {
+    params = null;
+  }
+  if (!params) return;
+
+  const decisionRaw = (params.get('autoDecisionAll') || '').trim().toLowerCase();
+  if (decisionRaw !== 'skip' && decisionRaw !== 'wait') return;
+  const shouldClickChat = params.get('autoClickContinue') === '1'
+    || params.get('autoClickContinue') === 'true'
+    || params.get('autoClickContinue') === decisionRaw;
+
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'PROCESS_DECISION_ALL',
+      decision: decisionRaw,
+      origin: 'process-monitor-auto-url'
+    });
+    console.warn('[panel] Auto decision from URL completed', {
+      decision: decisionRaw,
+      success: response?.success === true,
+      matched: response?.matched,
+      delivered: response?.delivered
+    });
+    document.title = `Auto decision ${decisionRaw}: ${response?.delivered || 0}/${response?.matched || 0}`;
+  } catch (error) {
+    console.warn('[panel] Auto decision from URL failed:', error?.message || error);
+    document.title = `Auto decision ${decisionRaw}: failed`;
+  }
+
+  if (!shouldClickChat || !chrome?.tabs?.query || !chrome?.scripting?.executeScript) {
+    return;
+  }
+
+  try {
+    const titleFilter = (params.get('titleIncludes') || '').trim().toLowerCase();
+    const chatTabs = await chrome.tabs.query({
+      url: ['https://chatgpt.com/*', 'https://chat.openai.com/*']
+    });
+    const candidateTabs = chatTabs.filter((tab) => {
+      if (!titleFilter) return true;
+      return String(tab.title || '').toLowerCase().includes(titleFilter);
+    });
+    const results = [];
+    for (const tab of candidateTabs) {
+      if (!Number.isInteger(tab.id)) continue;
+      try {
+        const injectionResults = await chrome.scripting.executeScript({
+          target: { tabId: tab.id },
+          args: [decisionRaw],
+          func: (decision) => {
+            const normalize = (value) => String(value || '').replace(/\s+/g, ' ').trim().toLowerCase();
+            const actionText = decision === 'skip'
+              ? ['wyślij następny prompt', 'wyslij nastepny prompt', 'send next prompt', 'skip']
+              : ['czekaj na odpowiedź', 'czekaj na odpowiedz', 'wait'];
+            const candidates = Array.from(document.querySelectorAll('button, [data-continue-action]'));
+            const button = candidates.find((element) => (
+              element
+              && element.getAttribute?.('data-continue-action') === decision
+            )) || candidates.find((element) => {
+              const text = normalize(element.innerText || element.textContent || element.getAttribute?.('aria-label') || '');
+              return actionText.some((token) => text.includes(token));
+            });
+            if (!button) {
+              return {
+                clicked: false,
+                reason: 'button_not_found',
+                candidateCount: candidates.length,
+                bodyHasContinueText: normalize(document.body?.innerText || document.body?.textContent || '').includes('wyslij nastepny prompt')
+                  || normalize(document.body?.innerText || document.body?.textContent || '').includes('wyślij następny prompt')
+              };
+            }
+            try {
+              button.scrollIntoView?.({ block: 'center', inline: 'center' });
+            } catch (_error) {
+              // Scroll is best effort.
+            }
+            button.click();
+            return {
+              clicked: true,
+              reason: 'clicked',
+              buttonText: String(button.innerText || button.textContent || '').slice(0, 120)
+            };
+          }
+        });
+        results.push({
+          tabId: tab.id,
+          title: tab.title || '',
+          result: injectionResults?.[0]?.result || null
+        });
+      } catch (error) {
+        results.push({
+          tabId: tab.id,
+          title: tab.title || '',
+          error: error?.message || String(error)
+        });
+      }
+    }
+    console.warn('[panel] Auto decision DOM click results', { decision: decisionRaw, results });
+    const clickedCount = results.filter((item) => item?.result?.clicked === true).length;
+    const firstMiss = results.find((item) => item?.result && item.result.clicked !== true)?.result || null;
+    const missInfo = firstMiss
+      ? ` ${firstMiss.reason || 'miss'} b${firstMiss.candidateCount || 0}${firstMiss.bodyHasContinueText ? ' text' : ''}`
+      : '';
+    document.title = `Auto click ${decisionRaw}: ${clickedCount}/${results.length}${missInfo}`;
+  } catch (error) {
+    console.warn('[panel] Auto decision DOM click failed:', error?.message || error);
+    document.title = `Auto click ${decisionRaw}: failed`;
+  }
+}
+
 async function loadStageNames() {
   const response = await sendRuntimeMessage({ type: 'GET_STAGE_NAMES' });
   const names = Array.isArray(response?.stageNames)
@@ -68,6 +182,7 @@ async function initializeMonitor() {
 }
 
 // Pobierz procesy przy starcie
+void maybeRunAutoDecisionFromUrl();
 void initializeMonitor();
 
 // Nasluchuj na aktualizacje
@@ -637,8 +752,9 @@ function humanizeThinkingEffort(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (normalized === 'light') return 'Light';
   if (normalized === 'standard') return 'Standard';
-  if (normalized === 'extended') return 'Extended';
+  if (normalized === 'extended') return 'Heavy';
   if (normalized === 'heavy') return 'Heavy';
+  if (normalized === 'pro') return 'Pro';
   return '';
 }
 
@@ -2697,6 +2813,7 @@ async function sendProcessResumeNextStage(process, options = {}) {
     || composerThinkingEffort === 'standard'
     || composerThinkingEffort === 'extended'
     || composerThinkingEffort === 'heavy'
+    || composerThinkingEffort === 'pro'
   );
   const useStoredComposerThinkingEffort = !hasExplicitThinkingEffort && options?.useStoredComposerThinkingEffort !== false;
   const message = {

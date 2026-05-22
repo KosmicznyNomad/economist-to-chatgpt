@@ -333,10 +333,31 @@ async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
   return manualPdfProviderPorts.has(safeProviderId);
 }
 
+const DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT = 'heavy';
+
 function normalizeComposerThinkingEffort(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!normalized) return '';
-  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+  if (
+    normalized === 'advanced'
+    || normalized === 'zaawansowany'
+    || normalized === 'zaawansowane'
+    || normalized === 'zaawansowan'
+    || normalized === 'zaa'
+    || normalized === 'extended'
+  ) {
+    return 'heavy';
+  }
+  if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') {
+    return 'standard';
+  }
+  if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') {
+    return 'light';
+  }
+  if (normalized === 'pro') {
+    return 'pro';
+  }
+  if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') {
     return normalized;
   }
   return '';
@@ -2085,6 +2106,10 @@ function sanitizeAnalysisQueueJob(rawJob) {
   if (remote) {
     sanitized.remote = remote;
   }
+  const composerThinkingEffort = normalizeComposerThinkingEffort(rawJob.composerThinkingEffort);
+  if (composerThinkingEffort) {
+    sanitized.composerThinkingEffort = composerThinkingEffort;
+  }
 
   if (kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
     const tabSnapshot = sanitizeAnalysisQueueTabSnapshot(rawJob.tabSnapshot || rawJob.tab);
@@ -2114,10 +2139,6 @@ function sanitizeAnalysisQueueJob(rawJob) {
     sanitized.forceRepeatLastPrompt = rawJob.forceRepeatLastPrompt === true;
     sanitized.bypassPause = rawJob.bypassPause === true;
     sanitized.skipStagePreflight = rawJob.skipStagePreflight === true;
-    const composerThinkingEffort = normalizeComposerThinkingEffort(rawJob.composerThinkingEffort);
-    if (composerThinkingEffort) {
-      sanitized.composerThinkingEffort = composerThinkingEffort;
-    }
     if (rawJob.precomputedStagePlan && typeof rawJob.precomputedStagePlan === 'object') {
       sanitized.precomputedStagePlan = rawJob.precomputedStagePlan;
     }
@@ -4384,6 +4405,7 @@ async function extractPreparedSourceFromTab(tab) {
 async function buildPreparedAnalysisBatch(tabs, promptChain, analysisType, options = {}) {
   const sourceTabs = Array.isArray(tabs) ? tabs.filter((tab) => !!tab) : [];
   const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
   if (promptChainSnapshot.length === 0) {
     return { success: false, error: 'prompts_empty', items: [], skipped: [] };
   }
@@ -4445,6 +4467,7 @@ async function buildPreparedAnalysisBatch(tabs, promptChain, analysisType, optio
       promptChainSnapshot,
       promptHash,
       usesRunnerPrompts: false,
+      ...(composerThinkingEffort ? { composerThinkingEffort } : {}),
       createdAt
     };
   });
@@ -11035,6 +11058,8 @@ async function launchAnalysisJobsOutsideQueue(tabs, promptChain, chatUrl, analys
   const invocationWindowId = Number.isInteger(options?.invocationWindowId)
     ? options.invocationWindowId
     : null;
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort)
+    || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT;
   const manualTextSources = sanitizeManualTextSourceRecords(options?.manualTextSources);
   const launchedJobs = sourceTabs.map((tab, index) => {
     const sourceUrl = typeof tab?.url === 'string' ? tab.url : '';
@@ -11065,6 +11090,7 @@ async function launchAnalysisJobsOutsideQueue(tabs, promptChain, chatUrl, analys
             queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
             manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
             manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+            composerThinkingEffort,
             queueBypass: true,
             queueBypassReason: typeof options?.reason === 'string' && options.reason.trim()
               ? options.reason.trim()
@@ -11643,12 +11669,37 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
       }
 
       const scheduledAnalysisType = scheduledJob.analysisType || ANALYSIS_TYPE_COMPANY;
-      if (!(Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0)) {
-        await ensurePromptChainReadyForAnalysisType(scheduledAnalysisType);
-      }
-      const promptChain = Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0
+      await ensurePromptChainReadyForAnalysisType(scheduledAnalysisType);
+      const hasPromptSnapshot = Array.isArray(scheduledJob.promptChainSnapshot)
+        && scheduledJob.promptChainSnapshot.length > 0;
+      const isRemotePinnedPromptSnapshot = !!(scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId);
+      let promptChain = hasPromptSnapshot
         ? scheduledJob.promptChainSnapshot
         : getPromptChainForAnalysisType(scheduledAnalysisType);
+
+      if (hasPromptSnapshot && !isRemotePinnedPromptSnapshot) {
+        const currentPromptChain = getPromptChainForAnalysisType(scheduledAnalysisType);
+        const [snapshotHash, currentPromptHash] = await Promise.all([
+          computePromptChainHash(scheduledJob.promptChainSnapshot).catch(() => ''),
+          computePromptChainHash(currentPromptChain).catch(() => '')
+        ]);
+        if (currentPromptHash && snapshotHash && currentPromptHash !== snapshotHash) {
+          console.warn('[analysis-queue] Local queued job has stale prompt snapshot; using current prompt chain.', {
+            jobId: scheduledJob.jobId,
+            runId: scheduledJob.runId,
+            analysisType: scheduledAnalysisType,
+            snapshotHash,
+            currentPromptHash
+          });
+          promptChain = currentPromptChain;
+          await upsertProcess(scheduledJob.runId, {
+            statusText: 'Aktualizuje przestarzaly snapshot promptow z kolejki',
+            promptHash: currentPromptHash,
+            promptSnapshotReplaced: true,
+            timestamp: Date.now()
+          }).catch(() => {});
+        }
+      }
       if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
         await reportRemoteJobEvent(
           scheduledJob.remote.remoteJobId,
@@ -11681,7 +11732,10 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
           queueJobId: scheduledJob.jobId,
           sourceKind: scheduledJob.sourceKind || '',
           remote: scheduledJob.remote || null,
-          promptHash: typeof scheduledJob.promptHash === 'string' ? scheduledJob.promptHash : ''
+          promptHash: typeof scheduledJob.promptHash === 'string' ? scheduledJob.promptHash : '',
+          composerThinkingEffort: typeof scheduledJob.composerThinkingEffort === 'string'
+            ? scheduledJob.composerThinkingEffort
+            : ''
         }
       );
       if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
@@ -29990,6 +30044,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       const invocationWindowId = Number.isInteger(message?.windowId)
         ? message.windowId
         : (Number.isInteger(sender?.tab?.windowId) ? sender.tab.windowId : null);
+      const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
       const promptsReady = await ensureCompanyPromptsReady();
       if (!promptsReady) {
         reportAdminActionEvent('run_analysis', {
@@ -30010,6 +30065,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         executionMode: typeof message?.executionMode === 'string' ? message.executionMode : '',
         runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
         selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : '',
+        composerThinkingEffort: explicitComposerThinkingEffort || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT,
         includePortfolio: message?.includePortfolio === true
       });
       reportAdminActionEvent('run_analysis', {
@@ -30022,7 +30078,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           windowId: invocationWindowId,
           queuedCount: Number.isInteger(runResult?.queuedCount) ? runResult.queuedCount : 0,
           queueSize: Number.isInteger(runResult?.queueSize) ? runResult.queueSize : 0,
-          activeSlots: Number.isInteger(runResult?.activeSlots) ? runResult.activeSlots : 0
+          activeSlots: Number.isInteger(runResult?.activeSlots) ? runResult.activeSlots : 0,
+          composerThinkingEffort: explicitComposerThinkingEffort || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT
         }
       });
       sendResponse(runResult);
@@ -31838,6 +31895,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
   const promptHash = typeof options?.promptHash === 'string' && options.promptHash.trim()
     ? options.promptHash.trim()
     : '';
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort)
+    || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT;
   let processTitle = tab?.title || 'Bez tytulu';
   let processTotalPrompts = promptChainSafe.length;
 
@@ -31905,6 +31964,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         : {}),
       ...(remoteJobContext ? { remote: remoteJobContext } : {}),
       ...(promptHash ? { promptHash } : {}),
+      ...(composerThinkingEffort ? { composerThinkingEffort } : {}),
       messages: []
     });
 
@@ -32078,6 +32138,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
       ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
       sourceMaterialStored: !!sourceMaterialId,
+      ...(composerThinkingEffort ? { composerThinkingEffort } : {}),
       timestamp: Date.now()
     });
     const firstPrompt = promptChainSafe[0] || '';
@@ -32102,7 +32163,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(sourceMaterialId ? { sourceMaterialId } : {}),
       ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
       ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
-      sourceMaterialStored: !!sourceMaterialId
+      sourceMaterialStored: !!sourceMaterialId,
+      ...(composerThinkingEffort ? { composerThinkingEffort } : {})
     });
 
     const referenceWindow = await resolveReferenceWindowForChatCreation(
@@ -32174,7 +32236,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         processId,
         {
           promptOffset: executionPromptOffset,
-          totalPromptsOverride: processTotalPrompts
+          totalPromptsOverride: processTotalPrompts,
+          composerThinkingEffort
         },
         {
           enabled: true,
@@ -32774,9 +32837,12 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     }
 
     const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
+    const promptHash = await computePromptChainHash(promptChainSnapshot).catch(() => '');
     const invocationWindowId = Number.isInteger(options?.invocationWindowId)
       ? options.invocationWindowId
       : null;
+    const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort)
+      || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT;
     const jobs = sourceTabs.map((tab) => {
       const sourceUrl = typeof tab?.url === 'string' ? tab.url : '';
       const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
@@ -32798,9 +32864,11 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         sourceUrl,
         chatUrl: typeof chatUrl === 'string' ? chatUrl : '',
         promptChainSnapshot,
+        promptHash,
         queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
         manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
-        manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : ''
+        manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+        composerThinkingEffort
       };
       if (sourceMaterialId) job.sourceMaterialId = sourceMaterialId;
       if (sourceMaterialHash) job.sourceMaterialHash = sourceMaterialHash;
@@ -33808,6 +33876,8 @@ async function runAnalysis(options = {}) {
         ? options.selectedRunnerId.trim()
         : await getStoredSelectedRemoteRunnerId());
     const includePortfolio = options?.includePortfolio === true;
+    const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort)
+      || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT;
 
     if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId) && executionMode !== 'remote') {
       const preUngroupResult = await ungroupChatGptTabsInWindow(invocationWindowId, {
@@ -33900,7 +33970,8 @@ async function runAnalysis(options = {}) {
         return { success: false, error: 'remote_runner_not_selected' };
       }
       const preparedBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_COMPANY, 'company', {
-        runnerId: selectedRunnerId
+        runnerId: selectedRunnerId,
+        composerThinkingEffort
       });
       if (preparedBatch?.success !== true) {
         return {
@@ -33913,7 +33984,8 @@ async function runAnalysis(options = {}) {
       let preparedPortfolioBatch = null;
       if (includePortfolio) {
         preparedPortfolioBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_PORTFOLIO, ANALYSIS_TYPE_PORTFOLIO, {
-          runnerId: selectedRunnerId
+          runnerId: selectedRunnerId,
+          composerThinkingEffort
         });
         if (preparedPortfolioBatch?.success !== true) {
           return {
@@ -33948,11 +34020,13 @@ async function runAnalysis(options = {}) {
 
     const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, getChatUrlForAnalysisType(ANALYSIS_TYPE_COMPANY), 'company', {
       invocationWindowId,
+      composerThinkingEffort,
       reason: 'run_analysis_enqueue'
     });
     const portfolioQueueResult = includePortfolio
       ? await processArticles(orderedTabs, PROMPTS_PORTFOLIO, getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
           invocationWindowId,
+          composerThinkingEffort,
           reason: 'run_analysis_portfolio_enqueue'
         })
       : null;
@@ -35343,18 +35417,28 @@ async function injectToChat(
       const conversationTurns = Array.from(
         document.querySelectorAll('[data-testid^="conversation-turn-"]')
       );
-      if (conversationTurns.length > 0) {
-        return { nodes: conversationTurns, source: 'conversation_turn' };
+      const assistantTurnMessages = conversationTurns
+        .map((turn) => turn?.querySelector?.('[data-message-author-role="assistant"]') || null)
+        .filter(Boolean);
+      if (assistantTurnMessages.length > 0) {
+        return { nodes: assistantTurnMessages, source: 'conversation_turn_assistant' };
       }
 
       const articles = Array.from(document.querySelectorAll('article'));
-      if (articles.length > 0) {
-        return { nodes: articles, source: 'article' };
+      const assistantArticles = articles
+        .map((article) => article?.matches?.('[data-message-author-role="assistant"]')
+          ? article
+          : (article?.querySelector?.('[data-message-author-role="assistant"]') || null))
+        .filter(Boolean);
+      if (assistantArticles.length > 0) {
+        return { nodes: assistantArticles, source: 'article_assistant' };
       }
 
-      const markdownBlocks = Array.from(document.querySelectorAll('div[class*="markdown"]'));
+      const markdownBlocks = Array.from(document.querySelectorAll('div[class*="markdown"]'))
+        .filter((node) => !!node?.closest?.('[data-message-author-role="assistant"]')
+          && !node?.closest?.('[data-message-author-role="user"]'));
       if (markdownBlocks.length > 0) {
-        return { nodes: markdownBlocks, source: 'markdown' };
+        return { nodes: markdownBlocks, source: 'markdown_assistant' };
       }
 
       return { nodes: [], source: 'none' };
@@ -35414,12 +35498,25 @@ async function injectToChat(
     const normalizeThinkingEffortLocal = (value) => {
       const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
       if (!normalized) return '';
-      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+      if (
+        normalized === 'advanced'
+        || normalized === 'zaawansowany'
+        || normalized === 'zaawansowane'
+        || normalized === 'zaawansowan'
+        || normalized === 'zaa'
+        || normalized === 'extended'
+      ) return 'heavy';
+      if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') return 'standard';
+      if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') return 'light';
+      if (normalized === 'pro') return 'pro';
+      if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') {
         return normalized;
       }
       return '';
     };
-    const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort);
+    const defaultComposerThinkingEffort = 'heavy';
+    const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort)
+      || defaultComposerThinkingEffort;
     let composerThinkingEffortApplied = false;
     const payloadTextForMode = typeof payload === 'string' ? payload : '';
     const isResumeModeFromPayload = payloadTextForMode.trim() === ''
@@ -35719,7 +35816,18 @@ async function injectToChat(
       };
       const normalizeThinkingEffort = (value) => {
         const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-        if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+        if (
+          normalized === 'advanced'
+          || normalized === 'zaawansowany'
+          || normalized === 'zaawansowane'
+          || normalized === 'zaawansowan'
+          || normalized === 'zaa'
+          || normalized === 'extended'
+        ) return 'heavy';
+        if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') return 'standard';
+        if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') return 'light';
+        if (normalized === 'pro') return 'pro';
+        if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') {
           return normalized;
         }
         return '';
@@ -37901,7 +38009,7 @@ async function injectToChat(
       return false;
     }
 
-    async function classifyTimeoutOutcome(snapshot, promptText) {
+    async function classifyTimeoutOutcome(snapshot, promptText, promptNumber = 0) {
       const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
       const promptFragment = getPromptProbeFragment(promptText);
 
@@ -37921,8 +38029,15 @@ async function injectToChat(
       }
 
       if (hasAssistantAdvancedSince(base, 20)) {
-        const extracted = await getLastResponseText();
-        if (!hasHardGenerationErrorMessage() && validateResponse(extracted)) {
+        const extracted = await getLastResponseText({
+          promptText,
+          promptNumber,
+          preferLatest: true
+        });
+        if (
+          !hasHardGenerationErrorMessage()
+          && validateStageResponseForPrompt(extracted, promptText, promptNumber).valid
+        ) {
           return 'response_ready';
         }
       }
@@ -38066,8 +38181,9 @@ async function injectToChat(
     function humanizeThinkingEffort(effort) {
       if (effort === 'light') return 'Light';
       if (effort === 'standard') return 'Standard';
-      if (effort === 'extended') return 'Extended';
+      if (effort === 'extended') return 'Heavy';
       if (effort === 'heavy') return 'Heavy';
+      if (effort === 'pro') return 'Pro';
       return '';
     }
 
@@ -38092,7 +38208,7 @@ async function injectToChat(
     function detectThinkingEffortState() {
       const checkedItem = getCheckedThinkingEffortMenuItem();
       const checkedLabel = getElementReadableText(checkedItem);
-      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+      for (const effort of ['pro', 'heavy', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(checkedLabel, effort)) {
           return {
             effort,
@@ -38103,7 +38219,7 @@ async function injectToChat(
 
       const pillButton = findThinkingEffortPillButton();
       const pillLabel = getElementReadableText(pillButton);
-      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+      for (const effort of ['pro', 'heavy', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(pillLabel, effort)) {
           return {
             effort,
@@ -38175,10 +38291,10 @@ async function injectToChat(
     }
 
     function getThinkingEffortKeywords(effort) {
-      if (effort === 'light') return ['light', 'lekki'];
-      if (effort === 'standard') return ['standard'];
-      if (effort === 'extended') return ['extended', 'rozszerzon'];
-      if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
+      if (effort === 'light') return ['light', 'lekki', 'instant', 'blyskaw', 'błyskaw'];
+      if (effort === 'standard') return ['standard', 'medium', 'sredni', 'średni'];
+      if (effort === 'heavy') return ['heavy', 'advanced', 'zaawansowan', 'zaa', 'extended', 'rozszerzon', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
+      if (effort === 'pro') return ['pro'];
       return [];
     }
 
@@ -38211,8 +38327,8 @@ async function injectToChat(
       return (
         matchesThinkingEffortLabel(text, 'light')
         || matchesThinkingEffortLabel(text, 'standard')
-        || matchesThinkingEffortLabel(text, 'extended')
         || matchesThinkingEffortLabel(text, 'heavy')
+        || matchesThinkingEffortLabel(text, 'pro')
       );
     }
 
@@ -38348,7 +38464,7 @@ async function injectToChat(
       if (isThinkingEffortMenuLabel(text)) score += 80;
       if (text.includes('zaawansowan')) score += 120;
       if (text.includes('advanced')) score += 120;
-      if (matchesThinkingEffortLabel(text, 'extended')) score += 90;
+      if (matchesThinkingEffortLabel(text, 'heavy')) score += 90;
       if (containsWord(text, 'pro')) score += 20;
       if (button.getAttribute('aria-haspopup')) score += 60;
       if (button.getAttribute('aria-expanded')) score += 30;
@@ -40519,6 +40635,8 @@ async function injectToChat(
     const expectedPromptText = typeof captureOptions.promptText === 'string' ? captureOptions.promptText : '';
     const expectedPromptNumber = Number.isInteger(captureOptions.promptNumber) ? captureOptions.promptNumber : 0;
     const preferLatest = captureOptions.preferLatest === true || !!expectedPromptText;
+    let bestContractMismatchText = '';
+    let bestContractMismatchMeta = null;
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
     
     // Funkcja pomocnicza - wyciąga tylko treść głównej odpowiedzi, pomija źródła/linki
@@ -40551,6 +40669,45 @@ async function injectToChat(
         .join('\n')
         .replace(/\n{3,}/g, '\n\n') // Max 2 puste linie z rzędu
         .trim();
+    }
+
+    function rememberContractMismatch(text, readiness, source) {
+      if (typeof text !== 'string' || text.length === 0) return;
+      if (text.length <= bestContractMismatchText.length) return;
+      bestContractMismatchText = text;
+      bestContractMismatchMeta = {
+        source,
+        reason: readiness?.reason || 'contract_not_ready',
+        missingMarkers: Array.isArray(readiness?.missingMarkers) ? readiness.missingMarkers : [],
+        characters: text.length
+      };
+    }
+
+    function isExtractedResponseReadyForExpectedPrompt(text, source) {
+      if (!preferLatest || !expectedPromptText) {
+        return true;
+      }
+      const expectedReadiness = getResponseCompletionReadiness(text, expectedPromptText, expectedPromptNumber);
+      if (expectedReadiness.ready) {
+        console.log('[response-capture] Extracted response passes current prompt completion readiness', {
+          source,
+          promptNumber: expectedPromptNumber,
+          stageId: expectedReadiness.stageId || '',
+          reason: expectedReadiness.reason,
+          characters: text.length
+        });
+        return true;
+      }
+
+      rememberContractMismatch(text, expectedReadiness, source);
+      console.warn('[response-capture] Extracted response does not yet match current prompt contract', {
+        source,
+        promptNumber: expectedPromptNumber,
+        reason: expectedReadiness.reason,
+        missingMarkers: expectedReadiness.missingMarkers || [],
+        characters: text.length
+      });
+      return false;
     }
     
     // RETRY LOOP - React może asynchronicznie renderować treść
@@ -40635,6 +40792,7 @@ async function injectToChat(
             return text;
           }
 
+          rememberContractMismatch(text, expectedReadiness, 'assistant_latest');
           console.warn('[response-capture] Latest assistant response does not yet match current prompt contract', {
             assistantCount: messages.length,
             promptNumber: expectedPromptNumber,
@@ -40642,6 +40800,7 @@ async function injectToChat(
             missingMarkers: expectedReadiness.missingMarkers || [],
             characters: text.length
           });
+          continue;
         }
 
         if (!preferLatest) {
@@ -40745,6 +40904,9 @@ async function injectToChat(
           if (assistantMsg) {
             const text = extractMainContent(assistantMsg);
             if (text.length > 0) {
+              if (!isExtractedResponseReadyForExpectedPrompt(text, 'conversation_turn_assistant')) {
+                continue;
+              }
               console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2): ${text.length} znaków`);
               console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
               return text;
@@ -40758,6 +40920,9 @@ async function injectToChat(
           const turn = turnContainers[i];
           const text = extractMainContent(turn);
           if (text.length > 50) { // Minimum 50 znaków
+            if (!isExtractedResponseReadyForExpectedPrompt(text, 'conversation_turn_text')) {
+              continue;
+            }
             console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2b): ${text.length} znaków`);
             console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
             return text;
@@ -40781,6 +40946,9 @@ async function injectToChat(
         const lastArticle = articles[articles.length - 1];
         const text = extractMainContent(lastArticle);
         if (text.length > 0) {
+          if (!isExtractedResponseReadyForExpectedPrompt(text, 'article')) {
+            continue;
+          }
           console.log(`✅ Znaleziono odpowiedź przez article (fallback 3): ${text.length} znaków`);
           console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
           return text;
@@ -40812,12 +40980,20 @@ async function injectToChat(
           const lastElement = elements[elements.length - 1];
           const text = extractMainContent(lastElement);
           if (text.length > 50) { // Minimum 50 znaków
+            if (!isExtractedResponseReadyForExpectedPrompt(text, `selector:${selector}`)) {
+              continue;
+            }
             console.log(`✅ Znaleziono odpowiedź przez ${selector} (fallback 4): ${text.length} znaków`);
             console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
             return text;
           }
         }
       }
+    }
+
+    if (bestContractMismatchText) {
+      console.warn('[response-capture] Returning best incomplete response after contract-aware capture exhausted', bestContractMismatchMeta || {});
+      return bestContractMismatchText;
     }
     
     console.error("❌ Nie znaleziono odpowiedzi ChatGPT w DOM po wszystkich próbach");
@@ -41149,6 +41325,46 @@ async function injectToChat(
       stageId: completionContract.stageId,
       missingMarkers,
       statusText: 'Odpowiedz kompletna'
+    };
+  }
+
+  async function tryAcceptLatestResponseByContract(promptText, promptNumber = 0, reason = 'manual_action_guard') {
+    const latestText = await getLastResponseText({
+      promptText,
+      promptNumber,
+      preferLatest: true
+    });
+    const validation = validateStageResponseForPrompt(latestText, promptText, promptNumber);
+    if (validation.valid) {
+      console.warn('[response-completion] Najnowsza odpowiedz spelnia kontrakt - pomijam reczna interwencje', {
+        promptNumber,
+        reason,
+        validationReason: validation.reason,
+        stageId: validation.stageId || '',
+        characters: typeof latestText === 'string' ? latestText.length : 0,
+        missingMarkers: validation.missingMarkers || []
+      });
+      return {
+        accepted: true,
+        responseText: latestText,
+        validation,
+        dataGapDirective: parseDataGapDirectiveResponse(latestText)
+      };
+    }
+
+    console.warn('[response-completion] Najnowsza odpowiedz nadal nie spelnia kontraktu', {
+      promptNumber,
+      reason,
+      validationReason: validation.reason,
+      stageId: validation.stageId || '',
+      characters: typeof latestText === 'string' ? latestText.length : 0,
+      missingMarkers: validation.missingMarkers || []
+    });
+    return {
+      accepted: false,
+      responseText: latestText,
+      validation,
+      dataGapDirective: null
     };
   }
 
@@ -43022,7 +43238,11 @@ async function injectToChat(
                   phase: 'response_wait'
                 });
               }
-              const timeoutOutcome = await classifyTimeoutOutcome(promptSnapshotBeforeSend, prompt);
+              const timeoutOutcome = await classifyTimeoutOutcome(
+                promptSnapshotBeforeSend,
+                prompt,
+                absoluteCurrentPrompt
+              );
               if (timeoutOutcome === 'response_ready') {
                 console.warn(`⚠️ Timeout heurystyki, ale wykryto odpowiedź - pomijam auto-reload dla prompta ${absoluteCurrentPrompt}`);
                 responseCompleted = true;
@@ -43088,6 +43308,16 @@ async function injectToChat(
               );
               if (autoRecoveryHandoff) {
                 return autoRecoveryHandoff;
+              }
+
+              const timeoutLatestAcceptance = await tryAcceptLatestResponseByContract(
+                prompt,
+                absoluteCurrentPrompt,
+                'timeout_before_manual_action'
+              );
+              if (timeoutLatestAcceptance.accepted) {
+                responseCompleted = true;
+                break;
               }
 
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'timeout');
@@ -43239,6 +43469,19 @@ async function injectToChat(
                   continue;
                 }
               }
+
+              const invalidLatestAcceptance = await tryAcceptLatestResponseByContract(
+                prompt,
+                absoluteCurrentPrompt,
+                `invalid_response_before_manual_action:${stageResponseValidation.reason || 'unknown'}`
+              );
+              if (invalidLatestAcceptance.accepted) {
+                responseText = invalidLatestAcceptance.responseText;
+                responseDataGapDirective = invalidLatestAcceptance.dataGapDirective;
+                responseValid = true;
+                break;
+              }
+
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
               const mustWaitForCompleteResponse = (
                 stageResponseValidation.reason === 'invalid_or_incomplete_json_array'

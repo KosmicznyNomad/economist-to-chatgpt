@@ -194,8 +194,13 @@ function loadCompletionHelpers() {
     console,
     JSON,
     Number,
+    Promise,
     RegExp,
     String,
+    setTimeout: (callback) => {
+      callback();
+      return 0;
+    },
     DATA_GAP_DIRECTIVE_REGEX: /^\s*DATA_GAP_STAGE\s*=\s*([0-9]+)\s*$/i
   });
 
@@ -210,7 +215,9 @@ function loadCompletionHelpers() {
     'responseTextContainsCompleteJsonArray',
     'responseTextContainsCompleteJsonObject',
     'getResponseCompletionReadiness',
-    'validateStageResponseForPrompt'
+    'validateStageResponseForPrompt',
+    'getResponseDomNodes',
+    'getLastResponseText'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
@@ -240,11 +247,105 @@ function parsePortfolioPrompts() {
     .filter(Boolean);
 }
 
-function main() {
+function makeAssistantElement(text) {
+  return {
+    innerText: text,
+    textContent: text,
+    children: [],
+    className: '',
+    innerHTML: text,
+    cloneNode() {
+      return {
+        innerText: text,
+        textContent: text,
+        querySelectorAll() {
+          return [];
+        }
+      };
+    },
+    querySelectorAll() {
+      return [];
+    },
+    querySelector() {
+      return null;
+    }
+  };
+}
+
+function makeDomNode({ text = '', assistantChild = null, assistantAncestor = null, userAncestor = null, matchesAssistant = false } = {}) {
+  return {
+    innerText: text,
+    textContent: text,
+    matches(selector) {
+      return selector === '[data-message-author-role="assistant"]' && matchesAssistant;
+    },
+    querySelector(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return assistantChild;
+      return null;
+    },
+    querySelectorAll() {
+      return [];
+    },
+    closest(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return assistantAncestor;
+      if (selector === '[data-message-author-role="user"]') return userAncestor;
+      return null;
+    }
+  };
+}
+
+function installAssistantTextSequence(ctx, texts) {
+  let assistantSelectorCalls = 0;
+  ctx.document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') {
+        const index = Math.min(assistantSelectorCalls, texts.length - 1);
+        assistantSelectorCalls += 1;
+        return [makeAssistantElement(texts[index])];
+      }
+      return [];
+    }
+  };
+  return () => assistantSelectorCalls;
+}
+
+async function main() {
   const ctx = loadCompletionHelpers();
   const prompts = parseCompanyPrompts();
   const stage1Prompt = prompts[1];
   assert(stage1Prompt.includes('STAGE 1'), 'Expected real Stage 1 prompt fixture.');
+
+  const userPromptNode = makeDomNode({ text: 'STAGE 15 prompt that asks for JSON array.' });
+  ctx.document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [];
+      if (selector === '[data-testid^="conversation-turn-"]') return [userPromptNode];
+      if (selector === 'article') return [userPromptNode];
+      if (selector === 'div[class*="markdown"]') {
+        return [makeDomNode({ text: 'User prompt markdown', userAncestor: userPromptNode })];
+      }
+      return [];
+    }
+  };
+  const userOnlyResponseNodes = ctx.getResponseDomNodes();
+  assert.strictEqual(userOnlyResponseNodes.source, 'none');
+  assert.strictEqual(userOnlyResponseNodes.nodes.length, 0);
+
+  const assistantChild = makeDomNode({ text: 'Assistant response JSON: []', matchesAssistant: true });
+  const turnWithAssistant = makeDomNode({ assistantChild });
+  ctx.document = {
+    querySelectorAll(selector) {
+      if (selector === '[data-message-author-role="assistant"]') return [];
+      if (selector === '[data-testid^="conversation-turn-"]') return [userPromptNode, turnWithAssistant];
+      if (selector === 'article') return [];
+      if (selector === 'div[class*="markdown"]') return [];
+      return [];
+    }
+  };
+  const assistantTurnResponseNodes = ctx.getResponseDomNodes();
+  assert.strictEqual(assistantTurnResponseNodes.source, 'conversation_turn_assistant');
+  assert.strictEqual(assistantTurnResponseNodes.nodes.length, 1);
+  assert.strictEqual(assistantTurnResponseNodes.nodes[0].innerText, assistantChild.innerText);
 
   const truncatedStage1 = [
     'I found the Stage 0 handoff in the prior output and will treat it as locked input.',
@@ -318,6 +419,29 @@ WINNING_THESIS: If agentic computing becomes continuous, then data-center spend 
   assert.strictEqual(completeStage0Readiness.ready, true);
   assert.strictEqual(completeStage0Readiness.reason, 'completion_contract_satisfied');
 
+  const companyPrompts = parseCompanyPrompts();
+  assert(companyPrompts.length >= 6);
+  const companyPrompt6 = companyPrompts[5];
+  const completeStage5 = `Synopsys, Inc. (SNPS)
+
+Sector overlay reviewed the Stage 4 CORE boundary and kept current EDA revenue in CORE while reserving above-base pricing, RPO quality, and capacity-rent proof for later rebase work.
+
+=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===
+COMPANY: Synopsys, Inc.
+TICKER: SNPS
+CORE_DECISION_GRADE_AFTER_MCP: TRUE
+=== END HANDOFF ===`;
+  const completeStage5Readiness = ctx.getResponseCompletionReadiness(
+    completeStage5,
+    companyPrompt6,
+    6,
+    { forStaleGenerating: true }
+  );
+  assert.strictEqual(completeStage5Readiness.ready, true);
+  assert.strictEqual(completeStage5Readiness.reason, 'completion_contract_satisfied');
+  const completeStage5Validation = ctx.validateStageResponseForPrompt(completeStage5, companyPrompt6, 6);
+  assert.strictEqual(completeStage5Validation.valid, true);
+
   const longNoHandoffReadiness = ctx.getResponseCompletionReadiness(
     'This is a long mechanically complete answer that has enough text to be treated as a finished DOM response after ChatGPT has stopped streaming. '.repeat(4),
     stage0PayloadPrompt,
@@ -366,6 +490,19 @@ PORTFOLIO_PROMPT_1_COMPLETE`;
   assert.strictEqual(portfolioPrompt1Readiness.ready, false);
   assert.strictEqual(portfolioPrompt1Readiness.reason, 'missing_completion_marker');
 
+  const getAssistantSelectorCalls = installAssistantTextSequence(ctx, [
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompt1Complete
+  ]);
+  const capturedPortfolioPrompt1 = await ctx.getLastResponseText({
+    promptText: portfolioPrompts[0],
+    promptNumber: 1,
+    preferLatest: true
+  });
+  assert.strictEqual(capturedPortfolioPrompt1, portfolioPrompt1Complete);
+  assert(getAssistantSelectorCalls() >= 3);
+
   const portfolioPrompt3TruncatedJson = ctx.validateStageResponseForPrompt(
     '{"thesis_construction_summary":"tekst","portfolio_construction_commentary":"tekst","layers":[',
     portfolioPrompts[2],
@@ -396,6 +533,10 @@ PORTFOLIO_PROMPT_1_COMPLETE`;
   assert.doesNotMatch(backgroundSource, /Nie wysylam kolejnego etapu - odpowiedz niepelna/);
   assert.match(backgroundSource, /async function getLastResponseText\(options = \{\}\)/);
   assert.match(backgroundSource, /Latest assistant response passes DOM\/basic completion readiness/);
+  assert.match(backgroundSource, /tryAcceptLatestResponseByContract\(/);
+  assert.match(backgroundSource, /timeout_before_manual_action/);
+  assert.match(backgroundSource, /invalid_response_before_manual_action/);
+  assert.match(backgroundSource, /classifyTimeoutOutcome\(snapshot, promptText, promptNumber = 0\)/);
   assert.match(backgroundSource, /if \(!preferLatest\)/);
   assert.match(
     backgroundSource,
@@ -405,4 +546,7 @@ PORTFOLIO_PROMPT_1_COMPLETE`;
   console.log('test-stage-response-completion-contract.js passed');
 }
 
-main();
+main().catch((error) => {
+  console.error(error);
+  process.exit(1);
+});

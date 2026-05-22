@@ -202,6 +202,7 @@ function buildContext() {
     Math,
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
+    DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT: 'heavy',
     SOURCE_TEXT_PLACEHOLDER_REGEX: /\{\{\s*(?:articlecontent|article)\s*\}\}/gi,
     PROMPTS_COMPANY: ['company prompt'],
     PROMPTS_PORTFOLIO: ['portfolio prompt'],
@@ -212,6 +213,12 @@ function buildContext() {
     ensureCompanyPromptsReady: async () => true,
     ensurePortfolioPromptsReady: async () => true,
     ensurePromptChainReadyForAnalysisType: async () => true,
+    normalizeComposerThinkingEffort: (value) => {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized === 'extended'
+        ? 'heavy'
+        : (['light', 'standard', 'heavy', 'pro'].includes(normalized) ? normalized : '');
+    },
     normalizeRemoteExecutionMode: (value) => (value === 'remote' ? 'remote' : 'local'),
     getStoredRemoteExecutionMode: async () => 'local',
     getStoredSelectedRemoteRunnerId: async () => '',
@@ -298,6 +305,7 @@ async function testPopupRunQueuesCompanyOnlyByDefault() {
   assert.strictEqual(context.processArticleCalls[0].chatUrl, 'https://chat.example');
   assert.deepStrictEqual(context.processArticleCalls[0].promptChain, ['company prompt']);
   assert.strictEqual(context.processArticleCalls[0].options.reason, 'run_analysis_enqueue');
+  assert.strictEqual(context.processArticleCalls[0].options.composerThinkingEffort, 'heavy');
 }
 
 async function testRunAnalysisCanExplicitlyIncludePortfolio() {
@@ -321,6 +329,8 @@ async function testRunAnalysisCanExplicitlyIncludePortfolio() {
   );
   assert.deepStrictEqual(context.processArticleCalls[1].promptChain, ['portfolio prompt']);
   assert.strictEqual(context.processArticleCalls[1].options.reason, 'run_analysis_portfolio_enqueue');
+  assert.strictEqual(context.processArticleCalls[0].options.composerThinkingEffort, 'heavy');
+  assert.strictEqual(context.processArticleCalls[1].options.composerThinkingEffort, 'heavy');
 }
 
 async function testManualTextSharesOneSourceAcrossCompanyAndPortfolio() {

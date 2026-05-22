@@ -50,6 +50,8 @@ function testThinkingModeIsCheckedEvenWithoutRequestedEffort() {
   requiredIndexOf('async function ensureThinkingModeBeforeRun(counterRef = null)');
   requiredIndexOf('const maxAttempts = 3;');
   requiredIndexOf('for (let attempt = 1; attempt <= maxAttempts; attempt += 1)');
+  requiredIndexOf("const defaultComposerThinkingEffort = 'heavy';");
+  requiredIndexOf('|| defaultComposerThinkingEffort;');
   requiredIndexOf("await ensureThinkingModeReadyForEffort(requestedComposerThinkingEffort || '', 9000)");
   requiredIndexOf('thinkingModeAttempt: attempt');
   requiredIndexOf("if (!requestedComposerThinkingEffort) {");
@@ -74,7 +76,8 @@ function testInstantComposerPillCanOpenModelModeMenu() {
   requiredIndexOf('if (isComposerModeSwitcherButton(button)) score += 220;');
   requiredIndexOf('function isThinkingModeReadyInComposer()');
   requiredIndexOf('function getThinkingEffortPillButtons(targetEffort = \'\')');
-  requiredIndexOf("if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
+  requiredIndexOf("if (effort === 'heavy') return ['heavy', 'advanced', 'zaawansowan', 'zaa', 'extended', 'rozszerzon', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
+  requiredIndexOf("if (effort === 'pro') return ['pro'];");
   requiredIndexOf("normalizedText.includes('zaawansowan')");
   requiredIndexOf("console.log('[thinking-mode] selecting Thinking mode'");
 }
@@ -86,7 +89,11 @@ function testAdvancedExtendedProPillCanOpenEffortMenu() {
   requiredIndexOf("'button[aria-haspopup=\"menu\"]'");
   requiredIndexOf('if (!hasThinkingContextToken(text) && !isThinkingEffortMenuLabel(text)) return false;');
   requiredIndexOf("containsWord(text, 'advanced')");
-  requiredIndexOf("if (effort === 'extended') return ['extended', 'rozszerzon'];");
+  requiredIndexOf("if (effort === 'standard') return ['standard', 'medium', 'sredni', 'średni'];");
+  requiredIndexOf("if (effort === 'heavy') return ['heavy', 'advanced', 'zaawansowan', 'zaa', 'extended', 'rozszerzon', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
+  requiredIndexOf("normalized === 'advanced'");
+  requiredIndexOf("normalized === 'zaawansowany'");
+  requiredIndexOf("if (normalized === 'pro') return 'pro';");
   requiredIndexOf("const isStrongThinkingEffortControl = text.includes('zaawansowan') && isThinkingEffortMenuLabel(text);");
   requiredIndexOf('return isStrongThinkingEffortControl || isComposerControl || hasMenuSignal;');
   requiredIndexOf('scoreThinkingEffortPillButton(button, effort)');
