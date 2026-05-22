@@ -740,23 +740,23 @@ function testDispatchPayloadPreservesChatGptComputationTelemetry() {
   });
 
   assert.strictEqual(payload.schema, 'economist.response.v2');
-  assert.strictEqual(payload.composerThinkingEffort, 'heavy');
+  assert.strictEqual(payload.composerThinkingEffort, 'high');
   assert.strictEqual(payload.chatGptModeKind, 'thinking');
   assert.strictEqual(payload.chatGptPlanHint, 'pro');
   assert.strictEqual(payload.chatGptModeLabel, 'Thinking');
   assert.strictEqual(payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
-  assert.strictEqual(payload.chatGptThinkingEffortDetected, 'heavy');
+  assert.strictEqual(payload.chatGptThinkingEffortDetected, 'high');
   assert.strictEqual(payload.chatGptThinkingEffortLabel, 'Heavy');
   assert.strictEqual(payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
   assert.strictEqual(payload.chatGptComputationDetectedAt, 1_710_000_123_456);
 
   const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
-  assert.strictEqual(outbound.composerThinkingEffort, 'heavy');
+  assert.strictEqual(outbound.composerThinkingEffort, 'high');
   assert.strictEqual(outbound.chatGptModeKind, 'thinking');
   assert.strictEqual(outbound.chatGptPlanHint, 'pro');
   assert.strictEqual(outbound.chatGptModeLabel, 'Thinking');
   assert.strictEqual(outbound.chatGptModelSwitcherLabel, 'ChatGPT Pro');
-  assert.strictEqual(outbound.chatGptThinkingEffortDetected, 'heavy');
+  assert.strictEqual(outbound.chatGptThinkingEffortDetected, 'high');
   assert.strictEqual(outbound.chatGptThinkingEffortLabel, 'Heavy');
   assert.strictEqual(outbound.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
   assert.strictEqual(outbound.chatGptComputationDetectedAt, 1_710_000_123_456);

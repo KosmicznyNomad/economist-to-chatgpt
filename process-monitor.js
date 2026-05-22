@@ -638,7 +638,7 @@ function humanizeThinkingEffort(value) {
   if (normalized === 'light') return 'Light';
   if (normalized === 'standard') return 'Standard';
   if (normalized === 'extended') return 'Extended';
-  if (normalized === 'heavy') return 'Heavy';
+  if (normalized === 'high' || normalized === 'heavy') return 'High';
   return '';
 }
 
@@ -2692,11 +2692,14 @@ async function sendProcessResumeNextStage(process, options = {}) {
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
+  const normalizedComposerThinkingEffort = composerThinkingEffort === 'heavy'
+    ? 'high'
+    : composerThinkingEffort;
   const hasExplicitThinkingEffort = (
-    composerThinkingEffort === 'light'
-    || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
-    || composerThinkingEffort === 'heavy'
+    normalizedComposerThinkingEffort === 'light'
+    || normalizedComposerThinkingEffort === 'standard'
+    || normalizedComposerThinkingEffort === 'extended'
+    || normalizedComposerThinkingEffort === 'high'
   );
   const useStoredComposerThinkingEffort = !hasExplicitThinkingEffort && options?.useStoredComposerThinkingEffort !== false;
   const message = {
@@ -2710,7 +2713,7 @@ async function sendProcessResumeNextStage(process, options = {}) {
     forceRepeatLastPrompt: options.forceRepeatLastPrompt === true
   };
   if (hasExplicitThinkingEffort) {
-    message.composerThinkingEffort = composerThinkingEffort;
+    message.composerThinkingEffort = normalizedComposerThinkingEffort;
   } else if (useStoredComposerThinkingEffort) {
     message.useStoredComposerThinkingEffort = true;
   }

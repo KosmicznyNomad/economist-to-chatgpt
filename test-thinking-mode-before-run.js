@@ -74,6 +74,7 @@ function testInstantComposerPillCanOpenModelModeMenu() {
   requiredIndexOf('if (isComposerModeSwitcherButton(button)) score += 220;');
   requiredIndexOf('function isThinkingModeReadyInComposer()');
   requiredIndexOf('function getThinkingEffortPillButtons(targetEffort = \'\')');
+  requiredIndexOf("if (effort === 'high') return ['high'];");
   requiredIndexOf("if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
   requiredIndexOf("normalizedText.includes('zaawansowan')");
   requiredIndexOf("console.log('[thinking-mode] selecting Thinking mode'");

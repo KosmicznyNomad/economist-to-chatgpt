@@ -217,7 +217,7 @@ async function main() {
     }),
     applySourceMaterialMetaForSave: (target) => target,
     detectChatGptComputationState: () => ({
-      composerThinkingEffort: 'heavy',
+      composerThinkingEffort: 'high',
       chatGptModeKind: 'thinking',
       chatGptModelSwitcherLabel: 'ChatGPT Pro',
       chatGptThinkingEffortDetected: 'heavy',
@@ -270,7 +270,7 @@ async function main() {
   assert.strictEqual(result.outboxQueued, true);
   assert.strictEqual(result.queueSize, 3);
   assert.strictEqual(queuedPayloads.length, 1, 'Emergency fallback should use shared outbox enqueue helper.');
-  assert.strictEqual(queuedPayloads[0].payload.composerThinkingEffort, 'heavy');
+  assert.strictEqual(queuedPayloads[0].payload.composerThinkingEffort, 'high');
   assert.strictEqual(queuedPayloads[0].payload.chatGptModeKind, 'thinking');
   assert.strictEqual(queuedPayloads[0].payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
   assert.strictEqual(queuedPayloads[0].payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');

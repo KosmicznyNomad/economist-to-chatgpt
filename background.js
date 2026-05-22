@@ -336,9 +336,10 @@ async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
 function normalizeComposerThinkingEffort(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!normalized) return '';
-  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
     return normalized;
   }
+  if (normalized === 'high' || normalized === 'heavy') return 'high';
   return '';
 }
 
@@ -351,6 +352,7 @@ function formatResumeProcessTitleWithThinkingEffort(title, composerThinkingEffor
 
   const tag = `[${normalizedEffort.toUpperCase()}]`;
   if (baseTitle.includes(tag)) return baseTitle;
+  if (normalizedEffort === 'high' && baseTitle.includes('[HEAVY]')) return baseTitle;
 
   const formattedTitle = baseTitle.replace(/^(Auto\s+(?:Start|Repeat))(?=:)/i, `$1 ${tag}`);
   return formattedTitle === baseTitle ? `${baseTitle} ${tag}` : formattedTitle;
@@ -35414,9 +35416,10 @@ async function injectToChat(
     const normalizeThinkingEffortLocal = (value) => {
       const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
       if (!normalized) return '';
-      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
         return normalized;
       }
+      if (normalized === 'high' || normalized === 'heavy') return 'high';
       return '';
     };
     const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort);
@@ -35719,9 +35722,10 @@ async function injectToChat(
       };
       const normalizeThinkingEffort = (value) => {
         const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-        if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+        if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
           return normalized;
         }
+        if (normalized === 'high' || normalized === 'heavy') return 'high';
         return '';
       };
 
@@ -38102,6 +38106,7 @@ async function injectToChat(
       if (effort === 'light') return 'Light';
       if (effort === 'standard') return 'Standard';
       if (effort === 'extended') return 'Extended';
+      if (effort === 'high') return 'High';
       if (effort === 'heavy') return 'Heavy';
       return '';
     }
@@ -38127,7 +38132,7 @@ async function injectToChat(
     function detectThinkingEffortState() {
       const checkedItem = getCheckedThinkingEffortMenuItem();
       const checkedLabel = getElementReadableText(checkedItem);
-      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+      for (const effort of ['high', 'heavy', 'extended', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(checkedLabel, effort)) {
           return {
             effort,
@@ -38138,7 +38143,7 @@ async function injectToChat(
 
       const pillButton = findThinkingEffortPillButton();
       const pillLabel = getElementReadableText(pillButton);
-      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+      for (const effort of ['high', 'heavy', 'extended', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(pillLabel, effort)) {
           return {
             effort,
@@ -38213,6 +38218,7 @@ async function injectToChat(
       if (effort === 'light') return ['light', 'lekki'];
       if (effort === 'standard') return ['standard'];
       if (effort === 'extended') return ['extended', 'rozszerzon'];
+      if (effort === 'high') return ['high'];
       if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
       return [];
     }
@@ -38222,6 +38228,7 @@ async function injectToChat(
       if (!normalizedText) return false;
       return (
         normalizedText.includes('thinking effort')
+        || normalizedText.includes('high thinking')
         || normalizedText.includes('heavy thinking')
         || normalizedText.includes('extended thinking')
         || normalizedText.includes('standard thinking')
@@ -38247,6 +38254,7 @@ async function injectToChat(
         matchesThinkingEffortLabel(text, 'light')
         || matchesThinkingEffortLabel(text, 'standard')
         || matchesThinkingEffortLabel(text, 'extended')
+        || matchesThinkingEffortLabel(text, 'high')
         || matchesThinkingEffortLabel(text, 'heavy')
       );
     }
@@ -38383,6 +38391,7 @@ async function injectToChat(
       if (isThinkingEffortMenuLabel(text)) score += 80;
       if (text.includes('zaawansowan')) score += 120;
       if (text.includes('advanced')) score += 120;
+      if (matchesThinkingEffortLabel(text, 'high')) score += 95;
       if (matchesThinkingEffortLabel(text, 'extended')) score += 90;
       if (containsWord(text, 'pro')) score += 20;
       if (button.getAttribute('aria-haspopup')) score += 60;

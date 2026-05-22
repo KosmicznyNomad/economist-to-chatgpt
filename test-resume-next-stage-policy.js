@@ -238,7 +238,7 @@ vm.createContext(context);
 
 assert.strictEqual(
   context.formatResumeProcessTitleWithThinkingEffort('Auto Start: Prompt 7', 'HEAVY'),
-  'Auto Start [HEAVY]: Prompt 7'
+  'Auto Start [HIGH]: Prompt 7'
 );
 assert.strictEqual(
   context.formatResumeProcessTitleWithThinkingEffort('Company run', 'extended'),

@@ -23,10 +23,10 @@ function normalizeComposerThinkingEffort(value) {
     normalized === 'light'
     || normalized === 'standard'
     || normalized === 'extended'
-    || normalized === 'heavy'
   ) {
     return normalized;
   }
+  if (normalized === 'high' || normalized === 'heavy') return 'high';
   return '';
 }
 

@@ -287,7 +287,7 @@ async function testResumeAllForwardsExplicitEffort() {
 
   assert.strictEqual(runtimeMessages.length, 1);
   assert.strictEqual(runtimeMessages[0].origin, 'popup-resume-test');
-  assert.strictEqual(runtimeMessages[0].composerThinkingEffort, 'heavy');
+  assert.strictEqual(runtimeMessages[0].composerThinkingEffort, 'high');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(runtimeMessages[0], 'useStoredComposerThinkingEffort'), false);
 }
 
@@ -302,7 +302,7 @@ async function testRepeatLastPromptForwardsExplicitEffort() {
 
   assert.strictEqual(runtimeMessages.length, 1);
   assert.strictEqual(runtimeMessages[0].origin, 'popup-test');
-  assert.strictEqual(runtimeMessages[0].composerThinkingEffort, 'heavy');
+  assert.strictEqual(runtimeMessages[0].composerThinkingEffort, 'high');
   assert.strictEqual(Object.prototype.hasOwnProperty.call(runtimeMessages[0], 'useStoredComposerThinkingEffort'), false);
 }
 

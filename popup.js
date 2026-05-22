@@ -1503,20 +1503,23 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
+  const normalizedComposerThinkingEffort = composerThinkingEffort === 'heavy'
+    ? 'high'
+    : composerThinkingEffort;
   const hasExplicitThinkingEffort = (
-    composerThinkingEffort === 'light'
-    || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
-    || composerThinkingEffort === 'heavy'
+    normalizedComposerThinkingEffort === 'light'
+    || normalizedComposerThinkingEffort === 'standard'
+    || normalizedComposerThinkingEffort === 'extended'
+    || normalizedComposerThinkingEffort === 'high'
   );
-  const effortSuffix = composerThinkingEffort ? ` (${composerThinkingEffort})` : '';
+  const effortSuffix = normalizedComposerThinkingEffort ? ` (${normalizedComposerThinkingEffort})` : '';
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
   button.textContent = `Wznawiam${effortSuffix}...`;
   setRunStatus(
-    composerThinkingEffort
-      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
+    normalizedComposerThinkingEffort
+      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${normalizedComposerThinkingEffort}.`
       : 'Wznowienie aktywnych procesow company (INVEST)...'
   );
 
@@ -1530,7 +1533,7 @@ async function executeResumeAllFromPopup(button, options = {}) {
       monitorAutoCloseAfterMs: 40_000
     };
     if (hasExplicitThinkingEffort) {
-      message.composerThinkingEffort = composerThinkingEffort;
+      message.composerThinkingEffort = normalizedComposerThinkingEffort;
     } else {
       message.useStoredComposerThinkingEffort = true;
     }
@@ -1538,8 +1541,8 @@ async function executeResumeAllFromPopup(button, options = {}) {
 
     if (!response || Object.keys(response).length === 0) {
       setRunStatus(
-        composerThinkingEffort
-          ? `Polecenie wznowienia (${composerThinkingEffort}) zostalo wyslane.`
+        normalizedComposerThinkingEffort
+          ? `Polecenie wznowienia (${normalizedComposerThinkingEffort}) zostalo wyslane.`
           : 'Polecenie wznowienia zostalo wyslane.'
       );
       return;
@@ -1551,8 +1554,8 @@ async function executeResumeAllFromPopup(button, options = {}) {
     }
 
     setRunStatus(
-      composerThinkingEffort
-        ? `Tryb ${composerThinkingEffort}: ${getResumeAllSummary(response)}`
+      normalizedComposerThinkingEffort
+        ? `Tryb ${normalizedComposerThinkingEffort}: ${getResumeAllSummary(response)}`
         : getResumeAllSummary(response)
     );
   } catch (error) {
@@ -1570,11 +1573,14 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
+  const normalizedComposerThinkingEffort = composerThinkingEffort === 'heavy'
+    ? 'high'
+    : composerThinkingEffort;
   const hasExplicitThinkingEffort = (
-    composerThinkingEffort === 'light'
-    || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
-    || composerThinkingEffort === 'heavy'
+    normalizedComposerThinkingEffort === 'light'
+    || normalizedComposerThinkingEffort === 'standard'
+    || normalizedComposerThinkingEffort === 'extended'
+    || normalizedComposerThinkingEffort === 'high'
   );
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalText = button.textContent;
@@ -1592,7 +1598,7 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
       openMonitorWindow: true
     };
     if (hasExplicitThinkingEffort) {
-      message.composerThinkingEffort = composerThinkingEffort;
+      message.composerThinkingEffort = normalizedComposerThinkingEffort;
     } else {
       message.useStoredComposerThinkingEffort = true;
     }
@@ -2255,8 +2261,8 @@ if (resumeAllExtendedBtn) {
 if (resumeAllHeavyBtn) {
   resumeAllHeavyBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllHeavyBtn, {
-      origin: 'popup-resume-all-heavy',
-      composerThinkingEffort: 'heavy',
+      origin: 'popup-resume-all-high',
+      composerThinkingEffort: 'high',
     });
   });
 }

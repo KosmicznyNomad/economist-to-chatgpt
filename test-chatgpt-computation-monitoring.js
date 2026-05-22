@@ -220,12 +220,12 @@ function testApplyChatGptComputationStatePatch() {
   });
 
   assert.deepStrictEqual(patch, {
-    composerThinkingEffort: 'heavy',
+    composerThinkingEffort: 'high',
     chatGptModeKind: 'thinking',
     chatGptPlanHint: 'pro',
     chatGptModeLabel: 'Thinking',
     chatGptModelSwitcherLabel: 'ChatGPT Pro',
-    chatGptThinkingEffortDetected: 'heavy',
+    chatGptThinkingEffortDetected: 'high',
     chatGptThinkingEffortLabel: 'Heavy',
     chatGptComputationLabel: 'ChatGPT Pro | Thinking | Thinking Heavy',
     chatGptComputationDetectedAt: 123456789
@@ -249,7 +249,7 @@ function testFormatChatGptComputationSummary() {
 
   assert.strictEqual(
     summary,
-    'Model ChatGPT Pro | Tryb Thinking | Thinking Heavy (req Extended)'
+    'Model ChatGPT Pro | Tryb Thinking | Thinking High (req Extended)'
   );
 }
 
