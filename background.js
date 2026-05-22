@@ -39900,6 +39900,78 @@ async function injectToChat(
     return { generating: false, reason: 'none', element: null };
   }
 
+  function findPromptComposerEditor() {
+    const selectors = [
+      'textarea#prompt-textarea',
+      'textarea',
+      'input[role="textbox"]',
+      '[role="textbox"][contenteditable="true"]',
+      '[data-testid="composer-input"]',
+      'div[contenteditable="true"]',
+      '[contenteditable]'
+    ];
+    const seen = new Set();
+    const candidates = [];
+    selectors.forEach((selector) => {
+      document.querySelectorAll(selector).forEach((node) => {
+        if (seen.has(node)) return;
+        seen.add(node);
+        candidates.push(node);
+      });
+    });
+
+    return candidates.find((node) => {
+      if (!(node instanceof HTMLElement)) return false;
+      if (!isElementVisibleForInteraction(node)) return false;
+      const tag = String(node.tagName || '').toLowerCase();
+      if (tag === 'textarea' || tag === 'input') {
+        return node.disabled !== true && node.readOnly !== true;
+      }
+      const contenteditable = node.getAttribute('contenteditable');
+      return contenteditable === 'true' || node.isContentEditable;
+    }) || null;
+  }
+
+  function getPromptSendSafetyState(options = {}) {
+    const allowPendingUserTurn = options?.allowPendingUserTurn === true;
+    const genStatus = isGenerating();
+    const continueButton = findChatGptContinueGeneratingButton();
+    const editor = findPromptComposerEditor();
+    const editorReady = !!editor;
+    const state = getLastTurnState();
+    const pendingUserTurn = state.userCount > state.assistantCount;
+    const unsafeReasons = [];
+
+    if (genStatus.generating) {
+      unsafeReasons.push(`generating:${genStatus.reason || 'unknown'}`);
+    }
+    if (continueButton) {
+      unsafeReasons.push('continue_generating_button');
+    }
+    if (!editorReady) {
+      unsafeReasons.push('editor_not_ready');
+    }
+    if (pendingUserTurn && !allowPendingUserTurn) {
+      unsafeReasons.push('pending_user_turn');
+    }
+
+    return {
+      safe: unsafeReasons.length === 0,
+      reason: unsafeReasons[0] || 'safe',
+      unsafeReasons,
+      editor,
+      editorReady,
+      generating: genStatus.generating === true,
+      generationReason: genStatus.reason || 'none',
+      generationElement: genStatus.element || null,
+      continueButtonVisible: !!continueButton,
+      pendingUserTurn,
+      userCount: state.userCount,
+      assistantCount: state.assistantCount,
+      allowPendingUserTurn
+    };
+  }
+
   function findChatGptContinueGeneratingButton() {
     const candidates = Array.from(document.querySelectorAll('button'));
     for (const button of candidates) {
@@ -41636,6 +41708,7 @@ async function injectToChat(
       totalPromptsForRun,
       {
         allowInferSent: true,
+        allowPendingUserTurn: true,
         promptSnapshotBeforeSend: resendPromptSnapshotBeforeSend
       }
     );
@@ -41663,8 +41736,11 @@ async function injectToChat(
   }
 
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
-  async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
+  async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0, options = {}) {
     if (shouldStopNow()) return false;
+    const waitOptions = options && typeof options === 'object' ? options : {};
+    const allowPendingUserTurn = waitOptions.allowPendingUserTurn === true;
+    const allowStaleGeneratingReady = waitOptions.allowStaleGeneratingReady === true;
     const startTime = Date.now();
     let effectiveMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
     let consecutiveReady = 0;
@@ -41679,13 +41755,15 @@ async function injectToChat(
     if (isNewConversation) {
       console.log("✅ Nowa konwersacja - pomijam czekanie na gotowość (nie powinno być generowania)");
       // Sprawdź tylko czy editor istnieje i jest enabled
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]');
-      if (editor) {
+      const initialSendSafety = getPromptSendSafetyState({ allowPendingUserTurn });
+      if (initialSendSafety.safe) {
         console.log("✅ Editor gotowy - kontynuuję natychmiast");
         return true;
       } else {
-        console.log("⏳ Editor nie istnieje - czekam max 5s...");
+        console.log("⏳ Slot wysyłki niegotowy - czekam max 5s...", {
+          reason: initialSendSafety.reason,
+          unsafeReasons: initialSendSafety.unsafeReasons
+        });
         effectiveMaxWaitMs = 5000; // Krótki timeout tylko na pojawienie się editora
       }
     } else {
@@ -41739,6 +41817,9 @@ async function injectToChat(
       'streamingIndicator': 'streamuje odpowiedź',
       'typingIndicator': 'pisze odpowiedź',
       'editorDisabled': 'interface zablokowany',
+      'continue_generating_button': 'czeka na Continue/koniec odpowiedzi',
+      'editor_not_ready': 'edytor niegotowy',
+      'pending_user_turn': 'ostatni prompt wyslany, brak odpowiedzi',
       'none': 'gotowy'
     };
     
@@ -41760,12 +41841,14 @@ async function injectToChat(
           continue;
         }
       }
-      // Sprawdź wszystkie elementy interfejsu
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]');
-      
+      const sendSafety = getPromptSendSafetyState({ allowPendingUserTurn });
+      const editor = sendSafety.editor;
       // POPRAWKA: Użyj isGenerating() zamiast tylko sprawdzania stopButton
-      const genStatus = isGenerating();
+      const genStatus = {
+        generating: sendSafety.generating,
+        reason: sendSafety.generationReason,
+        element: sendSafety.generationElement || null
+      };
       if (!genStatus.generating) {
         lastGenerationSignature = '';
         lastGeneratingActivityAt = Date.now();
@@ -41782,7 +41865,7 @@ async function injectToChat(
       // Interface jest gotowy gdy:
       // 1. BRAK wskaźników generowania (isGenerating() == false)
       // 2. Editor ISTNIEJE i jest ENABLED
-      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const editorReady = sendSafety.editorReady;
       const noGeneration = !genStatus.generating;
       const lastMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const lastAssistantMsg = lastMessages.length > 0 ? lastMessages[lastMessages.length - 1] : null;
@@ -41810,8 +41893,8 @@ async function injectToChat(
         staleGenerationOverrideWarned = false;
       }
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const currentUserCount = document.querySelectorAll('[data-message-author-role="user"]').length;
-      const currentAssistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+      const currentUserCount = sendSafety.userCount;
+      const currentAssistantCount = sendSafety.assistantCount;
       const conversationLooksBalanced = currentAssistantCount > 0 && currentAssistantCount >= currentUserCount;
       const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastGeneratingActivityAt) : 0;
       const generationLooksStaleBase = genStatus.generating
@@ -41823,7 +41906,7 @@ async function injectToChat(
       const staleReadyCompletion = getResponseCompletionReadiness(currentLastText, '', promptIndex, {
         forStaleGenerating: true
       });
-      const generationLooksStale = generationLooksStaleBase && staleReadyCompletion.ready;
+      const generationLooksStale = allowStaleGeneratingReady && generationLooksStaleBase && staleReadyCompletion.ready;
       if (generationLooksStaleBase && !staleReadyCompletion.ready) {
         const warnKey = [
           staleReadyCompletion.reason || 'unknown',
@@ -41852,7 +41935,21 @@ async function injectToChat(
           completionReason: staleReadyCompletion.reason
         });
       }
-      const isReady = (noGeneration || generationLooksStale) && editorReady && textStable && !hasProgressText;
+      const isReady = (
+        (
+          sendSafety.safe
+          || (
+            allowStaleGeneratingReady
+            && generationLooksStale
+            && editorReady
+            && !sendSafety.continueButtonVisible
+            && (!sendSafety.pendingUserTurn || allowPendingUserTurn)
+          )
+        )
+        && (noGeneration || generationLooksStale)
+        && textStable
+        && !hasProgressText
+      );
       
       if (isReady) {
         consecutiveReady++;
@@ -41872,7 +41969,7 @@ async function injectToChat(
         // Aktualizuj licznik wizualny z powodem czekania
         if (counter) {
           const elapsed = Math.round((Date.now() - startTime) / 1000);
-          const reason = reasonDescriptions[genStatus.reason] || genStatus.reason;
+          const reason = reasonDescriptions[sendSafety.reason] || reasonDescriptions[genStatus.reason] || sendSafety.reason || genStatus.reason;
           const statusText = `⏳ Czekam na gotowość... (${elapsed}s)\nChatGPT: ${reason}`;
           updateCounter(counter, promptIndex, promptTotal, statusText);
         }
@@ -41885,6 +41982,8 @@ async function injectToChat(
         console.log(`⏳ Interface nie gotowy (${elapsed}s)`, {
           generating: genStatus.generating,
           reason: genStatus.reason,
+          sendSafetyReason: sendSafety.reason,
+          pendingUserTurn: sendSafety.pendingUserTurn,
           reasonDesc: reason,
           editorReady: editorReady,
           textStable: textStable,
@@ -42107,8 +42206,12 @@ async function injectToChat(
   }
 
   // Funkcja wysyłania pojedynczego prompta
-  async function sendPrompt(promptText, maxWaitForReady = interfaceReadyWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
+  async function sendPrompt(promptText, maxWaitForReady = interfaceReadyWaitMs, counter = null, promptIndex = 0, promptTotal = 0, options = {}) {
     if (shouldStopNow()) return false;
+    const sendOptions = options && typeof options === 'object' ? options : {};
+    const sendSafetyOptions = {
+      allowPendingUserTurn: sendOptions.allowPendingUserTurn === true
+    };
     runMetrics.sendAttempts += 1;
     registerPromptAttempt(promptIndex);
     logSend('ATTEMPT', { promptIndex, promptTotal, chars: typeof promptText === 'string' ? promptText.length : 0 });
@@ -42145,7 +42248,7 @@ async function injectToChat(
     
     // KROK 1: Czekaj aż interface będzie gotowy (jeśli poprzednia odpowiedź się jeszcze generuje)
     console.log("🔍 Sprawdzam gotowość interfejsu przed wysłaniem...");
-    const interfaceReady = await waitForInterfaceReady(maxWaitForReady, counter, promptIndex, promptTotal);
+    const interfaceReady = await waitForInterfaceReady(maxWaitForReady, counter, promptIndex, promptTotal, sendSafetyOptions);
     
     if (!interfaceReady) {
       if (captureGenerationBlockerState()) {
@@ -42153,6 +42256,22 @@ async function injectToChat(
         return false;
       }
       console.error(`❌ Interface nie stał się gotowy po ${Math.round(maxWaitForReady/1000)}s`);
+      return false;
+    }
+
+    const preInsertSendSafety = getPromptSendSafetyState(sendSafetyOptions);
+    if (!preInsertSendSafety.safe) {
+      console.warn('[send-safety] Przerywam sendPrompt przed wstawieniem tekstu - DOM nie potwierdza bezpiecznego slotu wysylki.', {
+        promptIndex,
+        promptTotal,
+        reason: preInsertSendSafety.reason,
+        unsafeReasons: preInsertSendSafety.unsafeReasons,
+        generating: preInsertSendSafety.generating,
+        generationReason: preInsertSendSafety.generationReason,
+        pendingUserTurn: preInsertSendSafety.pendingUserTurn,
+        userCount: preInsertSendSafety.userCount,
+        assistantCount: preInsertSendSafety.assistantCount
+      });
       return false;
     }
     
@@ -42192,6 +42311,7 @@ async function injectToChat(
     function collectEditorCandidates() {
       const selectors = [
         'textarea#prompt-textarea',
+        'textarea',
         '[role="textbox"][contenteditable="true"]',
         'div[contenteditable="true"]',
         '[data-testid="composer-input"]',
@@ -42395,6 +42515,21 @@ async function injectToChat(
         console.warn('⚠️ Przerywam oczekiwanie na Send - wykryto limit/restriction w ChatGPT.');
         return false;
       }
+      const buttonWaitSafety = getPromptSendSafetyState(sendSafetyOptions);
+      if (!buttonWaitSafety.safe) {
+        console.warn('[send-safety] Przerywam oczekiwanie na Send - ChatGPT nie jest w bezpiecznym stanie do wysylki.', {
+          promptIndex,
+          promptTotal,
+          reason: buttonWaitSafety.reason,
+          unsafeReasons: buttonWaitSafety.unsafeReasons,
+          generating: buttonWaitSafety.generating,
+          generationReason: buttonWaitSafety.generationReason,
+          pendingUserTurn: buttonWaitSafety.pendingUserTurn,
+          userCount: buttonWaitSafety.userCount,
+          assistantCount: buttonWaitSafety.assistantCount
+        });
+        return false;
+      }
       submitButton = document.querySelector('[data-testid="send-button"]') ||
                      document.querySelector('#composer-submit-button') ||
                      document.querySelector('button[aria-label="Send"]') ||
@@ -42427,6 +42562,21 @@ async function injectToChat(
     
     // Poczekaj dłużej przed kliknięciem - daj czas na stabilizację UI
     await new Promise(resolve => setTimeout(resolve, 500));
+    const preClickSendSafety = getPromptSendSafetyState(sendSafetyOptions);
+    if (!preClickSendSafety.safe) {
+      console.warn('[send-safety] Nie klikam Send - DOM pokazuje aktywne generowanie albo nierozliczony user turn.', {
+        promptIndex,
+        promptTotal,
+        reason: preClickSendSafety.reason,
+        unsafeReasons: preClickSendSafety.unsafeReasons,
+        generating: preClickSendSafety.generating,
+        generationReason: preClickSendSafety.generationReason,
+        pendingUserTurn: preClickSendSafety.pendingUserTurn,
+        userCount: preClickSendSafety.userCount,
+        assistantCount: preClickSendSafety.assistantCount
+      });
+      return false;
+    }
     
     console.log("✓ Klikam Send...");
     const sendClickSnapshot = getPromptDomSnapshot();
@@ -42549,7 +42699,7 @@ async function injectToChat(
     while (attempt < maxAttempts && (Date.now() - retryStartedAt) < maxRetryWindowMs) {
       if (shouldStopNow()) return false;
       attempt += 1;
-      const sent = await sendPrompt(promptText, maxWaitForReady, counter, promptIndex, promptTotal);
+      const sent = await sendPrompt(promptText, maxWaitForReady, counter, promptIndex, promptTotal, options);
       if (sent) return true;
       if (captureGenerationBlockerState()) {
         console.warn(`[send] Przerywam retry promptu ${promptIndex || '?'}/${promptTotal || '?'} - wykryto limit/restriction.`);
