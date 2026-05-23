@@ -3458,12 +3458,11 @@ Zwróć dokładnie jeden obiekt JSON zgodny z:
   "records": [ ... ]
 }
 Standardowy przypadek
-records ma dokładnie 2 rekordy
-pierwszy rekord = PRIMARY
-drugi rekord = SECONDARY
-Jeśli tylko jedna spółka przeszła
-zwróć 1 rekord
-dodaj extras.shortfall_reason
+Zawsze zwróć rekordy dla wszystkich spółek WATCH ze Stage 12, posortowane malejąco po Composite Score ze Stage 13.
+Pierwszy rekord = PRIMARY, drugi = SECONDARY.
+Maksymalnie 2 rekordy.
+Jeśli Stage 13 zwrócił ENTRY_SHORTFALL, ignoruj to i bierz top 2 ze Stage 12 wg Composite.
+Pusta tablica records: [] tylko gdy zero spółek WATCH w Stage 12.
 Kształt rekordu
 
 Każdy rekord musi mieć dokładnie te sekcje:
