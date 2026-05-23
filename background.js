@@ -43,6 +43,7 @@ const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
 const ANALYSIS_TYPE_COMPANY = 'company';
 const ANALYSIS_TYPE_PORTFOLIO = 'portfolio';
+const DEFAULT_COMPOSER_THINKING_EFFORT = 'high';
 const PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA = 'portfolio.layer_ranking.v1';
 const PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE = 'portfolio_layer_ranking';
 const PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE = 'Portfolio Prompt 1: Layer Ranking';
@@ -336,7 +337,8 @@ async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
 function normalizeComposerThinkingEffort(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!normalized) return '';
-  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
+  if (normalized === 'light' || normalized === 'standard' || normalized === 'medium' || normalized === 'extended') {
+    if (normalized === 'medium') return 'standard';
     return normalized;
   }
   if (normalized === 'high' || normalized === 'heavy') return 'high';
@@ -2087,6 +2089,13 @@ function sanitizeAnalysisQueueJob(rawJob) {
   if (remote) {
     sanitized.remote = remote;
   }
+  const defaultComposerThinkingEffort = typeof DEFAULT_COMPOSER_THINKING_EFFORT === 'string'
+    ? DEFAULT_COMPOSER_THINKING_EFFORT
+    : 'high';
+  const composerThinkingEffort = normalizeComposerThinkingEffort(rawJob.composerThinkingEffort) || defaultComposerThinkingEffort;
+  if (composerThinkingEffort) {
+    sanitized.composerThinkingEffort = composerThinkingEffort;
+  }
 
   if (kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
     const tabSnapshot = sanitizeAnalysisQueueTabSnapshot(rawJob.tabSnapshot || rawJob.tab);
@@ -2116,10 +2125,6 @@ function sanitizeAnalysisQueueJob(rawJob) {
     sanitized.forceRepeatLastPrompt = rawJob.forceRepeatLastPrompt === true;
     sanitized.bypassPause = rawJob.bypassPause === true;
     sanitized.skipStagePreflight = rawJob.skipStagePreflight === true;
-    const composerThinkingEffort = normalizeComposerThinkingEffort(rawJob.composerThinkingEffort);
-    if (composerThinkingEffort) {
-      sanitized.composerThinkingEffort = composerThinkingEffort;
-    }
     if (rawJob.precomputedStagePlan && typeof rawJob.precomputedStagePlan === 'object') {
       sanitized.precomputedStagePlan = rawJob.precomputedStagePlan;
     }
@@ -11683,7 +11688,10 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
           queueJobId: scheduledJob.jobId,
           sourceKind: scheduledJob.sourceKind || '',
           remote: scheduledJob.remote || null,
-          promptHash: typeof scheduledJob.promptHash === 'string' ? scheduledJob.promptHash : ''
+          promptHash: typeof scheduledJob.promptHash === 'string' ? scheduledJob.promptHash : '',
+          composerThinkingEffort: typeof scheduledJob.composerThinkingEffort === 'string'
+            ? scheduledJob.composerThinkingEffort
+            : DEFAULT_COMPOSER_THINKING_EFFORT
         }
       );
       if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
@@ -13262,6 +13270,85 @@ async function stopActiveProcesses(options = {}) {
   };
 }
 
+async function clearLocalAnalysisQueueSlots(options = {}) {
+  await ensureProcessRegistryReady();
+  await ensureAnalysisQueueReady();
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'clear_local_analysis_queue';
+  const now = Date.now();
+
+  await setAnalysisQueuePaused(true, {
+    requestReconcile: false,
+    requestRemoteRunnerCycle: false
+  });
+
+  const cancelled = await cancelQueuedAnalysisJobs(() => true, {
+    reason: 'manual_queue_clear',
+    statusText: 'Anulowano przy czyszczeniu kolejki'
+  });
+
+  let releasedActiveJobs = [];
+  await withAnalysisQueueMutationLock(async () => {
+    const state = cloneAnalysisQueueState();
+    releasedActiveJobs = Array.isArray(state.activeJobs) ? state.activeJobs.slice() : [];
+    state.activeJobs = [];
+    await persistAnalysisQueueState(state);
+  });
+
+  let stopped = 0;
+  const touchedRunIds = new Set();
+  for (const job of releasedActiveJobs) {
+    const runId = typeof job?.runId === 'string' ? job.runId.trim() : '';
+    if (!runId || touchedRunIds.has(runId)) continue;
+    touchedRunIds.add(runId);
+    const process = processRegistry.get(runId) || null;
+    if (process && !isClosedProcessStatus(process.status)) {
+      const didStop = await stopSingleProcess(process, {
+        reason: 'manual_queue_clear',
+        statusText: 'Zatrzymano przy czyszczeniu kolejki',
+        origin,
+        replayLatestResponse: false,
+        forceReplayLatestResponse: false
+      });
+      if (didStop) {
+        stopped += 1;
+        continue;
+      }
+    }
+    await upsertProcess(runId, {
+      queueManaged: true,
+      queueJobId: typeof job?.jobId === 'string' ? job.jobId : '',
+      queueState: 'slot_released',
+      slotReserved: false,
+      slotReleasedAt: now,
+      slotReleaseReason: 'manual_queue_clear',
+      status: 'stopped',
+      lifecycleStatus: 'stopped',
+      phase: 'stopped',
+      statusCode: 'process.stopped',
+      statusText: 'Zatrzymano przy czyszczeniu kolejki',
+      reason: 'manual_queue_clear',
+      needsAction: false,
+      autoRecovery: null,
+      finishedAt: now,
+      timestamp: now
+    });
+    stopped += 1;
+  }
+
+  analysisQueueReady = null;
+  const status = await getAnalysisQueueStatusSnapshot();
+  return {
+    success: true,
+    paused: true,
+    cancelledQueued: Number.isInteger(cancelled?.cancelledCount) ? cancelled.cancelledCount : 0,
+    releasedActive: releasedActiveJobs.length,
+    stopped,
+    queue: status
+  };
+}
+
 function queryTabsInWindowSafe(windowId) {
   return new Promise((resolve) => {
     if (!Number.isInteger(windowId)) {
@@ -14698,7 +14785,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
 
   const targetWindowId = Number.isInteger(windowId) ? windowId : targetTab.windowId;
   const reloadBeforeResume = options?.reloadBeforeResume !== false;
-  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort) || DEFAULT_COMPOSER_THINKING_EFFORT;
   if (reloadBeforeResume) {
     const prepareResult = await prepareTabForResume(tabId, targetWindowId, {
       timeoutMs: 15000,
@@ -30544,6 +30631,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       });
     });
     return true;
+  } else if (message.type === 'CLEAR_LOCAL_ANALYSIS_QUEUE') {
+    (async () => {
+      const result = await clearLocalAnalysisQueueSlots({
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message'
+      });
+      reportAdminActionEvent('clear_local_analysis_queue', {
+        level: 'info',
+        status: 'completed',
+        reason: 'manual_queue_clear',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        details: {
+          cancelledQueued: result.cancelledQueued,
+          releasedActive: result.releasedActive,
+          stopped: result.stopped
+        }
+      });
+      sendResponse(result);
+    })().catch((error) => {
+      console.warn('[analysis-queue] clear local queue failed:', error);
+      reportAdminActionEvent('clear_local_analysis_queue', {
+        level: 'error',
+        status: 'failed',
+        reason: 'manual_queue_clear_failed',
+        origin: typeof message?.origin === 'string' ? message.origin : 'runtime-message',
+        error: error?.message || String(error)
+      });
+      sendResponse({
+        success: false,
+        error: error?.message || 'clear_local_analysis_queue_failed'
+      });
+    });
+    return true;
   } else if (message.type === 'SET_ANALYSIS_QUEUE_PAUSED') {
     (async () => {
       const nextPaused = Boolean(message?.paused);
@@ -31568,7 +31687,7 @@ async function resumeFromStage(startIndex, options = {}) {
       return { success: false, error: 'start_index_out_of_range' };
     }
 
-    const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
+    const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort) || DEFAULT_COMPOSER_THINKING_EFFORT;
     const rawProcessTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
       ? options.processTitle.trim()
       : `Resume from Stage ${startIndex + 1}`;
@@ -31840,6 +31959,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
   const promptHash = typeof options?.promptHash === 'string' && options.promptHash.trim()
     ? options.promptHash.trim()
     : '';
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort) || DEFAULT_COMPOSER_THINKING_EFFORT;
   let processTitle = tab?.title || 'Bez tytulu';
   let processTotalPrompts = promptChainSafe.length;
 
@@ -31882,6 +32002,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       statusText: 'Przygotowanie procesu',
       currentPrompt: 0,
       totalPrompts: processTotalPrompts,
+      composerThinkingEffort,
       needsAction: false,
       startedAt: Date.now(),
       timestamp: Date.now(),
@@ -32176,7 +32297,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         processId,
         {
           promptOffset: executionPromptOffset,
-          totalPromptsOverride: processTotalPrompts
+          totalPromptsOverride: processTotalPrompts,
+          composerThinkingEffort
         },
         {
           enabled: true,
@@ -32442,7 +32564,32 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         lines: dataGapSummary.logLines,
         autoCloseMs: 0
       });
-    } else if (result && result.success && hasResultLastResponse) {
+    } else {
+      if (result && result.success && hasResultSectorMemoryResponse) {
+        const sectorMemoryPersistence = await persistSectorMemoryResponseFromResult(result, {
+          source: title,
+          runId: processId,
+          conversationUrl: conversationUrl || null,
+          sourceMeta: {
+            sourceTitle: title,
+            sourceName,
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId
+          }
+        });
+        if (sectorMemoryPersistence?.attempted) {
+          sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
+          sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
+          sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
+            ? sectorMemoryPersistence.itemCount
+            : null;
+        }
+      }
+
+      if (result && result.success && hasResultLastResponse) {
       const stageMeta = {};
       if (Number.isInteger(result?.selectedResponsePrompt)) {
         stageMeta.selected_response_prompt = result.selectedResponsePrompt;
@@ -32485,29 +32632,6 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             sourceMaterialText: sourceMaterialId ? '' : extractedText
           }
         );
-      const sectorMemoryPersistence = hasResultSectorMemoryResponse
-        ? await persistSectorMemoryResponseFromResult(result, {
-          source: title,
-          runId: processId,
-          conversationUrl: conversationUrl || null,
-          sourceMeta: {
-            sourceTitle: title,
-            sourceName,
-            sourceUrl,
-            sourceMaterialId,
-            sourceMaterialHash,
-            sourceMaterialLength,
-            sourceMaterialStored: !!sourceMaterialId
-          }
-        })
-        : null;
-      if (sectorMemoryPersistence?.attempted) {
-        sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
-        sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
-        sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
-          ? sectorMemoryPersistence.itemCount
-          : null;
-      }
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: true,
         saveResult,
@@ -32674,6 +32798,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         lines: [`Powod: ${finalReason}`],
         autoCloseMs: 0
       });
+    }
+
     }
 
     await upsertProcess(processId, {
@@ -33364,7 +33490,6 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             : 'sector_memory_json'
         };
       }
-      
       if (isInjectDataGapTerminalResult(result)) {
         const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
           currentPrompt: executionPromptOffset,
@@ -33391,7 +33516,33 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
-      } else if (result && result.success && hasResultLastResponse) {
+      } else {
+
+        if (result && result.success && hasResultSectorMemoryResponse) {
+          const sectorMemoryPersistence = await persistSectorMemoryResponseFromResult(result, {
+            source: title,
+            runId: processId,
+            conversationUrl: conversationUrl || null,
+            sourceMeta: {
+              sourceTitle: title,
+              sourceName,
+              sourceUrl,
+              sourceMaterialId,
+              sourceMaterialHash,
+              sourceMaterialLength,
+              sourceMaterialStored: !!sourceMaterialId
+            }
+          });
+          if (sectorMemoryPersistence?.attempted) {
+            sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
+            sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
+            sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
+              ? sectorMemoryPersistence.itemCount
+              : null;
+          }
+        }
+
+        if (result && result.success && hasResultLastResponse) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
         console.log(`Zapisuję odpowiedź: ${resultLastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
@@ -33452,29 +33603,6 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
               sourceMaterialText: sourceMaterialId ? '' : extractedText
             }
           );
-        const sectorMemoryPersistence = hasResultSectorMemoryResponse
-          ? await persistSectorMemoryResponseFromResult(result, {
-            source: title,
-            runId: processId,
-            conversationUrl: conversationUrl || null,
-            sourceMeta: {
-              sourceTitle: title,
-              sourceName,
-              sourceUrl,
-              sourceMaterialId,
-              sourceMaterialHash,
-              sourceMaterialLength,
-              sourceMaterialStored: !!sourceMaterialId
-            }
-          })
-          : null;
-        if (sectorMemoryPersistence?.attempted) {
-          sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
-          sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
-          sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
-            ? sectorMemoryPersistence.itemCount
-            : null;
-        }
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
           saveResult,
@@ -33664,6 +33792,8 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
+      }
+
       }
 
       await upsertProcess(processId, {
@@ -35416,13 +35546,15 @@ async function injectToChat(
     const normalizeThinkingEffortLocal = (value) => {
       const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
       if (!normalized) return '';
-      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
-        return normalized;
+      if (normalized === 'light' || normalized === 'instant') return 'light';
+      if (normalized === 'standard' || normalized === 'medium') return 'standard';
+      if (normalized === 'extended') {
+        return 'high';
       }
       if (normalized === 'high' || normalized === 'heavy') return 'high';
       return '';
     };
-    const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort);
+    const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort) || 'high';
     let composerThinkingEffortApplied = false;
     const payloadTextForMode = typeof payload === 'string' ? payload : '';
     const isResumeModeFromPayload = payloadTextForMode.trim() === ''
@@ -35722,6 +35854,8 @@ async function injectToChat(
       };
       const normalizeThinkingEffort = (value) => {
         const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+        if (normalized === 'instant') return 'light';
+        if (normalized === 'medium') return 'standard';
         if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
           return normalized;
         }
@@ -38104,7 +38238,7 @@ async function injectToChat(
 
     function humanizeThinkingEffort(effort) {
       if (effort === 'light') return 'Light';
-      if (effort === 'standard') return 'Standard';
+      if (effort === 'standard') return 'Medium';
       if (effort === 'extended') return 'Extended';
       if (effort === 'high') return 'High';
       if (effort === 'heavy') return 'Heavy';
@@ -38215,19 +38349,32 @@ async function injectToChat(
     }
 
     function getThinkingEffortKeywords(effort) {
-      if (effort === 'light') return ['light', 'lekki'];
-      if (effort === 'standard') return ['standard'];
-      if (effort === 'extended') return ['extended', 'rozszerzon'];
+      if (effort === 'light') return ['light', 'lekki', 'instant'];
+      if (effort === 'standard') return ['standard', 'medium'];
+      if (effort === 'extended') return ['extended', 'rozszerzon', 'high'];
       if (effort === 'high') return ['high'];
       if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
       return [];
+    }
+
+    function isCurrentIntelligenceEffortLabel(text) {
+      const normalizedText = normalizeDomText(text);
+      if (!normalizedText) return false;
+      return (
+        containsWord(text, 'instant')
+        || containsWord(text, 'medium')
+        || containsWord(text, 'high')
+        || (containsWord(text, 'pro') && !normalizedText.includes('gpt'))
+      );
     }
 
     function hasThinkingContextToken(text) {
       const normalizedText = normalizeDomText(text);
       if (!normalizedText) return false;
       return (
-        normalizedText.includes('thinking effort')
+        normalizedText.includes('intelligence')
+        || normalizedText.includes('inteligenc')
+        || normalizedText.includes('thinking effort')
         || normalizedText.includes('high thinking')
         || normalizedText.includes('heavy thinking')
         || normalizedText.includes('extended thinking')
@@ -38251,7 +38398,8 @@ async function injectToChat(
 
     function isThinkingEffortMenuLabel(text) {
       return (
-        matchesThinkingEffortLabel(text, 'light')
+        isCurrentIntelligenceEffortLabel(text)
+        || matchesThinkingEffortLabel(text, 'light')
         || matchesThinkingEffortLabel(text, 'standard')
         || matchesThinkingEffortLabel(text, 'extended')
         || matchesThinkingEffortLabel(text, 'high')
@@ -38705,7 +38853,8 @@ async function injectToChat(
       const pillButton = findThinkingEffortPillButton(effort);
       if (!pillButton) return false;
       const buttonText = getElementMatchText(pillButton);
-      return matchesThinkingEffortLabel(buttonText, effort) && hasThinkingContextToken(buttonText);
+      return matchesThinkingEffortLabel(buttonText, effort)
+        && (hasThinkingContextToken(buttonText) || isThinkingEffortMenuLabel(buttonText));
     }
 
     function closeThinkingEffortMenuBestEffort() {

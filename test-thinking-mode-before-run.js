@@ -47,6 +47,10 @@ function testThinkingModeIsAttemptedBeforePromptChainWithoutStoppingRun() {
 }
 
 function testThinkingModeIsCheckedEvenWithoutRequestedEffort() {
+  requiredIndexOf("const DEFAULT_COMPOSER_THINKING_EFFORT = 'high';");
+  requiredIndexOf("const defaultComposerThinkingEffort = typeof DEFAULT_COMPOSER_THINKING_EFFORT === 'string'");
+  requiredIndexOf("const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort) || 'high';");
+  requiredIndexOf("composerThinkingEffort: typeof scheduledJob.composerThinkingEffort === 'string'");
   requiredIndexOf('async function ensureThinkingModeBeforeRun(counterRef = null)');
   requiredIndexOf('const maxAttempts = 3;');
   requiredIndexOf('for (let attempt = 1; attempt <= maxAttempts; attempt += 1)');
@@ -75,6 +79,7 @@ function testInstantComposerPillCanOpenModelModeMenu() {
   requiredIndexOf('function isThinkingModeReadyInComposer()');
   requiredIndexOf('function getThinkingEffortPillButtons(targetEffort = \'\')');
   requiredIndexOf("if (effort === 'high') return ['high'];");
+  requiredIndexOf("if (effort === 'standard') return ['standard', 'medium'];");
   requiredIndexOf("if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
   requiredIndexOf("normalizedText.includes('zaawansowan')");
   requiredIndexOf("console.log('[thinking-mode] selecting Thinking mode'");
@@ -87,7 +92,11 @@ function testAdvancedExtendedProPillCanOpenEffortMenu() {
   requiredIndexOf("'button[aria-haspopup=\"menu\"]'");
   requiredIndexOf('if (!hasThinkingContextToken(text) && !isThinkingEffortMenuLabel(text)) return false;');
   requiredIndexOf("containsWord(text, 'advanced')");
-  requiredIndexOf("if (effort === 'extended') return ['extended', 'rozszerzon'];");
+  requiredIndexOf("if (effort === 'extended') return ['extended', 'rozszerzon', 'high'];");
+  requiredIndexOf('function isCurrentIntelligenceEffortLabel(text)');
+  requiredIndexOf("normalizedText.includes('intelligence')");
+  requiredIndexOf("containsWord(text, 'medium')");
+  requiredIndexOf("&& (hasThinkingContextToken(buttonText) || isThinkingEffortMenuLabel(buttonText));");
   requiredIndexOf("const isStrongThinkingEffortControl = text.includes('zaawansowan') && isThinkingEffortMenuLabel(text);");
   requiredIndexOf('return isStrongThinkingEffortControl || isComposerControl || hasMenuSignal;');
   requiredIndexOf('scoreThinkingEffortPillButton(button, effort)');

@@ -110,6 +110,7 @@ function createReloadResumeMonitorSessionId(origin = 'popup') {
 const runStatus = document.getElementById('runStatus');
 const analysisQueueStatus = document.getElementById('analysisQueueStatus');
 const analysisQueuePauseBtn = document.getElementById('analysisQueuePauseBtn');
+const analysisQueueClearBtn = document.getElementById('analysisQueueClearBtn');
 const watchlistDispatchStatus = document.getElementById('watchlistDispatchStatus');
 const watchlistCredentialsHint = document.getElementById('watchlistCredentialsHint');
 const watchlistCredentialsForm = document.getElementById('watchlistCredentialsForm');
@@ -2467,6 +2468,39 @@ if (analysisQueuePauseBtn) {
       analysisQueuePauseBtn.textContent = originalLabel || (nextPaused ? 'Wstrzymaj kolejke' : 'Wznow kolejke');
     } finally {
       analysisQueuePauseBtn.disabled = false;
+    }
+  });
+}
+
+if (analysisQueueClearBtn) {
+  analysisQueueClearBtn.addEventListener('click', async () => {
+    const originalLabel = analysisQueueClearBtn.textContent;
+    analysisQueueClearBtn.disabled = true;
+    analysisQueueClearBtn.textContent = 'Czyszcze...';
+    setAnalysisQueueStatus('Kolejka analiz: czyszcze lokalne sloty i zatrzymuje procesy...', false);
+
+    try {
+      const response = await sendRuntimeMessage({
+        type: 'CLEAR_LOCAL_ANALYSIS_QUEUE',
+        origin: 'popup-analysis-queue-clear'
+      });
+      if (response?.success === false) {
+        throw new Error(response.error || response.reason || 'clear_local_analysis_queue_failed');
+      }
+      const cancelled = Number.isInteger(response?.cancelledQueued) ? response.cancelledQueued : 0;
+      const released = Number.isInteger(response?.releasedActive) ? response.releasedActive : 0;
+      const stopped = Number.isInteger(response?.stopped) ? response.stopped : 0;
+      applyAnalysisQueueUi(response?.queue || response);
+      setAnalysisQueueStatus(
+        `Kolejka analiz: wyczyszczona, oczekujace=${cancelled}, sloty=${released}, zatrzymane=${stopped}.`,
+        false
+      );
+      await refreshRemoteRunnerStatus();
+    } catch (error) {
+      setAnalysisQueueStatus(`Kolejka analiz: blad czyszczenia (${error?.message || String(error)}).`, true);
+    } finally {
+      analysisQueueClearBtn.textContent = originalLabel || 'Wyczysc kolejke';
+      analysisQueueClearBtn.disabled = false;
     }
   });
 }

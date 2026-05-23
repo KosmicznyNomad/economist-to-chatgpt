@@ -339,6 +339,12 @@ function testSectorMemoryFallbackIsWired() {
     'Background should send sector memory through the dedicated intake fallback endpoint.'
   );
   assert(
+    backgroundSource.indexOf('if (result && result.success && hasResultSectorMemoryResponse)') > -1
+      && backgroundSource.indexOf('if (result && result.success && hasResultSectorMemoryResponse)')
+        < backgroundSource.indexOf('if (result && result.success && hasResultLastResponse)'),
+    'Sector-memory fallback should not depend on final investment response persistence.'
+  );
+  assert(
     backgroundSource.includes('selectedResponseReason,'),
     'Injected result should preserve the selected final investment response reason instead of hardcoding last_prompt.'
   );

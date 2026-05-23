@@ -245,6 +245,57 @@ async function loadRemoteRunnerOptions(options = {}) {
   }
 }
 
+function summarizeLaunchError(rawError) {
+  if (rawError == null) return '';
+  if (typeof rawError === 'string') return rawError.trim();
+  if (rawError instanceof Error) return (rawError.message || rawError.name || '').trim();
+  try {
+    return JSON.stringify(rawError);
+  } catch (_) {
+    return String(rawError);
+  }
+}
+
+function isChromeStorageNoSpaceError(rawError) {
+  const text = summarizeLaunchError(rawError).toLowerCase();
+  return (
+    text.includes('file_error_no_space')
+    || text.includes('chrome storage no space')
+    || (text.includes('io error') && text.includes('.ldb') && text.includes('writablefileappend'))
+  );
+}
+
+function formatManualSourceLaunchMessage(rawError, launchPortfolioOnly = false) {
+  const launchError = summarizeLaunchError(rawError) || 'unknown';
+  if (launchError === 'prompts_not_loaded') {
+    return launchPortfolioOnly
+      ? 'Brak promptow portfolio. Odswiez rozszerzenie i sprobuj ponownie.'
+      : 'Brak promptow company/portfolio. Odswiez rozszerzenie i sprobuj ponownie.';
+  }
+  if (isChromeStorageNoSpaceError(launchError)) {
+    return 'Chrome nie moze zapisac danych Iskry (LevelDB: FILE_ERROR_NO_SPACE). Zamknij Chrome, zwolnij miejsce lub wyczysc dane rozszerzenia Iskra, a potem odswiez rozszerzenie.';
+  }
+  if (launchError === 'request_entity_too_large' || launchError === 'http_413') {
+    return 'Material jest za duzy dla aktualnego limitu serwera. Po deployu poprawionej konfiguracji Nginx limit bedzie wyzszy.';
+  }
+  if (launchError === 'remote_runner_not_selected') {
+    return 'Nie wybrano runnera remote.';
+  }
+  if (launchError === 'remote_runner_status_failed') {
+    return 'Nie mozna sprawdzic statusu runnera remote.';
+  }
+  if (launchError === 'remote_submit_failed') {
+    return 'Runner remote nie przyjal zadnego zadania.';
+  }
+  if (launchError === 'analysis_launch_failed') {
+    return 'Nie udalo sie zakolejkowac zadnej analizy. Odswiez status runnera i sprobuj ponownie.';
+  }
+  if (launchError.startsWith('runner_')) {
+    return `Runner remote nie jest gotowy (${launchError.replace(/^runner_/, '')}).`;
+  }
+  return launchError;
+}
+
 function formatBytes(bytes) {
   const size = Number(bytes);
   if (!Number.isFinite(size) || size <= 0) return '0 B';
@@ -298,31 +349,7 @@ function updateInstancesDisplay() {
 }
 
 function formatManualSourceLaunchError(errorCode, launchPortfolioOnly) {
-  const code = typeof errorCode === 'string' ? errorCode.trim() : '';
-  if (code === 'prompts_not_loaded') {
-    return launchPortfolioOnly
-      ? 'Brak promptow portfolio. Odswiez rozszerzenie i sprobuj ponownie.'
-      : 'Brak promptow company/portfolio. Odswiez rozszerzenie i sprobuj ponownie.';
-  }
-  if (code === 'request_entity_too_large' || code === 'http_413') {
-    return 'Material jest za duzy dla aktualnego limitu serwera. Po deployu poprawionej konfiguracji Nginx limit bedzie wyzszy.';
-  }
-  if (code === 'remote_runner_not_selected') {
-    return 'Nie wybrano runnera remote.';
-  }
-  if (code === 'remote_runner_status_failed') {
-    return 'Nie mozna sprawdzic statusu runnera remote.';
-  }
-  if (code === 'remote_submit_failed') {
-    return 'Runner remote nie przyjal zadnego zadania.';
-  }
-  if (code === 'analysis_launch_failed') {
-    return 'Nie udalo sie zakolejkowac zadnej analizy. Odswiez status runnera i sprobuj ponownie.';
-  }
-  if (code.startsWith('runner_')) {
-    return `Runner remote nie jest gotowy (${code.replace(/^runner_/, '')}).`;
-  }
-  return code || 'unknown';
+  return formatManualSourceLaunchMessage(errorCode, launchPortfolioOnly);
 }
 
 function setQueueUiLocked(locked) {

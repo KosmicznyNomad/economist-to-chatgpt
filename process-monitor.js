@@ -636,7 +636,7 @@ function humanizeChatGptModeKind(value) {
 function humanizeThinkingEffort(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (normalized === 'light') return 'Light';
-  if (normalized === 'standard') return 'Standard';
+  if (normalized === 'standard' || normalized === 'medium') return 'Medium';
   if (normalized === 'extended') return 'Extended';
   if (normalized === 'high' || normalized === 'heavy') return 'High';
   return '';
