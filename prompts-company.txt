@@ -7037,7 +7037,7 @@ Przed zwrotem sprawdź:
 
 top-level object has exactly one field: records
 records jest tablicą
-records ma dokładnie 2 rekordy w standardowym przypadku
+records ma maksymalnie 2 rekordy i jest puste tylko gdy Stage 12 ma zero spółek WATCH
 PRIMARY jest pierwszy
 każdy rekord ma:
 decision_role
