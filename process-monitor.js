@@ -11,6 +11,10 @@ const processSummary = document.getElementById('process-summary');
 const viewFilterSelect = document.getElementById('view-filter');
 const viewQueryInput = document.getElementById('view-query');
 const viewHint = document.getElementById('view-hint');
+const dispatchHealthStatus = document.getElementById('dispatch-health-status');
+const dispatchHealthMain = document.getElementById('dispatch-health-main');
+const dispatchHealthDetail = document.getElementById('dispatch-health-detail');
+const dispatchHealthRefreshBtn = document.getElementById('dispatch-health-refresh-btn');
 
 let selectedProcessId = null;
 let currentProcesses = [];
@@ -32,6 +36,8 @@ const processCardMap = new Map();
 const processSeenAt = new Map();
 let stageNamesCompany = [];
 let stageNamesLoaded = false;
+let dispatchHealthSnapshot = null;
+let dispatchHealthInFlight = false;
 const processConversationAuditCache = new Map();
 const processConversationAuditInFlight = new Map();
 const processCompanySnapshotCache = new Map();
@@ -41,6 +47,7 @@ const PROCESS_COMPANY_SNAPSHOT_TTL_MS = 60_000;
 const PROCESS_MONITOR_STORAGE_KEY = 'process_monitor_state';
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
 const MONITOR_UI_TICK_MS = 10_000;
+const DISPATCH_HEALTH_TICK_MS = 60_000;
 
 console.log('[panel] Monitor procesow uruchomiony');
 
@@ -57,6 +64,7 @@ async function loadStageNames() {
 async function initializeMonitor() {
   await loadStageNames();
   await refreshProcesses();
+  void refreshDispatchHealthStatus(true);
 }
 
 // Pobierz procesy przy starcie
@@ -87,6 +95,10 @@ setInterval(() => {
   if (activeProcessesCache.length === 0) return;
   updateUI(activeProcessesCache, { force: true });
 }, MONITOR_UI_TICK_MS);
+setInterval(() => {
+  if (document.hidden) return;
+  void refreshDispatchHealthStatus(false);
+}, DISPATCH_HEALTH_TICK_MS);
 installProcessMonitorRuntimeProblemLogging();
 
 function scheduleProcessRefresh(reason = 'manual', delayMs = 0) {
@@ -184,6 +196,12 @@ if (viewQueryInput) {
   });
 }
 
+if (dispatchHealthRefreshBtn) {
+  dispatchHealthRefreshBtn.addEventListener('click', () => {
+    void refreshDispatchHealthStatus(true);
+  });
+}
+
 const reasonLabels = {
   send_failed: 'Blad wysylania promptu',
   timeout: 'Timeout odpowiedzi',
@@ -199,20 +217,23 @@ const reasonLabels = {
   auto_resume_unhandled_exception: 'Auto-resume: nieobsluzony wyjatek',
   bulk_resume_reload: 'Zatrzymano przed zbiorczym wznowieniem',
   missing_execute_result: 'Brak wyniku executeScript',
+  missing_execute_result_payload: 'Brak payloadu executeScript',
   inject_failed: 'Inject zakonczyl sie bledem',
   inject_critical_error: 'Krytyczny blad injectToChat',
   force_stopped: 'Proces zatrzymany sygnalem STOP',
   pdf_attach_failed: 'Nie udalo sie dolaczyc PDF',
   save_failed: 'Blad zapisu odpowiedzi',
   save_response_failed: 'Nieudany zapis odpowiedzi',
+  page_emergency_only: 'Final tylko w awaryjnym zapisie strony',
   empty_response: 'Pusta odpowiedz (bez zapisu)',
   auto_recovery_send_failed: 'Auto-resend po bledzie wysylania',
   auto_recovery_timeout: 'Auto-resend po timeout',
   auto_recovery_invalid_response: 'Auto-resend po niepoprawnej odpowiedzi',
   auto_recovery_textarea_not_found: 'Auto-resend: brak pola wpisywania',
   auto_recovery_provider_invalid_response: 'Auto-resend: niepoprawna odpowiedz providera',
-  data_gap_unresolved: 'DATA_GAPS nierozwiazany',
-  data_gap_rewind_applied: 'DATA_GAPS rewind zastosowany'
+  data_gap_stage: 'DATA_GAP_STAGE - karta zamknieta',
+  data_gap_unresolved: 'DATA_GAP_STAGE nierozwiazany',
+  data_gap_rewind_applied: 'DATA_GAP_STAGE rewind zastosowany'
 };
 const persistenceErrorLabels = {
   runtime_unavailable: 'most runtime niedostepny',
@@ -220,9 +241,11 @@ const persistenceErrorLabels = {
   save_message_failed: 'blad save-message',
   save_response_failed: 'blad save-response',
   save_failed: 'blad zapisu',
+  page_emergency_only: 'tylko awaryjny zapis w stronie',
   dispatch_failed: 'blad dispatch',
   missing_intake_url: 'brak Intake URL',
   missing_dispatch_credentials: 'brak danych dispatch',
+  local_storage_unavailable: 'local storage rozszerzenia niedostepny',
   storage_unavailable: 'storage niedostepny',
   empty_response: 'pusta odpowiedz'
 };
@@ -282,6 +305,123 @@ function reportProblemLogFromUi(rawEntry = {}) {
     });
   } catch {
     // Ignore runtime bridge errors in UI page.
+  }
+}
+
+function formatDispatchHealthCheckedAt(ts) {
+  if (!Number.isInteger(ts) || ts <= 0) return 'nigdy';
+  try {
+    return new Date(ts).toLocaleTimeString();
+  } catch {
+    return 'n/a';
+  }
+}
+
+function getDispatchHealthTone(status) {
+  if (!status || typeof status !== 'object') return 'warn';
+  if (status.success === true && status.dbConnected === true) return 'ok';
+  if (status.configured === false || status.authOk === false || status.backendReachable === false) return 'error';
+  if (status.dbConnected === false) return 'error';
+  return 'warn';
+}
+
+function formatDispatchHealthLines(status) {
+  if (!status || typeof status !== 'object') {
+    return {
+      main: 'DB: status nieznany',
+      detail: 'Nie udalo sie odczytac statusu polaczenia.'
+    };
+  }
+  const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
+  const checkedAt = formatDispatchHealthCheckedAt(status.checkedAt);
+  const keyId = typeof status.keyId === 'string' && status.keyId.trim() ? status.keyId.trim() : '-';
+  const source = typeof status.tokenSource === 'string' && status.tokenSource.trim() ? status.tokenSource.trim() : 'missing';
+  const latency = Number.isInteger(status.databaseLatencyMs) ? `, DB ${status.databaseLatencyMs}ms` : '';
+  const lastFlush = status.lastFlush && typeof status.lastFlush === 'object'
+    ? `, last flush sent=${status.lastFlush.sent || 0}/failed=${status.lastFlush.failed || 0}`
+    : '';
+  if (status.success === true && status.dbConnected === true) {
+    return {
+      main: 'DB: OK - konfiguracja, backend i baza dzialaja',
+      detail: `Key ${keyId}, token=${source}, kolejka=${queueSize}${latency}${lastFlush}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.configured === false) {
+    return {
+      main: 'DB: NIE - brak konfiguracji wtyczki',
+      detail: `Powod: ${status.reason || status.healthError || 'missing_dispatch_credentials'}, key=${keyId}, token=${source}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.authOk === false && status.backendReachable === true) {
+    return {
+      main: 'DB: NIE - backend odpowiada, ale podpis/auth nie przechodzi',
+      detail: `HTTP ${status.status || '-'}, powod: ${status.healthError || status.reason || 'auth_failed'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.backendReachable === false) {
+    return {
+      main: 'DB: NIE - brak polaczenia z backendem',
+      detail: `${status.healthError || status.error || 'network_error'}, endpoint=${status.intakeUrl || '-'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.dbConnected === false) {
+    return {
+      main: 'DB: NIE - backend dziala, ale baza nie odpowiada',
+      detail: `${status.healthErrorType || 'db_error'}: ${status.healthError || status.intakeStatus || 'db_error'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  return {
+    main: 'DB: status niepewny',
+    detail: `${status.healthState || status.reason || 'unknown'}, kolejka=${queueSize}, sprawdzono ${checkedAt}.`
+  };
+}
+
+function renderDispatchHealthStatus(status, options = {}) {
+  if (!dispatchHealthStatus || !dispatchHealthMain || !dispatchHealthDetail) return;
+  const lines = formatDispatchHealthLines(status);
+  const tone = options.loading ? 'warn' : getDispatchHealthTone(status);
+  dispatchHealthStatus.className = `connection-status ${tone}`;
+  dispatchHealthMain.textContent = options.loading ? 'DB: sprawdzam...' : lines.main;
+  dispatchHealthDetail.textContent = options.loading
+    ? 'Weryfikuje konfiguracje, backend i polaczenie z baza.'
+    : lines.detail;
+  if (dispatchHealthRefreshBtn) {
+    dispatchHealthRefreshBtn.disabled = dispatchHealthInFlight;
+  }
+}
+
+async function refreshDispatchHealthStatus(forceReload = false) {
+  if (!dispatchHealthStatus || dispatchHealthInFlight) return dispatchHealthSnapshot;
+  dispatchHealthInFlight = true;
+  renderDispatchHealthStatus(dispatchHealthSnapshot, { loading: true });
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_WATCHLIST_DISPATCH_HEALTH',
+      forceReload
+    });
+    dispatchHealthSnapshot = response && typeof response === 'object'
+      ? response
+      : { success: false, healthState: 'empty_response', healthError: 'empty_response' };
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+    return dispatchHealthSnapshot;
+  } catch (error) {
+    dispatchHealthSnapshot = {
+      success: false,
+      configured: false,
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      healthState: 'runtime_error',
+      healthError: error?.message || String(error),
+      checkedAt: Date.now()
+    };
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+    return dispatchHealthSnapshot;
+  } finally {
+    dispatchHealthInFlight = false;
+    if (dispatchHealthRefreshBtn) {
+      dispatchHealthRefreshBtn.disabled = false;
+    }
   }
 }
 
@@ -393,6 +533,59 @@ function getPersistenceErrorLabel(errorCode) {
   return humanizeToken(normalized);
 }
 
+function getProcessEmergencyPersistence(process) {
+  const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+    ? process.persistenceStatus
+    : null;
+  const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+    ? process.finalStagePersistence
+    : null;
+  const emergencyPageSave = persistenceStatus?.emergencyPageSave && typeof persistenceStatus.emergencyPageSave === 'object'
+    ? persistenceStatus.emergencyPageSave
+    : (finalStagePersistence?.emergencyPageSave && typeof finalStagePersistence.emergencyPageSave === 'object'
+      ? finalStagePersistence.emergencyPageSave
+      : null);
+  const emergencyLocalSave = persistenceStatus?.emergencyLocalSave && typeof persistenceStatus.emergencyLocalSave === 'object'
+    ? persistenceStatus.emergencyLocalSave
+    : (finalStagePersistence?.emergencyLocalSave && typeof finalStagePersistence.emergencyLocalSave === 'object'
+      ? finalStagePersistence.emergencyLocalSave
+      : null);
+  const emergencyPageOk = persistenceStatus?.emergencyPageOk === true
+    || finalStagePersistence?.emergencyPageOk === true
+    || emergencyPageSave?.success === true;
+  const emergencyLocalOk = persistenceStatus?.emergencyLocalOk === true
+    || finalStagePersistence?.emergencyLocalOk === true
+    || emergencyLocalSave?.success === true;
+
+  let saveOk = null;
+  if (typeof persistenceStatus?.saveOk === 'boolean') {
+    saveOk = persistenceStatus.saveOk;
+  } else if (typeof process?.completedResponseSaved === 'boolean') {
+    saveOk = process.completedResponseSaved;
+  } else if (typeof finalStagePersistence?.success === 'boolean') {
+    saveOk = finalStagePersistence.success;
+  }
+
+  const pageEmergencyOnly = persistenceStatus?.pageEmergencyOnly === true
+    || finalStagePersistence?.pageEmergencyOnly === true
+    || (saveOk === false && emergencyPageOk && !emergencyLocalOk);
+  const responseId = [
+    persistenceStatus?.responseId,
+    finalStagePersistence?.responseId,
+    process?.responseId
+  ].find((value) => typeof value === 'string' && value.trim()) || '';
+
+  return {
+    saveOk,
+    emergencyPageSave,
+    emergencyLocalSave,
+    emergencyPageOk,
+    emergencyLocalOk,
+    pageEmergencyOnly,
+    responseId: typeof responseId === 'string' ? responseId.trim() : ''
+  };
+}
+
 function buildProcessReasonLine(process) {
   if (!process || typeof process !== 'object') return '';
   const reasonCode = normalizeCodeToken(process?.reason);
@@ -403,8 +596,12 @@ function buildProcessReasonLine(process) {
     : null;
   const saveErrorCode = normalizeCodeToken(persistenceStatus?.saveError || '');
   const bridgeErrorCode = normalizeCodeToken(persistenceStatus?.bridgeError || '');
+  const emergencyPersistence = getProcessEmergencyPersistence(process);
 
   const details = [];
+  if (emergencyPersistence.pageEmergencyOnly) {
+    details.push('page=awaryjny zapis strony');
+  }
   if (saveErrorCode && saveErrorCode !== 'empty_response') {
     details.push(`save=${getPersistenceErrorLabel(saveErrorCode)}`);
   }
@@ -441,7 +638,7 @@ function humanizeThinkingEffort(value) {
   if (normalized === 'light') return 'Light';
   if (normalized === 'standard') return 'Standard';
   if (normalized === 'extended') return 'Extended';
-  if (normalized === 'heavy') return 'Heavy';
+  if (normalized === 'high' || normalized === 'heavy') return 'High';
   return '';
 }
 
@@ -491,6 +688,12 @@ function getPersistenceLogLines(process, maxLines = 4) {
   const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
     ? process.persistenceStatus
     : null;
+  const emergencyPersistence = getProcessEmergencyPersistence(process);
+  if (emergencyPersistence.pageEmergencyOnly) {
+    const idChunk = emergencyPersistence.responseId ? ` (${emergencyPersistence.responseId})` : '';
+    lines.push(`Baza: NIE wyslano; final tylko w page localStorage${idChunk}`);
+    lines.push('Akcja: przeladuj rozszerzenie i odswiez karte ChatGPT, aby odpalic replay');
+  }
 
   const directLog = Array.isArray(process?.persistenceLog)
     ? process.persistenceLog
@@ -553,6 +756,7 @@ function resolveProcessDatabaseDelivery(process) {
   const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
     ? process.finalStagePersistence
     : null;
+  const emergencyPersistence = getProcessEmergencyPersistence(process);
   const dispatch = persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object'
     ? persistenceStatus.dispatch
     : (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object'
@@ -589,9 +793,26 @@ function resolveProcessDatabaseDelivery(process) {
   } else if (typeof finalStagePersistence?.success === 'boolean') {
     saveOk = finalStagePersistence.success;
   }
+  if (saveOk === null && typeof emergencyPersistence.saveOk === 'boolean') {
+    saveOk = emergencyPersistence.saveOk;
+  }
 
   return {
     saveOk,
+    responseId: emergencyPersistence.responseId,
+    emergencyPageOk: emergencyPersistence.emergencyPageOk,
+    emergencyLocalOk: emergencyPersistence.emergencyLocalOk,
+    pageEmergencyOnly: emergencyPersistence.pageEmergencyOnly,
+    saveError: typeof persistenceStatus?.saveError === 'string'
+      ? persistenceStatus.saveError
+      : (typeof finalStagePersistence?.saveError === 'string'
+        ? finalStagePersistence.saveError
+        : ''),
+    bridgeError: typeof persistenceStatus?.bridgeError === 'string'
+      ? persistenceStatus.bridgeError
+      : (typeof finalStagePersistence?.bridgeError === 'string'
+        ? finalStagePersistence.bridgeError
+        : ''),
     sent: safeSent,
     failed: safeFailed,
     deferred: safeDeferred,
@@ -605,13 +826,24 @@ function resolveProcessDatabaseDelivery(process) {
 
 function getDatabaseBadgeModel(process) {
   const delivery = resolveProcessDatabaseDelivery(process);
-  const hasSignal = delivery.saveOk !== null || delivery.hasNumericDispatch || !!delivery.summaryText;
+  const hasSignal = delivery.saveOk !== null || delivery.hasNumericDispatch || !!delivery.summaryText || delivery.pageEmergencyOnly;
   if (!hasSignal) {
     return {
       visible: false,
       text: '',
       className: 'db-badge db-info',
       detailText: ''
+    };
+  }
+
+  if (delivery.pageEmergencyOnly) {
+    const idChunk = delivery.responseId ? ` (${delivery.responseId})` : '';
+    const saveError = getPersistenceErrorLabel(delivery.saveError || delivery.bridgeError || 'page_emergency_only');
+    return {
+      visible: true,
+      text: 'Baza: PAGE-EMERGENCY',
+      className: 'db-badge db-warning',
+      detailText: `Baza danych: NIE wyslano finalu; zapis awaryjny tylko w stronie${idChunk}. Powod: ${saveError}.`
     };
   }
 
@@ -720,7 +952,7 @@ function normalizeCompanyConversationAudit(rawAudit) {
 
   const dataGapStopDetected = rawAudit?.dataGapStopDetected === true
     || verification?.dataGapStopDetected === true
-    || processIssueFlags.includes('data_gap_stop');
+    || processIssueFlags.includes('data_gap_stage');
   const dataGapMissingInputsList = Array.isArray(rawAudit?.dataGapMissingInputsList)
     ? rawAudit.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
     : [];
@@ -740,9 +972,10 @@ function normalizeCompanyConversationAudit(rawAudit) {
     promptRepliesBelowThreshold,
     missingReplyPromptNumbers,
     lowQualityReplyPromptNumbers,
-    missingPromptNumbers,
-    dataGapStopDetected,
-    dataGapMissingInputsList,
+	    missingPromptNumbers,
+	    dataGapStopDetected,
+	    dataGapStageId: typeof rawAudit?.dataGapStageId === 'string' ? rawAudit.dataGapStageId.trim() : '',
+	    dataGapMissingInputsList,
     dataGapMissingInputsText,
     processIssueFlags,
     stageMappingCheck: {
@@ -831,7 +1064,12 @@ function isCompletedStatus(status) {
   return status === 'completed';
 }
 
+function isStoppedStatus(status) {
+  return status === 'stopped';
+}
+
 const priorityReasonWeights = Object.freeze({
+  data_gap_stage: 44,
   data_gap_unresolved: 42,
   missing_assistant_reply: 34,
   timeout: 28,
@@ -991,7 +1229,7 @@ function getViewScopeLabel() {
     case 'failed':
       return 'status blad';
     case 'data_gap':
-      return 'DATA_GAPS';
+      return 'DATA_GAP_STAGE';
     default:
       return 'wszystkie aktywne';
   }
@@ -1280,7 +1518,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   if (processSummary) {
     const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Okna ${queueLiveSlots}/${queueMax} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
     const details = [
-      `DATA_GAPS: ${dataGapCount}`,
+      `DATA_GAP_STAGE: ${dataGapCount}`,
       `Braki odpowiedzi: ${missingReplyCount}`,
       `Sredni postep aktywnych: ${avgProgress}%`,
       `Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`,
@@ -2451,15 +2689,36 @@ async function sendProcessResumeNextStage(process, options = {}) {
     return { success: false, error: 'missing_process_id' };
   }
 
-  const response = await sendRuntimeMessage({
+  const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
+    ? options.composerThinkingEffort.trim().toLowerCase()
+    : '';
+  const normalizedComposerThinkingEffort = composerThinkingEffort === 'heavy'
+    ? 'high'
+    : composerThinkingEffort;
+  const hasExplicitThinkingEffort = (
+    normalizedComposerThinkingEffort === 'light'
+    || normalizedComposerThinkingEffort === 'standard'
+    || normalizedComposerThinkingEffort === 'extended'
+    || normalizedComposerThinkingEffort === 'high'
+  );
+  const useStoredComposerThinkingEffort = !hasExplicitThinkingEffort && options?.useStoredComposerThinkingEffort !== false;
+  const message = {
     type: 'PROCESS_RESUME_NEXT_STAGE',
     runId: process.id,
     tabId: Number.isInteger(process.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process.windowId) ? process.windowId : null,
     chatUrl: resolveChatUrl(process),
     title: process?.title || '',
-    openDialogOnly: !!options.openDialogOnly
-  });
+    openDialogOnly: !!options.openDialogOnly,
+    forceRepeatLastPrompt: options.forceRepeatLastPrompt === true
+  };
+  if (hasExplicitThinkingEffort) {
+    message.composerThinkingEffort = normalizedComposerThinkingEffort;
+  } else if (useStoredComposerThinkingEffort) {
+    message.useStoredComposerThinkingEffort = true;
+  }
+
+  const response = await sendRuntimeMessage(message);
   if (response?.ok === false) {
     console.warn('[panel] PROCESS_RESUME_NEXT_STAGE failed:', response.errorMessage || response.errorCode || response.error);
     return {
@@ -2476,6 +2735,8 @@ async function sendProcessResumeNextStage(process, options = {}) {
     startPromptNumber: Number.isInteger(response?.startPromptNumber) ? response.startPromptNumber : null,
     detectedPromptNumber: Number.isInteger(response?.detectedPromptNumber) ? response.detectedPromptNumber : null,
     detectedMethod: typeof response?.detectedMethod === 'string' ? response.detectedMethod : '',
+    retrySamePrompt: response?.retrySamePrompt === true,
+    retryReason: typeof response?.retryReason === 'string' ? response.retryReason : '',
     finalStagePersistence: response?.finalStagePersistence && typeof response.finalStagePersistence === 'object'
       ? response.finalStagePersistence
       : null
@@ -2561,15 +2822,23 @@ function formatFinalStagePersistenceShort(finalStagePersistence) {
 async function resumeNextStageFromPanel(process, button, options = {}) {
   if (!process) return false;
   const openDialogOnly = !!options.openDialogOnly;
-  const originalText = (button?.dataset?.originalText || button?.textContent || (openDialogOnly ? 'Wznow od kolejnego etapu' : 'Resume next stage')).trim();
+  const forceRepeatLastPrompt = options.forceRepeatLastPrompt === true;
+  const originalText = (button?.dataset?.originalText || button?.textContent || (forceRepeatLastPrompt ? 'Powtorz ostatni' : (openDialogOnly ? 'Wznow od kolejnego etapu' : 'Resume next stage'))).trim();
   if (button) {
     button.dataset.originalText = originalText;
     button.disabled = true;
-    button.textContent = openDialogOnly ? 'Wykrywam etap...' : 'Wznawiam...';
+    button.textContent = forceRepeatLastPrompt ? 'Powtarzam...' : (openDialogOnly ? 'Wykrywam etap...' : 'Wznawiam...');
   }
 
   try {
-    const response = await sendProcessResumeNextStage(process, { openDialogOnly });
+    const resumeOptions = { openDialogOnly, forceRepeatLastPrompt };
+    if (typeof options?.composerThinkingEffort === 'string') {
+      resumeOptions.composerThinkingEffort = options.composerThinkingEffort;
+    }
+    if (options?.useStoredComposerThinkingEffort === false) {
+      resumeOptions.useStoredComposerThinkingEffort = false;
+    }
+    const response = await sendProcessResumeNextStage(process, resumeOptions);
     if (response.success) {
       if (button) {
         if (openDialogOnly) {
@@ -2580,7 +2849,7 @@ async function resumeNextStageFromPanel(process, button, options = {}) {
           button.textContent = `Final zapisany (${persistenceText})`;
         } else {
           const promptText = Number.isInteger(response.startPromptNumber) ? `Prompt ${response.startPromptNumber}` : 'kolejny etap';
-          button.textContent = `Wznowiono: ${promptText}`;
+          button.textContent = response.retrySamePrompt ? `Powtorzono: ${promptText}` : `Wznowiono: ${promptText}`;
         }
       }
       await refreshProcesses();
@@ -2729,7 +2998,7 @@ function updateUI(processes, options = {}) {
         ? String(persistenceStatus.saveOk)
         : '';
       const dbDelivery = resolveProcessDatabaseDelivery(process);
-      const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}`;
+      const dbDeliverySignature = `${dbDelivery.saveOk === null ? 'n/a' : String(dbDelivery.saveOk)}:${dbDelivery.sent}:${dbDelivery.failed}:${dbDelivery.pending}:${dbDelivery.hasNumericDispatch ? 1 : 0}:${dbDelivery.pageEmergencyOnly ? 1 : 0}:${dbDelivery.emergencyPageOk ? 1 : 0}:${dbDelivery.responseId || ''}`;
       const persistenceLog = getPersistenceLogLines(process, 4).join('||');
       const sortKey = getProcessSortKey(process);
       return `${process.id}|${sortKey}|${getNormalizedStatus(process)}|${getProcessActionRequired(process)}|${getProcessPhase(process)}|${getProcessStatusCode(process)}|${process.currentPrompt || 0}|${process.totalPrompts || 0}|${stageKey}|${stageName}|${statusText}|${reason}|${title}|${tabId}|${windowId}|${chatUrl}|${sourceUrl}|${autoAttempt}|${autoMax}|${autoReason}|${autoPrompt}|${persistenceSaveOk}|${persistenceDispatchSummary}|${dbDeliverySignature}|${persistenceLog}`;
@@ -2831,7 +3100,9 @@ function updateHistory(processes) {
     const stageLabel = resolveStageLabel(process);
 
     const statusLabel = isProcessClosed(process)
-      ? (isFailedStatus(getNormalizedStatus(process)) ? 'Blad' : 'Zakonczono')
+      ? (isFailedStatus(getNormalizedStatus(process))
+        ? 'Blad'
+        : (isStoppedStatus(getNormalizedStatus(process)) ? 'Zatrzymano' : 'Zakonczono'))
       : 'Przerwane';
 
     const meta = document.createElement('div');
@@ -2921,24 +3192,39 @@ async function resumeAllProcesses() {
   if (needsActionProcesses.length === 0) return;
 
   resumeAllBtn.disabled = true;
-  // Globalne "wznow" = klikniecie "Wyslij nastepny prompt" (skip) dla kazdego zatrzymanego procesu.
-  const bulk = await sendDecisionAll('skip');
+  let resumed = 0;
+  let repeated = 0;
+  let failed = 0;
 
-  // Fallback: jesli bulk nie dostarczyl wszystkich decyzji, dopytaj stan i doslij selektywnie.
-  if (!bulk.success || bulk.delivered < needsActionProcesses.length) {
-    await new Promise((resolve) => setTimeout(resolve, 250));
-    await refreshProcesses();
-    const remaining = getNeedsActionProcesses();
-    if (remaining.length > 0) {
-      const fallbackResults = await Promise.all(remaining.map((process) => sendDecision(process, 'skip')));
-      if (fallbackResults.some((result) => !result)) {
-        console.warn('[panel] Nie wszystkie decyzje RESUME_ALL zostaly dostarczone (bulk+fallback)', {
-          bulk,
-          remaining: remaining.length
-        });
+  for (let index = 0; index < needsActionProcesses.length; index += 1) {
+    const process = needsActionProcesses[index];
+    resumeAllBtn.textContent = `Wznawiam ${index + 1}/${needsActionProcesses.length}`;
+    const response = await sendProcessResumeNextStage(process, {
+      forceRepeatLastPrompt: false,
+      useStoredComposerThinkingEffort: true
+    });
+    if (response.success) {
+      if (response.retrySamePrompt) {
+        repeated += 1;
+      } else {
+        resumed += 1;
       }
+    } else {
+      failed += 1;
+      console.warn('[panel] Smart resume all failed for process', {
+        processId: process?.id,
+        title: process?.title,
+        error: response.error || 'resume_failed'
+      });
     }
+    await new Promise((resolve) => setTimeout(resolve, 80));
   }
+
+  await refreshProcesses();
+  const resultParts = [`dalej=${resumed}`];
+  if (repeated > 0) resultParts.push(`powt=${repeated}`);
+  if (failed > 0) resultParts.push(`bledy=${failed}`);
+  resumeAllBtn.textContent = `Wznowiono (${resultParts.join(', ')})`;
 
   setTimeout(() => {
     updateResumeAllButtonState();
@@ -3087,12 +3373,10 @@ function formatConversationAuditText(audit) {
   }
 
   if (audit.dataGapStopDetected) {
-    const missingInputsText = audit.dataGapMissingInputsList.length > 0
-      ? audit.dataGapMissingInputsList.join(', ')
-      : (audit.dataGapMissingInputsText || 'brak');
-    lines.push(`DATA_GAPS: TAK | missing_inputs: ${missingInputsText}`);
+    const stageText = audit.dataGapStageId || '?';
+    lines.push(`DATA_GAP_STAGE: ${stageText}`);
   } else {
-    lines.push('DATA_GAPS: NIE');
+    lines.push('DATA_GAP_STAGE: NIE');
   }
 
   if (Array.isArray(audit.processIssueFlags) && audit.processIssueFlags.length > 0) {
@@ -3108,6 +3392,7 @@ function getProcessCompletionAuditStateLabel(state) {
   const labels = {
     response_missing: 'brak odpowiedzi koncowej',
     save_failed: 'blad zapisu lokalnego',
+    page_emergency_only: 'tylko awaryjny zapis w stronie',
     save_pending: 'zapis lokalny w toku',
     saved_local: 'zapis lokalny OK',
     dispatch_pending: 'dispatch oczekuje',
@@ -3137,6 +3422,7 @@ function getProcessCompletionAuditLevel(audit) {
   const windowState = typeof audit?.windowCloseState === 'string' ? audit.windowCloseState.trim().toLowerCase() : '';
   if (
     overall === 'save_failed'
+    || overall === 'page_emergency_only'
     || overall === 'dispatch_failed'
     || overall === 'dispatch_confirmed_window_close_failed'
     || dispatchState === 'dispatch_failed'
@@ -3318,9 +3604,11 @@ function renderDetails() {
     ? 'Zakonczono'
     : isFailedStatus(selectedStatus)
       ? 'Blad'
-      : processNeedsAction(selected)
-        ? 'Wymaga akcji'
-        : 'W trakcie';
+      : isStoppedStatus(selectedStatus)
+        ? 'Zatrzymano'
+        : processNeedsAction(selected)
+          ? 'Wymaga akcji'
+          : 'W trakcie';
   subtitle.textContent = `Status: ${statusLabel}`;
   titleWrap.appendChild(title);
   titleWrap.appendChild(subtitle);
@@ -3411,6 +3699,14 @@ function renderDetails() {
       void resumeNextStageFromPanel(selected, resumeNextBtn);
     });
     actions.appendChild(resumeNextBtn);
+
+    const repeatLastBtn = document.createElement('button');
+    repeatLastBtn.className = 'details-open details-repeat-last';
+    repeatLastBtn.textContent = 'Powtorz ostatni';
+    repeatLastBtn.addEventListener('click', () => {
+      void resumeNextStageFromPanel(selected, repeatLastBtn, { forceRepeatLastPrompt: true });
+    });
+    actions.appendChild(repeatLastBtn);
   }
 
   const copyCompletedBtn = document.createElement('button');
@@ -3500,6 +3796,3 @@ function renderDetails() {
 
   detailsContainer.appendChild(messageList);
 }
-
-
-

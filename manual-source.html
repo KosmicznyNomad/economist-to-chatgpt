@@ -122,7 +122,8 @@
 
     .instances-control {
       display: flex;
-      align-items: center;
+      align-items: flex-start;
+      flex-wrap: wrap;
       gap: 12px;
       margin-bottom: 18px;
       padding: 12px;
@@ -134,22 +135,25 @@
       font-size: 14px;
       font-weight: 500;
       color: #333;
+      line-height: 36px;
     }
 
-    .instances-input-group {
+    .instances-presets {
       display: flex;
       align-items: center;
       gap: 8px;
+      flex-wrap: wrap;
     }
 
     .instances-btn {
-      width: 32px;
-      height: 32px;
+      min-width: 64px;
+      height: 36px;
       border: 1px solid #ddd;
       background: #fff;
       border-radius: 4px;
       cursor: pointer;
-      font-size: 16px;
+      font-size: 14px;
+      font-weight: 600;
       display: flex;
       align-items: center;
       justify-content: center;
@@ -164,17 +168,69 @@
       background: #e0e0e0;
     }
 
+    .instances-btn.is-active {
+      background: #111827;
+      border-color: #111827;
+      color: #fff;
+    }
+
     .instances-btn:disabled {
-      opacity: 0.3;
+      opacity: 0.55;
       cursor: not-allowed;
     }
 
-    .instances-value {
-      font-size: 18px;
-      font-weight: 600;
-      color: #333;
-      min-width: 30px;
-      text-align: center;
+    .remote-section {
+      display: grid;
+      gap: 10px;
+      margin-bottom: 18px;
+      padding: 12px;
+      border: 1px solid #e2e8f0;
+      border-radius: 6px;
+      background: #f8fafc;
+    }
+
+    .remote-toggle {
+      display: inline-flex;
+      align-items: center;
+      gap: 8px;
+      margin-bottom: 0;
+      cursor: pointer;
+    }
+
+    .remote-toggle input {
+      width: 16px;
+      height: 16px;
+      margin: 0;
+    }
+
+    .remote-controls {
+      display: grid;
+      gap: 8px;
+      grid-template-columns: minmax(0, 1fr) auto;
+      align-items: center;
+    }
+
+    .remote-controls select {
+      width: 100%;
+      min-height: 36px;
+      padding: 8px 10px;
+      border: 1px solid #ddd;
+      border-radius: 4px;
+      background: #fff;
+      font-family: inherit;
+      font-size: 14px;
+    }
+
+    .remote-refresh-btn {
+      min-height: 36px;
+      padding: 8px 12px;
+      border: 1px solid #ddd;
+      background: #fff;
+      color: #334155;
+    }
+
+    .remote-refresh-btn:hover {
+      background: #f1f5f9;
     }
 
     .info {
@@ -206,6 +262,23 @@
 
     .cancel-btn:hover {
       background: #e8eaed;
+    }
+
+    .portfolio-only-btn {
+      background: #e0f2fe;
+      color: #075985;
+      border: 1px solid #bae6fd;
+    }
+
+    .portfolio-only-btn:hover {
+      background: #bae6fd;
+    }
+
+    .portfolio-only-btn:disabled {
+      background: #e5e7eb;
+      color: #94a3b8;
+      border-color: #e5e7eb;
+      cursor: not-allowed;
     }
 
     .submit-btn {
@@ -244,7 +317,7 @@
 <body>
   <div class="container">
     <h1>Wklej zrodlo do analizy</h1>
-    <p class="description">Wklej tekst zrodla lub zalacz PDF-y. Kazdy PDF uruchomi osobny proces i osobne okno ChatGPT.</p>
+    <p class="description">Wklej tekst zrodla lub zalacz PDF-y, a potem uruchom jeden zestaw promptow: analiza spolki plus automatyczna analiza portfela. Kazdy PDF uruchomi osobny proces i osobne okno ChatGPT.</p>
 
     <label for="titleInput">Tytul (opcjonalnie)</label>
     <input type="text" id="titleInput" placeholder="Opcjonalnie: tytul artykulu">
@@ -260,18 +333,32 @@
     </div>
 
     <div class="instances-control">
-      <span class="instances-label">Liczba instancji:</span>
-      <div class="instances-input-group">
-        <button class="instances-btn" id="decreaseBtn">-</button>
-        <span class="instances-value" id="instancesValue">1</span>
-        <button class="instances-btn" id="increaseBtn">+</button>
+      <span class="instances-label">Dodaj do kolejki:</span>
+      <div class="instances-presets" aria-label="Liczba instancji">
+        <button type="button" class="instances-btn" data-instances="1" aria-pressed="false">1</button>
+        <button type="button" class="instances-btn is-active" data-instances="5" aria-pressed="true">5</button>
+        <button type="button" class="instances-btn" data-instances="10" aria-pressed="false">10</button>
+        <button type="button" class="instances-btn" data-instances="20" aria-pressed="false">20</button>
       </div>
-      <span class="info">(1-10; dla PDF mnozy kazdy plik)</span>
+      <span class="info" id="instancesInfo">Dla PDF mnozy kazdy plik.</span>
+    </div>
+
+    <div class="remote-section">
+      <label class="remote-toggle" for="remoteModeInput">
+        <input type="checkbox" id="remoteModeInput">
+        <span>Wyslij na zdalnego runnera</span>
+      </label>
+      <div class="remote-controls" id="remoteControls" hidden>
+        <select id="remoteRunnerSelect" aria-label="Zdalny runner"></select>
+        <button type="button" class="remote-refresh-btn" id="remoteRefreshBtn">Odswiez</button>
+      </div>
+      <p class="info" id="remoteInfo">Remote dziala dla tekstu wklejonego w to okno. PDF-y zostaja lokalnie na tym komputerze.</p>
     </div>
 
     <div class="buttons">
       <button class="cancel-btn" id="cancelBtn">Anuluj</button>
-      <button class="submit-btn" id="submitBtn" disabled>Uruchom</button>
+      <button class="portfolio-only-btn" id="portfolioOnlyBtn" disabled>Uruchom tylko portfolio</button>
+      <button class="submit-btn" id="submitBtn" disabled>Uruchom zestaw promptow</button>
     </div>
     <p id="providerStatus" class="provider-status" aria-live="polite"></p>
   </div>

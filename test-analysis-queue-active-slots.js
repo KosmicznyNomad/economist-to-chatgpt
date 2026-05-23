@@ -320,6 +320,40 @@ async function testReleasedRunningQueueManagedProcessDoesNotConsumeSlot() {
   );
 }
 
+async function testPortfolioProcessDoesNotConsumeQueueSlot() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-company-1', runId: 'run-company-1', sequence: 1, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 1
+  };
+  context.processRegistry.set('run-portfolio-1', {
+    id: 'run-portfolio-1',
+    status: 'running',
+    analysisType: 'portfolio',
+    currentPrompt: 1,
+    totalPrompts: 3,
+    stageIndex: 0,
+    tabId: 350,
+    windowId: 450,
+    timestamp: now
+  });
+  context.liveTabs.add(350);
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(status.activeSlots, 0, 'Portfolio analysis must not consume an analysis queue slot.');
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('portfolio_slot_exempt');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    ['run-company-1'],
+    'Company queue should still start while portfolio analysis is already running.'
+  );
+}
+
 async function testCompletedPendingDispatchKeepsSlotReserved() {
   context = buildScenarioContext();
   const now = Date.now();
@@ -371,7 +405,55 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
   assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-2']);
   assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), []);
-  assert.deepStrictEqual(context.closedRuns, ['run-1']);
+  assert.deepStrictEqual(context.closedRuns, []);
+}
+
+async function testSavedProcessWithMissingLocalContextKeepsWindowOpen() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [{ jobId: 'aq-1', runId: 'run-1', sequence: 1, createdAt: now, slotReservedAt: now }],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'running',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0
+      }
+    },
+    tabId: 321,
+    windowId: 421,
+    timestamp: now - 120000
+  });
+
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  await context.reconcileAnalysisQueueState('saved_missing_context');
+
+  assert.deepStrictEqual(context.closedRuns, []);
+  assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
+  assert(
+    context.upserts.some((entry) => (
+      entry.runId === 'run-1'
+      && entry.patch.slotReleaseReason === 'final_stage_local_saved_after_local_context_loss'
+    )),
+    'Saved process that lost its local tab should release without requesting process-window close.'
+  );
 }
 
 async function testLocalSaveFailureKeepsCompletedProcessWindowOpen() {
@@ -529,6 +611,34 @@ async function testPausedQueueKeepsWaitingJobsQueued() {
   assert.deepStrictEqual(context.analysisQueueState.activeJobs, []);
 }
 
+async function testPausedQueueAllowsBypassResumeJobs() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [
+      { jobId: 'aq-paused-article', runId: 'run-paused-article', kind: 'article_analysis', sequence: 1, createdAt: now },
+      { jobId: 'aq-bypass-resume', runId: 'run-bypass-resume', kind: 'resume_stage', sequence: 2, createdAt: now, bypassPause: true }
+    ],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.getAnalysisQueuePaused = async () => true;
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('queue_paused_manual_resume');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    ['run-bypass-resume'],
+    'Paused queue should still start manual resume jobs that bypass pause.'
+  );
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-paused-article'],
+    'Paused queue should keep non-bypass jobs waiting.'
+  );
+}
+
 async function testLatePauseRequeuesFreshlyActivatedJobs() {
   context = buildScenarioContext();
   const now = Date.now();
@@ -566,6 +676,8 @@ function buildScenarioContext() {
     Set,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article_analysis',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
+    ANALYSIS_TYPE_COMPANY: 'company',
+    ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
     ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
     MANUAL_PDF_QUEUE_MAX_CONCURRENCY: 3,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
@@ -638,6 +750,8 @@ function buildScenarioContext() {
     'getAnalysisQueueJobPriority',
     'compareAnalysisQueueJobs',
     'sortAnalysisQueueWaitingJobs',
+    'normalizeAnalysisTypeForPromptChain',
+    'shouldBypassAnalysisQueueForAnalysisType',
     'normalizeProcessLifecycleStatus',
     'normalizeProcessStatus',
     'isClosedProcessStatus',
@@ -647,6 +761,8 @@ function buildScenarioContext() {
     'isExplicitlyVerifiedDispatch',
     'getProcessPersistenceDispatchSnapshot',
     'getProcessQueueDeliveryState',
+    'hasProcessCloseableSavedResponse',
+    'isProcessWindowAutoCloseEnabled',
     'buildStaleQueueReleasePatch',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
@@ -683,11 +799,14 @@ async function main() {
   await testGracePreventsPrematureSlotRelease();
   await testClosedWindowDoesNotConsumeSlot();
   await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();
+  await testPortfolioProcessDoesNotConsumeQueueSlot();
   await testCompletedPendingDispatchKeepsSlotReserved();
+  await testSavedProcessWithMissingLocalContextKeepsWindowOpen();
   await testLocalSaveFailureKeepsCompletedProcessWindowOpen();
   await testDuplicateActiveJobsReleaseSupersededContext();
   await testManualPdfJobsRespectDedicatedConcurrencyCap();
   await testPausedQueueKeepsWaitingJobsQueued();
+  await testPausedQueueAllowsBypassResumeJobs();
   await testLatePauseRequeuesFreshlyActivatedJobs();
   console.log('analysis queue active slot test: ok');
 }

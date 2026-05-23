@@ -68,12 +68,28 @@ function testRateLimitNeedsActionContract() {
   assert.match(contract.statusText, /limit|restriction/i);
 }
 
+function testForceStoppedLegacyFailureBackfill() {
+  const contract = ProcessContractUtils.getProcessContract({
+    lifecycleStatus: 'failed',
+    status: 'failed',
+    reason: 'inject_failed',
+    error: 'force_stopped',
+    statusText: 'Blad procesu'
+  });
+
+  assert.strictEqual(contract.lifecycleStatus, 'stopped');
+  assert.strictEqual(contract.statusCode, 'process.stopped');
+  assert.match(contract.statusText, /zatrzymany/i);
+  assert.strictEqual(ProcessContractUtils.isFailedLifecycleStatus(contract.lifecycleStatus), false);
+}
+
 function main() {
   testQueueContract();
   testLegacyFailureBackfill();
   testNeedsActionInference();
   testFinalizingCompletionSemantics();
   testRateLimitNeedsActionContract();
+  testForceStoppedLegacyFailureBackfill();
   console.log('test-process-contract.js passed');
 }
 

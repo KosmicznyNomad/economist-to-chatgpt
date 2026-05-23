@@ -215,15 +215,9 @@ async function main() {
       ...payload,
       schema: 'dispatch.v1'
     }),
-    applyChatGptComputationStatePatch(target, source) {
-      if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {
-        return target;
-      }
-      Object.assign(target, source);
-      return target;
-    },
+    applySourceMaterialMetaForSave: (target) => target,
     detectChatGptComputationState: () => ({
-      composerThinkingEffort: 'heavy',
+      composerThinkingEffort: 'high',
       chatGptModeKind: 'thinking',
       chatGptModelSwitcherLabel: 'ChatGPT Pro',
       chatGptThinkingEffortDetected: 'heavy',
@@ -257,6 +251,9 @@ async function main() {
   context.globalThis = context;
 
   vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'applyInjectedChatGptComputationStatePatch'), context, {
+    filename: 'background.js'
+  });
   vm.runInContext(extractFunctionSource(backgroundSource, 'persistResponseViaLocalEmergencyFallback'), context, {
     filename: 'background.js'
   });
@@ -273,7 +270,7 @@ async function main() {
   assert.strictEqual(result.outboxQueued, true);
   assert.strictEqual(result.queueSize, 3);
   assert.strictEqual(queuedPayloads.length, 1, 'Emergency fallback should use shared outbox enqueue helper.');
-  assert.strictEqual(queuedPayloads[0].payload.composerThinkingEffort, 'heavy');
+  assert.strictEqual(queuedPayloads[0].payload.composerThinkingEffort, 'high');
   assert.strictEqual(queuedPayloads[0].payload.chatGptModeKind, 'thinking');
   assert.strictEqual(queuedPayloads[0].payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
   assert.strictEqual(queuedPayloads[0].payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');

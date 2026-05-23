@@ -119,6 +119,8 @@ const watchlistSecretInput = document.getElementById('watchlistSecretInput');
 const saveWatchlistTokenBtn = document.getElementById('saveWatchlistTokenBtn');
 const clearWatchlistTokenBtn = document.getElementById('clearWatchlistTokenBtn');
 const flushWatchlistDispatchBtn = document.getElementById('flushWatchlistDispatchBtn');
+const extensionHeartbeatBtn = document.getElementById('extensionHeartbeatBtn');
+const extensionHeartbeatStatus = document.getElementById('extensionHeartbeatStatus');
 const restoreProcessWindowsBtn = document.getElementById('restoreProcessWindowsBtn');
 const copyLatestInvestFinalResponseBtn = document.getElementById('copyLatestInvestFinalResponseBtn');
 const copyLatestInvestFinalResponseStatus = document.getElementById('copyLatestInvestFinalResponseStatus');
@@ -138,11 +140,13 @@ const openRemoteIntakeBtn = document.getElementById('openRemoteIntakeBtn');
 const remoteIntakeStatus = document.getElementById('remoteIntakeStatus');
 let watchlistDispatchStatusSnapshot = null;
 let dispatchButtonsBusy = false;
+let extensionHeartbeatBusy = false;
 let analysisQueueStatusSnapshot = null;
 let remoteRunnerConfigSnapshot = null;
 const WATCHLIST_DEFAULT_KEY_ID = 'extension-primary';
 const REMOTE_INTAKE_FALLBACK_ORIGIN = 'https://iskierka-watchlist.duckdns.org';
 const REMOTE_INTAKE_PATH = '/iskra';
+const MANUAL_SOURCE_PREFILL_STORAGE_KEY = 'manual_source_prefill_draft';
 
 const POPUP_SHORTCUTS = Object.freeze({
   manualSource: '1',
@@ -196,6 +200,10 @@ function setDispatchStatus(text, isError = false) {
   setStatusElement(watchlistDispatchStatus, text, isError);
 }
 
+function setExtensionHeartbeatStatus(text, isError = false) {
+  setStatusElement(extensionHeartbeatStatus, text, isError);
+}
+
 function setCopyLatestInvestFinalResponseStatus(text, isError = false) {
   setStatusElement(copyLatestInvestFinalResponseStatus, text, isError);
 }
@@ -218,6 +226,61 @@ function setRemoteRunnerStatus(text, isError = false) {
 
 function setRemoteIntakeStatus(text, isError = false) {
   setStatusElement(remoteIntakeStatus, text, isError);
+}
+
+function getManualSourcePrefillStorageArea() {
+  const storage = typeof chrome !== 'undefined' ? chrome.storage : null;
+  if (storage?.session) return storage.session;
+  if (storage?.local) return storage.local;
+  return null;
+}
+
+function setChromeStorage(area, payload) {
+  return new Promise((resolve, reject) => {
+    try {
+      area.set(payload, () => {
+        const lastError = typeof chrome !== 'undefined' ? chrome.runtime?.lastError : null;
+        if (lastError) {
+          reject(new Error(lastError.message || 'storage_set_failed'));
+          return;
+        }
+        resolve();
+      });
+    } catch (error) {
+      reject(error);
+    }
+  });
+}
+
+async function readManualSourceClipboardText() {
+  const clipboard = typeof navigator !== 'undefined' ? navigator.clipboard : null;
+  if (!clipboard?.readText) {
+    return { text: '', error: 'clipboard_unavailable' };
+  }
+  try {
+    const text = await clipboard.readText();
+    return { text: typeof text === 'string' ? text : '', error: '' };
+  } catch (error) {
+    return { text: '', error: error?.message || 'clipboard_read_failed' };
+  }
+}
+
+async function storeManualSourcePrefillDraft(text) {
+  const safeText = typeof text === 'string' ? text : '';
+  if (!safeText.trim()) return '';
+
+  const storageArea = getManualSourcePrefillStorageArea();
+  if (!storageArea) return '';
+
+  const token = `manual-source-prefill-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await setChromeStorage(storageArea, {
+    [MANUAL_SOURCE_PREFILL_STORAGE_KEY]: {
+      token,
+      text: safeText,
+      createdAt: Date.now()
+    }
+  });
+  return token;
 }
 
 function compactRemoteIdentifier(rawValue, fallback = '') {
@@ -823,6 +886,7 @@ function applyDispatchButtonsState() {
   if (saveWatchlistTokenBtn) saveWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
   if (clearWatchlistTokenBtn) clearWatchlistTokenBtn.disabled = dispatchButtonsBusy || inlineManaged;
   if (flushWatchlistDispatchBtn) flushWatchlistDispatchBtn.disabled = dispatchButtonsBusy;
+  if (extensionHeartbeatBtn) extensionHeartbeatBtn.disabled = extensionHeartbeatBusy;
 }
 
 function applyWatchlistCredentialsUi(status) {
@@ -875,12 +939,79 @@ async function refreshDispatchStatus(forceReload = false) {
   }
 }
 
+function formatExtensionHeartbeatStatus(heartbeat) {
+  if (!heartbeat || typeof heartbeat !== 'object') {
+    return 'Heartbeat: brak danych.';
+  }
+  if (heartbeat.success === false) {
+    return `Heartbeat: blad (${heartbeat.error || 'unknown'}).`;
+  }
+  const prompts = heartbeat.prompts && typeof heartbeat.prompts === 'object' ? heartbeat.prompts : {};
+  const features = heartbeat.features && typeof heartbeat.features === 'object' ? heartbeat.features : {};
+  const watchlist = heartbeat.watchlist && typeof heartbeat.watchlist === 'object' ? heartbeat.watchlist : {};
+  const queue = heartbeat.queue && typeof heartbeat.queue === 'object' ? heartbeat.queue : null;
+  const failedChecks = Array.isArray(heartbeat.checks)
+    ? heartbeat.checks
+      .filter((check) => check && check.ok !== true)
+      .map((check) => check.name || 'unknown')
+      .slice(0, 5)
+    : [];
+  const statusLabel = heartbeat.ok === true ? 'OK' : 'UWAGA';
+  const sourceLabel = features.sourceMaterialsSubmitFunction && features.manualSourceQueueSubmitFunction
+    ? 'source OK'
+    : 'source NIE';
+  const dbLabel = heartbeat.readyForDb === true ? 'DB OK' : 'DB NIE';
+  const tokenLabel = watchlist.hasToken === true ? `token=${watchlist.tokenSource || 'ok'}` : 'token=brak';
+  const queueLabel = queue
+    ? `kolejka=${queue.activeSlots || 0}/${queue.maxConcurrent || 0}, wait=${queue.queueSize || 0}`
+    : 'kolejka=brak';
+  const supportId = typeof heartbeat.supportId === 'string' && heartbeat.supportId
+    ? `support=${heartbeat.supportId}`
+    : '';
+  const revision = typeof heartbeat.featureRevision === 'string' && heartbeat.featureRevision
+    ? `build=${heartbeat.featureRevision}`
+    : '';
+  const failedLabel = failedChecks.length > 0 ? `fail=${failedChecks.join(',')}` : '';
+  return [
+    `Heartbeat ${statusLabel}`,
+    sourceLabel,
+    dbLabel,
+    tokenLabel,
+    `prompty C:${prompts.companyCount || 0} P:${prompts.portfolioCount || 0}`,
+    `portfolio-auto=${features.portfolioAutoCompany ? 'OK' : 'NIE'}`,
+    queueLabel,
+    revision,
+    supportId,
+    failedLabel
+  ].filter(Boolean).join(' | ');
+}
+
+async function refreshExtensionHeartbeatStatus(forceReload = false) {
+  if (!extensionHeartbeatStatus) return;
+  extensionHeartbeatBusy = true;
+  applyDispatchButtonsState();
+  setExtensionHeartbeatStatus('Heartbeat: sprawdzam...', false);
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_EXTENSION_HEARTBEAT',
+      forceReload,
+      includeQueue: true
+    });
+    setExtensionHeartbeatStatus(formatExtensionHeartbeatStatus(response), response?.ok !== true);
+  } catch (error) {
+    setExtensionHeartbeatStatus(`Heartbeat: ${error?.message || String(error)}`, true);
+  } finally {
+    extensionHeartbeatBusy = false;
+    applyDispatchButtonsState();
+  }
+}
+
 const COMPANY_COUNT_PROCESS_ISSUE_LABELS = {
   missing_assistant_reply: 'brak odpowiedzi assistant po prompcie',
   assistant_reply_below_threshold: 'odpowiedzi ponizej progu jakosci',
   unrecognized_prompt_stage: 'nierozpoznane etapy promptow',
   sequence_issue: 'naruszona kolejnosc etapow',
-  data_gap_stop: 'wykryto sygnal DATA_GAPS_STOP',
+  data_gap_stage: 'wykryto DATA_GAP_STAGE',
   unmatched_user_messages: 'nierozpoznane wiadomosci user'
 };
 
@@ -916,7 +1047,7 @@ function formatCompanyProcessCounterAlert(response) {
   const totals = response?.totals && typeof response.totals === 'object' ? response.totals : {};
   const missingReplyCount = Number.isInteger(totals?.promptRepliesMissing) ? totals.promptRepliesMissing : 0;
   const lowQualityCount = Number.isInteger(totals?.promptRepliesBelowThreshold) ? totals.promptRepliesBelowThreshold : 0;
-  const dataGapStopDetected = response?.dataGapStopDetected === true
+  const dataGapStageDetected = response?.dataGapStopDetected === true
     || (Number.isInteger(totals?.dataGapStopDetected) && totals.dataGapStopDetected > 0);
   const dataGapMissingInputsList = Array.isArray(response?.dataGapMissingInputsList)
     ? response.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
@@ -928,7 +1059,7 @@ function formatCompanyProcessCounterAlert(response) {
     ? response.lowQualityReplyPromptNumbers
     : [];
 
-  if (missingReplyCount <= 0 && lowQualityCount <= 0 && !dataGapStopDetected) {
+  if (missingReplyCount <= 0 && lowQualityCount <= 0 && !dataGapStageDetected) {
     return 'Licznik procesu: OK (brak brakujacych i niskiej jakosci odpowiedzi).';
   }
 
@@ -945,11 +1076,11 @@ function formatCompanyProcessCounterAlert(response) {
       : '';
     parts.push(`jakosc_niska=${lowQualityCount}${lowQualityPromptText}`);
   }
-  if (dataGapStopDetected) {
-    const missingInputsText = dataGapMissingInputsList.length > 0
-      ? `; missing_inputs=${dataGapMissingInputsList.join(',')}`
+  if (dataGapStageDetected) {
+    const stageText = typeof response?.dataGapStageId === 'string' && response.dataGapStageId.trim()
+      ? `; stage=${response.dataGapStageId.trim()}`
       : '';
-    parts.push(`data_gaps_stop=1${missingInputsText}`);
+    parts.push(`data_gap_stage=1${stageText}`);
   }
   return `Licznik procesu: WYMAGA AKCJI (${parts.join(' | ')}).`;
 }
@@ -995,7 +1126,7 @@ function formatCompanyConversationCountStatus(response) {
   const unmatchedUserSamples = Array.isArray(response?.unmatchedUserSamples) ? response.unmatchedUserSamples : [];
   const sequenceIssues = Array.isArray(response?.sequenceIssues) ? response.sequenceIssues : [];
   const runResets = Array.isArray(response?.runResets) ? response.runResets : [];
-  const dataGapStopDetected = response?.dataGapStopDetected === true
+  const dataGapStageDetected = response?.dataGapStopDetected === true
     || (Number.isInteger(totals?.dataGapStopDetected) && totals.dataGapStopDetected > 0);
   const dataGapMissingInputsList = Array.isArray(response?.dataGapMissingInputsList)
     ? response.dataGapMissingInputsList.filter((item) => typeof item === 'string' && item.trim())
@@ -1036,9 +1167,12 @@ function formatCompanyConversationCountStatus(response) {
   lines.push(`Rozpoznanie wiadomosci: instancje_promptow=${matchedPromptMessages}, etapy_unique=${recognizedUniquePrompts}/${promptCatalogCount}, nierozpoznane_user=${unmatchedUserMessages}, skutecznosc=${recognitionRate}%, runy=${totals.detectedRuns || 0}`);
   lines.push(`Odpowiedzi (instancje): present=${totals.promptRepliesPresent || 0}, missing=${totals.promptRepliesMissing || 0}, quality_ok=${totals.promptRepliesPassingThreshold || 0}, quality_low=${totals.promptRepliesBelowThreshold || 0} (prog: ${thresholds.minAssistantWords || 0} slow, ${thresholds.minAssistantSentences || 0} zdan)`);
   lines.push(`Odpowiedzi (etapy): missing=${missingReplyStageCount}, quality_low=${lowQualityStageCount}`);
-  lines.push(`Data gaps: stop_marker=${dataGapStopDetected ? 'TAK' : 'NIE'}, missing_inputs=${dataGapStopDetected ? dataGapMissingInputsResolved : 'brak'}`);
+  const dataGapStageText = typeof response?.dataGapStageId === 'string' && response.dataGapStageId.trim()
+    ? response.dataGapStageId.trim()
+    : '?';
+  lines.push(`Data gap directive: ${dataGapStageDetected ? `DATA_GAP_STAGE=${dataGapStageText}` : 'NIE'}`);
   const resolvedProcessState = processState || (
-    ((totals.promptRepliesMissing || 0) > 0 || dataGapStopDetected)
+    ((totals.promptRepliesMissing || 0) > 0 || dataGapStageDetected)
       ? 'needs_action'
       : ((totals.promptRepliesBelowThreshold || 0) > 0 ? 'warning' : 'ok')
   );
@@ -1069,8 +1203,8 @@ function formatCompanyConversationCountStatus(response) {
   if ((totals.promptRepliesMissing || 0) > 0) {
     lines.push('Akcja procesu: uruchom "Powtorz ostatni prompt (wszystkie)" albo "Wznow wszystkie".');
   }
-  if (dataGapStopDetected) {
-    lines.push(`Akcja data gaps: uzupelnij brakujace dane (${dataGapMissingInputsResolved}), potem wznow pipeline od etapu data-gap.`);
+  if (dataGapStageDetected) {
+    lines.push(`Akcja data gap: wtyczka zamknie karte procesu i zwolni slot kolejki; nastepny job ruszy automatycznie.`);
   }
 
   const lowQualityItemsText = lowQualityReplyRows
@@ -1090,7 +1224,7 @@ function formatCompanyConversationCountStatus(response) {
   lines.push(`Duplikaty promptow: ${duplicateText}`);
 
   lines.push(
-    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}, data_gaps=${verification.dataGapStopDetected ? 'NIE' : 'OK'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
+    `Walidacja: prompts=${verification.allPromptsDetected ? 'OK' : 'NIE'}, replies=${verification.allMatchedPromptsHaveReply ? 'OK' : 'NIE'}, quality=${verification.allMatchedRepliesPassThreshold ? 'OK' : 'NIE'}, kolejnosc=${verification.sequenceNonDecreasing ? 'OK' : 'NIE'}, data_gap_stage=${verification.dataGapStopDetected ? 'TAK' : 'NIE'}${verification.userMetaTruncated ? ', meta_ucinane=TAK' : ''}`
   );
   lines.push('');
 
@@ -1241,6 +1375,7 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
     const payload = {
       type: 'RUN_ANALYSIS',
       origin: typeof options?.origin === 'string' ? options.origin : 'popup-run-analysis',
+      includePortfolio: false,
     };
     if (Number.isInteger(options?.windowId)) {
       payload.windowId = options.windowId;
@@ -1260,11 +1395,17 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
     }
 
     const queuedCount = Number.isInteger(response?.queuedCount) ? response.queuedCount : 0;
+    const portfolioLaunchedCount = Number.isInteger(response?.portfolioLaunchedCount)
+      ? Math.max(0, response.portfolioLaunchedCount)
+      : 0;
     const queueSummary = formatAnalysisQueueSummary(response, {
       includePrefix: false,
       includeQueue: true
     });
-    setRunStatus(`Zakolejkowano ${queuedCount} analiz. ${queueSummary}`);
+    const portfolioLaunchSummary = portfolioLaunchedCount > 0
+      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
+      : '';
+    setRunStatus(`Zakolejkowano ${queuedCount} analiz.${portfolioLaunchSummary} ${queueSummary}`);
     void refreshAnalysisQueueStatus();
   } catch (error) {
     setRunStatus(`Blad: ${error?.message || String(error)}`, true);
@@ -1362,20 +1503,23 @@ async function executeResumeAllFromPopup(button, options = {}) {
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
+  const normalizedComposerThinkingEffort = composerThinkingEffort === 'heavy'
+    ? 'high'
+    : composerThinkingEffort;
   const hasExplicitThinkingEffort = (
-    composerThinkingEffort === 'light'
-    || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
-    || composerThinkingEffort === 'heavy'
+    normalizedComposerThinkingEffort === 'light'
+    || normalizedComposerThinkingEffort === 'standard'
+    || normalizedComposerThinkingEffort === 'extended'
+    || normalizedComposerThinkingEffort === 'high'
   );
-  const effortSuffix = composerThinkingEffort ? ` (${composerThinkingEffort})` : '';
+  const effortSuffix = normalizedComposerThinkingEffort ? ` (${normalizedComposerThinkingEffort})` : '';
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalHtml = button.innerHTML;
   button.disabled = true;
   button.textContent = `Wznawiam${effortSuffix}...`;
   setRunStatus(
-    composerThinkingEffort
-      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${composerThinkingEffort}.`
+    normalizedComposerThinkingEffort
+      ? `Wznowienie aktywnych procesow company (INVEST), tryb: ${normalizedComposerThinkingEffort}.`
       : 'Wznowienie aktywnych procesow company (INVEST)...'
   );
 
@@ -1389,14 +1533,16 @@ async function executeResumeAllFromPopup(button, options = {}) {
       monitorAutoCloseAfterMs: 40_000
     };
     if (hasExplicitThinkingEffort) {
-      message.composerThinkingEffort = composerThinkingEffort;
+      message.composerThinkingEffort = normalizedComposerThinkingEffort;
+    } else {
+      message.useStoredComposerThinkingEffort = true;
     }
     const response = await sendRuntimeMessage(message);
 
     if (!response || Object.keys(response).length === 0) {
       setRunStatus(
-        composerThinkingEffort
-          ? `Polecenie wznowienia (${composerThinkingEffort}) zostalo wyslane.`
+        normalizedComposerThinkingEffort
+          ? `Polecenie wznowienia (${normalizedComposerThinkingEffort}) zostalo wyslane.`
           : 'Polecenie wznowienia zostalo wyslane.'
       );
       return;
@@ -1408,8 +1554,8 @@ async function executeResumeAllFromPopup(button, options = {}) {
     }
 
     setRunStatus(
-      composerThinkingEffort
-        ? `Tryb ${composerThinkingEffort}: ${getResumeAllSummary(response)}`
+      normalizedComposerThinkingEffort
+        ? `Tryb ${normalizedComposerThinkingEffort}: ${getResumeAllSummary(response)}`
         : getResumeAllSummary(response)
     );
   } catch (error) {
@@ -1427,11 +1573,14 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
   const composerThinkingEffort = typeof options?.composerThinkingEffort === 'string'
     ? options.composerThinkingEffort.trim().toLowerCase()
     : '';
+  const normalizedComposerThinkingEffort = composerThinkingEffort === 'heavy'
+    ? 'high'
+    : composerThinkingEffort;
   const hasExplicitThinkingEffort = (
-    composerThinkingEffort === 'light'
-    || composerThinkingEffort === 'standard'
-    || composerThinkingEffort === 'extended'
-    || composerThinkingEffort === 'heavy'
+    normalizedComposerThinkingEffort === 'light'
+    || normalizedComposerThinkingEffort === 'standard'
+    || normalizedComposerThinkingEffort === 'extended'
+    || normalizedComposerThinkingEffort === 'high'
   );
   const monitorSessionId = createReloadResumeMonitorSessionId(origin);
   const originalText = button.textContent;
@@ -1449,7 +1598,7 @@ async function executeRepeatLastPromptAllFromPopup(button, options = {}) {
       openMonitorWindow: true
     };
     if (hasExplicitThinkingEffort) {
-      message.composerThinkingEffort = composerThinkingEffort;
+      message.composerThinkingEffort = normalizedComposerThinkingEffort;
     } else {
       message.useStoredComposerThinkingEffort = true;
     }
@@ -1798,24 +1947,55 @@ function formatCopyLatestInvestFinalResponseStatus(response) {
     const conversationUrlCount = Number.isInteger(response?.conversationUrlCount)
       ? response.conversationUrlCount
       : results.filter((row) => typeof row?.conversationUrl === 'string' && row.conversationUrl.trim()).length;
-    const persistenceAttemptedCount = Number.isInteger(response?.persistenceAttemptedCount)
-      ? response.persistenceAttemptedCount
-      : results.filter((row) => row?.persistence && row.persistence.attempted === true).length;
-    const persistenceSuccessCount = Number.isInteger(response?.persistenceSuccessCount)
-      ? response.persistenceSuccessCount
-      : results.filter((row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true).length;
-    const localSaveSuccessCount = Number.isInteger(response?.localSaveSuccessCount)
-      ? response.localSaveSuccessCount
-      : results.filter((row) => row?.persistence?.localSaveOk === true || row?.persistence?.success === true).length;
-    const intakeAcceptedCount = Number.isInteger(response?.intakeAcceptedCount)
-      ? response.intakeAcceptedCount
-      : results.filter((row) => row?.persistence?.acceptedByIntake === true).length;
-    const verifiedDbCount = Number.isInteger(response?.verifiedDbCount)
-      ? response.verifiedDbCount
-      : results.filter((row) => row?.persistence?.verifiedInDb === true).length;
-    const terminalFailureCount = Number.isInteger(response?.terminalFailureCount)
-      ? response.terminalFailureCount
-      : results.filter((row) => row?.persistence?.terminalFailure === true).length;
+    const hasDetailedPersistenceResults = results.some((row) => row?.persistence && typeof row.persistence === 'object');
+    const derivedPersistenceAttemptedCount = results.filter(
+      (row) => row?.persistence && row.persistence.attempted === true
+    ).length;
+    const derivedPersistenceSuccessCount = results.filter(
+      (row) => row?.persistence && row.persistence.attempted === true && row.persistence.success === true
+    ).length;
+    const derivedLocalSaveSuccessCount = results.filter(
+      (row) => row?.persistence?.localSaveOk === true || row?.persistence?.success === true
+    ).length;
+    const derivedIntakeAcceptedCount = results.filter(
+      (row) => row?.persistence?.acceptedByIntake === true
+    ).length;
+    const derivedVerifiedDbCount = results.filter(
+      (row) => row?.persistence?.verifiedInDb === true
+    ).length;
+    const derivedTerminalFailureCount = results.filter(
+      (row) => row?.persistence?.terminalFailure === true
+    ).length;
+    const persistenceAttemptedCount = hasDetailedPersistenceResults
+      ? derivedPersistenceAttemptedCount
+      : (Number.isInteger(response?.persistenceAttemptedCount)
+        ? response.persistenceAttemptedCount
+        : derivedPersistenceAttemptedCount);
+    const persistenceSuccessCount = hasDetailedPersistenceResults
+      ? derivedPersistenceSuccessCount
+      : (Number.isInteger(response?.persistenceSuccessCount)
+        ? response.persistenceSuccessCount
+        : derivedPersistenceSuccessCount);
+    const localSaveSuccessCount = hasDetailedPersistenceResults
+      ? derivedLocalSaveSuccessCount
+      : (Number.isInteger(response?.localSaveSuccessCount)
+        ? response.localSaveSuccessCount
+        : derivedLocalSaveSuccessCount);
+    const intakeAcceptedCount = hasDetailedPersistenceResults
+      ? derivedIntakeAcceptedCount
+      : (Number.isInteger(response?.intakeAcceptedCount)
+        ? response.intakeAcceptedCount
+        : derivedIntakeAcceptedCount);
+    const verifiedDbCount = hasDetailedPersistenceResults
+      ? derivedVerifiedDbCount
+      : (Number.isInteger(response?.verifiedDbCount)
+        ? response.verifiedDbCount
+        : derivedVerifiedDbCount);
+    const terminalFailureCount = hasDetailedPersistenceResults
+      ? derivedTerminalFailureCount
+      : (Number.isInteger(response?.terminalFailureCount)
+        ? response.terminalFailureCount
+        : derivedTerminalFailureCount);
     const lines = [
       `Skopiowano finalne odpowiedzi z ${copied}/${requested} okien Invest.`,
       `Otwarte okna Invest: ${windowCount}. Laczna dlugosc: ${textLength} znakow.`
@@ -1988,6 +2168,47 @@ async function getActiveTabInCurrentWindow() {
   return tabs.length > 0 ? tabs[0] : null;
 }
 
+async function openManualSourceWindowFromPopup(button) {
+  if (!button) return;
+
+  const originalHtml = button.innerHTML;
+  button.disabled = true;
+  button.textContent = 'Otwieram...';
+
+  let prefillToken = '';
+  const clipboardResult = await readManualSourceClipboardText();
+  if (clipboardResult.text.trim()) {
+    try {
+      prefillToken = await storeManualSourcePrefillDraft(clipboardResult.text);
+    } catch (error) {
+      console.warn('[manual-source] clipboard prefill storage failed:', error?.message || error);
+    }
+  }
+
+  try {
+    const activeTab = await getActiveTabInCurrentWindow();
+    const title = activeTab?.title || '';
+    const url = activeTab?.url || '';
+    const params = new URLSearchParams();
+    if (title) params.set('title', title);
+    if (url) params.set('url', url);
+    if (prefillToken) params.set('prefillToken', prefillToken);
+    const targetUrl = chrome.runtime.getURL(`manual-source.html${params.toString() ? `?${params.toString()}` : ''}`);
+
+    await chrome.windows.create({
+      url: targetUrl,
+      type: 'popup',
+      width: 800,
+      height: 600,
+    });
+    window.close();
+  } catch (error) {
+    setRunStatus(`Nie udalo sie otworzyc wklejania: ${error?.message || String(error)}.`, true);
+    button.disabled = false;
+    button.innerHTML = originalHtml;
+  }
+}
+
 if (openRemoteIntakeBtn) {
   openRemoteIntakeBtn.addEventListener('click', async () => {
     const originalLabel = openRemoteIntakeBtn.textContent;
@@ -2040,8 +2261,8 @@ if (resumeAllExtendedBtn) {
 if (resumeAllHeavyBtn) {
   resumeAllHeavyBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllHeavyBtn, {
-      origin: 'popup-resume-all-heavy',
-      composerThinkingEffort: 'heavy',
+      origin: 'popup-resume-all-high',
+      composerThinkingEffort: 'high',
     });
   });
 }
@@ -2083,22 +2304,7 @@ if (copyLatestInvestFinalResponseBtn) {
 const manualSourceBtn = document.getElementById('manualSourceBtn');
 if (manualSourceBtn) {
   manualSourceBtn.addEventListener('click', () => {
-    withActiveWindowContext(({ activeTab }) => {
-      const title = activeTab?.title || '';
-      const url = activeTab?.url || '';
-      const params = new URLSearchParams();
-      if (title) params.set('title', title);
-      if (url) params.set('url', url);
-      const targetUrl = chrome.runtime.getURL(`manual-source.html${params.toString() ? `?${params.toString()}` : ''}`);
-
-      chrome.windows.create({
-        url: targetUrl,
-        type: 'popup',
-        width: 800,
-        height: 600,
-      });
-      window.close();
-    });
+    void openManualSourceWindowFromPopup(manualSourceBtn);
   });
 }
 
@@ -2518,6 +2724,18 @@ if (flushWatchlistDispatchBtn) {
   });
 }
 
+if (extensionHeartbeatBtn) {
+  extensionHeartbeatBtn.addEventListener('click', async () => {
+    const originalText = extensionHeartbeatBtn.textContent;
+    extensionHeartbeatBtn.textContent = 'Heartbeat...';
+    try {
+      await refreshExtensionHeartbeatStatus(true);
+    } finally {
+      extensionHeartbeatBtn.textContent = originalText;
+    }
+  });
+}
+
 if (chrome?.runtime?.onMessage?.addListener) {
   chrome.runtime.onMessage.addListener((message) => {
     if (message?.type !== 'AUTO_RESTORE_STATUS_UPDATED') return;
@@ -2529,6 +2747,7 @@ installPopupRuntimeProblemLogging();
 
 void Promise.all([
   refreshDispatchStatus(true),
+  refreshExtensionHeartbeatStatus(true),
   refreshAutoRestoreStatus(true),
   refreshAnalysisQueueStatus(),
   refreshRemoteRunnerStatus(),
@@ -2538,4 +2757,5 @@ setInterval(() => {
   void refreshAutoRestoreStatus(false);
   void refreshAnalysisQueueStatus();
   void refreshRemoteRunnerStatus();
+  void refreshExtensionHeartbeatStatus(false);
 }, 15000);

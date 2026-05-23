@@ -201,15 +201,50 @@ function buildContext() {
     console,
     Date,
     Math,
+    ANALYSIS_TYPE_COMPANY: 'company',
+    ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
     PROMPTS_COMPANY: ['prompt'],
+    PROMPTS_PORTFOLIO: ['portfolio prompt'],
     CHAT_URL: 'https://chat.example',
+    PORTFOLIO_CHAT_URL: 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project',
     captured: null,
+    sourceMaterialSubmissions: [],
+    normalizeAnalysisTypeForPromptChain: (value) => {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized === 'portfolio' || normalized === 'portfolio_analysis' ? 'portfolio' : 'company';
+    },
+    getPromptChainForAnalysisType: (analysisType) => {
+      const normalized = typeof analysisType === 'string' ? analysisType.trim().toLowerCase() : '';
+      return normalized === 'portfolio' ? ['portfolio prompt'] : ['prompt'];
+    },
+    getChatUrlForAnalysisType: (analysisType) => {
+      const normalized = typeof analysisType === 'string' ? analysisType.trim().toLowerCase() : '';
+      return normalized === 'portfolio'
+        ? 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project'
+        : 'https://chat.example';
+    },
+    ensurePromptChainReadyForAnalysisType: async () => true,
     processArticles: async (tabs, promptChain, chatUrl, analysisType, options) => {
       context.captured = { tabs, promptChain, chatUrl, analysisType, options };
+      const isPortfolio = analysisType === 'portfolio';
       return {
         success: true,
-        queuedCount: tabs.length,
-        queueSize: tabs.length
+        queuedCount: isPortfolio ? 0 : tabs.length,
+        launchedCount: isPortfolio ? tabs.length : 0,
+        queueBypassCount: isPortfolio ? tabs.length : 0,
+        queueBypass: isPortfolio,
+        queueSize: isPortfolio ? 0 : tabs.length
+      };
+    },
+    submitSourceMaterialForProcess: async (source, options) => {
+      context.sourceMaterialSubmissions.push({ source, options });
+      return {
+        success: true,
+        payload: {
+          sourceMaterialId: 'srcmat:sha256:test',
+          sourceMaterialHash: 'sha256:test',
+          sourceMaterialLength: source?.text?.length || 0
+        }
       };
     }
   };
@@ -226,6 +261,10 @@ function buildContext() {
     'mergeManualTextSourceRecords',
     'compactManualTextSnapshotsForQueueState',
     'normalizeManualInstances',
+    'normalizeSourceMaterialLength',
+    'normalizeSourceMaterialSubmitFailure',
+    'reportManualSourceMaterialSaveEvent',
+    'submitManualSourceMaterialForQueue',
     'runManualSourceAnalysis'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
@@ -238,11 +277,14 @@ function buildContext() {
 async function main() {
   const context = buildContext();
   const sourceText = 'A'.repeat(50000);
-  const result = await context.runManualSourceAnalysis(sourceText, 'Manual large source', 10);
+  const result = await context.runManualSourceAnalysis(sourceText, 'Manual large source', 20);
 
-  assert.strictEqual(result.queuedCount, 10);
+  assert.strictEqual(result.queuedCount, 20);
+  assert.strictEqual(context.sourceMaterialSubmissions.length, 1);
+  assert.strictEqual(context.sourceMaterialSubmissions[0].source.text, sourceText);
+  assert.strictEqual(context.sourceMaterialSubmissions[0].source.processKind, 'manual_source_enqueue');
   assert.ok(context.captured, 'processArticles should be called');
-  assert.strictEqual(context.captured.tabs.length, 10);
+  assert.strictEqual(context.captured.tabs.length, 20);
   assert.strictEqual(context.captured.options.manualTextSources.length, 1);
   assert.strictEqual(context.captured.options.manualTextSources[0].text, sourceText);
   assert.ok(context.captured.options.manualTextSources[0].id.startsWith('manual-text-'));
@@ -250,6 +292,11 @@ async function main() {
   const sourceId = context.captured.options.manualTextSources[0].id;
   context.captured.tabs.forEach((tab) => {
     assert.strictEqual(tab.manualTextSourceId, sourceId);
+    assert.strictEqual(tab.sourceMaterialId, 'srcmat:sha256:test');
+    assert.strictEqual(tab.sourceMaterialHash, 'sha256:test');
+    assert.strictEqual(tab.sourceMaterialLength, sourceText.length);
+    assert.strictEqual(tab.sourceMaterialStored, true);
+    assert.strictEqual(tab.sourceMaterialNeedsProcessLink, true);
     assert.strictEqual(Object.prototype.hasOwnProperty.call(tab, 'manualText'), false);
   });
 
@@ -258,6 +305,21 @@ async function main() {
     serializedTabs.length < sourceText.length,
     'queued tab snapshots should not duplicate the full manual text'
   );
+
+  const portfolioResult = await context.runManualSourceAnalysis(sourceText, 'Manual portfolio source', 20, 'portfolio');
+  assert.strictEqual(portfolioResult.queuedCount, 0);
+  assert.strictEqual(portfolioResult.launchedCount, 1);
+  assert.strictEqual(portfolioResult.queueBypassCount, 1);
+  assert.strictEqual(portfolioResult.queueBypass, true);
+  assert.strictEqual(context.sourceMaterialSubmissions.length, 2);
+  assert.strictEqual(context.captured.tabs.length, 1);
+  assert.strictEqual(context.captured.analysisType, 'portfolio');
+  assert.strictEqual(context.captured.tabs[0].sourceMaterialId, 'srcmat:sha256:test');
+  assert.strictEqual(
+    context.captured.chatUrl,
+    'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project'
+  );
+  assert.deepStrictEqual(context.captured.promptChain, ['portfolio prompt']);
 
   const migrated = context.compactManualTextSnapshotsForQueueState([
     {

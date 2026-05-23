@@ -197,13 +197,11 @@ function testViewHelpersFallbacks() {
 
 function testStructuredJsonV2Contract() {
   const text = JSON.stringify({
-    schema: 'economist.response.v2',
     records: [
       {
         decision_role: 'PRIMARY',
         fields: {
           data_decyzji: '2026-03-29',
-          status_decyzji: 'WATCH',
           spolka: 'Leidos Holdings Inc. (LDOS:NYSE)',
           material_zrodlowy_podcast: 'a16z podcast',
           teza_inwestycyjna: 'Primary thesis',
@@ -213,7 +211,8 @@ function testStructuredJsonV2Contract() {
           voi_falsy_kluczowe_ryzyka: 'VOI: backlog, Fals: budget cut, Primary risk: execution, Composite: 4.1/5.0, EntryScore: 7.8/10, Sizing: 3%'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Defense',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Oprogramowanie obronne',
           revenue_model: 'Integracja i wdrozenia',
@@ -243,13 +242,16 @@ function testStructuredJsonV2Contract() {
             { key: 'MR', label: 'Monetization Realism', value: 6 }
           ]
         },
-        extras: {}
+        extras: {
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       },
       {
         decision_role: 'SECONDARY',
         fields: {
           data_decyzji: '2026-03-29',
-          status_decyzji: 'WATCH',
           spolka: 'KBR (KBR:NYSE)',
           material_zrodlowy_podcast: 'a16z podcast',
           teza_inwestycyjna: 'Secondary thesis',
@@ -259,7 +261,8 @@ function testStructuredJsonV2Contract() {
           voi_falsy_kluczowe_ryzyka: 'VOI: task orders, Fals: margin compression, Primary risk: procurement delay, Composite: 3.8/5.0, EntryScore: 6.9/10, Sizing: 2%'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Defense',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Oprogramowanie obronne',
           revenue_model: 'Integracja i wdrozenia',
@@ -275,7 +278,11 @@ function testStructuredJsonV2Contract() {
           primary_kill_risk: 'procurement delay'
         },
         kpi: { schema_id: 'core10', items: [] },
-        extras: {}
+        extras: {
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       }
     ]
   });
@@ -284,6 +291,9 @@ function testStructuredJsonV2Contract() {
   assert.strictEqual(validation.status, 'current');
   assert.strictEqual(validation.recordCount, 2);
   assert.strictEqual(validation.primaryRecord.company, 'Leidos Holdings Inc. (LDOS:NYSE)');
+  assert.strictEqual(validation.primaryRecord.decisionStatus, 'WATCH');
+  assert.strictEqual(validation.primaryRecord.sector, 'Defense');
+  assert.strictEqual(validation.structuredPayload.records[0].taxonomy.worldview_bucket, 'Software steruje praca, pieniedzmi i ryzykiem');
   assert.strictEqual(validation.records[1].decisionRole, 'SECONDARY');
   assert.strictEqual(validation.primaryRecord.opportunity.value_chain_position, 'Platforma');
   assert.strictEqual(validation.records[1].character.primary_kill_risk, 'procurement delay');

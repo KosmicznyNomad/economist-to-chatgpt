@@ -1,5 +1,6 @@
-const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje/project";
-const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje";
+const CHAT_URL = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/project";
+const PORTFOLIO_CHAT_URL = "https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project";
+const INVEST_GPT_URL_BASE = "https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka";
 const INVEST_GPT_URL_PREFIX = `${INVEST_GPT_URL_BASE}/`;
 const CHAT_GPT_HOSTS = new Set([
   'chatgpt.com',
@@ -11,7 +12,7 @@ const INVEST_GPT_PATH_BASE = (() => {
   try {
     return new URL(INVEST_GPT_URL_BASE).pathname.replace(/\/+$/, '');
   } catch (error) {
-    return '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-inwestycje';
+    return '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka';
   }
 })();
 
@@ -40,6 +41,12 @@ const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
 const PROCESS_WINDOW_AUTO_MINIMIZE_DELAY_MS = 1200;
 const ANALYSIS_QUEUE_KIND_ARTICLE = 'article_analysis';
 const ANALYSIS_QUEUE_KIND_RESUME_STAGE = 'resume_stage';
+const ANALYSIS_TYPE_COMPANY = 'company';
+const ANALYSIS_TYPE_PORTFOLIO = 'portfolio';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA = 'portfolio.layer_ranking.v1';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE = 'portfolio_layer_ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE = 'Portfolio Prompt 1: Layer Ranking';
+const PORTFOLIO_PROMPT_ONE_RESPONSE_REASON = 'portfolio_layer_ranking';
 const EXECUTE_SCRIPT_TRANSIENT_MAX_ATTEMPTS = 3;
 const EXECUTE_SCRIPT_TRANSIENT_RETRY_DELAY_MS = 700;
 const EXECUTE_SCRIPT_TRANSIENT_WAIT_TIMEOUT_MS = 8000;
@@ -116,6 +123,13 @@ const WATCHLIST_DISPATCH = {
   retryAlarmImmediateDelayMs: 1000,
   alarmPeriodMinutes: 2
 };
+const SECTOR_MEMORY_INTAKE_PATH = "/api/v1/intake/sector-memory-rows";
+const SOURCE_MATERIALS_API_PATH = "/api/v1/source-materials";
+const EXTENSION_SERVICE_WORKER_STARTED_AT = Date.now();
+const EXTENSION_HEARTBEAT_STORAGE_KEY = "iskra_extension_heartbeat";
+const EXTENSION_FEATURE_REVISION = "source-materials-heartbeat-v1";
+const SECTOR_MEMORY_COPY_STORAGE_KEY = "watchlist_sector_memory_copies";
+const SECTOR_MEMORY_COPY_MAX_ITEMS = 500;
 function computeFinalResponseSaveTimeoutMs() {
   const sendTimeoutMs = Number.isInteger(WATCHLIST_DISPATCH.timeoutMs) && WATCHLIST_DISPATCH.timeoutMs > 0
     ? WATCHLIST_DISPATCH.timeoutMs
@@ -135,9 +149,12 @@ function computeFinalResponseSaveTimeoutMs() {
 }
 const FINAL_RESPONSE_SAVE_TIMEOUT_MS = computeFinalResponseSaveTimeoutMs();
 const WATCHLIST_PROBLEM_LOGS_QUERY_PATH = '/api/v1/intake/problem-logs/query';
+const WATCHLIST_INTAKE_STATUS_PATH = '/api/v1/intake/status';
+const WATCHLIST_DISPATCH_HEALTH_CACHE_TTL_MS = 30 * 1000;
 const ANALYSIS_QUEUE_PAUSED_STORAGE_KEY = 'analysis_queue_paused';
 const ISKRA_REMOTE_EXECUTION_MODE_STORAGE_KEY = 'iskra_remote_execution_mode';
 const ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY = 'iskra_remote_selected_runner_id';
+const ISKRA_DEFAULT_REMOTE_SELECTED_RUNNER_ID = 'ext-a2506ac9-8f3d-4d52-8d4f-92f71e864d9f';
 const ISKRA_REMOTE_RUNNER_ENABLED_STORAGE_KEY = 'iskra_remote_runner_enabled';
 const ISKRA_REMOTE_RUNNER_NAME_STORAGE_KEY = 'iskra_remote_runner_name';
 const ISKRA_REMOTE_JOB_SUPPRESSIONS_STORAGE_KEY = 'iskra_remote_job_suppressions';
@@ -149,7 +166,8 @@ const ISKRA_REMOTE_RUNNER = {
   alarmPeriodMinutes: 1,
   requestTimeoutMs: 20000,
   retryCount: 2,
-  backoffMs: 1500
+  backoffMs: 1500,
+  rescueRetryMs: 15000
 };
 
 const AUTO_RESTORE_WINDOWS = {
@@ -178,7 +196,9 @@ const PROCESS_MONITOR_HEARTBEAT = {
   // Treat runs as stale when no progress update arrives within TTL.
   staleTtlMs: PROCESS_STREAM_HEARTBEAT_MS * 3,
   staleWarnCooldownMs: PROCESS_STREAM_HEARTBEAT_MS * 2,
-  autoStopNoContextTtlMs: 24 * 60 * 60 * 1000,
+  autoStopNoContextTtlMs: 15 * 60 * 1000,
+  autoStopLiveStaleTtlMs: WAIT_FOR_RESPONSE_MS + (30 * 60 * 1000),
+  autoStopFinalizingStaleTtlMs: 30 * 60 * 1000,
   finalPromptRecoveryTtlMs: 10 * 60 * 1000,
   finalPromptRecoveryCooldownMs: 15 * 60 * 1000
 };
@@ -189,6 +209,8 @@ const COMPLETED_PROCESS_PERSISTENCE_RETRY = {
   alarmName: 'completed-process-persistence-retry'
 };
 const PROCESS_WINDOW_CLOSE_RETRY = {
+  // Process tabs/windows are automation-owned work surfaces; close them after final response persistence.
+  enabled: true,
   initialDelayMs: 1500,
   maxDelayMs: 60 * 1000,
   maxAttempts: 24,
@@ -242,6 +264,7 @@ let responseStorageMutationQueue = Promise.resolve();
 let canonicalResponseStorageReady = null;
 let analysisQueueMutationQueue = Promise.resolve();
 let watchlistDispatchCredentialsCache = null;
+let watchlistDispatchHealthCache = null;
 let watchlistDispatchProcessLogEntries = [];
 let watchlistDispatchProcessLogReady = null;
 let autoRestoreWindowsInProgress = false;
@@ -287,6 +310,7 @@ let watchlistConnectionLogLastTs = 0;
 let processMonitorHeartbeatSweepInProgress = false;
 let remoteRunnerCycleInProgress = false;
 let remoteRunnerCycleRequested = false;
+let remoteRunnerRescueTimer = null;
 
 function extractManualPdfProviderIdFromPort(port) {
   const name = typeof port?.name === 'string' ? port.name.trim() : '';
@@ -312,10 +336,26 @@ async function waitForManualPdfProviderPort(providerId, timeoutMs = 5000) {
 function normalizeComposerThinkingEffort(value) {
   const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
   if (!normalized) return '';
-  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+  if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
     return normalized;
   }
+  if (normalized === 'high' || normalized === 'heavy') return 'high';
   return '';
+}
+
+function formatResumeProcessTitleWithThinkingEffort(title, composerThinkingEffort) {
+  const baseTitle = typeof title === 'string' && title.trim()
+    ? title.trim()
+    : '';
+  const normalizedEffort = normalizeComposerThinkingEffort(composerThinkingEffort);
+  if (!baseTitle || !normalizedEffort) return baseTitle;
+
+  const tag = `[${normalizedEffort.toUpperCase()}]`;
+  if (baseTitle.includes(tag)) return baseTitle;
+  if (normalizedEffort === 'high' && baseTitle.includes('[HEAVY]')) return baseTitle;
+
+  const formattedTitle = baseTitle.replace(/^(Auto\s+(?:Start|Repeat))(?=:)/i, `$1 ${tag}`);
+  return formattedTitle === baseTitle ? `${baseTitle} ${tag}` : formattedTitle;
 }
 
 function normalizeChatGptMonitoringLabel(value, maxLength = 180) {
@@ -386,10 +426,18 @@ function normalizeChatGptUiText(value) {
     .toLowerCase();
 }
 
-function isChatGptLimitOrRestrictionText(text) {
+function isChatGptLimitOrRestrictionText(text, source = 'text') {
   const lowered = normalizeChatGptUiText(text);
   if (!lowered) return false;
-  return /\blimit\s*:/.test(lowered);
+  const sourceKey = normalizeChatGptUiText(source);
+  const trustedUiSource = (
+    sourceKey.includes('alert') ||
+    sourceKey.includes('status') ||
+    sourceKey.includes('error') ||
+    sourceKey.includes('banner') ||
+    sourceKey.includes('toast')
+  );
+  return trustedUiSource && /^(?:limit|rate limit|usage limit)\s*:/.test(lowered) && lowered.length <= 240;
 }
 
 function isInjectRateLimitBlockedResult(result) {
@@ -399,6 +447,81 @@ function isInjectRateLimitBlockedResult(result) {
     && result.success === false
     && result.error === 'rate_limit_blocked'
   );
+}
+
+function resolveDataGapStageIdFromObject(source = {}) {
+  if (!source || typeof source !== 'object') return '';
+  const candidates = [
+    source.dataGapStageId,
+    source.dataGapStage,
+    source.stageId,
+    source.missingStageId
+  ];
+  for (const candidate of candidates) {
+    const stageId = normalizeDataGapStageIdValue(candidate);
+    if (stageId) return stageId;
+  }
+  const errorText = typeof source.error === 'string' ? source.error.trim() : '';
+  const errorMatch = errorText.match(/^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i);
+  if (errorMatch) return normalizeDataGapStageIdValue(errorMatch[1]);
+  return '';
+}
+
+function isInjectDataGapTerminalResult(result) {
+  return !!(
+    result
+    && typeof result === 'object'
+    && result.success === false
+    && (
+      result.dataGapTerminal === true
+      || result.dataGapDetected === true
+      || result.reason === 'data_gap_stage'
+      || result.statusCode === 'process.data_gap_stage'
+    )
+  );
+}
+
+function isDataGapTerminalProcess(process) {
+  if (!process || typeof process !== 'object') return false;
+  return process.dataGapDetected === true
+    || process.reason === 'data_gap_stage'
+    || process.statusCode === 'process.data_gap_stage';
+}
+
+function buildInjectDataGapTerminalSummary(result = {}, fallback = {}) {
+  const stageId = resolveDataGapStageIdFromObject(result) || '?';
+  const currentPrompt = Number.isInteger(result?.currentPrompt)
+    ? result.currentPrompt
+    : (Number.isInteger(fallback?.currentPrompt) ? fallback.currentPrompt : 0);
+  const totalPrompts = Number.isInteger(result?.totalPrompts)
+    ? result.totalPrompts
+    : (Number.isInteger(fallback?.totalPrompts) ? fallback.totalPrompts : 0);
+  const stageIndex = Number.isInteger(result?.stageIndex)
+    ? result.stageIndex
+    : (Number.isInteger(fallback?.stageIndex)
+      ? fallback.stageIndex
+      : (currentPrompt > 0 ? currentPrompt - 1 : null));
+  const statusText = `DATA_GAP_STAGE=${stageId} - zamykam karte`;
+  return {
+    lifecycleStatus: 'stopped',
+    phase: 'data_gap_stage',
+    actionRequired: 'none',
+    needsAction: false,
+    statusCode: 'process.data_gap_stage',
+    statusText,
+    reason: 'data_gap_stage',
+    error: `DATA_GAP_STAGE=${stageId}`,
+    heading: 'DATA_GAP_STAGE',
+    tone: 'warn',
+    logLines: [
+      `Wykryto DATA_GAP_STAGE=${stageId}.`,
+      'Karta zostanie zamknieta, a kolejka uruchomi nastepny job.'
+    ],
+    currentPrompt,
+    totalPrompts,
+    stageIndex,
+    stageName: Number.isInteger(stageIndex) ? `Prompt ${stageIndex + 1}` : ''
+  };
 }
 
 function buildInjectRateLimitNeedsActionPatch(result = {}, fallback = {}) {
@@ -1852,6 +1975,22 @@ function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   };
   if (Number.isInteger(rawTab.windowId)) snapshot.windowId = rawTab.windowId;
   if (Number.isInteger(rawTab.index)) snapshot.index = rawTab.index;
+  if (typeof rawTab.sourceUrl === 'string' && rawTab.sourceUrl.trim()) {
+    snapshot.sourceUrl = rawTab.sourceUrl.trim();
+  }
+  if (typeof rawTab.sourceKind === 'string' && rawTab.sourceKind.trim()) {
+    snapshot.sourceKind = rawTab.sourceKind.trim();
+  }
+  if (typeof rawTab.sourceMaterialId === 'string' && rawTab.sourceMaterialId.trim()) {
+    snapshot.sourceMaterialId = rawTab.sourceMaterialId.trim();
+  }
+  if (typeof rawTab.sourceMaterialHash === 'string' && rawTab.sourceMaterialHash.trim()) {
+    snapshot.sourceMaterialHash = rawTab.sourceMaterialHash.trim();
+  }
+  const sourceMaterialLength = normalizeSourceMaterialLength(rawTab.sourceMaterialLength);
+  if (Number.isInteger(sourceMaterialLength)) snapshot.sourceMaterialLength = sourceMaterialLength;
+  if (rawTab.sourceMaterialStored === true) snapshot.sourceMaterialStored = true;
+  if (rawTab.sourceMaterialNeedsProcessLink === true) snapshot.sourceMaterialNeedsProcessLink = true;
   const manualTextSourceId = sanitizeManualTextSourceId(rawTab.manualTextSourceId);
   if (manualTextSourceId) snapshot.manualTextSourceId = manualTextSourceId;
   if (typeof rawTab.manualText === 'string') snapshot.manualText = rawTab.manualText;
@@ -1886,7 +2025,16 @@ function sanitizeRemoteAnalysisQueueJobMetadata(rawRemote) {
       : (typeof rawRemote.runnerId === 'string' ? rawRemote.runnerId.trim() : ''),
     controllerId: typeof rawRemote.controllerId === 'string' ? rawRemote.controllerId.trim() : '',
     batchId: typeof rawRemote.batchId === 'string' ? rawRemote.batchId.trim() : '',
-    submissionId: typeof rawRemote.submissionId === 'string' ? rawRemote.submissionId.trim() : ''
+    submissionId: typeof rawRemote.submissionId === 'string' ? rawRemote.submissionId.trim() : '',
+    sourceMaterialId: typeof rawRemote.sourceMaterialId === 'string'
+      ? rawRemote.sourceMaterialId.trim()
+      : (typeof rawRemote.source_material_id === 'string' ? rawRemote.source_material_id.trim() : ''),
+    sourceMaterialHash: typeof rawRemote.sourceMaterialHash === 'string'
+      ? rawRemote.sourceMaterialHash.trim()
+      : (typeof rawRemote.source_material_hash === 'string' ? rawRemote.source_material_hash.trim() : ''),
+    sourceMaterialLength: normalizeSourceMaterialLength(
+      rawRemote.sourceMaterialLength ?? rawRemote.source_material_length
+    ) ?? null
   };
 }
 
@@ -1916,6 +2064,10 @@ function sanitizeAnalysisQueueJob(rawJob) {
     manualPdfBatchId: typeof rawJob.manualPdfBatchId === 'string' ? rawJob.manualPdfBatchId.trim() : '',
     manualPdfProviderId: typeof rawJob.manualPdfProviderId === 'string' ? rawJob.manualPdfProviderId.trim() : '',
     sourceUrl: typeof rawJob.sourceUrl === 'string' ? rawJob.sourceUrl.trim() : '',
+    sourceMaterialId: typeof rawJob.sourceMaterialId === 'string' ? rawJob.sourceMaterialId.trim() : '',
+    sourceMaterialHash: typeof rawJob.sourceMaterialHash === 'string' ? rawJob.sourceMaterialHash.trim() : '',
+    sourceMaterialLength: normalizeSourceMaterialLength(rawJob.sourceMaterialLength) ?? null,
+    sourceMaterialStored: rawJob.sourceMaterialStored === true,
     chatUrl: typeof rawJob.chatUrl === 'string' ? rawJob.chatUrl.trim() : '',
     startedAt: Number.isInteger(rawJob.startedAt) ? rawJob.startedAt : null,
     slotReservedAt: Number.isInteger(rawJob.slotReservedAt) ? rawJob.slotReservedAt : null,
@@ -1962,9 +2114,11 @@ function sanitizeAnalysisQueueJob(rawJob) {
     }
     sanitized.reloadBeforeResume = rawJob.reloadBeforeResume !== false;
     sanitized.forceRepeatLastPrompt = rawJob.forceRepeatLastPrompt === true;
+    sanitized.bypassPause = rawJob.bypassPause === true;
     sanitized.skipStagePreflight = rawJob.skipStagePreflight === true;
-    if (typeof rawJob.composerThinkingEffort === 'string' && rawJob.composerThinkingEffort.trim()) {
-      sanitized.composerThinkingEffort = rawJob.composerThinkingEffort.trim();
+    const composerThinkingEffort = normalizeComposerThinkingEffort(rawJob.composerThinkingEffort);
+    if (composerThinkingEffort) {
+      sanitized.composerThinkingEffort = composerThinkingEffort;
     }
     if (rawJob.precomputedStagePlan && typeof rawJob.precomputedStagePlan === 'object') {
       sanitized.precomputedStagePlan = rawJob.precomputedStagePlan;
@@ -2045,8 +2199,8 @@ async function setAnalysisQueuePaused(paused, options = {}) {
   }
   await chrome.storage.local.set({ [ANALYSIS_QUEUE_PAUSED_STORAGE_KEY]: nextPaused });
   analysisQueuePaused = nextPaused;
-  if (options?.requestReconcile !== false) {
-    requestAnalysisQueueReconcile(nextPaused ? 'queue_paused' : 'queue_resumed');
+  if (!nextPaused && options?.requestReconcile !== false) {
+    requestAnalysisQueueReconcile('queue_resumed');
   }
   if (!nextPaused && options?.requestRemoteRunnerCycle !== false) {
     requestRemoteRunnerCycle('queue_resumed');
@@ -2548,6 +2702,9 @@ function getAnalysisQueueProcessContextKey(process) {
 
 function shouldProcessOccupyAnalysisQueueSlot(process) {
   if (!process || typeof process !== 'object') return false;
+  if (shouldBypassAnalysisQueueForAnalysisType(process.analysisType)) {
+    return false;
+  }
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (process.queueManaged === true && process.slotReserved === false && status !== 'queued') {
     return false;
@@ -2814,11 +2971,10 @@ async function getStoredRemoteExecutionMode() {
 async function getStoredSelectedRemoteRunnerId() {
   try {
     const stored = await chrome.storage.local.get([ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY]);
-    return typeof stored?.[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY] === 'string'
-      ? stored[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY].trim()
-      : '';
+    const storedRunnerId = normalizeSelectedRemoteRunnerId(stored?.[ISKRA_REMOTE_SELECTED_RUNNER_ID_STORAGE_KEY]);
+    return storedRunnerId || getDefaultSelectedRemoteRunnerId();
   } catch (error) {
-    return '';
+    return getDefaultSelectedRemoteRunnerId();
   }
 }
 
@@ -2847,7 +3003,13 @@ function normalizeRemoteRunnerName(value) {
 }
 
 function normalizeSelectedRemoteRunnerId(value) {
-  return typeof value === 'string' ? value.trim() : '';
+  const normalized = typeof value === 'string' ? value.trim() : '';
+  if (normalized === 'default_runner_missing') return '';
+  return normalized;
+}
+
+function getDefaultSelectedRemoteRunnerId() {
+  return normalizeSelectedRemoteRunnerId(ISKRA_DEFAULT_REMOTE_SELECTED_RUNNER_ID);
 }
 
 async function getRemoteExecutionConfigSnapshot(options = {}) {
@@ -3022,6 +3184,28 @@ function normalizeRemoteApiErrorText(error, fallback = 'remote_api_failed') {
   return normalized || fallback;
 }
 
+function normalizeRemoteApiResponseErrorText(status, payload = {}, responseText = '') {
+  if (status === 413) {
+    return 'request_entity_too_large';
+  }
+
+  const payloadDetail = typeof payload?.detail === 'string' && payload.detail.trim()
+    ? payload.detail.trim()
+    : '';
+  const payloadReason = typeof payload?.reason === 'string' && payload.reason.trim()
+    ? payload.reason.trim()
+    : '';
+  if (payloadDetail) return payloadDetail;
+  if (payloadReason) return payloadReason;
+
+  const text = typeof responseText === 'string' ? responseText.trim() : '';
+  if (!text) return `http_${status}`;
+  if (/^\s*</.test(text) || /<html[\s>]/i.test(text)) {
+    return `http_${status}`;
+  }
+  return text.slice(0, 240);
+}
+
 async function performSignedIskraApiRequest(options = {}) {
   const config = await resolveWatchlistDispatchConfiguration(options?.forceConfigReload === true);
   if (!config?.ok) {
@@ -3111,13 +3295,15 @@ async function performSignedIskraApiRequest(options = {}) {
 
         if (!response.ok) {
           lastStatus = response.status;
-          lastError = (
-            (typeof responsePayload?.detail === 'string' && responsePayload.detail.trim())
-            || (typeof responsePayload?.reason === 'string' && responsePayload.reason.trim())
-            || (typeof responseText === 'string' && responseText.trim())
-            || `http_${response.status}`
-          );
-          if (response.status === 401 || response.status === 403 || response.status === 404 || response.status === 409 || response.status === 422) {
+          lastError = normalizeRemoteApiResponseErrorText(response.status, responsePayload, responseText);
+          if (
+            response.status === 401
+            || response.status === 403
+            || response.status === 404
+            || response.status === 409
+            || response.status === 413
+            || response.status === 422
+          ) {
             break;
           }
         } else {
@@ -3148,6 +3334,56 @@ async function performSignedIskraApiRequest(options = {}) {
     payload: lastPayload,
     intakeUrl: lastUrl
   };
+}
+
+async function submitSourceMaterialForProcess(source = {}, options = {}) {
+  const text = typeof source?.text === 'string' ? source.text : '';
+  if (!text.trim()) {
+    return { success: false, skipped: true, reason: 'source_material_text_empty', payload: null };
+  }
+  const runId = typeof source?.runId === 'string' ? source.runId.trim() : '';
+  const jobId = typeof source?.jobId === 'string' ? source.jobId.trim() : '';
+  const batchId = typeof source?.batchId === 'string' ? source.batchId.trim() : '';
+  const submissionId = typeof source?.submissionId === 'string' ? source.submissionId.trim() : '';
+  const runnerId = typeof source?.runnerId === 'string' ? source.runnerId.trim() : '';
+  const processId = typeof source?.processId === 'string' && source.processId.trim()
+    ? source.processId.trim()
+    : (jobId || runId);
+  const process = processId
+    ? {
+      processKind: typeof source?.processKind === 'string' && source.processKind.trim()
+        ? source.processKind.trim()
+        : 'analysis_process',
+      processId,
+      jobId,
+      runId,
+      batchId,
+      submissionId,
+      runnerId,
+      relation: typeof source?.relation === 'string' && source.relation.trim()
+        ? source.relation.trim()
+        : 'process_input',
+      metadata: source?.processMetadata && typeof source.processMetadata === 'object'
+        ? source.processMetadata
+        : {}
+    }
+    : null;
+  const payload = {
+    text,
+    title: typeof source?.title === 'string' ? source.title : '',
+    sourceKind: typeof source?.sourceKind === 'string' ? source.sourceKind : '',
+    sourceUrl: typeof source?.sourceUrl === 'string' ? source.sourceUrl : '',
+    metadata: source?.metadata && typeof source.metadata === 'object' ? source.metadata : {}
+  };
+  if (process) payload.process = process;
+  return performSignedIskraApiRequest({
+    method: 'POST',
+    path: SOURCE_MATERIALS_API_PATH,
+    payload,
+    timeoutMs: Number.isInteger(options?.timeoutMs) ? options.timeoutMs : 15000,
+    retryCount: Number.isInteger(options?.retryCount) ? options.retryCount : 0,
+    backoffMs: Number.isInteger(options?.backoffMs) ? options.backoffMs : 1000
+  });
 }
 
 async function listRemoteRunnersViaApi(options = {}) {
@@ -3253,12 +3489,174 @@ function buildRemoteQueueJobLikeFromProcess(process) {
   };
 }
 
+function trimRemoteRunnerSnapshotText(value, maxLength = 180) {
+  const safeValue = typeof value === 'string' ? value.trim() : '';
+  if (!safeValue) return '';
+  if (typeof trimProblemLogText === 'function') {
+    return trimProblemLogText(safeValue, maxLength);
+  }
+  if (!Number.isInteger(maxLength) || maxLength <= 0 || safeValue.length <= maxLength) {
+    return safeValue;
+  }
+  return `${safeValue.slice(0, Math.max(0, maxLength - 3)).trimEnd()}...`;
+}
+
+function readRemoteRunnerSnapshotTimestamp(value) {
+  return Number.isInteger(value) && value > 0 ? value : null;
+}
+
+function getRemoteRunnerSnapshotProcessStatus(process) {
+  const rawStatus = typeof process?.status === 'string' && process.status.trim()
+    ? process.status.trim()
+    : (typeof process?.queueState === 'string' ? process.queueState.trim() : '');
+  if (typeof normalizeProcessStatus === 'function') {
+    return normalizeProcessStatus(rawStatus || 'running');
+  }
+  return rawStatus || 'running';
+}
+
+function buildRemoteRunnerLocalProcessItem(process, activity = null) {
+  if (!process || typeof process !== 'object') return null;
+  const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  if (!runId) return null;
+  const remote = process?.remote && typeof process.remote === 'object' ? process.remote : null;
+  const remoteJobId = typeof remote?.remoteJobId === 'string' ? remote.remoteJobId.trim() : '';
+  const lastActivityAt = typeof getProcessLastActivityTimestamp === 'function'
+    ? getProcessLastActivityTimestamp(process)
+    : (
+      readRemoteRunnerSnapshotTimestamp(process?.lastActivityAt)
+      || readRemoteRunnerSnapshotTimestamp(process?.timestamp)
+      || readRemoteRunnerSnapshotTimestamp(process?.startedAt)
+      || 0
+    );
+  return {
+    kind: 'local_process',
+    runId,
+    jobId: typeof process?.queueJobId === 'string' && process.queueJobId.trim()
+      ? process.queueJobId.trim()
+      : remoteJobId,
+    title: trimRemoteRunnerSnapshotText(
+      typeof process?.title === 'string' && process.title.trim()
+        ? process.title.trim()
+        : 'Lokalny proces',
+      180
+    ),
+    status: getRemoteRunnerSnapshotProcessStatus(process),
+    queueState: typeof process?.queueState === 'string' ? process.queueState.trim() : '',
+    phase: typeof process?.phase === 'string' ? trimRemoteRunnerSnapshotText(process.phase, 80) : '',
+    sourceKind: typeof process?.sourceKind === 'string' ? process.sourceKind.trim() : '',
+    sourceUrl: typeof process?.sourceUrl === 'string' ? trimRemoteRunnerSnapshotText(process.sourceUrl, 240) : '',
+    chatUrl: typeof process?.chatUrl === 'string' ? trimRemoteRunnerSnapshotText(process.chatUrl, 240) : '',
+    currentPrompt: Number.isInteger(process?.currentPrompt) ? process.currentPrompt : null,
+    totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null,
+    startedAt: readRemoteRunnerSnapshotTimestamp(process?.startedAt),
+    updatedAt: lastActivityAt || readRemoteRunnerSnapshotTimestamp(process?.timestamp),
+    lastActivityAt: lastActivityAt || null,
+    remoteJobId,
+    remoteAttemptId: typeof remote?.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '',
+    remoteRunnerId: typeof remote?.remoteRunnerId === 'string' ? remote.remoteRunnerId.trim() : '',
+    controllerId: typeof remote?.controllerId === 'string' ? remote.controllerId.trim() : '',
+    batchId: typeof remote?.batchId === 'string' ? remote.batchId.trim() : '',
+    submissionId: typeof remote?.submissionId === 'string' ? remote.submissionId.trim() : '',
+    live: activity?.live === true,
+    contextKey: typeof activity?.contextKey === 'string' ? activity.contextKey : ''
+  };
+}
+
+function buildRemoteRunnerLocalQueueItem(job, queueState = 'waiting') {
+  if (!job || typeof job !== 'object') return null;
+  const runId = typeof job?.runId === 'string' ? job.runId.trim() : '';
+  const jobId = typeof job?.jobId === 'string' ? job.jobId.trim() : '';
+  if (!runId && !jobId) return null;
+  const remote = job?.remote && typeof job.remote === 'object' ? job.remote : null;
+  return {
+    kind: 'local_queue_job',
+    runId,
+    jobId,
+    title: trimRemoteRunnerSnapshotText(
+      typeof job?.title === 'string' && job.title.trim()
+        ? job.title.trim()
+        : 'Lokalny job',
+      180
+    ),
+    status: queueState === 'waiting' ? 'queued' : 'starting',
+    queueState,
+    phase: queueState === 'waiting' ? 'waiting' : 'slot_reserved',
+    sourceKind: typeof job?.sourceKind === 'string' ? job.sourceKind.trim() : '',
+    sourceUrl: typeof job?.sourceUrl === 'string' ? trimRemoteRunnerSnapshotText(job.sourceUrl, 240) : '',
+    currentPrompt: null,
+    totalPrompts: null,
+    startedAt: readRemoteRunnerSnapshotTimestamp(job?.startedAt),
+    updatedAt: readRemoteRunnerSnapshotTimestamp(job?.startedAt) || readRemoteRunnerSnapshotTimestamp(job?.createdAt),
+    lastActivityAt: readRemoteRunnerSnapshotTimestamp(job?.startedAt) || readRemoteRunnerSnapshotTimestamp(job?.createdAt),
+    remoteJobId: typeof remote?.remoteJobId === 'string' ? remote.remoteJobId.trim() : '',
+    remoteAttemptId: typeof remote?.remoteAttemptId === 'string' ? remote.remoteAttemptId.trim() : '',
+    remoteRunnerId: typeof remote?.remoteRunnerId === 'string' ? remote.remoteRunnerId.trim() : '',
+    controllerId: typeof remote?.controllerId === 'string' ? remote.controllerId.trim() : '',
+    batchId: typeof remote?.batchId === 'string' ? remote.batchId.trim() : '',
+    submissionId: typeof remote?.submissionId === 'string' ? remote.submissionId.trim() : '',
+    live: false,
+    contextKey: ''
+  };
+}
+
+function buildRemoteRunnerLocalProcessSnapshot(localState, options = {}) {
+  const limit = Number.isInteger(options?.limit)
+    ? Math.max(0, Math.min(50, options.limit))
+    : 25;
+  if (limit === 0) return [];
+  const items = [];
+  const seen = new Set();
+  const addItem = (item) => {
+    if (!item || typeof item !== 'object') return;
+    const key = item.remoteJobId
+      ? `remote:${item.remoteJobId}`
+      : (item.runId ? `run:${item.runId}` : (item.jobId ? `job:${item.jobId}` : ''));
+    if (!key || seen.has(key)) return;
+    seen.add(key);
+    items.push(item);
+  };
+
+  const activeLocalProcesses = Array.isArray(localState?.activeLocalProcesses)
+    ? localState.activeLocalProcesses
+    : [];
+  for (const entry of activeLocalProcesses) {
+    addItem(buildRemoteRunnerLocalProcessItem(entry?.process, entry?.activity || null));
+  }
+
+  const activeJobs = Array.isArray(localState?.queueState?.activeJobs)
+    ? localState.queueState.activeJobs
+    : [];
+  for (const job of activeJobs) {
+    addItem(buildRemoteRunnerLocalQueueItem(job, 'active'));
+  }
+
+  const waitingJobs = Array.isArray(localState?.queueState?.waitingJobs)
+    ? localState.queueState.waitingJobs
+    : [];
+  for (const job of waitingJobs) {
+    addItem(buildRemoteRunnerLocalQueueItem(job, 'waiting'));
+  }
+
+  return items
+    .sort((left, right) => {
+      const leftUpdatedAt = Number.isInteger(left?.updatedAt) ? left.updatedAt : 0;
+      const rightUpdatedAt = Number.isInteger(right?.updatedAt) ? right.updatedAt : 0;
+      if (leftUpdatedAt !== rightUpdatedAt) return rightUpdatedAt - leftUpdatedAt;
+      return String(left?.runId || left?.jobId || '').localeCompare(String(right?.runId || right?.jobId || ''));
+    })
+    .slice(0, limit);
+}
+
 async function getRemoteRunnerLocalState() {
   const [queueSnapshot, queueState] = await Promise.all([
     getAnalysisQueueStatusSnapshot().catch(() => null),
     getAnalysisQueueSnapshot().catch(() => createEmptyAnalysisQueueState()),
     ensureProcessRegistryReady().catch(() => null)
   ]);
+  const activeLocalProcesses = typeof collectAnalysisQueueActiveProcesses === 'function'
+    ? await collectAnalysisQueueActiveProcesses().catch(() => [])
+    : [];
   const activeRemoteJob = findRemoteAnalysisQueueJob(queueState?.activeJobs);
   const queuedWaitingRemoteJob = findRemoteAnalysisQueueJob(queueState?.waitingJobs);
   const activeRemoteProcess = findActiveRemoteProcessRecord();
@@ -3278,6 +3676,7 @@ async function getRemoteRunnerLocalState() {
     queueState,
     activeRemoteJob: activeRemoteJob || processBackedRemoteJob,
     activeRemoteProcess,
+    activeLocalProcesses,
     queuedRemoteJob,
     localBusy: totalJobsWithProcess > 0,
     localQueueSize: totalJobsWithProcess
@@ -3439,19 +3838,35 @@ async function enqueueClaimedRemoteJob(job) {
     throw new Error('remote_job_prompt_chain_missing');
   }
 
+  const remoteSourceKind = typeof remoteJob.sourceKind === 'string' && remoteJob.sourceKind.trim()
+    ? remoteJob.sourceKind.trim()
+    : 'manual_text';
+  const remoteSourceUrl = typeof remoteJob.sourceUrl === 'string' && remoteJob.sourceUrl.trim()
+    ? remoteJob.sourceUrl.trim()
+    : 'manual://source';
+  const remoteAnalysisType = normalizeAnalysisTypeForPromptChain(remoteJob.analysisType);
+  const remoteChatUrl = typeof remoteJob.chatUrl === 'string' && remoteJob.chatUrl.trim()
+    ? remoteJob.chatUrl.trim()
+    : getChatUrlForAnalysisType(remoteAnalysisType);
+  const sourceMaterialId = typeof remoteJob.sourceMaterialId === 'string' ? remoteJob.sourceMaterialId.trim() : '';
+  const sourceMaterialHash = typeof remoteJob.sourceMaterialHash === 'string' ? remoteJob.sourceMaterialHash.trim() : '';
+  const sourceMaterialLength = normalizeSourceMaterialLength(remoteJob.sourceMaterialLength);
+
   const localJob = {
     kind: ANALYSIS_QUEUE_KIND_ARTICLE,
     jobId: remoteJob.jobId.trim(),
     runId: remoteJob.runId.trim(),
-    analysisType: typeof remoteJob.analysisType === 'string' && remoteJob.analysisType.trim()
-      ? remoteJob.analysisType.trim()
-      : 'company',
+    analysisType: remoteAnalysisType,
     title: typeof remoteJob.submittedTitle === 'string' && remoteJob.submittedTitle.trim()
       ? remoteJob.submittedTitle.trim()
       : 'Remote manual source',
-    sourceKind: 'manual_text',
-    sourceUrl: 'manual://source',
-    chatUrl: CHAT_URL,
+    sourceKind: remoteSourceKind,
+    sourceUrl: remoteSourceUrl,
+    sourceMaterialId,
+    sourceMaterialHash,
+    sourceMaterialLength: Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : null,
+    sourceMaterialStored: !!sourceMaterialId,
+    chatUrl: remoteChatUrl,
     queueBatchId: typeof remoteJob.batchId === 'string' ? remoteJob.batchId.trim() : '',
     promptChainSnapshot,
     promptHash: typeof remoteJob.promptHash === 'string' ? remoteJob.promptHash.trim() : '',
@@ -3461,7 +3876,10 @@ async function enqueueClaimedRemoteJob(job) {
       remoteRunnerId: typeof remoteJob.runnerId === 'string' ? remoteJob.runnerId.trim() : '',
       controllerId: typeof remoteJob.controllerId === 'string' ? remoteJob.controllerId.trim() : '',
       batchId: typeof remoteJob.batchId === 'string' ? remoteJob.batchId.trim() : '',
-      submissionId: typeof remoteJob.submissionId === 'string' ? remoteJob.submissionId.trim() : ''
+      submissionId: typeof remoteJob.submissionId === 'string' ? remoteJob.submissionId.trim() : '',
+      sourceMaterialId,
+      sourceMaterialHash,
+      sourceMaterialLength: Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : null
     },
     tabSnapshot: {
       id: `remote-${remoteJob.jobId.trim()}`,
@@ -3469,6 +3887,12 @@ async function enqueueClaimedRemoteJob(job) {
         ? remoteJob.submittedTitle.trim()
         : 'Remote manual source',
       url: 'manual://source',
+      sourceUrl: remoteSourceUrl,
+      sourceKind: remoteSourceKind,
+      sourceMaterialId,
+      sourceMaterialHash,
+      sourceMaterialLength: Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : null,
+      sourceMaterialStored: !!sourceMaterialId,
       manualText: text
     }
   };
@@ -3649,6 +4073,12 @@ async function sendRemoteRunnerHeartbeat(options = {}) {
   const activeRemoteJobId = typeof localState?.queuedRemoteJob?.remote?.remoteJobId === 'string'
     ? localState.queuedRemoteJob.remote.remoteJobId
     : '';
+  const localProcessSnapshot = typeof buildRemoteRunnerLocalProcessSnapshot === 'function'
+    ? buildRemoteRunnerLocalProcessSnapshot(localState, { limit: 25 })
+    : [];
+  const queueSnapshot = localState?.queueSnapshot && typeof localState.queueSnapshot === 'object'
+    ? localState.queueSnapshot
+    : {};
   return performSignedIskraApiRequest({
     method: 'POST',
     path: getIskraApiPath('runnerHeartbeat'),
@@ -3667,7 +4097,17 @@ async function sendRemoteRunnerHeartbeat(options = {}) {
       activeJobId: activeRemoteJobId || undefined,
       capabilities: {
         remoteManualTextV1: true,
-        promptChainSnapshotV1: true
+        promptChainSnapshotV1: true,
+        localProcessSnapshotV1: true,
+        localProcesses: localProcessSnapshot,
+        localQueueSnapshot: {
+          totalJobs: Number.isInteger(queueSnapshot?.totalJobs) ? queueSnapshot.totalJobs : localProcessSnapshot.length,
+          queueSize: Number.isInteger(queueSnapshot?.queueSize) ? queueSnapshot.queueSize : 0,
+          activeSlots: Number.isInteger(queueSnapshot?.activeSlots) ? queueSnapshot.activeSlots : 0,
+          reservedSlots: Number.isInteger(queueSnapshot?.reservedSlots) ? queueSnapshot.reservedSlots : 0,
+          liveSlots: Number.isInteger(queueSnapshot?.liveSlots) ? queueSnapshot.liveSlots : 0,
+          updatedAt: Date.now()
+        }
       }
     },
     timeoutMs: options?.timeoutMs
@@ -3750,7 +4190,28 @@ function requestRemoteRunnerCycle(reason = 'manual') {
   remoteRunnerCycleRequested = true;
   Promise.resolve().then(() => runRemoteRunnerCycle(normalizedReason)).catch((error) => {
     console.warn('[remote-runner] cycle failed:', error?.message || String(error));
+    if (typeof scheduleRemoteRunnerRescueCycle === 'function') {
+      scheduleRemoteRunnerRescueCycle(`request_failed:${normalizedReason}`);
+    }
   });
+}
+
+function clearRemoteRunnerRescueTimer() {
+  if (remoteRunnerRescueTimer === null) return;
+  if (typeof clearTimeout === 'function') clearTimeout(remoteRunnerRescueTimer);
+  remoteRunnerRescueTimer = null;
+}
+
+function scheduleRemoteRunnerRescueCycle(reason = 'cycle_failed', delayMs = ISKRA_REMOTE_RUNNER.rescueRetryMs) {
+  if (typeof setTimeout !== 'function') return;
+  if (remoteRunnerRescueTimer !== null) return;
+  const safeDelay = Number.isInteger(delayMs)
+    ? Math.max(1000, Math.min(5 * 60 * 1000, delayMs))
+    : ISKRA_REMOTE_RUNNER.rescueRetryMs;
+  remoteRunnerRescueTimer = setTimeout(() => {
+    remoteRunnerRescueTimer = null;
+    requestRemoteRunnerCycle(`rescue:${reason}`);
+  }, safeDelay);
 }
 
 async function runRemoteRunnerCycle(reason = 'manual') {
@@ -3767,7 +4228,17 @@ async function runRemoteRunnerCycle(reason = 'manual') {
     remoteRunnerCycleRequested = false;
     const runnerEnabled = await getStoredRemoteRunnerEnabled();
     if (!runnerEnabled) {
+      if (typeof clearRemoteRunnerRescueTimer === 'function') clearRemoteRunnerRescueTimer();
       return { success: true, skipped: true, reason: 'runner_disabled' };
+    }
+
+    if (typeof syncRemoteRunnerAlarm === 'function') {
+      await syncRemoteRunnerAlarm().catch((error) => {
+        console.warn('[remote-runner] alarm sync failed:', {
+          reason: normalizedReason,
+          error: error?.message || String(error)
+        });
+      });
     }
 
     await sendRemoteRunnerHeartbeat().catch((error) => {
@@ -3814,6 +4285,20 @@ async function runRemoteRunnerCycle(reason = 'manual') {
     return pollAndClaimRemoteJob({
       origin: normalizedReason
     });
+  } catch (error) {
+    console.warn('[remote-runner] cycle failed:', {
+      reason: normalizedReason,
+      error: error?.message || String(error)
+    });
+    if (typeof scheduleRemoteRunnerRescueCycle === 'function') {
+      scheduleRemoteRunnerRescueCycle(`cycle_failed:${normalizedReason}`);
+    }
+    return {
+      success: false,
+      skipped: true,
+      reason: 'remote_runner_cycle_failed',
+      error: error?.message || String(error)
+    };
   } finally {
     remoteRunnerCycleInProgress = false;
     if (remoteRunnerCycleRequested) {
@@ -3951,7 +4436,10 @@ async function buildPreparedAnalysisBatch(tabs, promptChain, analysisType, optio
       controllerId,
       runnerId: typeof options?.runnerId === 'string' ? options.runnerId.trim() : '',
       analysisType,
+      chatUrl: getChatUrlForAnalysisType(analysisType),
       sourceMode: 'manual_text',
+      sourceKind: 'desktop_tab',
+      sourceUrl: typeof prepared.sourceUrl === 'string' ? prepared.sourceUrl : '',
       submittedTitle: prepared.title,
       text: prepared.text,
       instanceIndex: index + 1,
@@ -4050,7 +4538,8 @@ async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, option
     ? statusResult.payload.runner
     : null;
   const runnerState = typeof runnerStatus?.state === 'string' ? runnerStatus.state.trim().toLowerCase() : '';
-  if (!runnerStatus || runnerStatus.queueable !== true || runnerState !== 'ready') {
+  const runnerAcceptsQueuedWork = runnerStatus?.queueable === true && (runnerState === 'ready' || runnerState === 'busy');
+  if (!runnerStatus || !runnerAcceptsQueuedWork) {
     return {
       success: false,
       error: runnerState ? `runner_${runnerState}` : 'runner_blocked',
@@ -4096,10 +4585,14 @@ async function submitPreparedAnalysisBatchToRemoteRunner(batch, runnerId, option
 
   const createdCount = results.filter((entry) => entry.created === true).length;
   const idempotentCount = results.filter((entry) => entry.idempotent === true).length;
+  const submitError = results.length > 0
+    ? ''
+    : (failures.find((entry) => typeof entry?.error === 'string' && entry.error.trim())?.error || 'remote_submit_failed');
   return {
     success: results.length > 0,
     remote: true,
     runnerId: safeRunnerId,
+    error: submitError,
     batchId: typeof batch?.batchId === 'string' ? batch.batchId : '',
     submissionId: typeof batch?.submissionId === 'string' ? batch.submissionId : '',
     submittedCount: results.length,
@@ -4247,7 +4740,10 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
   finalPromptRecoveryInFlight.add(runId);
   finalPromptRecoveryLastAttemptAtByRunId.set(runId, nowTs);
   try {
-    const responseText = await extractLastAssistantResponseFromTab(tabId, 2600);
+    const stage12DomResponse = await extractLatestStage12InvestmentResponseFromTab(tabId, 2600);
+    const responseText = stage12DomResponse?.text
+      ? stage12DomResponse.text
+      : await extractLastAssistantResponseFromTab(tabId, 2600);
     const normalizedResponseText = typeof responseText === 'string' ? responseText.trim() : '';
     if (!normalizedResponseText) {
       return { success: false, reason: 'missing_response_text' };
@@ -4261,9 +4757,13 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
       };
     }
 
-    const promptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
-      ? process.currentPrompt
-      : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+    const recoveredFromStage12History = !!stage12DomResponse?.text;
+    const recoveredInvestmentJson = recoveredFromStage12History || contract?.kind === 'economist.response.v2';
+    const promptNumber = recoveredInvestmentJson
+      ? 15
+      : (Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
+        ? process.currentPrompt
+        : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0));
     const safeRunId = runId.replace(/[^a-zA-Z0-9._-]/g, '_') || 'run';
     const responseId = `${safeRunId}_p${promptNumber > 0 ? promptNumber : 0}_${textFingerprint(normalizedResponseText)}`;
     const stageMeta = {};
@@ -4271,7 +4771,9 @@ async function attemptStaleFinalPromptRecovery(process, origin = 'heartbeat', no
       stageMeta.selected_response_prompt = promptNumber;
       stageMeta.selected_response_stage_index = promptNumber - 1;
     }
-    stageMeta.selected_response_reason = 'stale_final_prompt_recovery';
+    stageMeta.selected_response_reason = recoveredFromStage12History
+      ? 'stale_final_prompt_stage14_dom_history'
+      : (recoveredInvestmentJson ? 'stale_final_prompt_stage14_last_message' : 'stale_final_prompt_recovery');
     const source = typeof process?.title === 'string' && process.title.trim()
       ? process.title.trim()
       : 'Stale final prompt recovery';
@@ -4384,22 +4886,69 @@ async function runProcessMonitorHeartbeatSweep(origin = 'alarm') {
         const autoStopNoContextTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs)
           && PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs > 0
           ? PROCESS_MONITOR_HEARTBEAT.autoStopNoContextTtlMs
-          : (24 * 60 * 60 * 1000);
+          : (15 * 60 * 1000);
+        const fallbackWaitForResponseMs = (
+          typeof WAIT_FOR_RESPONSE_MS === 'number'
+          && Number.isInteger(WAIT_FOR_RESPONSE_MS)
+          && WAIT_FOR_RESPONSE_MS > 0
+        )
+          ? WAIT_FOR_RESPONSE_MS
+          : (4 * 60 * 60 * 1000);
+        const autoStopLiveStaleTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs)
+          && PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs > 0
+          ? PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs
+          : (fallbackWaitForResponseMs + (30 * 60 * 1000));
+        const autoStopFinalizingStaleTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT.autoStopFinalizingStaleTtlMs)
+          && PROCESS_MONITOR_HEARTBEAT.autoStopFinalizingStaleTtlMs > 0
+          ? PROCESS_MONITOR_HEARTBEAT.autoStopFinalizingStaleTtlMs
+          : (30 * 60 * 1000);
+        const closeableSavedResponse = typeof hasProcessCloseableSavedResponse === 'function'
+          ? hasProcessCloseableSavedResponse(process)
+          : false;
+        if (
+          lifecycleStatus === 'finalizing'
+          && !closeableSavedResponse
+          && progressAgeMs >= autoStopFinalizingStaleTtlMs
+        ) {
+          const stoppedRecord = await upsertProcess(runId, {
+            lifecycleStatus: 'stopped',
+            status: 'stopped',
+            actionRequired: 'none',
+            needsAction: false,
+            reason: 'heartbeat_stale_finalizing',
+            statusCode: 'process.heartbeat_stale_finalizing',
+            statusText: 'Finalizacja bez postepu - proces zatrzymany przez sweep',
+            autoRecovery: null,
+            finishedAt: nowTs,
+            timestamp: nowTs
+          });
+          if (stoppedRecord) autoStopped += 1;
+          continue;
+        }
         if (
           (lifecycleStatus === 'running' || lifecycleStatus === 'starting')
-          && progressAgeMs >= autoStopNoContextTtlMs
           && typeof getAnalysisQueueProcessActivityState === 'function'
         ) {
           const processActivity = await getAnalysisQueueProcessActivityState(process, nowTs).catch(() => null);
-          if (processActivity?.active !== true) {
+          const shouldStopNoContext = processActivity?.active !== true
+            && progressAgeMs >= autoStopNoContextTtlMs;
+          const shouldStopLiveTimeout = processActivity?.active === true
+            && processActivity?.live === true
+            && progressAgeMs >= autoStopLiveStaleTtlMs;
+          if (shouldStopNoContext || shouldStopLiveTimeout) {
+            const staleReason = shouldStopLiveTimeout
+              ? 'heartbeat_stale_live_timeout'
+              : 'heartbeat_stale_no_context';
             const stoppedRecord = await upsertProcess(runId, {
               lifecycleStatus: 'stopped',
               status: 'stopped',
               actionRequired: 'none',
               needsAction: false,
-              reason: 'heartbeat_stale_no_context',
-              statusCode: 'process.heartbeat_stale_no_context',
-              statusText: 'Brak postepu i lokalnego kontekstu - proces zatrzymany przez sweep',
+              reason: staleReason,
+              statusCode: `process.${staleReason}`,
+              statusText: shouldStopLiveTimeout
+                ? 'Brak postepu powyzej limitu oczekiwania - proces zatrzymany przez sweep'
+                : 'Brak postepu i lokalnego kontekstu - proces zatrzymany przez sweep',
               autoRecovery: null,
               finishedAt: nowTs,
               timestamp: nowTs
@@ -4521,65 +5070,46 @@ function toNonNegativeInt(value, fallback = 0) {
   return normalized;
 }
 
-const DATA_GAPS_STOP_COMMAND = 'DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN';
-const DATA_GAPS_STOP_COMMAND_REGEX = /SYSTEM_COMMAND:\s*DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN/i;
-const DATA_GAPS_CATEGORY_REGEX = /CATEGORY:\s*DATA_GAPS\b/i;
-const DATA_GAPS_MISSING_INPUTS_REGEX = /MISSING_INPUTS:\s*([^\n\r]+)/i;
-// Accept both standalone "DATA_GAP(S)" and suffixed variants like
-// "data_gap_unresolved" used in runtime reason/status codes.
-const DATA_GAPS_GENERIC_REGEX = /\bDATA[_\s-]?GAPS?(?:\b|[_-])/i;
+const DATA_GAP_STAGE_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i;
 
-function parseDataGapsStopFromText(text) {
-  const normalized = typeof text === 'string' ? text.trim() : '';
-  if (!normalized) {
-    return {
-      detected: false,
-      hasCommand: false,
-      hasCategory: false,
-      missingInputsText: '',
-      missingInputs: []
-    };
-  }
-  const hasCommand = DATA_GAPS_STOP_COMMAND_REGEX.test(normalized);
-  const hasCategory = DATA_GAPS_CATEGORY_REGEX.test(normalized);
-  const hasDataGapToken = DATA_GAPS_GENERIC_REGEX.test(normalized);
-  const missingInputsMatch = normalized.match(DATA_GAPS_MISSING_INPUTS_REGEX);
-  const missingInputsText = missingInputsMatch?.[1]
-    ? compactWhitespace(missingInputsMatch[1]).slice(0, 320)
-    : '';
-  const missingInputs = missingInputsText
-    ? missingInputsText
-        .split(',')
-        .map((item) => item.trim())
-        .filter((item) => item.length > 0)
-        .slice(0, 12)
-    : [];
-  const detected = hasCommand || (hasCategory && hasDataGapToken);
-  return {
-    detected,
-    hasCommand,
-    hasCategory,
-    missingInputsText,
-    missingInputs
-  };
+function normalizeDataGapStageIdValue(value) {
+  const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
+  if (!raw) return '';
+  const compact = raw.replace(/\s+/g, '').toUpperCase();
+  const match = compact.match(/^(\d+)$/);
+  if (!match) return '';
+  return String(Number.parseInt(match[1], 10));
 }
 
-function looksLikeDataGapMarker(value) {
-  if (typeof value !== 'string' || !value.trim()) return false;
-  return DATA_GAPS_GENERIC_REGEX.test(value);
+function parseStandaloneDataGapStageDirective(text) {
+  if (typeof text !== 'string') {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  const lines = text
+    .split(/\r?\n/)
+    .map((line) => line.trim())
+    .filter((line) => line.length > 0);
+  if (lines.length !== 1) {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  const match = lines[0].match(DATA_GAP_STAGE_DIRECTIVE_REGEX);
+  if (!match) {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  const stageId = normalizeDataGapStageIdValue(match[1]);
+  if (!stageId) {
+    return { detected: false, stageId: '', rawLine: '' };
+  }
+  return { detected: true, stageId, rawLine: lines[0] };
 }
 
 function isDataGapMonitorRow(row) {
   if (!row || typeof row !== 'object') return false;
   if (row.dataGapDetected === true) return true;
-  return [
-    row.reason,
-    row.restartDecisionReason,
-    row.restartDispatchStatus,
-    row.recognitionSummary,
-    row.resumeDecisionSource,
-    row.recognitionSource
-  ].some((value) => looksLikeDataGapMarker(value));
+  return row.reason === 'data_gap_stage'
+    || row.reason === 'data_gap_unresolved'
+    || row.statusCode === 'process.data_gap_stage'
+    || row.statusCode === 'process.data_gap_unresolved';
 }
 
 function normalizeReloadResumeSummary(rawSummary) {
@@ -4628,6 +5158,13 @@ function sanitizeReloadResumeMonitorRow(rawRow) {
     totalPrompts: Number.isInteger(rawRow.totalPrompts) ? rawRow.totalPrompts : null,
     progressStageName: typeof rawRow.progressStageName === 'string' ? rawRow.progressStageName : '',
     progressStatus: typeof rawRow.progressStatus === 'string' ? rawRow.progressStatus : '',
+    progressStatusCode: typeof rawRow.progressStatusCode === 'string' ? rawRow.progressStatusCode : '',
+    progressReason: typeof rawRow.progressReason === 'string' ? rawRow.progressReason : '',
+    progressError: typeof rawRow.progressError === 'string' ? rawRow.progressError : '',
+    progressStatusText: typeof rawRow.progressStatusText === 'string' ? rawRow.progressStatusText : '',
+    processIssueFlags: Array.isArray(rawRow.processIssueFlags)
+      ? rawRow.processIssueFlags.filter((item) => typeof item === 'string' && item.trim()).slice(0, 12)
+      : [],
     progressNeedsAction: rawRow.progressNeedsAction === true,
     chatPromptNumber: Number.isInteger(rawRow.chatPromptNumber) ? rawRow.chatPromptNumber : null,
     chatPromptSource: typeof rawRow.chatPromptSource === 'string' ? rawRow.chatPromptSource : '',
@@ -6587,15 +7124,90 @@ function problemLogSourceMatches(sourceText, token) {
   return false;
 }
 
+function processProblemLogBlob(entry) {
+  if (!entry || typeof entry !== 'object') return '';
+  return [
+    entry.level,
+    entry.source,
+    entry.category,
+    entry.status,
+    entry.reason,
+    entry.error,
+    entry.statusText,
+    entry.message,
+    entry.stageName
+  ].map((value) => (typeof value === 'string' ? value.trim() : '')).join(' ').toLowerCase();
+}
+
+function hasOperationalProblemLogMarker(...values) {
+  const blob = values
+    .flat()
+    .map((value) => (typeof value === 'string' ? value.trim() : ''))
+    .filter(Boolean)
+    .join(' ')
+    .toLowerCase();
+  if (!blob) return false;
+  return [
+    'dispatch',
+    'retry',
+    'timeout',
+    'timed_out',
+    'slow',
+    'stuck',
+    'defer',
+    'pending',
+    'blocked',
+    'rate_limit',
+    'limit',
+    'unavailable',
+    'failed',
+    'failure',
+    'error',
+    'data_gap',
+    'recovery',
+    'resend',
+    'window_close',
+    'missing_dispatch',
+    'db_',
+    'http_'
+  ].some((marker) => blob.includes(marker));
+}
+
+function isNormalProcessProblemLogEntry(entry) {
+  if (!entry || typeof entry !== 'object') return false;
+  const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
+  if (!problemLogSourceMatches(source, 'process-monitor')) return false;
+  const level = normalizeProblemLogLevel(entry.level);
+  if (level === 'warn' || level === 'error') return false;
+  const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
+  const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  if (!['process_state', 'process_stream'].includes(category)) return false;
+  if (hasOperationalProblemLogMarker(
+    reason,
+    entry.statusText,
+    entry.message,
+    entry.error,
+    entry.stageName
+  )) {
+    return false;
+  }
+  if (reason.startsWith('ok_') || reason.startsWith('state_')) return true;
+  const status = normalizeProcessStatus(entry.status || '');
+  return ['queued', 'starting', 'started', 'running', 'finalizing', 'completed'].includes(status);
+}
+
 function isLowSignalProblemLogEntry(entry) {
   if (!entry || typeof entry !== 'object') return false;
   const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const reason = typeof entry.reason === 'string' ? entry.reason.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
+  const level = normalizeProblemLogLevel(entry.level);
 
   if (reason === 'remote_connection_configured') return true;
   if (problemLogSourceMatches(source, 'dispatch-connection')) return true;
   if (problemLogSourceMatches(source, 'process-monitor-heartbeat')) return true;
+  if (problemLogSourceMatches(source, 'process-monitor') && reason === 'dispatch_skipped' && level === 'info') return true;
+  if (isNormalProcessProblemLogEntry(entry)) return true;
   if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
     return entry.heartbeat === true;
   }
@@ -6631,8 +7243,12 @@ function shouldDispatchProblemLogRemotely(entry) {
 
   const source = typeof entry.source === 'string' ? entry.source.trim().toLowerCase() : '';
   const category = typeof entry.category === 'string' ? entry.category.trim().toLowerCase() : '';
-  if (problemLogSourceMatches(source, 'process-monitor') && category === 'process_stream') {
-    return entry.heartbeat !== true;
+  if (problemLogSourceMatches(source, 'process-monitor')) {
+    if (entry.heartbeat === true) return false;
+    if (category !== 'process_state' && category !== 'process_stream') {
+      return hasOperationalProblemLogMarker(processProblemLogBlob(entry));
+    }
+    return hasOperationalProblemLogMarker(processProblemLogBlob(entry));
   }
   if (category === 'process_state' || category === 'data_gap' || category === 'recovery') return true;
   return false;
@@ -6658,16 +7274,108 @@ function shouldRecordIssueForProcess(process) {
   ));
 }
 
-function shouldRecordSuccessForProcess(process, status, stage) {
-  if (!process || typeof process !== 'object') return false;
-  if (shouldRecordIssueForProcess(process)) return false;
-  if (isClosedProcessStatus(status) && status !== 'completed') return false;
+function resolveProcessDispatchProblemReason(process) {
+  if (!process || typeof process !== 'object') return '';
+  const dispatch = typeof getProcessPersistenceDispatchSnapshot === 'function'
+    ? getProcessPersistenceDispatchSnapshot(process)
+    : null;
+  if (!dispatch || typeof dispatch !== 'object') return '';
 
-  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : null;
-  const hasPromptProgress = currentPrompt !== null && currentPrompt > 0;
-  if (status === 'completed') return true;
-  if (status === 'starting' || status === 'started' || status === 'queued') return true;
-  return hasPromptProgress;
+  const state = typeof dispatch.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
+  const verifyState = typeof dispatch.verifyState === 'string' ? dispatch.verifyState.trim().toLowerCase() : '';
+  const failed = Number.isInteger(dispatch.failed) ? dispatch.failed : 0;
+  const deferred = Number.isInteger(dispatch.deferred) ? dispatch.deferred : 0;
+  const remaining = Number.isInteger(dispatch.remaining) ? dispatch.remaining : 0;
+  const pending = Number.isInteger(dispatch.pending) ? dispatch.pending : (deferred + remaining);
+  const accepted = Number.isInteger(dispatch.accepted) ? dispatch.accepted : 0;
+  const sent = Number.isInteger(dispatch.sent) ? dispatch.sent : 0;
+  const failureReason = typeof dispatch.failureReason === 'string' ? dispatch.failureReason.trim() : '';
+  const failureStage = typeof dispatch.failureStage === 'string' ? dispatch.failureStage.trim() : '';
+  const confirmed = typeof isExplicitlyVerifiedDispatch === 'function' && isExplicitlyVerifiedDispatch(dispatch);
+
+  if (dispatch.queueSkipped === true || dispatch.flushSkipped === true || state.includes('skipped')) return 'dispatch_skipped';
+  if (failed > 0 || state.includes('failed') || failureReason || failureStage) return 'dispatch_failed';
+  if (deferred > 0 || remaining > 0) return 'dispatch_deferred';
+  if (
+    pending > 0
+    || ['queued', 'dispatch_pending', 'awaiting_dispatch', 'dispatch_queued_no_flush_result'].includes(state)
+    || (sent > 0 && !confirmed)
+    || (accepted > 0 && !confirmed)
+    || verifyState === 'http_accepted'
+  ) {
+    const updatedAt = Number.isInteger(dispatch.updatedAt) && dispatch.updatedAt > 0
+      ? dispatch.updatedAt
+      : (
+        Number.isInteger(process.completedResponseCapturedAt) && process.completedResponseCapturedAt > 0
+          ? process.completedResponseCapturedAt
+          : 0
+      );
+    if (updatedAt && (Date.now() - updatedAt) >= Math.max(60_000, Number(WATCHLIST_DISPATCH?.verifyTimeoutMs || 0))) {
+      return 'dispatch_slow';
+    }
+    return sent > 0 || accepted > 0 ? 'dispatch_sending' : 'dispatch_pending';
+  }
+
+  return '';
+}
+
+function resolveProcessOperationalProblemReason(process, status, stage) {
+  if (!process || typeof process !== 'object') return '';
+  const reasonRaw = typeof process.reason === 'string' ? process.reason.trim() : '';
+  const errorRaw = typeof process.error === 'string' ? process.error.trim() : '';
+  const statusTextRaw = typeof process.statusText === 'string' ? process.statusText.trim() : '';
+  const statusCodeRaw = typeof process.statusCode === 'string' ? process.statusCode.trim() : '';
+  const queueStateRaw = typeof process.queueState === 'string' ? process.queueState.trim() : '';
+  const phaseRaw = typeof process.phase === 'string' ? process.phase.trim() : '';
+  const actionRaw = typeof process.actionRequired === 'string' ? process.actionRequired.trim() : '';
+  const dispatchReason = resolveProcessDispatchProblemReason(process);
+  if (dispatchReason) return dispatchReason;
+
+  const windowClose = typeof normalizeProcessWindowCloseState === 'function'
+    ? normalizeProcessWindowCloseState(process.windowClose)
+    : null;
+  const windowCloseState = typeof windowClose?.state === 'string' ? windowClose.state.trim().toLowerCase() : '';
+  if (windowCloseState === 'retrying') return 'window_close_retry';
+  if (windowCloseState === 'failed') return 'window_close_failed';
+
+  const markerFields = [
+    reasonRaw,
+    errorRaw,
+    statusTextRaw,
+    statusCodeRaw,
+    queueStateRaw,
+    phaseRaw,
+    actionRaw,
+    typeof stage?.stageName === 'string' ? stage.stageName : '',
+    status
+  ];
+  if (hasOperationalProblemLogMarker(markerFields)) {
+    const normalizedReason = trimProblemLogText(reasonRaw || statusCodeRaw || queueStateRaw || phaseRaw || actionRaw, 140);
+    return normalizedReason || 'operational_event';
+  }
+
+  return '';
+}
+
+function problemLogLevelForOperationalReason(reason) {
+  const normalized = typeof reason === 'string' ? reason.trim().toLowerCase() : '';
+  if (!normalized) return 'info';
+  if (normalized.includes('failed') || normalized.includes('error') || normalized.includes('timeout')) return 'error';
+  if (
+    normalized.includes('retry')
+    || normalized.includes('slow')
+    || normalized.includes('defer')
+    || normalized.includes('pending')
+    || normalized.includes('blocked')
+    || normalized.includes('stuck')
+  ) {
+    return 'warn';
+  }
+  return 'info';
+}
+
+function shouldRecordSuccessForProcess(process, status, stage) {
+  return false;
 }
 
 function buildProcessSuccessReason(status, stage) {
@@ -6800,7 +7508,9 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
   const chatUrlSignature = trimProblemLogText(processChatUrl || '', 180);
   const sourceUrlSignature = trimProblemLogText(processSourceUrl || '', 180);
   const issueDetected = shouldRecordIssueForProcess(process);
+  const operationalReason = issueDetected ? '' : resolveProcessOperationalProblemReason(process, status, stage);
   const successDetected = shouldRecordSuccessForProcess(process, status, stage);
+  if (!issueDetected && !operationalReason && !successDetected) return null;
   const stateDetected = !issueDetected && !successDetected;
 
   const reasonRaw = typeof process.reason === 'string' ? process.reason.trim() : '';
@@ -6810,13 +7520,13 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
     ? (reasonRaw || (isFailedProcessStatus(status) ? 'failed_status' : (process.needsAction ? 'needs_action' : 'process_issue')))
     : successDetected
       ? buildProcessSuccessReason(status, stage)
-      : (reasonRaw || buildProcessStateReason(status, stage));
+      : (reasonRaw || operationalReason || buildProcessStateReason(status, stage));
   const error = issueDetected ? errorRaw : '';
   const statusText = issueDetected
     ? (statusTextRaw || '')
     : successDetected
       ? buildProcessSuccessStatusText(reason, stage)
-      : (statusTextRaw || buildProcessStateStatusText(status, stage));
+      : (statusTextRaw || operationalReason || buildProcessStateStatusText(status, stage));
   const message = issueDetected
     ? trimProblemLogText(statusTextRaw || reasonRaw || errorRaw || status || 'process_issue', 260)
     : successDetected
@@ -6841,7 +7551,7 @@ function buildProcessProblemLogEntry(runId, process, options = {}) {
 
   const level = issueDetected
     ? (isFailedProcessStatus(status) ? 'error' : 'warn')
-    : (stateDetected && process.needsAction ? 'warn' : 'info');
+    : problemLogLevelForOperationalReason(reason);
 
   return {
     timestamp: Number.isInteger(process.timestamp) ? process.timestamp : Date.now(),
@@ -7714,6 +8424,10 @@ async function getActiveProcessForTab(tabId) {
 
 function removeWindowSafe(windowId) {
   return new Promise((resolve) => {
+    if (!isProcessWindowAutoCloseEnabled()) {
+      resolve(false);
+      return;
+    }
     if (!Number.isInteger(windowId)) {
       resolve(false);
       return;
@@ -7732,8 +8446,30 @@ function removeWindowSafe(windowId) {
   });
 }
 
+function isChromeMissingTabOrWindowError(message, target = '') {
+  const normalized = typeof message === 'string' ? message.trim().toLowerCase() : '';
+  if (!normalized) return false;
+  const wantsTab = target === 'tab' || !target;
+  const wantsWindow = target === 'window' || !target;
+  return (
+    wantsTab && (
+      normalized.includes('no tab with id')
+      || normalized.includes('invalid tab id')
+    )
+  ) || (
+    wantsWindow && (
+      normalized.includes('no window with id')
+      || normalized.includes('invalid window id')
+    )
+  );
+}
+
 function removeTabSafe(tabId) {
   return new Promise((resolve) => {
+    if (!isProcessWindowAutoCloseEnabled()) {
+      resolve(false);
+      return;
+    }
     if (!Number.isInteger(tabId)) {
       resolve(false);
       return;
@@ -8366,6 +9102,39 @@ function normalizeSaveResponseDispatchOutcome(dispatchOutcome) {
   return dispatch;
 }
 
+function resolveSaveResponseDispatchSkipDecision(analysisType = 'company', responseSchema = '', sourceRecordSuffix = '', saveOptions = null) {
+  const options = saveOptions && typeof saveOptions === 'object' ? saveOptions : {};
+  const normalizedAnalysisType = typeof normalizeAnalysisTypeForPromptChain === 'function'
+    ? normalizeAnalysisTypeForPromptChain(analysisType)
+    : normalizeStructuredWatchlistValue(analysisType).toLowerCase();
+  const normalizedResponseSchema = normalizeStructuredWatchlistValue(responseSchema).toLowerCase();
+  const normalizedSourceRecordSuffix = normalizeStructuredWatchlistValue(sourceRecordSuffix).toLowerCase();
+  const isPortfolioFinalDispatchCandidate = normalizedResponseSchema === 'portfolio.final_response.v1'
+    || normalizedResponseSchema === 'portfolio.final_response.v2'
+    || normalizedSourceRecordSuffix === 'portfolio_final_json';
+  const allowPortfolioFeedbackDispatch = options.allowPortfolioFeedbackDispatch === true
+    || isPortfolioFinalDispatchCandidate;
+  const portfolioLocalOnly = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO
+    && !allowPortfolioFeedbackDispatch;
+  const explicitSkip = options.skipWatchlistDispatch === true
+    && !allowPortfolioFeedbackDispatch;
+  const skip = explicitSkip || portfolioLocalOnly;
+  const reason = skip
+    ? (
+      options.skipWatchlistDispatchReason
+      || (portfolioLocalOnly ? 'portfolio_analysis_saved_locally' : 'dispatch_skipped_by_options')
+    )
+    : '';
+  return {
+    skip,
+    reason,
+    normalizedAnalysisType,
+    normalizedResponseSchema,
+    isPortfolioFinalDispatchCandidate,
+    allowPortfolioFeedbackDispatch
+  };
+}
+
 function resolveSaveResponsePersistenceState(dispatchOutcome) {
   const pipelineDispatchState = resolveSaveResponseDispatchPipelineState(dispatchOutcome);
   return {
@@ -8816,6 +9585,30 @@ function getProcessQueueDeliveryState(process) {
   };
 }
 
+function hasProcessCloseableSavedResponse(process) {
+  if (!process || typeof process !== 'object') return false;
+  const delivery = getProcessQueueDeliveryState(process);
+  if (delivery.saveOk !== true) return false;
+  if (hasProcessReachedFinalStage(process)) return true;
+
+  const stage = resolveProcessStageSnapshot(process);
+  const totalPrompts = Number.isInteger(stage?.totalPrompts) ? stage.totalPrompts : 0;
+  const currentPrompt = Number.isInteger(stage?.currentPrompt) ? stage.currentPrompt : 0;
+  if (totalPrompts > 0 && currentPrompt >= totalPrompts) return true;
+  if (Number.isInteger(process?.completedResponseCapturedAt) && process.completedResponseCapturedAt > 0) return true;
+  if (typeof process?.completedResponseText === 'string' && process.completedResponseText.trim()) return true;
+  return process?.completedResponseSaved === true;
+}
+
+function isProcessWindowAutoCloseEnabled() {
+  try {
+    return typeof PROCESS_WINDOW_CLOSE_RETRY !== 'undefined'
+      && PROCESS_WINDOW_CLOSE_RETRY?.enabled === true;
+  } catch (_) {
+    return false;
+  }
+}
+
 function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   if (!job || typeof job !== 'object') {
     return { action: 'release', closeWindow: false, reason: 'invalid_job' };
@@ -8825,6 +9618,14 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   }
 
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (isDataGapTerminalProcess(process)) {
+    return {
+      action: 'release',
+      closeWindow: isProcessWindowAutoCloseEnabled(),
+      reason: 'data_gap_stage',
+      slotReleaseReason: 'data_gap_stage'
+    };
+  }
   if (status === 'finalizing' || status === 'completed') {
     if (!hasProcessReachedFinalStage(process)) {
       return {
@@ -8836,7 +9637,7 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     if (delivery.confirmed === true) {
       return {
         action: 'release',
-        closeWindow: true,
+        closeWindow: isProcessWindowAutoCloseEnabled(),
         reason: 'dispatch_confirmed',
         slotReleaseReason: 'dispatch_confirmed'
       };
@@ -8851,13 +9652,24 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     }
     return {
       action: 'release',
-      closeWindow: true,
+      closeWindow: isProcessWindowAutoCloseEnabled(),
       reason: 'dispatch_pending',
       slotReleaseReason: 'final_stage_local_saved'
     };
   }
 
   if (isClosedProcessStatus(status)) {
+    const delivery = getProcessQueueDeliveryState(process);
+    if (hasProcessCloseableSavedResponse(process)) {
+      return {
+        action: 'release',
+        closeWindow: isProcessWindowAutoCloseEnabled(),
+        reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending',
+        slotReleaseReason: delivery.confirmed === true
+          ? 'dispatch_confirmed_after_local_context_loss'
+          : 'final_stage_local_saved_after_local_context_loss'
+      };
+    }
     return { action: 'release', closeWindow: false, reason: status || 'closed' };
   }
 
@@ -9017,6 +9829,14 @@ async function inspectProcessWindowContext(process) {
         reason: validTabs.length > 0 ? 'window_present' : 'window_empty'
       };
     }
+    if (isChromeMissingTabOrWindowError(tabsInWindow?.reason || '', 'window')) {
+      return {
+        exists: false,
+        missingKnown: true,
+        hasOnlyProcessTab: false,
+        reason: 'window_missing'
+      };
+    }
     return {
       exists: true,
       missingKnown: false,
@@ -9094,6 +9914,9 @@ async function findOpenProcessTabByConversationUrl(process) {
 }
 
 async function attemptProcessWindowClose(process) {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    return { closed: false, reason: 'process_window_auto_close_disabled', closeMode: '' };
+  }
   if (!process || typeof process !== 'object') {
     return { closed: false, reason: 'invalid_process', closeMode: '' };
   }
@@ -9124,9 +9947,23 @@ async function attemptProcessWindowClose(process) {
 
   if (processWindowId !== null) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
+    if (tabsInWindow?.ok === false && isChromeMissingTabOrWindowError(tabsInWindow?.reason || '', 'window')) {
+      return {
+        closed: true,
+        reason: 'window_already_missing',
+        closeMode: 'window'
+      };
+    }
     const validTabs = Array.isArray(tabsInWindow?.tabs)
       ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
       : [];
+    if (tabsInWindow?.ok === true && validTabs.length === 0) {
+      return {
+        closed: true,
+        reason: 'window_empty',
+        closeMode: 'window'
+      };
+    }
     const chatTabs = validTabs.filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)));
     const activeChatTab = chatTabs.find((tab) => tab?.active === true) || null;
     const fallbackChatTab = activeChatTab || (chatTabs.length === 1 ? chatTabs[0] : null);
@@ -9155,7 +9992,9 @@ async function attemptProcessWindowClose(process) {
     }
     return {
       closed: false,
-      reason: validTabs.length > 0 ? 'window_contains_other_tabs' : 'tab_remove_failed',
+      reason: validTabs.length > 0
+        ? 'window_contains_other_tabs'
+        : (tabsInWindow?.ok === false ? (tabsInWindow.reason || 'window_query_failed') : 'tab_remove_failed'),
       closeMode: ''
     };
   }
@@ -9205,19 +10044,28 @@ function clearProcessWindowCloseRetry(runId = '', options = {}) {
 }
 
 function resolveProcessWindowCloseRetryPlan(process) {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    return {
+      needed: false,
+      reason: 'process_window_auto_close_disabled',
+      delivery: process && typeof process === 'object' ? getProcessQueueDeliveryState(process) : null
+    };
+  }
   if (!process || typeof process !== 'object') {
     return { needed: false, reason: 'invalid_process', delivery: null };
   }
   const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
-  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing') {
+  const closeableSavedResponse = hasProcessCloseableSavedResponse(process);
+  const dataGapTerminal = isDataGapTerminalProcess(process);
+  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing' && !closeableSavedResponse && !dataGapTerminal) {
     return { needed: false, reason: 'status_not_closeable', delivery: getProcessQueueDeliveryState(process) };
   }
-  if (!hasProcessReachedFinalStage(process)) {
+  if (!hasProcessReachedFinalStage(process) && !closeableSavedResponse && !dataGapTerminal) {
     return { needed: false, reason: 'not_final_stage', delivery: getProcessQueueDeliveryState(process) };
   }
 
   const delivery = getProcessQueueDeliveryState(process);
-  if (delivery.saveOk !== true) {
+  if (delivery.saveOk !== true && !dataGapTerminal) {
     return { needed: false, reason: 'save_not_confirmed', delivery };
   }
 
@@ -9238,12 +10086,23 @@ function resolveProcessWindowCloseRetryPlan(process) {
 
   return {
     needed: true,
-    reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed',
+    reason: dataGapTerminal
+      ? 'data_gap_stage'
+      : (delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed'),
     delivery
   };
 }
 
 function scheduleProcessWindowCloseRetriesForSnapshot(records = [], origin = 'registry_ready') {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
+    processWindowCloseRetryTimersByRunId.clear();
+    processWindowCloseRetryDueAtByRunId.clear();
+    processWindowCloseRetryAttemptCountByRunId.clear();
+    processWindowCloseRetryInFlight.clear();
+    void syncProcessWindowCloseRetryAlarm();
+    return;
+  }
   const snapshot = Array.isArray(records) ? records : [];
   snapshot.forEach((process) => {
     scheduleProcessWindowCloseRetry(process, {
@@ -9261,6 +10120,10 @@ function scheduleProcessWindowCloseRetry(processOrRunId, options = {}) {
     ? processOrRunId.trim()
     : (typeof process?.id === 'string' ? process.id.trim() : '');
   if (!normalizedRunId) return false;
+  if (!isProcessWindowAutoCloseEnabled()) {
+    clearProcessWindowCloseRetry(normalizedRunId);
+    return false;
+  }
 
   const currentProcess = process || processRegistry.get(normalizedRunId) || null;
   const plan = resolveProcessWindowCloseRetryPlan(currentProcess);
@@ -9318,6 +10181,10 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
   const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
   if (!normalizedRunId) {
     return { success: false, reason: 'missing_run_id' };
+  }
+  if (!isProcessWindowAutoCloseEnabled()) {
+    clearProcessWindowCloseRetry(normalizedRunId);
+    return { success: true, skipped: true, closed: false, reason: 'process_window_auto_close_disabled' };
   }
   if (processWindowCloseRetryInFlight.has(normalizedRunId)) {
     return { success: false, skipped: true, reason: 'retry_in_flight' };
@@ -9467,6 +10334,10 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
 async function closeProcessWindowAfterQueueSuccess(process, options = {}) {
   if (!process || typeof process !== 'object') return false;
   const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+  if (!isProcessWindowAutoCloseEnabled()) {
+    if (runId) clearProcessWindowCloseRetry(runId);
+    return false;
+  }
   const plan = resolveProcessWindowCloseRetryPlan(process);
   if (!plan.needed) {
     if (runId) clearProcessWindowCloseRetry(runId);
@@ -9972,6 +10843,20 @@ async function runDueCompletedProcessPersistenceRetries(origin = 'alarm') {
 }
 
 async function runDueProcessWindowCloseRetries(origin = 'alarm') {
+  if (!isProcessWindowAutoCloseEnabled()) {
+    processWindowCloseRetryTimersByRunId.forEach((timerId) => clearTimeout(timerId));
+    processWindowCloseRetryTimersByRunId.clear();
+    processWindowCloseRetryDueAtByRunId.clear();
+    processWindowCloseRetryAttemptCountByRunId.clear();
+    processWindowCloseRetryInFlight.clear();
+    await syncProcessWindowCloseRetryAlarm().catch(() => {});
+    return {
+      success: true,
+      attempted: 0,
+      due: 0,
+      reason: 'process_window_auto_close_disabled'
+    };
+  }
   await ensureProcessRegistryReady();
   const nowTs = Date.now();
   const dueRunIds = new Set();
@@ -10023,10 +10908,19 @@ function generateAnalysisQueueJobId(sequence = 0) {
   return `aq-${Date.now()}-${safeSequence}-${Math.random().toString(36).slice(2, 8)}`;
 }
 
+function resolvePromptCountForQueuedJob(job) {
+  if (Array.isArray(job?.promptChainSnapshot) && job.promptChainSnapshot.length > 0) {
+    return job.promptChainSnapshot.length;
+  }
+  const promptChain = getPromptChainForAnalysisType(job?.analysisType || ANALYSIS_TYPE_COMPANY);
+  return Array.isArray(promptChain) ? promptChain.length : 0;
+}
+
 function buildQueuedProcessPatchForJob(job) {
   const safeJob = sanitizeAnalysisQueueJob(job);
   if (!safeJob) return null;
-  const totalPrompts = Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0;
+  const totalPrompts = resolvePromptCountForQueuedJob(safeJob);
+  const composerThinkingEffort = normalizeComposerThinkingEffort(safeJob.composerThinkingEffort);
   const patch = {
     title: safeJob.title,
     analysisType: safeJob.analysisType || 'company',
@@ -10052,10 +10946,29 @@ function buildQueuedProcessPatchForJob(job) {
     sourceWindowId: Number.isInteger(safeJob.sourceWindowId) ? safeJob.sourceWindowId : null,
     messages: []
   };
+  if (composerThinkingEffort) {
+    patch.composerThinkingEffort = composerThinkingEffort;
+  }
 
   if (safeJob.kind === ANALYSIS_QUEUE_KIND_ARTICLE) {
-    const sourceUrl = typeof safeJob?.tabSnapshot?.url === 'string' ? safeJob.tabSnapshot.url : '';
+    const sourceUrl = typeof safeJob?.sourceUrl === 'string' && safeJob.sourceUrl.trim()
+      ? safeJob.sourceUrl.trim()
+      : (typeof safeJob?.tabSnapshot?.sourceUrl === 'string' && safeJob.tabSnapshot.sourceUrl.trim()
+        ? safeJob.tabSnapshot.sourceUrl.trim()
+        : (typeof safeJob?.tabSnapshot?.url === 'string' ? safeJob.tabSnapshot.url : ''));
     patch.sourceUrl = sourceUrl;
+    if (safeJob.sourceKind) patch.sourceKind = safeJob.sourceKind;
+    const sourceMaterialId = safeJob.sourceMaterialId || safeJob.tabSnapshot?.sourceMaterialId || '';
+    const sourceMaterialHash = safeJob.sourceMaterialHash || safeJob.tabSnapshot?.sourceMaterialHash || '';
+    const sourceMaterialLength = normalizeSourceMaterialLength(
+      safeJob.sourceMaterialLength ?? safeJob.tabSnapshot?.sourceMaterialLength
+    );
+    if (sourceMaterialId) patch.sourceMaterialId = sourceMaterialId;
+    if (sourceMaterialHash) patch.sourceMaterialHash = sourceMaterialHash;
+    if (Number.isInteger(sourceMaterialLength)) patch.sourceMaterialLength = sourceMaterialLength;
+    if (safeJob.sourceMaterialStored === true || safeJob.tabSnapshot?.sourceMaterialStored === true || sourceMaterialId) {
+      patch.sourceMaterialStored = true;
+    }
   } else {
     const startIndex = Number.isInteger(safeJob.resumeStartIndex) ? safeJob.resumeStartIndex : 0;
     const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(startIndex, totalPrompts);
@@ -10073,6 +10986,148 @@ function buildQueuedProcessPatchForJob(job) {
   }
 
   return patch;
+}
+
+function shouldBypassAnalysisQueueForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO;
+}
+
+function findManualTextSourceForQueueBypass(sourceId, manualTextSources = []) {
+  const normalizedSourceId = sanitizeManualTextSourceId(sourceId);
+  if (!normalizedSourceId) return null;
+  return sanitizeManualTextSourceRecords(manualTextSources)
+    .find((source) => source?.id === normalizedSourceId) || null;
+}
+
+function hydrateManualTextForQueueBypass(tab, manualTextSources = []) {
+  if (!tab || typeof tab !== 'object') return tab;
+  if (typeof tab.manualText === 'string' && tab.manualText.trim()) return tab;
+  const manualUrl = typeof tab.url === 'string' ? tab.url : '';
+  if (!manualUrl.startsWith('manual://')) return tab;
+  const source = findManualTextSourceForQueueBypass(tab.manualTextSourceId, manualTextSources);
+  if (!source || typeof source.text !== 'string' || !source.text.trim()) return tab;
+  return {
+    ...tab,
+    manualText: source.text
+  };
+}
+
+function generateAnalysisQueueBypassRunId(analysisType = ANALYSIS_TYPE_COMPANY, index = 0) {
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const safeIndex = Number.isInteger(index) ? Math.max(0, index) : 0;
+  return `${normalizedAnalysisType}-queue-bypass-${Date.now()}-${safeIndex}-${Math.random().toString(36).slice(2, 8)}`;
+}
+
+async function launchAnalysisJobsOutsideQueue(tabs, promptChain, chatUrl, analysisType, options = {}) {
+  const sourceTabs = Array.isArray(tabs) ? tabs.filter((tab) => !!tab) : [];
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  if (sourceTabs.length === 0) {
+    const snapshot = await getAnalysisQueueStatusSnapshot();
+    return {
+      ...snapshot,
+      analysisType: normalizedAnalysisType,
+      queuedCount: 0,
+      launchedCount: 0,
+      queueBypassCount: 0,
+      queueBypass: true
+    };
+  }
+
+  const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
+  const invocationWindowId = Number.isInteger(options?.invocationWindowId)
+    ? options.invocationWindowId
+    : null;
+  const manualTextSources = sanitizeManualTextSourceRecords(options?.manualTextSources);
+  const launchedJobs = sourceTabs.map((tab, index) => {
+    const sourceUrl = typeof tab?.url === 'string' ? tab.url : '';
+    const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
+      ? options.sourceKind.trim()
+      : (sourceUrl === 'manual://pdf'
+        ? 'manual_pdf'
+        : (sourceUrl.startsWith('manual://') ? 'manual_text' : 'article'));
+    const title = typeof tab?.title === 'string' && tab.title.trim() ? tab.title.trim() : 'Bez tytulu';
+    const runId = generateAnalysisQueueBypassRunId(normalizedAnalysisType, index);
+    const launchTab = hydrateManualTextForQueueBypass({
+      ...tab,
+      sourceKind
+    }, manualTextSources);
+
+    void Promise.resolve()
+      .then(async () => {
+        await sleep(index * 500);
+        await executeAnalysisProcessJob(
+          launchTab,
+          promptChainSnapshot,
+          typeof chatUrl === 'string' ? chatUrl : '',
+          normalizedAnalysisType,
+          {
+            invocationWindowId,
+            runId,
+            sourceKind,
+            queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
+            manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
+            manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+            queueBypass: true,
+            queueBypassReason: typeof options?.reason === 'string' && options.reason.trim()
+              ? options.reason.trim()
+              : 'analysis_queue_bypass'
+          }
+        );
+      })
+      .catch(async (error) => {
+        console.warn('[analysis-queue] bypass launch failed:', {
+          runId,
+          analysisType: normalizedAnalysisType,
+          title,
+          error: error?.message || String(error)
+        });
+        if (typeof upsertProcess === 'function') {
+          await upsertProcess(runId, {
+            title,
+            analysisType: normalizedAnalysisType,
+            status: 'failed',
+            statusText: 'Blad uruchomienia poza kolejka',
+            reason: 'queue_bypass_launch_exception',
+            error: error?.message || String(error),
+            needsAction: false,
+            autoRecovery: null,
+            queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
+            manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
+            manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+            finishedAt: Date.now(),
+            timestamp: Date.now()
+          }).catch(() => null);
+        }
+      });
+
+    return {
+      runId,
+      analysisType: normalizedAnalysisType,
+      title,
+      sourceKind,
+      queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
+      manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
+      manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
+      queueBypass: true
+    };
+  });
+
+  const queueSnapshot = await getAnalysisQueueStatusSnapshot();
+  return {
+    success: true,
+    jobs: launchedJobs,
+    analysisType: normalizedAnalysisType,
+    queuedCount: 0,
+    launchedCount: launchedJobs.length,
+    queueBypassCount: launchedJobs.length,
+    queueBypass: true,
+    maxConcurrent: queueSnapshot.maxConcurrent,
+    queueSize: queueSnapshot.queueSize,
+    activeSlots: queueSnapshot.activeSlots,
+    reservedSlots: queueSnapshot.reservedSlots,
+    liveSlots: queueSnapshot.liveSlots,
+    startingSlots: queueSnapshot.startingSlots
+  };
 }
 
 async function enqueueAnalysisJobs(rawJobs, options = {}) {
@@ -10589,12 +11644,13 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         return;
       }
 
+      const scheduledAnalysisType = scheduledJob.analysisType || ANALYSIS_TYPE_COMPANY;
+      if (!(Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0)) {
+        await ensurePromptChainReadyForAnalysisType(scheduledAnalysisType);
+      }
       const promptChain = Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0
         ? scheduledJob.promptChainSnapshot
-        : PROMPTS_COMPANY;
-      if (!(Array.isArray(scheduledJob.promptChainSnapshot) && scheduledJob.promptChainSnapshot.length > 0)) {
-        await ensureCompanyPromptsReady();
-      }
+        : getPromptChainForAnalysisType(scheduledAnalysisType);
       if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
         await reportRemoteJobEvent(
           scheduledJob.remote.remoteJobId,
@@ -10619,8 +11675,8 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
         promptChain,
         typeof scheduledJob.chatUrl === 'string' && scheduledJob.chatUrl.trim()
           ? scheduledJob.chatUrl.trim()
-          : CHAT_URL,
-        scheduledJob.analysisType || 'company',
+          : getChatUrlForAnalysisType(scheduledAnalysisType),
+        scheduledAnalysisType,
         {
           invocationWindowId: Number.isInteger(scheduledJob.invocationWindowId) ? scheduledJob.invocationWindowId : null,
           runId: scheduledJob.runId,
@@ -10789,11 +11845,19 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             ? await getAnalysisQueueProcessActivityState(process, now)
             : null;
           if (process && processActivity?.active !== true) {
+            const closeSavedMissingContextWindow = hasProcessCloseableSavedResponse(process);
+            const delivery = closeSavedMissingContextWindow ? getProcessQueueDeliveryState(process) : null;
+            const releaseReason = closeSavedMissingContextWindow
+              ? (delivery?.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending')
+              : 'local_context_missing';
             releaseJobs.push({
               job: activeJob,
               process,
-              reason: 'local_context_missing',
-              closeWindow: false
+              reason: releaseReason,
+              slotReleaseReason: closeSavedMissingContextWindow
+                ? 'final_stage_local_saved_after_local_context_loss'
+                : 'local_context_missing',
+              closeWindow: closeSavedMissingContextWindow && isProcessWindowAutoCloseEnabled()
             });
             const stalePatch = await buildStaleQueueReleasePatch(process, now);
             if (stalePatch) {
@@ -10803,7 +11867,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
                 queueState: 'slot_released',
                 slotReserved: false,
                 slotReleasedAt: now,
-                slotReleaseReason: 'local_context_missing',
+                slotReleaseReason: closeSavedMissingContextWindow
+                  ? 'final_stage_local_saved_after_local_context_loss'
+                  : 'local_context_missing',
                 ...stalePatch
               });
             }
@@ -10893,10 +11959,9 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         sortAnalysisQueueWaitingJobs(state.waitingJobs);
         let manualPdfReservedSlots = state.activeJobs.filter((job) => job?.sourceKind === 'manual_pdf').length;
         while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
-          if (queuePaused || await getAnalysisQueuePaused()) {
-            break;
-          }
+          const pauseActive = queuePaused || await getAnalysisQueuePaused();
           const waitingIndex = state.waitingJobs.findIndex((job) => {
+            if (pauseActive && job?.bypassPause !== true) return false;
             if (job?.sourceKind !== 'manual_pdf') return true;
             return manualPdfReservedSlots < MANUAL_PDF_QUEUE_MAX_CONCURRENCY;
           });
@@ -10922,8 +11987,10 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
 
       const followUpProcessPatches = Array.from(followUpProcessPatchesByRunId.values());
       if (startJobs.length > 0 && await getAnalysisQueuePaused()) {
+        const pauseBypassJobs = startJobs.filter((job) => job?.bypassPause === true);
+        const pauseBlockedJobs = startJobs.filter((job) => job?.bypassPause !== true);
         const activatedJobIds = new Set(
-          startJobs
+          pauseBlockedJobs
             .map((job) => (typeof job?.jobId === 'string' ? job.jobId.trim() : ''))
             .filter(Boolean)
         );
@@ -10956,7 +12023,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             }
           });
         }
-        startJobs = [];
+        startJobs = pauseBypassJobs;
       }
 
       for (const update of followUpProcessPatches) {
@@ -11216,7 +12283,13 @@ async function resolveCompletedProcessFinalResponseText(process, options = {}) {
     responseText = extractAssistantTextFromProcess(process);
   }
   if (!responseText && force && options?.allowDomFallback === true && Number.isInteger(options?.tabId)) {
-    responseText = await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
+    const stage12DomResponse = await extractLatestStage12InvestmentResponseFromTab(
+      options.tabId,
+      options?.tabReadTimeoutMs || 1800
+    );
+    responseText = stage12DomResponse?.text
+      ? stage12DomResponse.text
+      : await extractLastAssistantResponseFromTab(options.tabId, options?.tabReadTimeoutMs || 1800);
   }
   responseText = typeof responseText === 'string' ? responseText.trim() : '';
   if (!responseText) {
@@ -11319,6 +12392,167 @@ async function extractLastAssistantResponseFromTab(tabId, maxWaitMs = 1800) {
   }
 }
 
+function resolveInvestmentResponseCandidateFromText(rawText) {
+  const text = typeof rawText === 'string' ? rawText.trim() : '';
+  if (!text) {
+    return {
+      text: '',
+      contract: null,
+      reason: 'empty_text'
+    };
+  }
+
+  const candidates = typeof extractStructuredWatchlistJsonCandidates === 'function'
+    ? extractStructuredWatchlistJsonCandidates(text)
+    : [text];
+  for (const candidate of candidates) {
+    const candidateText = typeof candidate === 'string' ? candidate.trim() : '';
+    if (!candidateText) continue;
+    const contract = buildResponseContractValidation(candidateText);
+    if (contract?.valid === true && contract?.kind === 'economist.response.v2') {
+      return {
+        text: candidateText,
+        contract,
+        reason: 'economist_response_v2'
+      };
+    }
+  }
+
+  const fallbackContract = buildResponseContractValidation(text);
+  if (fallbackContract?.valid === true && fallbackContract?.kind === 'economist.response.v2') {
+    return {
+      text,
+      contract: fallbackContract,
+      reason: 'economist_response_v2_full_text'
+    };
+  }
+
+  return {
+    text: '',
+    contract: fallbackContract,
+    reason: fallbackContract?.kind || 'invalid'
+  };
+}
+
+async function extractLatestStage12InvestmentResponseFromTab(tabId, maxWaitMs = 1800) {
+  if (!Number.isInteger(tabId)) {
+    return {
+      text: '',
+      contract: null,
+      scannedCount: 0,
+      sourceIndex: null,
+      reason: 'invalid_tab'
+    };
+  }
+  try {
+    const results = await chrome.scripting.executeScript({
+      target: { tabId },
+      function: async (waitMs) => {
+        const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
+        const normalizeText = (text) => (text || '')
+          .replace(/\u00a0/g, ' ')
+          .replace(/[ \t]+\n/g, '\n')
+          .replace(/\n[ \t]+/g, '\n')
+          .replace(/\n{3,}/g, '\n\n')
+          .trim();
+
+        function extractTextFromNode(node) {
+          if (!node) return '';
+          const clone = node.cloneNode(true);
+          const removableSelectors = [
+            '[data-testid="copy-turn-action-button"]',
+            '[data-testid="message-actions"]',
+            'button',
+            'svg',
+            'aside',
+            'nav',
+            'footer'
+          ];
+          removableSelectors.forEach((selector) => {
+            clone.querySelectorAll(selector).forEach((child) => child.remove());
+          });
+          return normalizeText(clone.innerText || clone.textContent || '');
+        }
+
+        function readAssistantTexts() {
+          const texts = [];
+          const seen = new Set();
+          const pushText = (text) => {
+            const normalized = normalizeText(text);
+            if (!normalized || seen.has(normalized)) return;
+            seen.add(normalized);
+            texts.push(normalized);
+          };
+
+          const byRole = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+          for (let i = byRole.length - 1; i >= 0; i -= 1) {
+            pushText(extractTextFromNode(byRole[i]));
+          }
+          if (texts.length > 0) return texts;
+
+          const conversationTurns = Array.from(document.querySelectorAll('[data-testid^="conversation-turn-"]'));
+          for (let i = conversationTurns.length - 1; i >= 0; i -= 1) {
+            const turn = conversationTurns[i];
+            const candidate = turn.querySelector('[data-message-author-role="assistant"]') || turn;
+            pushText(extractTextFromNode(candidate));
+          }
+          if (texts.length > 0) return texts;
+
+          const articles = Array.from(document.querySelectorAll('article'));
+          for (let i = articles.length - 1; i >= 0; i -= 1) {
+            pushText(extractTextFromNode(articles[i]));
+          }
+          return texts;
+        }
+
+        const startedAt = Date.now();
+        let bestTexts = [];
+        while ((Date.now() - startedAt) <= waitMs) {
+          const candidateTexts = readAssistantTexts();
+          const candidateLength = candidateTexts.reduce((sum, text) => sum + text.length, 0);
+          const bestLength = bestTexts.reduce((sum, text) => sum + text.length, 0);
+          if (candidateTexts.length > bestTexts.length || candidateLength > bestLength) {
+            bestTexts = candidateTexts;
+          }
+          await sleep(220);
+        }
+        return bestTexts;
+      },
+      args: [Math.max(500, Math.min(maxWaitMs, 12000))]
+    });
+    const texts = Array.isArray(results?.[0]?.result)
+      ? results[0].result.filter((item) => typeof item === 'string' && item.trim())
+      : [];
+    for (let index = 0; index < texts.length; index += 1) {
+      const resolved = resolveInvestmentResponseCandidateFromText(texts[index]);
+      if (resolved?.text && resolved?.contract?.valid === true) {
+        return {
+          text: resolved.text,
+          contract: resolved.contract,
+          scannedCount: texts.length,
+          sourceIndex: index,
+          reason: resolved.reason || 'economist_response_v2'
+        };
+      }
+    }
+    return {
+      text: '',
+      contract: null,
+      scannedCount: texts.length,
+      sourceIndex: null,
+      reason: texts.length > 0 ? 'not_found' : 'no_assistant_messages'
+    };
+  } catch (error) {
+    return {
+      text: '',
+      contract: null,
+      scannedCount: 0,
+      sourceIndex: null,
+      reason: error?.message || 'extract_failed'
+    };
+  }
+}
+
 async function replayCompletedResponseForProcess(process, options = {}) {
   if (!process || typeof process !== 'object') {
     return { attempted: false, success: false, reason: 'invalid_process' };
@@ -11415,21 +12649,29 @@ async function replayCompletedResponseForProcess(process, options = {}) {
     ? process.completedResponseSaveTrace.trim()
     : (typeof process?.persistenceStatus?.copyTrace === 'string' ? process.persistenceStatus.copyTrace.trim() : '');
   const responseIdFromTrace = extractResponseIdFromCopyTrace(existingTrace, runId);
-  const promptNumber = Number.isInteger(process.currentPrompt) && process.currentPrompt > 0
-    ? process.currentPrompt
-    : (Number.isInteger(process.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0);
+  const promptNumber = Number.isInteger(options?.selectedPrompt) && options.selectedPrompt > 0
+    ? options.selectedPrompt
+    : (Number.isInteger(process.currentPrompt) && process.currentPrompt > 0
+      ? process.currentPrompt
+      : (Number.isInteger(process.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : 0));
   const responseId = responseIdFromTrace || buildRestartReplayResponseId(runId, responseText, promptNumber);
 
   const stageMeta = {};
   if (promptNumber > 0) {
     stageMeta.selected_response_prompt = promptNumber;
   }
-  if (Number.isInteger(process.stageIndex) && process.stageIndex >= 0) {
+  if (Number.isInteger(options?.selectedStageIndex) && options.selectedStageIndex >= 0) {
+    stageMeta.selected_response_stage_index = options.selectedStageIndex;
+  } else if (Number.isInteger(options?.selectedPrompt) && options.selectedPrompt > 0) {
+    stageMeta.selected_response_stage_index = options.selectedPrompt - 1;
+  } else if (Number.isInteger(process.stageIndex) && process.stageIndex >= 0) {
     stageMeta.selected_response_stage_index = process.stageIndex;
   } else if (promptNumber > 0) {
     stageMeta.selected_response_stage_index = promptNumber - 1;
   }
-  stageMeta.selected_response_reason = 'restart_replay';
+  stageMeta.selected_response_reason = typeof options?.selectedResponseReason === 'string' && options.selectedResponseReason.trim()
+    ? options.selectedResponseReason.trim()
+    : 'restart_replay';
 
   const conversationUrl = normalizeChatConversationUrl(process.chatUrl)
     || normalizeChatConversationUrl(process.sourceUrl)
@@ -11843,13 +13085,13 @@ async function stopSingleProcess(process, options = {}) {
   }
 
   let tabClosed = false;
-  if (processTabId !== null) {
+  if (isProcessWindowAutoCloseEnabled() && processTabId !== null) {
     tabClosed = await removeTabSafe(processTabId);
   }
 
   // Fallback: close the whole window only when it is a dedicated process window
   // with no extra tabs (to avoid closing source/info windows).
-  if (!tabClosed && processWindowId !== null && processWindowId !== preserveWindowId) {
+  if (isProcessWindowAutoCloseEnabled() && !tabClosed && processWindowId !== null && processWindowId !== preserveWindowId) {
     const tabsInWindow = await queryTabsInWindowSafe(processWindowId);
     const validTabs = Array.isArray(tabsInWindow?.tabs)
       ? tabsInWindow.tabs.filter((tab) => Number.isInteger(tab?.id))
@@ -12633,12 +13875,13 @@ async function handleProcessDecisionAllMessage(message) {
 
 // Zmienne globalne dla promptów
 let PROMPTS_COMPANY = [];
+let PROMPTS_PORTFOLIO = [];
 let promptsCompanyHashCache = '';
 let promptsCompanyHashCacheKey = '';
 
 // Jedno źródło prawdy dla etapów company chain.
 // Kolejność musi być zsynchronizowana z prompts-company.txt (po separatorze).
-const STAGE_METADATA_COMPANY = [
+const DEFAULT_STAGE_METADATA_COMPANY = [
   {
     promptIndex: 0,
     promptNumber: 1,
@@ -12671,62 +13914,91 @@ const STAGE_METADATA_COMPANY = [
     promptIndex: 4,
     promptNumber: 5,
     stageId: '4',
-    stageName: "Stage 4: Reverse DCF Lite + Driver Screen",
-    description: "Core vs wedge vs total, asymmetry pre-filter, dominant valuation driver."
+    stageName: "Stage 4: Company CORE Reconstruction",
+    description: "Market-anchored going-concern CORE, CORE/WEDGE boundary, and downstream restrictions."
   },
   {
     promptIndex: 5,
     promptNumber: 6,
     stageId: '5',
-    stageName: "Stage 5: Competitive Position (4 finalists)",
-    description: "Replaceability, moat durability, and finalist selection from the advanced set."
+    stageName: "Stage 5: MCP Sector Overlay / CORE Challenge",
+    description: "Iskierka sector-memory audit of CORE, boundary, proof standards, and decision-grade status."
   },
   {
     promptIndex: 6,
     promptNumber: 7,
     stageId: '6',
-    stageName: "Stage 6: Returns on Capital & Capital Allocation",
-    description: "ROIC, CROIC, incremental returns, and value-destructive growth checks."
+    stageName: "Stage 6: Valuation Diagnostics / Reverse DCF Lite",
+    description: "Diagnostic reverse DCF lite using Stage 4 CORE_ADOPTED and MCP-adjusted CORE confidence."
   },
   {
     promptIndex: 7,
     promptNumber: 8,
     stageId: '7',
-    stageName: "Stage 7: Revaluation Parameter Selection",
-    description: "Single KPI with VOI window and measurable re-rate force."
+    stageName: "Stage 7: Competitive Position (4 finalists)",
+    description: "Replaceability, moat durability, and finalist selection from the advanced set."
   },
   {
     promptIndex: 8,
     promptNumber: 9,
     stageId: '8',
-    stageName: "Stage 8: Thesis Monetization Quantification",
-    description: "Incremental wedge cash flows (Bear/Base/Bull), capture ceilings, and NPV blocks."
+    stageName: "Stage 8: Returns on Capital & Capital Allocation",
+    description: "ROIC, CROIC, incremental returns, and value-destructive growth checks."
   },
   {
     promptIndex: 9,
     promptNumber: 10,
     stageId: '9',
-    stageName: "Stage 9: Reverse DCF (TOTAL)",
-    description: "Market-implied growth/margin extraction and divergence diagnostics."
+    stageName: "Stage 9: Revaluation Parameter Selection",
+    description: "Single KPI with VOI window and measurable re-rate force."
   },
   {
     promptIndex: 10,
     promptNumber: 11,
     stageId: '10',
-    stageName: "Stage 10: Four-Gate Decision + Stage 11 Composite Rank",
-    description: "Per-company WATCH/AVOID gates plus cross-company composite ranking with PRIMARY/SECONDARY selection."
+    stageName: "Stage 10: Thesis Monetization Quantification",
+    description: "Incremental wedge cash flows (Bear/Base/Bull), capture ceilings, and NPV blocks."
   },
   {
     promptIndex: 11,
     promptNumber: 12,
+    stageId: '11',
+    stageName: "Stage 11: Reverse DCF (TOTAL)",
+    description: "Market-implied growth/margin extraction and divergence diagnostics."
+  },
+  {
+    promptIndex: 12,
+    promptNumber: 13,
     stageId: '12',
-    stageName: "Stage 12: Final Investment Record Builder",
+    stageName: "Stage 12: Four-Gate Decision",
+    description: "Per-company WATCH/AVOID gates, integrity checks, value/proof gates, and execution plan handoff."
+  },
+  {
+    promptIndex: 13,
+    promptNumber: 14,
+    stageId: '13',
+    stageName: "Stage 13: Composite Rank",
+    description: "Cross-company composite ranking with PRIMARY/SECONDARY selection."
+  },
+  {
+    promptIndex: 14,
+    promptNumber: 15,
+    stageId: '14',
+    stageName: "Stage 14: Final Investment Record Builder",
     description: "Final structured watchlist records for downstream ingestion."
+  },
+  {
+    promptIndex: 15,
+    promptNumber: 16,
+    stageId: '15',
+    stageName: "Stage 15: Sector Intelligence Memory Row Writer",
+    description: "Durable sector intelligence records for future portfolio positioning and company analyses."
   }
 ];
 
 // Backward-compatible list used by existing UI components.
-const STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
+let STAGE_METADATA_COMPANY = DEFAULT_STAGE_METADATA_COMPANY.map((entry) => ({ ...entry }));
+let STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
 
 // Stage-id hints for dynamic DATA_GAP_STAGE recovery.
 // The map is intentionally explicit because some stage prompts do not expose
@@ -12737,7 +14009,6 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['1', 1],
   ['2', 2],
   ['3', 3],
-  ['3.1', 3], // traction scoring now lives inside the Stage 3 prompt
   ['4', 4],
   ['5', 5],
   ['6', 6],
@@ -12745,13 +14016,11 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['8', 8],
   ['9', 9],
   ['10', 10],
-  ['11', 10], // Stage 11 exists as a section inside the Stage 10 prompt
-  ['12', 11],
-  ['10.5', 10], // legacy alias: old chain used Stage 10.5 for composite rank
-  ['2.5', 4], // legacy alias: old chain used 2.5 for Reverse DCF Lite
-  ['3.2', 4], // compatibility alias: optional Stage 3.2 naming collapses to Stage 4 prompt
-  ['3.5', 6], // legacy alias now resolves to returns quality
-  ['6.5', 6] // compatibility midpoint alias for returns quality
+  ['11', 11],
+  ['12', 12],
+  ['13', 13],
+  ['14', 14],
+  ['15', 15]
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -12760,15 +14029,94 @@ function normalizeCompanyStageIdentifier(rawValue) {
     : String(rawValue ?? '').trim();
   if (!raw) return '';
 
-  const match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+  const compact = raw.replace(/\s+/g, '').toUpperCase();
+  if (compact === 'SETUP') return 'setup';
+  const match = compact.match(/^(\d+)$/);
   if (!match) return '';
+  return String(Number.parseInt(match[1], 10));
+}
 
-  const whole = String(Number.parseInt(match[1], 10));
-  const fractionRaw = typeof match[2] === 'string' ? match[2] : '';
-  if (!fractionRaw) return whole;
+function extractCompanyStageHeadingFromPrompt(promptText) {
+  const head = typeof promptText === 'string' ? promptText.slice(0, 2600) : '';
+  if (!head.trim()) return null;
 
-  const fraction = fractionRaw.replace(/0+$/, '');
-  return fraction ? `${whole}.${fraction}` : whole;
+  const directMatch = head.match(/^\s*#?\s*STAGE\s+(\d+)\s*(?:[—–-]\s*([^\n]+))?/im);
+  if (directMatch) {
+    const stageId = String(Number.parseInt(directMatch[1], 10));
+    const title = typeof directMatch[2] === 'string'
+      ? directMatch[2].trim().replace(/\s+/g, ' ')
+      : '';
+    return { stageId, title };
+  }
+
+  const roleMatch = head.match(/\brole\s*:\s*stage\s+(\d+)\s+([^\n.]+)/i)
+    || head.match(/\brole\s+is\s+stage\s+(\d+)\s*:?\s*([^\n.]+)/i);
+  if (roleMatch) {
+    const stageId = String(Number.parseInt(roleMatch[1], 10));
+    const title = typeof roleMatch[2] === 'string'
+      ? roleMatch[2].trim().replace(/\s+/g, ' ')
+      : '';
+    return { stageId, title };
+  }
+
+  return null;
+}
+
+function buildCompanyStageMetadataFromPrompts(prompts) {
+  const list = Array.isArray(prompts) ? prompts : [];
+  const defaultByPromptIndex = new Map(
+    DEFAULT_STAGE_METADATA_COMPANY.map((entry) => [entry.promptIndex, entry])
+  );
+
+  return list.map((promptText, index) => {
+    const promptNumber = index + 1;
+    const defaultEntry = defaultByPromptIndex.get(index) || null;
+    const heading = extractCompanyStageHeadingFromPrompt(promptText);
+    if (heading && defaultEntry?.stageId === heading.stageId) {
+      return {
+        ...defaultEntry,
+        promptIndex: index,
+        promptNumber
+      };
+    }
+    if (heading && heading.stageId) {
+      const defaultTitle = defaultEntry?.stageName
+        ? defaultEntry.stageName.replace(/^Stage\s+\d+\s*:\s*/i, '').trim()
+        : '';
+      const title = heading.title || defaultTitle || `Prompt ${promptNumber}`;
+      return {
+        promptIndex: index,
+        promptNumber,
+        stageId: heading.stageId,
+        stageName: `Stage ${heading.stageId}: ${title}`,
+        description: defaultEntry?.stageId === heading.stageId && typeof defaultEntry.description === 'string'
+          ? defaultEntry.description
+          : "Autodetected from prompts-company.txt."
+      };
+    }
+
+    if (defaultEntry) {
+      return {
+        ...defaultEntry,
+        promptIndex: index,
+        promptNumber
+      };
+    }
+
+    return {
+      promptIndex: index,
+      promptNumber,
+      stageId: String(index),
+      stageName: `Prompt ${promptNumber}`,
+      description: "Autodetected from prompts-company.txt."
+    };
+  });
+}
+
+function refreshCompanyStageMetadataFromPrompts(prompts) {
+  STAGE_METADATA_COMPANY = buildCompanyStageMetadataFromPrompts(prompts);
+  STAGE_NAMES_COMPANY = STAGE_METADATA_COMPANY.map((entry) => entry.stageName);
+  return STAGE_METADATA_COMPANY;
 }
 
 function escapeRegExpLiteral(value) {
@@ -13444,7 +14792,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
   const promptsToSend = PROMPTS_COMPANY.slice(effectiveStartIndex);
   const cleanedPrompts = [...promptsToSend];
   if (cleanedPrompts[0]) {
-    cleanedPrompts[0] = cleanedPrompts[0].replace('{{articlecontent}}', '').trim();
+    cleanedPrompts[0] = removeSourceTextPlaceholdersFromPromptTemplate(cleanedPrompts[0]);
   }
 
   const payload = '';
@@ -13482,6 +14830,7 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
     chatUrl: targetTabUrl || '',
     tabId,
     windowId: Number.isInteger(windowId) ? windowId : targetTab.windowId,
+    ...(composerThinkingEffort ? { composerThinkingEffort } : {}),
     ...(queueManaged
       ? {
         queueManaged: true,
@@ -13664,6 +15013,74 @@ async function resumeFromStageOnTab(tabId, windowId, startIndex, options = {}) {
         success: false,
         error: 'rate_limit_blocked',
         needsAction: true,
+        processId
+      };
+    }
+
+    if (isInjectDataGapTerminalResult(result)) {
+      const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
+        currentPrompt: executionPromptOffset,
+        totalPrompts: PROMPTS_COMPANY.length
+      });
+      const resultLastResponse = typeof result?.lastResponse === 'string'
+        ? result.lastResponse
+        : '';
+      const MAX_COMPLETED_RESPONSE_CHARS = 180000;
+      const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+      const storedCompletedResponse = completedResponseTruncated
+        ? resultLastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+        : resultLastResponse;
+      const dataGapConversationUrl = normalizeChatConversationUrl(result?.conversationUrl)
+        || normalizeChatConversationUrl(getTabEffectiveUrl(targetTab));
+      await renderFinalCounterStatusOnTab(tabId, {
+        heading: dataGapSummary.heading,
+        tone: dataGapSummary.tone,
+        lines: dataGapSummary.logLines,
+        autoCloseMs: 0
+      });
+      await upsertProcess(processId, {
+        title: processTitle,
+        analysisType: 'company',
+        lifecycleStatus: dataGapSummary.lifecycleStatus,
+        status: dataGapSummary.lifecycleStatus,
+        phase: dataGapSummary.phase,
+        actionRequired: dataGapSummary.actionRequired,
+        statusCode: dataGapSummary.statusCode,
+        statusText: dataGapSummary.statusText,
+        reason: dataGapSummary.reason,
+        error: dataGapSummary.error,
+        needsAction: dataGapSummary.needsAction,
+        currentPrompt: dataGapSummary.currentPrompt,
+        totalPrompts: dataGapSummary.totalPrompts,
+        ...(Number.isInteger(dataGapSummary.stageIndex)
+          ? {
+            stageIndex: dataGapSummary.stageIndex,
+            stageName: dataGapSummary.stageName
+          }
+          : {}),
+        ...(dataGapConversationUrl ? { chatUrl: dataGapConversationUrl } : {}),
+        dataGapDetected: true,
+        dataGapSignal: 'assistant_data_gap_stage',
+        dataGapStageId: resolveDataGapStageIdFromObject(result),
+        dataGapMissingInputs: '',
+        ...(typeof result?.lastResponse === 'string'
+          ? {
+            completedResponseText: storedCompletedResponse,
+            completedResponseLength: resultLastResponse.length,
+            completedResponseTruncated,
+            completedResponseCapturedAt: Date.now(),
+            completedResponseSaved: false
+          }
+          : {}),
+        autoRecovery: null,
+        finishedAt: Date.now(),
+        timestamp: Date.now()
+      });
+      return {
+        success: false,
+        stopped: true,
+        reason: 'data_gap_stage',
+        error: dataGapSummary.error,
         processId
       };
     }
@@ -14528,6 +15945,21 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
   const retryTimeoutMs = Number.isInteger(options?.retryTabReadTimeoutMs)
     ? options.retryTabReadTimeoutMs
     : Math.max(initialTimeoutMs + 1600, 3600);
+  const firstStage12 = await extractLatestStage12InvestmentResponseFromTab(tabId, initialTimeoutMs);
+  if (firstStage12?.text && firstStage12?.contract?.valid === true) {
+    return {
+      text: firstStage12.text,
+      contract: firstStage12.contract,
+      attemptCount: 1,
+      activated: false,
+      resolutionMode: 'stage12_dom_history',
+      selectedPrompt: 15,
+      selectedResponseReason: 'manual_copy_stage14_dom_history',
+      scannedCount: Number.isInteger(firstStage12.scannedCount) ? firstStage12.scannedCount : null,
+      sourceIndex: Number.isInteger(firstStage12.sourceIndex) ? firstStage12.sourceIndex : null
+    };
+  }
+
   const firstText = await extractLastAssistantResponseFromTab(tabId, initialTimeoutMs);
   const firstContract = buildResponseContractValidation(firstText);
   if (firstContract?.valid === true) {
@@ -14535,7 +15967,8 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
       text: firstText,
       contract: firstContract,
       attemptCount: 1,
-      activated: false
+      activated: false,
+      resolutionMode: 'dom_contract'
     };
   }
 
@@ -14552,7 +15985,23 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
       text: firstText,
       contract: firstContract,
       attemptCount: 1,
-      activated: false
+      activated: false,
+      resolutionMode: 'dom_invalid'
+    };
+  }
+
+  const secondStage12 = await extractLatestStage12InvestmentResponseFromTab(tabId, retryTimeoutMs);
+  if (secondStage12?.text && secondStage12?.contract?.valid === true) {
+    return {
+      text: secondStage12.text,
+      contract: secondStage12.contract,
+      attemptCount: 2,
+      activated: true,
+      resolutionMode: 'stage12_dom_history',
+      selectedPrompt: 15,
+      selectedResponseReason: 'manual_copy_stage14_dom_history',
+      scannedCount: Number.isInteger(secondStage12.scannedCount) ? secondStage12.scannedCount : null,
+      sourceIndex: Number.isInteger(secondStage12.sourceIndex) ? secondStage12.sourceIndex : null
     };
   }
 
@@ -14565,7 +16014,10 @@ async function resolveInvestCopyDomFallback(target, options = {}) {
     text: shouldPreferSecond ? secondText : firstText,
     contract: shouldPreferSecond ? secondContract : firstContract,
     attemptCount: 2,
-    activated: true
+    activated: true,
+    resolutionMode: shouldPreferSecond
+      ? (secondContract?.valid === true ? 'dom_contract' : 'dom_invalid')
+      : (firstContract?.valid === true ? 'dom_contract' : 'dom_invalid')
   };
 }
 
@@ -14597,10 +16049,16 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
     const domFallbackText = typeof domFallback?.text === 'string' ? domFallback.text : '';
     const domFallbackContract = domFallback?.contract || buildResponseContractValidation(domFallbackText);
     if (domFallbackText && domFallbackContract?.valid === true) {
+      const isStage12DomHistory = domFallback?.resolutionMode === 'stage12_dom_history';
       return {
         success: true,
         responseText: domFallbackText,
-        resolutionMode: 'process_dom_contract',
+        resolutionMode: isStage12DomHistory ? 'process_stage12_dom_history' : 'process_dom_contract',
+        fromDom: true,
+        selectedPrompt: Number.isInteger(domFallback?.selectedPrompt) ? domFallback.selectedPrompt : null,
+        selectedResponseReason: typeof domFallback?.selectedResponseReason === 'string' && domFallback.selectedResponseReason.trim()
+          ? domFallback.selectedResponseReason.trim()
+          : (isStage12DomHistory ? 'manual_copy_stage14_dom_history' : 'manual_copy_dom_contract'),
         processPatch: {
           completedResponseText: domFallbackText,
           completedResponseCapturedAt: Date.now()
@@ -14646,7 +16104,16 @@ async function resolveCopyLatestInvestResponsePayload(target, process, options =
   return {
     success: true,
     responseText: directFallbackText,
-    resolutionMode: 'direct_save'
+    resolutionMode: directFallback?.resolutionMode === 'stage12_dom_history'
+      ? 'direct_stage12_dom_history'
+      : 'direct_save',
+    fromDom: true,
+    selectedPrompt: Number.isInteger(directFallback?.selectedPrompt) ? directFallback.selectedPrompt : null,
+    selectedResponseReason: typeof directFallback?.selectedResponseReason === 'string' && directFallback.selectedResponseReason.trim()
+      ? directFallback.selectedResponseReason.trim()
+      : (directFallback?.resolutionMode === 'stage12_dom_history'
+        ? 'manual_copy_stage14_dom_history'
+        : 'manual_copy_fallback')
   };
 }
 
@@ -14827,10 +16294,17 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         ? (processRegistry.get(processId) || { ...process, ...processPatch })
         : { ...process, ...processPatch };
       let persistenceResult = await replayCompletedResponseForProcess(latestProcess, {
-        force: resolvedResponse?.resolutionMode === 'process_dom_contract',
+        force: resolvedResponse?.fromDom === true || resolvedResponse?.resolutionMode === 'process_dom_contract',
         allowDomFallback: false,
         tabId,
-        tabReadTimeoutMs
+        tabReadTimeoutMs,
+        selectedPrompt: Number.isInteger(resolvedResponse?.selectedPrompt) ? resolvedResponse.selectedPrompt : null,
+        selectedStageIndex: Number.isInteger(resolvedResponse?.selectedPrompt) && resolvedResponse.selectedPrompt > 0
+          ? resolvedResponse.selectedPrompt - 1
+          : null,
+        selectedResponseReason: typeof resolvedResponse?.selectedResponseReason === 'string'
+          ? resolvedResponse.selectedResponseReason
+          : ''
       });
       let persistenceMode = typeof persistenceResult?.recoveryMode === 'string'
         ? persistenceResult.recoveryMode
@@ -14891,9 +16365,11 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         const sourceTitle = typeof latestProcess?.title === 'string' && latestProcess.title.trim()
           ? latestProcess.title.trim()
           : (title && title.trim() ? title.trim() : 'ChatGPT Invest');
-        const stagePromptNumber = Number.isInteger(latestProcess?.currentPrompt) && latestProcess.currentPrompt > 0
-          ? latestProcess.currentPrompt
-          : (Number.isInteger(latestProcess?.stageIndex) && latestProcess.stageIndex >= 0 ? (latestProcess.stageIndex + 1) : 0);
+        const stagePromptNumber = Number.isInteger(resolvedResponse?.selectedPrompt) && resolvedResponse.selectedPrompt > 0
+          ? resolvedResponse.selectedPrompt
+          : (Number.isInteger(latestProcess?.currentPrompt) && latestProcess.currentPrompt > 0
+            ? latestProcess.currentPrompt
+            : (Number.isInteger(latestProcess?.stageIndex) && latestProcess.stageIndex >= 0 ? (latestProcess.stageIndex + 1) : 0));
         const existingCopyTrace = typeof latestProcess?.completedResponseSaveTrace === 'string' && latestProcess.completedResponseSaveTrace.trim()
           ? latestProcess.completedResponseSaveTrace.trim()
           : (typeof latestProcess?.persistenceStatus?.copyTrace === 'string' ? latestProcess.persistenceStatus.copyTrace.trim() : '');
@@ -14916,7 +16392,9 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
           : 'manual_copy_process';
         const fallbackResponseId = tracedResponseId || `${fallbackSafeRunId}_manual_copy_p${Math.max(0, stagePromptNumber)}_${fallbackHash}`;
         const fallbackStageMeta = {
-          selected_response_reason: 'manual_copy_recovered'
+          selected_response_reason: typeof resolvedResponse?.selectedResponseReason === 'string' && resolvedResponse.selectedResponseReason.trim()
+            ? resolvedResponse.selectedResponseReason.trim()
+            : 'manual_copy_recovered'
         };
         if (stagePromptNumber > 0) {
           fallbackStageMeta.selected_response_prompt = stagePromptNumber;
@@ -15033,7 +16511,15 @@ async function copyLatestInvestFinalResponseForTarget(target, options = {}) {
         null,
         generateResponseId('manual_copy_fallback'),
         {
-          selected_response_reason: 'manual_copy_fallback'
+          selected_response_reason: typeof resolvedResponse?.selectedResponseReason === 'string' && resolvedResponse.selectedResponseReason.trim()
+            ? resolvedResponse.selectedResponseReason.trim()
+            : 'manual_copy_fallback',
+          ...(Number.isInteger(resolvedResponse?.selectedPrompt) && resolvedResponse.selectedPrompt > 0
+            ? {
+              selected_response_prompt: resolvedResponse.selectedPrompt,
+              selected_response_stage_index: resolvedResponse.selectedPrompt - 1
+            }
+            : {})
         },
         conversationUrl || null,
         {
@@ -15601,8 +17087,8 @@ async function runResetScanStartAllTabs(options = {}) {
     const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
     const useStoredComposerThinkingEffort = options?.useStoredComposerThinkingEffort === true;
     let composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
-    // Unified rule: thinking effort is applied only when explicitly provided.
-    // Legacy fallback to stored value can be enabled only by explicit opt-in.
+    // Popup and process monitor can opt into the saved resume effort when
+    // the clicked button does not provide an explicit value.
     if (!composerThinkingEffort && useStoredComposerThinkingEffort) {
       composerThinkingEffort = await getStoredResumeComposerThinkingEffort();
     }
@@ -15707,7 +17193,7 @@ async function runResetScanStartAllTabs(options = {}) {
       includeClosedProcesses: options?.includeClosedProcesses === true,
       includeInvestTabs: true,
       // Resume-all must also see open company runs whose tab no longer exposes
-      // the stable /g/...-inwestycje URL after Chrome restore or ChatGPT routing.
+      // the stable /g/... project URL after Chrome restore or ChatGPT routing.
       includeProcessContextFallback: true
     });
     const activeProcesses = contextSnapshot.processCandidates;
@@ -15865,7 +17351,11 @@ async function runResetScanStartAllTabs(options = {}) {
       if (shouldRecordIssueForProcess(process)) return false;
       const processTs = Number.isInteger(process?.timestamp) ? process.timestamp : 0;
       const ageMs = processTs > 0 ? Math.max(0, Date.now() - processTs) : Number.MAX_SAFE_INTEGER;
-      if (ageMs > PROCESS_MONITOR_HEARTBEAT.staleTtlMs) return false;
+      const livePreserveTtlMs = Number.isInteger(PROCESS_MONITOR_HEARTBEAT?.autoStopLiveStaleTtlMs)
+        && PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs > 0
+        ? PROCESS_MONITOR_HEARTBEAT.autoStopLiveStaleTtlMs
+        : (WAIT_FOR_RESPONSE_MS + (30 * 60 * 1000));
+      if (ageMs > livePreserveTtlMs) return false;
       return true;
     };
     const computeResumePlanFromSavedStage = (row) => {
@@ -15893,12 +17383,12 @@ async function runResetScanStartAllTabs(options = {}) {
       }
 
       const savedStatus = normalizeProcessStatus(row?.progressStatus || '');
-      const savedNeedsAction = row?.progressNeedsAction === true;
+      const missingAssistantReplySignal = hasExplicitMissingAssistantReplySignal(row);
       let shouldAdvancePrompt = forceRepeatLastPrompt
         ? false
-        : !(savedNeedsAction || isFailedProcessStatus(savedStatus));
-      if (!forceRepeatLastPrompt && savedPromptNumber >= promptCount && !isClosedProcessStatus(savedStatus)) {
-        // For active runs at final prompt, retry the same stage instead of auto-marking completion.
+        : !missingAssistantReplySignal;
+      if (!forceRepeatLastPrompt && savedPromptNumber >= promptCount && !isClosedProcessStatus(savedStatus) && missingAssistantReplySignal) {
+        // At final prompt, only retry when there is an explicit no-reply signal.
         shouldAdvancePrompt = false;
       }
       let nextStartIndex = computeNextResumeIndex(
@@ -15915,8 +17405,8 @@ async function runResetScanStartAllTabs(options = {}) {
       const reason = forceRepeatLastPrompt
         ? (clampedFromPrompt1 ? 'force_repeat_saved_stage_clamped_to_prompt_2' : 'force_repeat_saved_stage')
         : (
-          savedNeedsAction || isFailedProcessStatus(savedStatus)
-            ? (clampedFromPrompt1 ? 'saved_stage_retry_clamped_to_prompt_2' : 'saved_stage_retry_same_prompt')
+          missingAssistantReplySignal
+            ? (clampedFromPrompt1 ? 'saved_stage_missing_reply_clamped_to_prompt_2' : 'saved_stage_missing_assistant_reply')
             : 'saved_stage_snapshot'
         );
 
@@ -15929,6 +17419,7 @@ async function runResetScanStartAllTabs(options = {}) {
         nextStartIndex,
         finalStageReached: !Number.isInteger(nextStartIndex),
         clampedFromPrompt1,
+        missingAssistantReply: missingAssistantReplySignal,
         reason
       };
     };
@@ -15995,16 +17486,11 @@ async function runResetScanStartAllTabs(options = {}) {
       const context = processContexts[index] || {};
       const process = context?.process || null;
       const key = getResultKey(context, index);
-      const processDataGapSignal = parseDataGapsStopFromText([
+      const processDataGapDirective = parseStandaloneDataGapStageDirective([
         typeof process?.statusText === 'string' ? process.statusText : '',
         typeof process?.reason === 'string' ? process.reason : '',
         typeof process?.error === 'string' ? process.error : ''
       ].filter(Boolean).join('\n'));
-      const processMentionsDataGap = (
-        looksLikeDataGapMarker(process?.reason || '')
-        || looksLikeDataGapMarker(process?.statusText || '')
-        || looksLikeDataGapMarker(process?.error || '')
-      );
       const row = {
         key,
         runId: typeof process?.id === 'string' && process.id.trim() ? process.id.trim() : '',
@@ -16042,6 +17528,11 @@ async function runResetScanStartAllTabs(options = {}) {
         totalPrompts: Number.isInteger(process?.totalPrompts) ? process.totalPrompts : null,
         progressStageName: typeof process?.stageName === 'string' ? process.stageName : '',
         progressStatus: process ? normalizeProcessStatus(process?.status || '') : '',
+        progressStatusCode: typeof process?.statusCode === 'string' ? process.statusCode : '',
+        progressReason: typeof process?.reason === 'string' ? process.reason : '',
+        progressError: typeof process?.error === 'string' ? process.error : '',
+        progressStatusText: typeof process?.statusText === 'string' ? process.statusText : '',
+        processIssueFlags: Array.isArray(process?.issueFlags) ? process.issueFlags.slice(0, 12) : [],
         progressNeedsAction: process?.needsAction === true,
         chatPromptNumber: null,
         chatPromptSource: '',
@@ -16060,11 +17551,10 @@ async function runResetScanStartAllTabs(options = {}) {
         restartDecisionSource: '',
         restartDispatchStatus: '',
         restartMissingAssistantReply: null,
-        dataGapDetected: processDataGapSignal.detected || processMentionsDataGap,
-        dataGapSignal: processDataGapSignal.detected
-          ? 'process_state'
-          : (processMentionsDataGap ? 'process_marker' : ''),
-        dataGapMissingInputs: processDataGapSignal.missingInputsText || '',
+        dataGapDetected: processDataGapDirective.detected,
+        dataGapSignal: processDataGapDirective.detected ? 'process_data_gap_stage' : '',
+        dataGapStageId: processDataGapDirective.stageId || '',
+        dataGapMissingInputs: '',
         resumeDecisionSource: '',
         recognitionStage: '',
         recognitionStatus: '',
@@ -16084,15 +17574,13 @@ async function runResetScanStartAllTabs(options = {}) {
       };
       appendRecognitionStep(row, 'init', 'queued', 'process_enqueued_for_reload_resume');
       if (row.dataGapDetected) {
-        const dataGapDetail = row.dataGapMissingInputs
-          ? `source=${row.dataGapSignal || 'process_state'}, missing_inputs=${row.dataGapMissingInputs}`
-          : `source=${row.dataGapSignal || 'process_state'}`;
+        const dataGapDetail = `source=${row.dataGapSignal || 'process_state'}, stage=${row.dataGapStageId || 'unknown'}`;
         appendRecognitionStep(row, 'data_gap', 'detected', dataGapDetail);
-        console.warn('[reset-scan-start] Data gap marker inherited from process state', {
+        console.warn('[reset-scan-start] DATA_GAP_STAGE directive inherited from process state', {
           runId: row.runId || '',
           tabId: row.tabId,
           signal: row.dataGapSignal || '',
-          missingInputs: row.dataGapMissingInputs || ''
+          stageId: row.dataGapStageId || ''
         });
       }
 
@@ -16144,6 +17632,11 @@ async function runResetScanStartAllTabs(options = {}) {
         row.totalPrompts = Number.isInteger(liveProcess?.totalPrompts) ? liveProcess.totalPrompts : row.totalPrompts;
         row.progressStageName = typeof liveProcess?.stageName === 'string' ? liveProcess.stageName : row.progressStageName;
         row.progressStatus = normalizeProcessStatus(liveProcess?.status || row.progressStatus || '');
+        row.progressStatusCode = typeof liveProcess?.statusCode === 'string' ? liveProcess.statusCode : row.progressStatusCode;
+        row.progressReason = typeof liveProcess?.reason === 'string' ? liveProcess.reason : row.progressReason;
+        row.progressError = typeof liveProcess?.error === 'string' ? liveProcess.error : row.progressError;
+        row.progressStatusText = typeof liveProcess?.statusText === 'string' ? liveProcess.statusText : row.progressStatusText;
+        row.processIssueFlags = Array.isArray(liveProcess?.issueFlags) ? liveProcess.issueFlags.slice(0, 12) : row.processIssueFlags;
         row.progressNeedsAction = liveProcess?.needsAction === true;
       }
       if (shouldPreserveLiveProcessDuringResume(liveProcess, row)) {
@@ -16374,11 +17867,11 @@ async function runResetScanStartAllTabs(options = {}) {
           : (target.process || null);
         if (!canResumeCompanyInvestContextFromUrl(row.url, currentProcess)) {
           row.action = 'skipped_outside_invest';
-          row.reason = `tab_url_not_inwestycje_gpt:${row.url || 'empty'}`;
+          row.reason = `tab_url_not_iskierka_gpt:${row.url || 'empty'}`;
           appendRecognitionStep(row, 'precheck', 'skipped', row.reason);
           resultsByKey.set(target.key, row);
           pendingKeys.delete(target.key);
-          console.warn('[reset-scan-start] Skip process (url outside inwestycje GPT)', {
+          console.warn('[reset-scan-start] Skip process (url outside Iskierka GPT)', {
             runId: row.runId || '',
             tabId: row.tabId,
             reason: row.reason
@@ -16449,7 +17942,7 @@ async function runResetScanStartAllTabs(options = {}) {
           markRestartLaunchPlan(row, row.nextStartIndex, {
             decisionReason: row.reason,
             decisionSource: row.resumeDecisionSource || 'saved_stage_snapshot',
-            missingAssistantReply: isMissingAssistantReplyReason(row.reason)
+            missingAssistantReply: savedStagePlan.missingAssistantReply === true
           });
           appendRecognitionStep(
             row,
@@ -16511,24 +18004,23 @@ async function runResetScanStartAllTabs(options = {}) {
         row.assistantMessageCount = Number.isInteger(extraction.assistantCount) ? extraction.assistantCount : 0;
         row.responseBlockCount = row.assistantMessageCount;
         row.lastUserMessageLength = typeof extraction.text === 'string' ? extraction.text.length : 0;
-        const dataGapStopSignal = parseDataGapsStopFromText(extraction.lastAssistantText || '');
-        if (dataGapStopSignal.detected) {
+        const dataGapDirectiveSignal = parseStandaloneDataGapStageDirective(extraction.lastAssistantText || '');
+        if (dataGapDirectiveSignal.detected) {
           row.dataGapDetected = true;
-          row.dataGapSignal = 'assistant_system_command';
-          row.dataGapMissingInputs = dataGapStopSignal.missingInputsText || '';
-          const dataGapDetail = row.dataGapMissingInputs
-            ? `source=assistant_system_command, missing_inputs=${row.dataGapMissingInputs}`
-            : 'source=assistant_system_command';
+          row.dataGapSignal = 'assistant_data_gap_stage';
+          row.dataGapStageId = dataGapDirectiveSignal.stageId || '';
+          row.dataGapMissingInputs = '';
+          const dataGapDetail = `source=assistant_data_gap_stage, stage=${row.dataGapStageId || 'unknown'}`;
           appendRecognitionStep(row, 'data_gap', 'detected', dataGapDetail);
-          console.warn('[reset-scan-start] Detected DATA_GAPS stop command in assistant response', {
+          console.warn('[reset-scan-start] Detected DATA_GAP_STAGE directive in assistant response', {
             runId: row.runId || '',
             tabId: row.tabId,
-            missingInputs: row.dataGapMissingInputs || ''
+            stageId: row.dataGapStageId || ''
           });
           await appendReloadResumeMonitorEvent(monitorSessionId, {
             level: 'warn',
             code: 'data_gap_detected',
-            message: `Tab ${row.tabId}: wykryto DATA_GAPS stop${row.dataGapMissingInputs ? ` (${row.dataGapMissingInputs})` : ''}`
+            message: `Tab ${row.tabId}: wykryto DATA_GAP_STAGE=${row.dataGapStageId || '?'}`
           });
         }
         appendRecognitionStep(
@@ -17308,7 +18800,7 @@ async function runResetScanStartAllTabs(options = {}) {
       await appendReloadResumeMonitorEvent(monitorSessionId, {
         level: 'warn',
         code: 'data_gap_summary',
-        message: `Wykryto DATA_GAPS w ${summary.data_gaps_detected} procesach`
+        message: `Wykryto DATA_GAP_STAGE w ${summary.data_gaps_detected} procesach`
       });
     }
 
@@ -17415,6 +18907,19 @@ function compactWhitespace(text) {
   return text.replace(/\s+/g, ' ').trim();
 }
 
+const SOURCE_TEXT_PLACEHOLDER_REGEX = /\{\{\s*(?:articlecontent|article)\s*\}\}/gi;
+
+function injectSourceTextIntoPromptTemplate(promptText, sourceText) {
+  const template = typeof promptText === 'string' ? promptText : '';
+  const source = typeof sourceText === 'string' ? sourceText : '';
+  return template.replace(SOURCE_TEXT_PLACEHOLDER_REGEX, () => source);
+}
+
+function removeSourceTextPlaceholdersFromPromptTemplate(promptText) {
+  const template = typeof promptText === 'string' ? promptText : '';
+  return template.replace(SOURCE_TEXT_PLACEHOLDER_REGEX, '').trim();
+}
+
 function isChatGptUrl(url) {
   if (typeof url !== 'string') return false;
   const candidate = url.trim();
@@ -17449,7 +18954,7 @@ function isInvestGptUrl(url) {
   const compactUrl = url.trim();
   if (!compactUrl) return false;
 
-  // GPT ids rotate, but the stable routing suffix is the Invest slug.
+  // GPT ids can rotate, and the local project was renamed from "inwestycje" to "iskierka".
   const matchesInvestPath = (pathname) => {
     const normalizedPath = typeof pathname === 'string'
       ? pathname.replace(/\/+$/, '').toLowerCase()
@@ -17464,7 +18969,7 @@ function isInvestGptUrl(url) {
       if (normalizedPath.startsWith(`${primaryPathBase}/`)) return true;
     }
 
-    return /^\/g\/[^/]*-inwestycje(?:\/|$)/i.test(normalizedPath);
+    return /^\/g\/[^/]*-(?:inwestycje|iskierka)(?:\/|$)/i.test(normalizedPath);
   };
 
   try {
@@ -17473,7 +18978,7 @@ function isInvestGptUrl(url) {
     if (!CHAT_GPT_HOSTS.has(parsed.hostname.toLowerCase())) return false;
     return matchesInvestPath(parsed.pathname || '');
   } catch (error) {
-    if (/^https?:\/\/(?:www\.)?(?:chatgpt\.com|chat\.openai\.com)\/g\/[^/?#]*-inwestycje(?:[/?#]|$)/i.test(compactUrl)) {
+    if (/^https?:\/\/(?:www\.)?(?:chatgpt\.com|chat\.openai\.com)\/g\/[^/?#]*-(?:inwestycje|iskierka)(?:[/?#]|$)/i.test(compactUrl)) {
       return true;
     }
 
@@ -18188,6 +19693,62 @@ async function ensureCompanyPromptsReady() {
   return Array.isArray(PROMPTS_COMPANY) && PROMPTS_COMPANY.length > 0;
 }
 
+function getPortfolioPromptSnapshotStatus(promptChain = PROMPTS_PORTFOLIO) {
+  const chain = Array.isArray(promptChain) ? promptChain : [];
+  const promptTwo = typeof chain[1] === 'string' ? chain[1] : '';
+  const snapshotMatch = promptTwo.match(
+    new RegExp('^PORTFOLIO_SNAPSHOT_FROM_DB_BEGIN\\n([\\s\\S]*?)\\nPORTFOLIO_SNAPSHOT_FROM_DB_END$', 'm')
+  );
+
+  if (!snapshotMatch) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_missing' };
+  }
+
+  const snapshotBlock = snapshotMatch[1];
+  if (
+    new RegExp('"source"\\s*:\\s*"placeholder_until_snapshot_refresh"').test(snapshotBlock)
+    || new RegExp('(?:^|\\b)source\\s*[:=]\\s*placeholder_until_snapshot_refresh\\b', 'mi').test(snapshotBlock)
+  ) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_placeholder' };
+  }
+  if (
+    new RegExp('"positions"\\s*:\\s*\\[\\s*\\]').test(snapshotBlock)
+    || new RegExp('^POSITIONS\\s*\\(\\s*0\\s*\\)\\s*$', 'mi').test(snapshotBlock)
+    || new RegExp('^Brak pozycji\\.\\s*$', 'mi').test(snapshotBlock)
+  ) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_empty_positions' };
+  }
+  const hasGeneratedUtc = new RegExp('"generated_utc"\\s*:\\s*"[^"]+"').test(snapshotBlock)
+    || new RegExp('(?:^|\\b)generated_utc\\s*[:=]\\s*(?!brak\\b|null\\b|unknown\\b)[^\\s|]+', 'mi').test(snapshotBlock);
+  if (!hasGeneratedUtc) {
+    return { ok: false, reason: 'portfolio_prompt_snapshot_missing_timestamp' };
+  }
+
+  return { ok: true, reason: 'portfolio_prompt_snapshot_ready' };
+}
+
+async function ensurePortfolioPromptsReady() {
+  // Portfolio Prompt 2 embeds the latest DB snapshot, so refresh from the
+  // bundled prompt file before each portfolio launch instead of relying on
+  // a startup-only in-memory copy.
+  await loadPrompts();
+  if (!Array.isArray(PROMPTS_PORTFOLIO) || PROMPTS_PORTFOLIO.length === 0) {
+    return false;
+  }
+  const snapshotStatus = getPortfolioPromptSnapshotStatus(PROMPTS_PORTFOLIO);
+  if (!snapshotStatus.ok) {
+    console.warn('[watchlist] Portfolio prompts snapshot not ready:', snapshotStatus.reason);
+    return false;
+  }
+  return true;
+}
+
+async function ensurePromptChainReadyForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+    ? ensurePortfolioPromptsReady()
+    : ensureCompanyPromptsReady();
+}
+
 function buildCompanyPromptChainForResume(startIndex) {
   if (!Array.isArray(PROMPTS_COMPANY) || PROMPTS_COMPANY.length === 0) {
     return [];
@@ -18200,7 +19761,7 @@ function buildCompanyPromptChainForResume(startIndex) {
 
   const normalized = [...chain];
   if (typeof normalized[0] === 'string') {
-    normalized[0] = normalized[0].replace('{{articlecontent}}', '').trim();
+    normalized[0] = removeSourceTextPlaceholdersFromPromptTemplate(normalized[0]);
   }
   return normalized;
 }
@@ -18267,9 +19828,15 @@ async function detectCompanyRecoveryPointFromLastMessage(tabId, fallbackPromptOf
       method: typeof plan?.method === 'string' ? plan.method : 'audit:prompt_match',
       promptNumber: Number.isInteger(plan?.detectedPromptNumber) ? plan.detectedPromptNumber : null,
       index: Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null,
-      hasAssistantReplyAfter: plan?.hasAssistantReplyAfter === true,
-      hasAssistantReplyByCounters: plan?.hasAssistantReplyByCounters === true,
-      assistantReplyPassThreshold: plan?.assistantReplyPassThreshold === true,
+      hasAssistantReplyAfter: typeof plan?.hasAssistantReplyAfter === 'boolean'
+        ? plan.hasAssistantReplyAfter
+        : null,
+      hasAssistantReplyByCounters: typeof plan?.hasAssistantReplyByCounters === 'boolean'
+        ? plan.hasAssistantReplyByCounters
+        : null,
+      assistantReplyPassThreshold: typeof plan?.assistantReplyPassThreshold === 'boolean'
+        ? plan.assistantReplyPassThreshold
+        : null,
       conservativePromptNumber: Number.isInteger(plan?.detectedPromptNumber) ? plan.detectedPromptNumber : null,
       conservativePromptIndex: Number.isInteger(plan?.detectedPromptIndex) ? plan.detectedPromptIndex : null,
       conservativePromptSource: typeof plan?.source === 'string' ? plan.source : 'conversation_audit',
@@ -18497,7 +20064,7 @@ function tokenizeForCompanyPromptMatch(text) {
 
 function normalizeCompanyPromptTemplate(promptText) {
   const raw = typeof promptText === 'string' ? promptText : '';
-  return compactWhitespace(raw.replace(/\{\{\s*articlecontent\s*\}\}/gi, ' '));
+  return compactWhitespace(raw.replace(SOURCE_TEXT_PLACEHOLDER_REGEX, ' '));
 }
 
 function buildCompanyPromptMatchRecords(prompts) {
@@ -19128,10 +20695,10 @@ async function countCompanyConversationMessages(tabId, options = {}) {
   if (missingPromptNumbers.length > 0) processIssueFlags.push('unrecognized_prompt_stage');
   if (unmatchedRows.length > 0) processIssueFlags.push('unmatched_user_messages');
   if (sequenceIssues.length > 0) processIssueFlags.push('sequence_issue');
-  const dataGapStopSignal = parseDataGapsStopFromText(scanned?.lastAssistantText || '');
-  const dataGapStopDetected = dataGapStopSignal.detected;
-  if (dataGapStopDetected) processIssueFlags.push('data_gap_stop');
-  const processState = (missingReplyRows.length > 0 || dataGapStopDetected)
+  const dataGapDirectiveSignal = parseStandaloneDataGapStageDirective(scanned?.lastAssistantText || '');
+  const dataGapDirectiveDetected = dataGapDirectiveSignal.detected;
+  if (dataGapDirectiveDetected) processIssueFlags.push('data_gap_stage');
+  const processState = (missingReplyRows.length > 0 || dataGapDirectiveDetected)
     ? 'needs_action'
     : ((lowQualityReplyRows.length > 0 || processIssueFlags.length > 0) ? 'warning' : 'ok');
   const runResets = [];
@@ -19230,17 +20797,13 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       const missingReplyStageText = missingReplyPromptNumbers.map((value) => `P${value}`).join(',');
       const lowQualityStageText = lowQualityReplyPromptNumbers.map((value) => `P${value}`).join(',');
       const unrecognizedStageText = missingPromptNumbers.map((value) => `P${value}`).join(',');
-      const dataGapInputsText = dataGapStopSignal.missingInputs.length > 0
-        ? dataGapStopSignal.missingInputs.join(',')
-        : '';
       const summaryMessage = [
         `state=${processState}`,
         processIssueText ? `issues=${processIssueText}` : '',
         missingReplyStageText ? `missing_reply=${missingReplyStageText}` : '',
         lowQualityStageText ? `low_quality=${lowQualityStageText}` : '',
         unrecognizedStageText ? `unrecognized=${unrecognizedStageText}` : '',
-        dataGapStopDetected ? `data_gap_stop=${DATA_GAPS_STOP_COMMAND}` : '',
-        dataGapInputsText ? `data_gap_inputs=${dataGapInputsText}` : '',
+        dataGapDirectiveDetected ? `data_gap_stage=${dataGapDirectiveSignal.stageId}` : '',
         sequenceIssues.length > 0 ? `sequence_issues=${sequenceIssues.length}` : ''
       ].filter(Boolean).join(' | ');
       const signature = [
@@ -19293,9 +20856,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       duplicatePromptNumbers,
       promptRepliesMissing,
       promptRepliesBelowThreshold,
-      dataGapStopDetected,
-      dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
-      dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
+	      dataGapDirectiveDetected,
+	      dataGapStageId: dataGapDirectiveSignal.stageId || '',
       auditPromptFrontier,
       activeProcessPromptNumber: Number.isInteger(activeProcessForTab?.currentPrompt)
         ? activeProcessForTab.currentPrompt
@@ -19370,8 +20932,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       promptRepliesPassingThreshold,
       promptRepliesBelowThreshold: effectivePromptRepliesBelowThreshold,
       missingReplyPromptCount: missingReplyPromptNumbers.length,
-      dataGapStopDetected: dataGapStopDetected ? 1 : 0,
-      dataGapMissingInputsCount: dataGapStopSignal.missingInputs.length,
+	      dataGapStopDetected: dataGapDirectiveDetected ? 1 : 0,
+	      dataGapStageDetected: dataGapDirectiveDetected ? 1 : 0,
       lowQualityReplyPromptCount: lowQualityReplyPromptNumbers.length
     },
     verification: {
@@ -19379,7 +20941,8 @@ async function countCompanyConversationMessages(tabId, options = {}) {
       allMatchedPromptsHaveReply: effectivePromptRepliesMissing === 0,
       allMatchedRepliesPassThreshold: effectivePromptRepliesBelowThreshold === 0,
       sequenceNonDecreasing: sequenceIssues.length === 0,
-      dataGapStopDetected,
+	      dataGapStopDetected: dataGapDirectiveDetected,
+	      dataGapStageDetected: dataGapDirectiveDetected,
       userMetaTruncated: scanned?.userMetaTruncated === true
     },
     auditPromptFrontier,
@@ -19393,9 +20956,11 @@ async function countCompanyConversationMessages(tabId, options = {}) {
     duplicatePromptNumbers,
     missingReplyPromptNumbers,
     lowQualityReplyPromptNumbers,
-    dataGapStopDetected,
-    dataGapMissingInputs: dataGapStopSignal.missingInputsText || '',
-    dataGapMissingInputsList: dataGapStopSignal.missingInputs,
+	    dataGapStopDetected: dataGapDirectiveDetected,
+	    dataGapStageDetected: dataGapDirectiveDetected,
+	    dataGapStageId: dataGapDirectiveSignal.stageId || '',
+	    dataGapMissingInputs: '',
+	    dataGapMissingInputsList: [],
     missingReplyRows,
     lowQualityReplyRows,
     promptCoverage,
@@ -19497,6 +21062,81 @@ function computeNextResumeIndex(lastPromptIndex, totalPrompts, shouldAdvanceProm
   return Math.max(1, nextIndex);
 }
 
+function normalizeResumeSignalToken(value) {
+  if (
+    typeof ProcessContractUtils !== 'undefined'
+    && typeof ProcessContractUtils?.normalizeCodeToken === 'function'
+  ) {
+    return ProcessContractUtils.normalizeCodeToken(value);
+  }
+  return String(value ?? '')
+    .trim()
+    .toLowerCase()
+    .replace(/[^a-z0-9._-]+/g, '_')
+    .replace(/_{2,}/g, '_')
+    .replace(/\._/g, '.')
+    .replace(/_\./g, '.')
+    .replace(/^[_./-]+|[_./-]+$/g, '');
+}
+
+function isMissingAssistantReplySignalToken(value) {
+  const token = normalizeResumeSignalToken(value);
+  if (!token) return false;
+  if (
+    token === 'missing_assistant_reply'
+    || token === 'missing_assistant_reply_by_count'
+    || token === 'assistant_reply_missing'
+    || token === 'assistant_reply_absent'
+    || token === 'no_assistant_reply'
+    || token === 'assistant_reply_empty'
+    || token === 'empty_response'
+    || token === 'no_response'
+    || token === 'no_response_or_error'
+    || token === 'brak_odpowiedzi'
+  ) {
+    return true;
+  }
+  return (
+    token.includes('missing_assistant_reply')
+    || token.includes('no_assistant_reply')
+    || token.includes('assistant_reply_empty')
+    || token.includes('empty_response')
+    || token.includes('no_response')
+    || token.includes('brak_odpowiedzi')
+  );
+}
+
+function hasExplicitMissingAssistantReplySignal(source = {}) {
+  const value = source && typeof source === 'object' ? source : {};
+  if (
+    value.hasAssistantReplyAfter === false
+    || value.hasAssistantReplyByCounters === false
+    || value.detectedHasAssistantReply === false
+    || value.restartMissingAssistantReply === true
+  ) {
+    return true;
+  }
+
+  const tokens = [
+    value.statusCode,
+    value.reason,
+    value.error,
+    value.statusText,
+    value.saveError,
+    value.bridgeError,
+    value.progressStatusCode,
+    value.progressReason,
+    value.progressError,
+    value.progressStatusText,
+    value.retryReason,
+    value.restartDecisionReason
+  ];
+  if (Array.isArray(value.issueFlags)) tokens.push(...value.issueFlags);
+  if (Array.isArray(value.processIssueFlags)) tokens.push(...value.processIssueFlags);
+
+  return tokens.some((token) => isMissingAssistantReplySignalToken(token));
+}
+
 function buildCompanyResumePlanFromAudit(audit, options = {}) {
   const forceRepeatLastPrompt = options?.forceRepeatLastPrompt === true;
   const promptCount = Number.isInteger(audit?.promptCatalogCount) && audit.promptCatalogCount > 0
@@ -19551,15 +21191,19 @@ function buildCompanyResumePlanFromAudit(audit, options = {}) {
 
   if (selectedRow) {
     detectedPromptNumber = selectedRow.promptNumber;
-    hasAssistantReplyAfter = selectedRow.hasAssistantReplyAfter === true;
-    assistantReplyPassThreshold = selectedRow.assistantReplyPassThreshold === true;
+    hasAssistantReplyAfter = typeof selectedRow?.hasAssistantReplyAfter === 'boolean'
+      ? selectedRow.hasAssistantReplyAfter
+      : null;
+    assistantReplyPassThreshold = typeof selectedRow?.assistantReplyPassThreshold === 'boolean'
+      ? selectedRow.assistantReplyPassThreshold
+      : null;
     shouldAdvancePrompt = forceRepeatLastPrompt
       ? false
-      : hasAssistantReplyAfter;
+      : (hasAssistantReplyAfter !== false);
     retryReason = forceRepeatLastPrompt
       ? 'force_repeat_last_prompt'
       : (
-        !hasAssistantReplyAfter
+        hasAssistantReplyAfter === false
           ? 'missing_assistant_reply'
           : ''
       );
@@ -19706,10 +21350,15 @@ function openResumeStagePopup(startIndex, title = '', options = {}) {
   const params = new URLSearchParams();
   const targetTabId = Number.isInteger(options?.targetTabId) ? options.targetTabId : null;
   const targetWindowId = Number.isInteger(options?.targetWindowId) ? options.targetWindowId : null;
+  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
   if (Number.isInteger(startIndex)) params.set('startIndex', String(startIndex));
   if (title) params.set('title', title);
   if (Number.isInteger(targetTabId)) params.set('targetTabId', String(targetTabId));
   if (Number.isInteger(targetWindowId)) params.set('targetWindowId', String(targetWindowId));
+  if (composerThinkingEffort) params.set('composerThinkingEffort', composerThinkingEffort);
+  if (!composerThinkingEffort && options?.useStoredComposerThinkingEffort === true) {
+    params.set('useStoredComposerThinkingEffort', '1');
+  }
   const query = params.toString();
   const targetUrl = chrome.runtime.getURL('resume-stage.html' + (query ? ('?' + query) : ''));
 
@@ -19740,6 +21389,14 @@ async function handleProcessResumeNextStageMessage(message) {
       ...(finalStagePersistence ? { finalStagePersistence } : {})
     };
   };
+  const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
+  const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
+  let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
+  if (resolvedComposerThinkingEffort) {
+    await setStoredResumeComposerThinkingEffort(resolvedComposerThinkingEffort);
+  } else if (useStoredComposerThinkingEffort) {
+    resolvedComposerThinkingEffort = await getStoredResumeComposerThinkingEffort();
+  }
   if (!runId) {
     const tabId = Number.isInteger(message?.tabId) ? message.tabId : null;
     if (!Number.isInteger(tabId)) {
@@ -19791,6 +21448,11 @@ async function handleProcessResumeNextStageMessage(message) {
         ? 'missing_assistant_reply'
         : 'missing_assistant_reply_by_count';
     }
+    if (message?.forceRepeatLastPrompt === true && Number.isInteger(detectedPromptIndex)) {
+      retrySamePrompt = true;
+      retryReason = 'force_repeat_last_prompt';
+      nextStartIndex = detectedPromptIndex;
+    }
 
     if (promptCount > 1) {
       nextStartIndex = Math.min(Math.max(nextStartIndex, 1), promptCount - 1);
@@ -19831,7 +21493,9 @@ async function handleProcessResumeNextStageMessage(message) {
       const title = typeof message?.title === 'string' ? message.title.trim() : '';
       openResumeStagePopup(nextStartIndex, title || (chatTab.title || ''), {
         targetTabId: chatTab.id,
-        targetWindowId: chatTab.windowId
+        targetWindowId: chatTab.windowId,
+        composerThinkingEffort: resolvedComposerThinkingEffort,
+        useStoredComposerThinkingEffort
       });
       return {
         success: true,
@@ -19852,7 +21516,8 @@ async function handleProcessResumeNextStageMessage(message) {
     const resumeResult = await resumeFromStage(nextStartIndex, {
       targetTabId: chatTab.id,
       suppressAlerts: true,
-      processTitle: resumeTitle || undefined
+      processTitle: resumeTitle || undefined,
+      composerThinkingEffort: resolvedComposerThinkingEffort
     });
 
     if (!resumeResult?.success) {
@@ -19895,7 +21560,8 @@ async function handleProcessResumeNextStageMessage(message) {
       detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
       detectedMethod,
       retrySamePrompt,
-      retryReason
+      retryReason,
+      composerThinkingEffort: resolvedComposerThinkingEffort || ''
     };
   }
 
@@ -19914,8 +21580,6 @@ async function handleProcessResumeNextStageMessage(message) {
   const progressPromptNumber = Number.isInteger(process?.currentPrompt) && process.currentPrompt > 0
     ? process.currentPrompt
     : (Number.isInteger(process?.stageIndex) && process.stageIndex >= 0 ? (process.stageIndex + 1) : null);
-  const processStatus = normalizeProcessStatus(process?.status || '');
-  const processNeedsAction = process?.needsAction === true;
   const minStartIndex = PROMPTS_COMPANY.length > 1 ? 1 : 0;
   let detectedPromptIndex = null;
   let detectedMethod = '';
@@ -19944,11 +21608,14 @@ async function handleProcessResumeNextStageMessage(message) {
     if (Number.isInteger(boundedProgressPromptNumber) && boundedProgressPromptNumber > 0) {
       detectedPromptIndex = boundedProgressPromptNumber - 1;
       detectedMethod = 'fallback_saved_process_progress';
-      const shouldAdvancePrompt = !(processNeedsAction || isFailedProcessStatus(processStatus));
+      const missingAssistantReplySignal = hasExplicitMissingAssistantReplySignal(process);
+      const shouldAdvancePrompt = message?.forceRepeatLastPrompt === true
+        ? false
+        : !missingAssistantReplySignal;
       retrySamePrompt = !shouldAdvancePrompt;
-      retryReason = retrySamePrompt
-        ? (processNeedsAction ? 'saved_stage_needs_action' : 'saved_stage_failed_status')
-        : '';
+      retryReason = message?.forceRepeatLastPrompt === true
+        ? 'force_repeat_last_prompt'
+        : (missingAssistantReplySignal ? 'missing_assistant_reply' : '');
       nextStartIndex = computeNextResumeIndex(
         detectedPromptIndex,
         PROMPTS_COMPANY.length,
@@ -19985,7 +21652,9 @@ async function handleProcessResumeNextStageMessage(message) {
   if (message?.openDialogOnly) {
     openResumeStagePopup(nextStartIndex, title, {
       targetTabId: chatTab.id,
-      targetWindowId: chatTab.windowId
+      targetWindowId: chatTab.windowId,
+      composerThinkingEffort: resolvedComposerThinkingEffort,
+      useStoredComposerThinkingEffort
     });
     return {
       success: true,
@@ -20003,7 +21672,8 @@ async function handleProcessResumeNextStageMessage(message) {
   const resumeResult = await resumeFromStage(nextStartIndex, {
     targetTabId: chatTab.id,
     suppressAlerts: true,
-    processTitle: title || undefined
+    processTitle: title || undefined,
+    composerThinkingEffort: resolvedComposerThinkingEffort
   });
 
   if (!resumeResult?.success) {
@@ -20077,7 +21747,8 @@ async function handleProcessResumeNextStageMessage(message) {
     detectedPromptNumber: Number.isInteger(detectedPromptIndex) ? (detectedPromptIndex + 1) : null,
     detectedMethod,
     retrySamePrompt,
-    retryReason
+    retryReason,
+    composerThinkingEffort: resolvedComposerThinkingEffort || ''
   };
 }
 
@@ -20682,6 +22353,48 @@ function buildPersistenceUiSummary(options = {}) {
   };
 }
 
+function isForceStoppedExecutionResult(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (result.stopped === true) return true;
+  const error = typeof result.error === 'string' ? result.error.trim().toLowerCase() : '';
+  return error === 'force_stopped';
+}
+
+function buildForceStoppedExecutionSummary(result = {}) {
+  const reason = typeof result?.reason === 'string' && result.reason.trim()
+    ? result.reason.trim()
+    : 'force_stop';
+  const origin = typeof result?.origin === 'string' && result.origin.trim()
+    ? result.origin.trim()
+    : '';
+  const statusText = reason === 'bulk_resume_prepare'
+    ? 'Zatrzymano przed wznowieniem zbiorczym'
+    : (reason === 'bulk_reset_before_detect_resume'
+      ? 'Zatrzymano przed ponownym rozpoznaniem'
+      : (reason === 'restarted_in_same_window'
+        ? 'Zatrzymano przez ponowne uruchomienie'
+        : (reason === 'manual_stop'
+          ? 'Zatrzymano recznie'
+          : 'Proces zatrzymany')));
+  const logLines = [
+    `Powod: ${reason}`,
+    ...(origin ? [`Origin: ${origin}`] : [])
+  ];
+  return {
+    lifecycleStatus: 'stopped',
+    phase: 'response_wait',
+    actionRequired: 'none',
+    needsAction: false,
+    statusCode: 'process.stopped',
+    statusText,
+    reason,
+    error: '',
+    heading: statusText,
+    tone: 'warn',
+    logLines
+  };
+}
+
 async function renderFinalCounterStatusOnTab(tabId, options = {}) {
   if (!Number.isInteger(tabId)) return;
   if (!chrome?.scripting?.executeScript) return;
@@ -21007,6 +22720,7 @@ function summarizeWatchlistDispatchPayload(payload) {
     schema: typeof payload.schema === 'string' ? payload.schema : '',
     responseId: typeof payload.responseId === 'string' ? payload.responseId : '',
     runId: typeof payload.runId === 'string' ? payload.runId : '',
+    sourceRecordSuffix: typeof payload.sourceRecordSuffix === 'string' ? payload.sourceRecordSuffix : '',
     analysisType: typeof payload.analysisType === 'string' ? payload.analysisType : '',
     source: typeof payload.source === 'string' ? payload.source : '',
     sourceTitle: typeof payload.sourceTitle === 'string' ? payload.sourceTitle : '',
@@ -21017,6 +22731,7 @@ function summarizeWatchlistDispatchPayload(payload) {
     textFingerprint: textFingerprint(text),
     hasConversationUrl: !!(typeof payload.conversationUrl === 'string' && payload.conversationUrl.trim()),
     conversationLogCount,
+    stageReason: typeof payload.stage?.selected_response_reason === 'string' ? payload.stage.selected_response_reason : '',
     hasDecisionRecord: !!decisionRecord,
     decisionRecordFormat: typeof decisionRecord?.recordFormat === 'string' ? decisionRecord.recordFormat : ''
   };
@@ -21182,7 +22897,7 @@ function extractStructuredWatchlistResponseFromText(rawText) {
         continue;
       }
       const schema = normalizeStructuredWatchlistValue(parsed.schema).toLowerCase();
-      if (schema !== 'economist.response.v2') {
+      if (schema && schema !== 'economist.response.v2') {
         continue;
       }
 
@@ -21206,7 +22921,427 @@ function extractStructuredWatchlistResponseFromText(rawText) {
   return null;
 }
 
+function extractPortfolioFinalResponseFromText(rawText) {
+  const candidates = extractStructuredWatchlistJsonCandidates(rawText);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+        continue;
+      }
+      const schema = normalizeStructuredWatchlistValue(parsed.schema).toLowerCase();
+      const status = normalizeStructuredWatchlistValue(parsed.status).toUpperCase();
+      const hasLegacyPortfolioShape = (
+        parsed.save && typeof parsed.save === 'object' && !Array.isArray(parsed.save)
+      ) || (
+        parsed.totals && typeof parsed.totals === 'object' && !Array.isArray(parsed.totals)
+      ) || (
+        Object.prototype.hasOwnProperty.call(parsed, 'feedback_payload')
+      ) || (
+        parsed.mcp_confirmation && typeof parsed.mcp_confirmation === 'object' && !Array.isArray(parsed.mcp_confirmation)
+      ) || (
+        parsed.execution_summary && typeof parsed.execution_summary === 'object' && !Array.isArray(parsed.execution_summary)
+      ) || (
+        Object.prototype.hasOwnProperty.call(parsed, 'mcp_feedback_json')
+      ) || (
+        Array.isArray(parsed.positions) && Array.isArray(parsed.layers)
+      );
+      const hasPortfolioSummary = (
+        typeof parsed.thesis_construction_summary === 'string'
+        || typeof parsed.author_thesis_commentary === 'string'
+      );
+      const hasPortfolioConstructionCommentary = (
+        typeof parsed.portfolio_construction_commentary === 'string'
+        || typeof parsed.portfolio_decision_narrative === 'string'
+      );
+      const hasTextPortfolioShape = (
+        hasPortfolioSummary
+        && hasPortfolioConstructionCommentary
+        && Array.isArray(parsed.layers)
+        && Array.isArray(parsed.positions)
+      );
+      const isPortfolioSchema = schema === 'portfolio.final_response.v1' || schema === 'portfolio.final_response.v2';
+      if (hasTextPortfolioShape || ((isPortfolioSchema || status) && hasLegacyPortfolioShape)) {
+        return {
+          schema: schema || (hasTextPortfolioShape ? 'portfolio.final_response.v2' : 'portfolio.final_response.v1'),
+          payload: parsed,
+          text: candidate
+        };
+      }
+    } catch (error) {
+      continue;
+    }
+  }
+  return null;
+}
+
+function cloneJsonCompatibleValue(value) {
+  if (value === null || value === undefined) return value;
+  try {
+    return JSON.parse(JSON.stringify(value));
+  } catch (_) {
+    return value;
+  }
+}
+
+function parseJsonObjectCandidate(value) {
+  if (value && typeof value === 'object' && !Array.isArray(value)) {
+    return value;
+  }
+  if (typeof value !== 'string' || !value.trim()) {
+    return null;
+  }
+  const candidates = extractStructuredWatchlistJsonCandidates(value);
+  for (const candidate of candidates) {
+    try {
+      const parsed = JSON.parse(candidate);
+      if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+        return parsed;
+      }
+    } catch (_) {
+      // Try the next candidate.
+    }
+  }
+  return null;
+}
+
+function isPortfolioFeedbackSubmitPayload(payload) {
+  if (!payload || typeof payload !== 'object' || Array.isArray(payload)) return false;
+  const schema = normalizeStructuredWatchlistValue(payload.schema).toLowerCase();
+  const tool = normalizeStructuredWatchlistValue(payload.tool).toLowerCase();
+  const hasReview = payload.review && typeof payload.review === 'object' && !Array.isArray(payload.review);
+  const hasFeedbackRows = (
+    Array.isArray(payload.layer_votes)
+    || Array.isArray(payload.position_votes)
+    || Array.isArray(payload.action_plan)
+    || Array.isArray(payload.actions)
+    || Array.isArray(payload.trades)
+    || Array.isArray(payload.entry_strategy)
+    || Array.isArray(payload.entry_rules)
+  );
+  return schema === 'portfolio.feedback.submit.v1'
+    || tool === 'portfolio.feedback.submit'
+    || (hasReview && hasFeedbackRows);
+}
+
+function normalizePortfolioFeedbackSubmitDispatchPayload(rawPayload, meta) {
+  const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const payload = parseJsonObjectCandidate(rawPayload);
+  if (!isPortfolioFeedbackSubmitPayload(payload)) return null;
+
+  const review = payload.review && typeof payload.review === 'object' && !Array.isArray(payload.review)
+    ? cloneJsonCompatibleValue(payload.review)
+    : null;
+  const layerVotes = Array.isArray(payload.layer_votes) ? cloneJsonCompatibleValue(payload.layer_votes) : [];
+  const positionVotes = Array.isArray(payload.position_votes) ? cloneJsonCompatibleValue(payload.position_votes) : [];
+  const actionPlan = Array.isArray(payload.action_plan)
+    ? cloneJsonCompatibleValue(payload.action_plan)
+    : (
+      Array.isArray(payload.actions)
+        ? cloneJsonCompatibleValue(payload.actions)
+        : (Array.isArray(payload.trades) ? cloneJsonCompatibleValue(payload.trades) : [])
+    );
+  const entryStrategy = Array.isArray(payload.entry_strategy)
+    ? cloneJsonCompatibleValue(payload.entry_strategy)
+    : (Array.isArray(payload.entry_rules) ? cloneJsonCompatibleValue(payload.entry_rules) : []);
+  if (!review || (layerVotes.length === 0 && positionVotes.length === 0 && actionPlan.length === 0)) {
+    return null;
+  }
+
+  const baseRunId = normalizeStructuredWatchlistValue(payload.runId || payload.run_id || safeMeta.runId);
+  const baseResponseId = normalizeStructuredWatchlistValue(payload.responseId || payload.response_id || safeMeta.responseId);
+  const responseId = baseResponseId
+    ? (baseResponseId.includes('portfolio_feedback_submit') ? baseResponseId : `${baseResponseId}:portfolio_feedback_submit`)
+    : generateResponseId(baseRunId);
+  const account = normalizeStructuredWatchlistValue(payload.account || safeMeta.account || 'U22088457');
+  const source = normalizeStructuredWatchlistValue(payload.source || safeMeta.source, 'Portfolio feedback submit payload');
+  const sourceTitle = normalizeStructuredWatchlistValue(payload.sourceTitle || payload.source_title || safeMeta.sourceTitle, source);
+  const conversationUrl = normalizeChatConversationUrl(
+    normalizeStructuredWatchlistValue(payload.conversationUrl || payload.conversation_url || safeMeta.conversationUrl)
+  );
+  const stage = payload.stage && typeof payload.stage === 'object' && !Array.isArray(payload.stage)
+    ? cloneJsonCompatibleValue(payload.stage)
+    : (
+      safeMeta.stage && typeof safeMeta.stage === 'object' && !Array.isArray(safeMeta.stage)
+        ? cloneJsonCompatibleValue(safeMeta.stage)
+        : {}
+    );
+  stage.selected_response_kind = 'portfolio_feedback_submit';
+
+  const submitPayload = {
+    schema: 'portfolio.feedback.submit.v1',
+    responseId,
+    runId: baseRunId || null,
+    text: '',
+    source,
+    sourceTitle,
+    analysisType: 'portfolio_feedback_submit',
+    timestamp: payload.timestamp ?? safeMeta.timestamp ?? Date.now(),
+    account,
+    review,
+    layer_votes: layerVotes,
+    position_votes: positionVotes,
+    action_plan: actionPlan,
+    entry_strategy: entryStrategy,
+    stage
+  };
+  if (conversationUrl) {
+    submitPayload.conversationUrl = conversationUrl;
+  }
+  const conversationLogs = normalizeConversationLogSnapshot(
+    payload.conversationLogs || payload.conversation_logs || safeMeta.conversationLogs,
+    RESPONSE_CONVERSATION_LOG_MAX_ITEMS
+  );
+  if (conversationLogs.length > 0) {
+    submitPayload.conversationLogs = conversationLogs;
+    submitPayload.conversationLogCount = conversationLogs.length;
+  }
+  submitPayload.text = JSON.stringify({
+    schema: submitPayload.schema,
+    account: submitPayload.account,
+    review: submitPayload.review,
+    layer_votes: submitPayload.layer_votes,
+    position_votes: submitPayload.position_votes,
+    action_plan: submitPayload.action_plan,
+    entry_strategy: submitPayload.entry_strategy
+  });
+  return submitPayload;
+}
+
+function normalizePortfolioFinalResponseFeedbackSubmitPayload(rawFinalResponse, meta) {
+  const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const parsed = parseJsonObjectCandidate(rawFinalResponse);
+  if (!parsed) return null;
+
+  const candidates = [];
+  const pushCandidate = (candidate) => {
+    if (candidate && typeof candidate === 'object' && !Array.isArray(candidate)) {
+      candidates.push(candidate);
+    }
+  };
+  pushCandidate(parsed);
+  pushCandidate(parsed.payload);
+  pushCandidate(parsed.portfolioFinalResponse?.payload);
+  pushCandidate(parseJsonObjectCandidate(parsed.text));
+  pushCandidate(parseJsonObjectCandidate(parsed.responseText));
+
+  const isPortfolioFinalResponse = (candidate) => {
+    if (!candidate || typeof candidate !== 'object' || Array.isArray(candidate)) {
+      return false;
+    }
+    const hasPortfolioSummary = (
+      typeof candidate.thesis_construction_summary === 'string'
+      || typeof candidate.author_thesis_commentary === 'string'
+    );
+    const hasPortfolioConstructionCommentary = (
+      typeof candidate.portfolio_construction_commentary === 'string'
+      || typeof candidate.portfolio_decision_narrative === 'string'
+    );
+    return hasPortfolioSummary
+      && hasPortfolioConstructionCommentary
+      && Array.isArray(candidate.layers)
+      && Array.isArray(candidate.positions);
+  };
+  const finalResponse = candidates.find(isPortfolioFinalResponse);
+  if (!finalResponse) return null;
+
+  const firstText = (...values) => {
+    for (const value of values) {
+      const normalized = normalizeStructuredWatchlistValue(value);
+      if (normalized) return normalized;
+    }
+    return '';
+  };
+  const firstNumber = (...values) => {
+    for (const value of values) {
+      if (value === null || value === undefined || value === '') continue;
+      const number = Number(value);
+      if (Number.isFinite(number)) return number;
+    }
+    return null;
+  };
+  const normalizeLayerVote = (value) => {
+    const normalized = normalizeStructuredWatchlistValue(value).toUpperCase();
+    return ['INCREASE', 'REDUCE', 'HOLD', 'ROTATE', 'CLEANUP'].includes(normalized)
+      ? normalized
+      : 'HOLD';
+  };
+  const normalizePositionAction = (value, row = {}) => {
+    const normalized = normalizeStructuredWatchlistValue(value).toUpperCase();
+    return ['INCREASE', 'REDUCE', 'HOLD', 'EXIT', 'WATCH'].includes(normalized)
+      ? normalized
+      : (() => {
+        const currentQty = firstNumber(row.current_qty, row.currentQty, row.qty, row.quantity);
+        const targetQty = firstNumber(row.target_qty, row.targetQty);
+        if (currentQty !== null && targetQty !== null) {
+          if (targetQty <= 0 && currentQty > 0) return 'EXIT';
+          if (targetQty > currentQty) return 'INCREASE';
+          if (targetQty < currentQty) return 'REDUCE';
+          return 'HOLD';
+        }
+        const currentWeight = firstNumber(row.current_weight_pct, row.currentWeightPct);
+        const targetWeight = firstNumber(row.target_weight_pct, row.targetWeightPct);
+        if (currentWeight !== null && targetWeight !== null) {
+          if (targetWeight <= 0 && currentWeight > 0) return 'EXIT';
+          if (targetWeight > currentWeight) return 'INCREASE';
+          if (targetWeight < currentWeight) return 'REDUCE';
+        }
+        return 'HOLD';
+      })();
+  };
+  const stringList = (value) => Array.isArray(value)
+    ? value.map((item) => normalizeStructuredWatchlistValue(item)).filter(Boolean)
+    : [];
+
+  const gaps = stringList(finalResponse.portfolio_gaps);
+  const warnings = stringList(finalResponse.warnings);
+  const errors = stringList(finalResponse.errors);
+  if (errors.length > 0) {
+    return null;
+  }
+  const commentary = firstText(finalResponse.thesis_construction_summary, finalResponse.author_thesis_commentary);
+  const narrative = firstText(finalResponse.portfolio_construction_commentary, finalResponse.portfolio_decision_narrative);
+  const reviewFeedbackParts = [
+    narrative,
+    commentary,
+    gaps.length ? `Luki portfela: ${gaps.join(' ')}` : ''
+  ].filter(Boolean);
+
+  const layerVotes = finalResponse.layers
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => {
+      const layerId = firstText(row.layer_id, row.layer);
+      if (!layerId) return null;
+      const commentaryText = firstText(row.layer_business_thesis, row.layer_commentary, row.feedback_text, row.why_this_pct);
+      return {
+        layer_id: layerId,
+        layer_name: firstText(row.layer_name, row.name),
+        current_pct: firstNumber(row.current_pct, row.current_weight_pct, row.currentWeightPct),
+        target_pct: firstNumber(row.target_pct, row.proposed_pct, row.target_weight_pct, row.targetWeightPct),
+        vote: normalizeLayerVote(row.vote || row.action),
+        problem: firstText(row.problem, commentaryText),
+        why_this_pct: firstText(row.why_this_pct, commentaryText),
+        author_rank: firstNumber(row.author_rank, row.layer_rank),
+        exposure_quality: firstText(row.exposure_quality),
+        thesis_ref: 'portfolio.final_response.v2'
+      };
+    })
+    .filter(Boolean);
+
+  const positionVotes = finalResponse.positions
+    .filter((row) => row && typeof row === 'object' && !Array.isArray(row))
+    .map((row) => {
+      const symbol = firstText(row.symbol);
+      const layerId = firstText(row.layer_id, row.layer);
+      if (!symbol || !layerId) return null;
+      const thesis = firstText(row.position_thesis, row.feedback_text, row.why_this_action);
+      const currentQty = firstNumber(row.current_qty, row.currentQty, row.qty, row.quantity);
+      const targetQty = firstNumber(row.target_qty, row.targetQty);
+      const qtyDelta = currentQty !== null && targetQty !== null ? targetQty - currentQty : firstNumber(row.qty_delta, row.qtyDelta);
+      return {
+        symbol,
+        company: firstText(row.company, row.name),
+        layer_id: layerId,
+        action: normalizePositionAction(row.action, row),
+        current_qty: currentQty,
+        target_qty: targetQty,
+        qty_delta: qtyDelta,
+        current_weight_pct: firstNumber(row.current_weight_pct, row.currentWeightPct),
+        target_weight_pct: firstNumber(row.target_weight_pct, row.targetWeightPct),
+        target_value_base: firstNumber(row.target_value_base, row.targetValueBase),
+        conviction: firstNumber(row.conviction),
+        stop_loss_price: firstNumber(row.stop_loss_price, row.stop_loss),
+        take_profit_price: firstNumber(row.take_profit_price, row.take_profit),
+        value_capture_assessment: firstText(row.value_capture_assessment),
+        feedback_text: thesis,
+        why_this_action: firstText(row.why_this_action, thesis),
+        author_layer_rank: firstNumber(row.author_layer_rank, row.layer_rank),
+        thesis_ref: 'portfolio.final_response.v2',
+        evidence: {
+          author_layer_rank: firstNumber(row.author_layer_rank, row.layer_rank),
+          value_capture_assessment: firstText(row.value_capture_assessment),
+          current_qty: currentQty,
+          target_qty: targetQty,
+          qty_delta: qtyDelta
+        }
+      };
+    })
+    .filter(Boolean);
+
+  if (layerVotes.length === 0 && positionVotes.length === 0) {
+    return null;
+  }
+
+  const baseRunId = normalizeStructuredWatchlistValue(parsed.runId || parsed.run_id || safeMeta.runId);
+  const baseResponseId = normalizeStructuredWatchlistValue(parsed.responseId || parsed.response_id || safeMeta.responseId);
+  const source = firstText(parsed.source, safeMeta.source, 'Portfolio final response');
+  const sourceTitle = firstText(parsed.sourceTitle, parsed.source_title, safeMeta.sourceTitle, source);
+  const account = firstText(parsed.account, safeMeta.account, 'U22088457');
+  const stage = parsed.stage && typeof parsed.stage === 'object' && !Array.isArray(parsed.stage)
+    ? cloneJsonCompatibleValue(parsed.stage)
+    : (
+      safeMeta.stage && typeof safeMeta.stage === 'object' && !Array.isArray(safeMeta.stage)
+        ? cloneJsonCompatibleValue(safeMeta.stage)
+        : {}
+    );
+  stage.source_final_response_schema = 'portfolio.final_response.v2';
+
+  return normalizePortfolioFeedbackSubmitDispatchPayload(
+    {
+      schema: 'portfolio.feedback.submit.v1',
+      tool: 'portfolio.feedback.submit',
+      responseId: baseResponseId,
+      runId: baseRunId || null,
+      source,
+      sourceTitle,
+      analysisType: 'portfolio_feedback_submit',
+      timestamp: parsed.timestamp ?? safeMeta.timestamp ?? Date.now(),
+      account,
+      review: {
+        review_id: baseResponseId ? `${baseResponseId}:portfolio_final_feedback` : '',
+        portfolio_feedback: reviewFeedbackParts.join('\n\n') || 'Portfolio final response feedback.',
+        main_problem: firstText(gaps[0], warnings[0]),
+        main_change: narrative
+      },
+      layer_votes: layerVotes,
+      position_votes: positionVotes,
+      action_plan: [],
+      entry_strategy: [],
+      stage,
+      conversationUrl: parsed.conversationUrl || parsed.conversation_url || safeMeta.conversationUrl,
+      conversationLogs: parsed.conversationLogs || parsed.conversation_logs || safeMeta.conversationLogs
+    },
+    safeMeta
+  );
+}
+
+function extractPortfolioFeedbackSubmitPayloadFromFinalResponse(rawText, meta) {
+  const safeMeta = meta && typeof meta === 'object' && !Array.isArray(meta) ? meta : {};
+  const finalResponse = parseJsonObjectCandidate(rawText);
+  if (!finalResponse) return null;
+  const direct = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse, safeMeta);
+  if (direct) return direct;
+  if (Object.prototype.hasOwnProperty.call(finalResponse, 'feedback_payload')) {
+    const feedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.feedback_payload, safeMeta);
+    if (feedbackPayload) return feedbackPayload;
+  }
+  if (Object.prototype.hasOwnProperty.call(finalResponse, 'mcp_feedback_json')) {
+    const mcpPayload = normalizePortfolioFeedbackSubmitDispatchPayload(finalResponse.mcp_feedback_json, safeMeta);
+    if (mcpPayload) return mcpPayload;
+  }
+  return normalizePortfolioFinalResponseFeedbackSubmitPayload(finalResponse, safeMeta);
+}
+
 function buildResponseContractValidation(rawText) {
+  const portfolioFinalResponse = extractPortfolioFinalResponseFromText(rawText);
+  if (portfolioFinalResponse) {
+    return {
+      valid: true,
+      kind: portfolioFinalResponse.schema || 'portfolio.final_response.v2',
+      portfolioFinalResponse
+    };
+  }
+
   const structuredResponse = extractStructuredWatchlistResponseFromText(rawText);
   if (structuredResponse) {
     return {
@@ -21318,10 +23453,25 @@ function mapDispatchDecisionRecord(record) {
 
 function normalizeWatchlistDispatchPayload(response) {
   if (!response || typeof response !== 'object') return null;
+  const customSchema = normalizeStructuredWatchlistValue(response.schema || response.responseSchema);
+  const normalizedCustomSchema = customSchema.toLowerCase();
+  if (normalizedCustomSchema === 'portfolio.final_response.v2') {
+    return extractPortfolioFeedbackSubmitPayloadFromFinalResponse(response, response);
+  }
+  const portfolioFeedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(response);
+  if (portfolioFeedbackPayload) {
+    return portfolioFeedbackPayload;
+  }
   const text = typeof response.text === 'string' ? response.text : '';
 
   const responseId = typeof response.responseId === 'string' ? response.responseId.trim() : '';
   const runId = typeof response.runId === 'string' ? response.runId.trim() : '';
+  const unstructuredSchema = customSchema && normalizedCustomSchema !== 'economist.response.v2'
+    ? customSchema
+    : 'economist.response.v1';
+  const sourceRecordSuffix = normalizeStructuredWatchlistValue(
+    response.sourceRecordSuffix || response.source_record_suffix
+  );
   const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
     ? DecisionContractUtils.validateDecisionContractText(text)
     : null;
@@ -21433,7 +23583,7 @@ function normalizeWatchlistDispatchPayload(response) {
   const sourceMeta = normalizeResponseSourceMeta(response, typeof response.source === 'string' ? response.source : '');
 
   const payload = {
-    schema: structuredPayload ? 'economist.response.v2' : 'economist.response.v1',
+    schema: structuredPayload ? 'economist.response.v2' : unstructuredSchema,
     responseId: responseId || generateResponseId(runId),
     runId: runId || null,
     text: dispatchText,
@@ -21449,6 +23599,24 @@ function normalizeWatchlistDispatchPayload(response) {
   }
   if (sourceMeta.sourceUrl) {
     payload.sourceUrl = sourceMeta.sourceUrl;
+  }
+  if (sourceMeta.sourceMaterialId) {
+    payload.sourceMaterialId = sourceMeta.sourceMaterialId;
+  }
+  if (sourceMeta.sourceMaterialHash) {
+    payload.sourceMaterialHash = sourceMeta.sourceMaterialHash;
+  }
+  if (Number.isInteger(sourceMeta.sourceMaterialLength)) {
+    payload.sourceMaterialLength = sourceMeta.sourceMaterialLength;
+  }
+  if (sourceRecordSuffix) {
+    payload.sourceRecordSuffix = sourceRecordSuffix;
+  }
+  if (sourceMeta.sourceMaterialStored) {
+    payload.sourceMaterialStored = true;
+  }
+  if (!sourceMeta.sourceMaterialId && typeof sourceMeta.sourceMaterialText === 'string' && sourceMeta.sourceMaterialText.trim()) {
+    payload.sourceMaterialText = sourceMeta.sourceMaterialText;
   }
   if (structuredPayload?.schemaVersion) {
     payload.schema_version = structuredPayload.schemaVersion;
@@ -21509,12 +23677,29 @@ function normalizeWatchlistDispatchPayload(response) {
   } else if (Number.isInteger(response.conversationLogCount) && response.conversationLogCount > 0) {
     payload.conversationLogCount = response.conversationLogCount;
   }
+  if (response.stage && typeof response.stage === 'object' && !Array.isArray(response.stage)) {
+    payload.stage = response.stage;
+  }
   applyChatGptComputationStatePatch(payload, response);
   return payload;
 }
 
 function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (!rawPayload || typeof rawPayload !== 'object') return null;
+  const portfolioFinalPayload = extractPortfolioFeedbackSubmitPayloadFromFinalResponse(rawPayload, rawPayload);
+  if (portfolioFinalPayload) {
+    applyChatGptComputationStatePatch(portfolioFinalPayload, rawPayload);
+    return portfolioFinalPayload;
+  }
+  const rawSchema = normalizeStructuredWatchlistValue(rawPayload.schema || rawPayload.responseSchema).toLowerCase();
+  if (rawSchema === 'portfolio.final_response.v2') {
+    return null;
+  }
+  const portfolioFeedbackPayload = normalizePortfolioFeedbackSubmitDispatchPayload(rawPayload);
+  if (portfolioFeedbackPayload) {
+    applyChatGptComputationStatePatch(portfolioFeedbackPayload, rawPayload);
+    return portfolioFeedbackPayload;
+  }
   const rawText = typeof rawPayload.text === 'string' ? rawPayload.text : '';
   const hasStructuredRecords = Array.isArray(rawPayload.records) && rawPayload.records.length > 0;
   if (!rawText.trim() && !hasStructuredRecords) return null;
@@ -21528,6 +23713,10 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     : generateResponseId(runId);
   const source = trimProblemLogText(rawPayload.source || '', 140);
   const analysisType = trimProblemLogText(rawPayload.analysisType || '', 80);
+  const sourceRecordSuffix = trimProblemLogText(
+    rawPayload.sourceRecordSuffix || rawPayload.source_record_suffix || '',
+    120
+  );
   const sourceMeta = normalizeResponseSourceMeta(rawPayload, source);
   const structuredResponse = (() => {
     const chooseRicherStructuredPayload = (leftPayload, rightPayload) => {
@@ -21580,7 +23769,8 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
       );
       return scorePayload(rightPayload) > scorePayload(leftPayload) ? rightPayload : leftPayload;
     };
-    if (schema !== 'economist.response.v2' && !hasStructuredRecords) {
+    const extractedFromText = extractStructuredWatchlistResponseFromText(rawText);
+    if (schema !== 'economist.response.v2' && !hasStructuredRecords && !extractedFromText) {
       return null;
     }
     const records = Array.isArray(rawPayload.records)
@@ -21601,7 +23791,7 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     }
     return chooseRicherStructuredPayload(
       null,
-      extractStructuredWatchlistResponseFromText(rawText)
+      extractedFromText
     );
   })();
   if (schema === 'economist.response.v2' && !structuredResponse) {
@@ -21634,6 +23824,24 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   }
   if (sourceMeta.sourceUrl) {
     payload.sourceUrl = sourceMeta.sourceUrl;
+  }
+  if (sourceMeta.sourceMaterialId) {
+    payload.sourceMaterialId = sourceMeta.sourceMaterialId;
+  }
+  if (sourceMeta.sourceMaterialHash) {
+    payload.sourceMaterialHash = sourceMeta.sourceMaterialHash;
+  }
+  if (Number.isInteger(sourceMeta.sourceMaterialLength)) {
+    payload.sourceMaterialLength = sourceMeta.sourceMaterialLength;
+  }
+  if (sourceRecordSuffix) {
+    payload.sourceRecordSuffix = sourceRecordSuffix;
+  }
+  if (sourceMeta.sourceMaterialStored) {
+    payload.sourceMaterialStored = true;
+  }
+  if (!sourceMeta.sourceMaterialId && typeof sourceMeta.sourceMaterialText === 'string' && sourceMeta.sourceMaterialText.trim()) {
+    payload.sourceMaterialText = sourceMeta.sourceMaterialText;
   }
   if (structuredResponse?.schemaVersion) {
     payload.schema_version = structuredResponse.schemaVersion;
@@ -23300,6 +25508,394 @@ async function getWatchlistDispatchStatus(forceReload = false) {
   };
 }
 
+function normalizeWatchlistIntakeHealthPayload(rawPayload, fallback = {}) {
+  const payload = rawPayload && typeof rawPayload === 'object' ? rawPayload : {};
+  const database = payload.database && typeof payload.database === 'object' ? payload.database : {};
+  const dbLatencyMs = Number.isInteger(database.latency_ms)
+    ? database.latency_ms
+    : (Number.isInteger(database.latencyMs) ? database.latencyMs : null);
+  const dbOk = database.ok === true;
+  const healthStatus = typeof payload.status === 'string' && payload.status.trim()
+    ? payload.status.trim()
+    : (dbOk ? 'ok' : 'unknown');
+  return {
+    success: payload.success === true && dbOk,
+    healthState: dbOk ? 'ok' : healthStatus,
+    backendReachable: fallback.backendReachable === true,
+    authOk: fallback.authOk === true,
+    dbConnected: dbOk,
+    databaseLatencyMs: dbLatencyMs,
+    intakeStatus: healthStatus,
+    healthError: typeof database.error === 'string' && database.error.trim()
+      ? truncateDispatchLogText(database.error, 240)
+      : '',
+    healthErrorType: typeof database.error_type === 'string' && database.error_type.trim()
+      ? truncateDispatchLogText(database.error_type, 80)
+      : '',
+    status: Number.isInteger(fallback.status) ? fallback.status : null,
+    requestId: typeof fallback.requestId === 'string' ? fallback.requestId : '',
+    checkedAt: Date.now(),
+    intakeUrl: typeof fallback.intakeUrl === 'string' ? fallback.intakeUrl : ''
+  };
+}
+
+async function probeWatchlistIntakeHealth(dispatchConfig, options = {}) {
+  const config = dispatchConfig && typeof dispatchConfig === 'object' ? dispatchConfig : {};
+  if (!config.ok) {
+    return {
+      success: false,
+      healthState: 'configuration_missing',
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      databaseLatencyMs: null,
+      intakeStatus: '',
+      healthError: config.reason || 'missing_dispatch_credentials',
+      healthErrorType: 'configuration',
+      status: null,
+      requestId: '',
+      checkedAt: Date.now(),
+      intakeUrl: config.intakeUrl || ''
+    };
+  }
+
+  const timeoutMs = Number.isInteger(options?.timeoutMs) && options.timeoutMs > 0
+    ? Math.max(1000, options.timeoutMs)
+    : Math.max(1000, Number(WATCHLIST_DISPATCH.verifyTimeoutMs || WATCHLIST_DISPATCH.timeoutMs || 0) || 12000);
+  const candidates = buildWatchlistDispatchUrlCandidates(config.intakeUrl);
+  let lastFailure = {
+    success: false,
+    healthState: 'status_unavailable',
+    backendReachable: false,
+    authOk: false,
+    dbConnected: false,
+    databaseLatencyMs: null,
+    intakeStatus: '',
+    healthError: 'status_unavailable',
+    healthErrorType: '',
+    status: null,
+    requestId: '',
+    checkedAt: Date.now(),
+    intakeUrl: ''
+  };
+
+  for (const candidate of candidates) {
+    const controller = new AbortController();
+    let timeoutId = null;
+    try {
+      const buildRequest = typeof WatchlistApiUtils.buildSignedGetIntakeStatusRequest === 'function'
+        ? WatchlistApiUtils.buildSignedGetIntakeStatusRequest
+        : WatchlistApiUtils.buildSignedJsonRequest;
+      const signedRequest = await buildRequest({
+        intakeUrl: candidate,
+        keyId: config.keyId,
+        secret: config.secret,
+        path: WATCHLIST_INTAKE_STATUS_PATH,
+        method: 'GET'
+      });
+      const endpoint = new URL(signedRequest?.url || '');
+      const response = await Promise.race([
+        fetch(endpoint.toString(), {
+          method: 'GET',
+          headers: signedRequest.headers || {},
+          signal: controller.signal
+        }),
+        new Promise((_, reject) => {
+          timeoutId = setTimeout(() => {
+            try {
+              controller.abort();
+            } catch {
+              // Ignore abort exceptions in timeout branch.
+            }
+            reject(createDispatchTimeoutError(timeoutMs));
+          }, timeoutMs);
+        })
+      ]);
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+
+      const requestId = response.headers?.get?.('x-request-id') || response.headers?.get?.('x-correlation-id') || '';
+      const payload = await response.json().catch(() => ({}));
+      if (response.status === 401 || response.status === 403) {
+        return {
+          success: false,
+          healthState: 'auth_failed',
+          backendReachable: true,
+          authOk: false,
+          dbConnected: false,
+          databaseLatencyMs: null,
+          intakeStatus: '',
+          healthError: typeof payload?.detail === 'string' ? payload.detail : `http_${response.status}`,
+          healthErrorType: 'auth',
+          status: response.status,
+          requestId,
+          checkedAt: Date.now(),
+          intakeUrl: endpoint.toString()
+        };
+      }
+      if (!response.ok) {
+        lastFailure = {
+          success: false,
+          healthState: 'http_error',
+          backendReachable: true,
+          authOk: true,
+          dbConnected: false,
+          databaseLatencyMs: null,
+          intakeStatus: '',
+          healthError: typeof payload?.detail === 'string' ? payload.detail : `http_${response.status}`,
+          healthErrorType: 'http',
+          status: response.status,
+          requestId,
+          checkedAt: Date.now(),
+          intakeUrl: endpoint.toString()
+        };
+        continue;
+      }
+
+      return normalizeWatchlistIntakeHealthPayload(payload, {
+        backendReachable: true,
+        authOk: true,
+        status: response.status,
+        requestId,
+        intakeUrl: endpoint.toString()
+      });
+    } catch (error) {
+      if (timeoutId) {
+        clearTimeout(timeoutId);
+        timeoutId = null;
+      }
+      lastFailure = {
+        success: false,
+        healthState: error?.name === 'TimeoutError' ? 'timeout' : 'network_error',
+        backendReachable: false,
+        authOk: false,
+        dbConnected: false,
+        databaseLatencyMs: null,
+        intakeStatus: '',
+        healthError: truncateDispatchLogText(error?.message || String(error), 240) || 'network_error',
+        healthErrorType: error?.name || typeof error || 'network',
+        status: null,
+        requestId: '',
+        checkedAt: Date.now(),
+        intakeUrl: candidate
+      };
+    }
+  }
+
+  return lastFailure;
+}
+
+async function getWatchlistDispatchHealth(forceReload = false) {
+  const status = await getWatchlistDispatchStatus(forceReload);
+  if (!status.configured) {
+    return {
+      ...status,
+      success: false,
+      healthState: 'configuration_missing',
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      databaseLatencyMs: null,
+      intakeStatus: '',
+      healthError: status.reason || 'missing_dispatch_credentials',
+      checkedAt: Date.now()
+    };
+  }
+
+  const nowTs = Date.now();
+  if (!forceReload && watchlistDispatchHealthCache
+    && Number.isInteger(watchlistDispatchHealthCache.checkedAt)
+    && (nowTs - watchlistDispatchHealthCache.checkedAt) < WATCHLIST_DISPATCH_HEALTH_CACHE_TTL_MS) {
+    return { ...status, ...watchlistDispatchHealthCache };
+  }
+
+  const config = await resolveWatchlistDispatchConfiguration(forceReload);
+  const probe = await probeWatchlistIntakeHealth(config);
+  watchlistDispatchHealthCache = probe;
+  return { ...status, ...probe };
+}
+
+function buildExtensionHeartbeatCheck(name, ok, detail = '') {
+  return {
+    name: typeof name === 'string' ? name : '',
+    ok: ok === true,
+    detail: typeof detail === 'string' ? detail : ''
+  };
+}
+
+function sanitizeExtensionHeartbeatWatchlistStatus(status) {
+  const raw = status && typeof status === 'object' ? status : {};
+  return {
+    enabled: raw.enabled !== false,
+    configured: raw.configured === true,
+    hasToken: raw.hasToken === true,
+    ready: raw.configured === true && raw.hasToken === true,
+    reason: typeof raw.reason === 'string' ? raw.reason : '',
+    intakeUrl: typeof raw.intakeUrl === 'string' ? raw.intakeUrl : '',
+    keyId: typeof raw.keyId === 'string' ? raw.keyId : '',
+    tokenSource: typeof raw.tokenSource === 'string' ? raw.tokenSource : 'missing',
+    intakeUrlSource: typeof raw.intakeUrlSource === 'string' ? raw.intakeUrlSource : 'missing',
+    keyIdSource: typeof raw.keyIdSource === 'string' ? raw.keyIdSource : 'missing',
+    queueSize: Number.isInteger(raw.queueSize) ? raw.queueSize : 0,
+    flushInProgress: raw.flushInProgress === true,
+    historySize: Number.isInteger(raw.historySize) ? raw.historySize : 0,
+    nextRetryAt: Number.isInteger(raw.nextRetryAt) ? raw.nextRetryAt : null,
+    latestOutboxError: typeof raw.latestOutboxError === 'string' ? raw.latestOutboxError : '',
+    supportId: typeof raw.supportId === 'string' ? raw.supportId : ''
+  };
+}
+
+function sanitizeExtensionHeartbeatQueueStatus(queue) {
+  const raw = queue && typeof queue === 'object' ? queue : {};
+  return {
+    success: raw.success !== false,
+    paused: raw.paused === true,
+    maxConcurrent: Number.isInteger(raw.maxConcurrent) ? raw.maxConcurrent : ANALYSIS_QUEUE_MAX_CONCURRENT,
+    activeSlots: Number.isInteger(raw.activeSlots) ? raw.activeSlots : 0,
+    reservedSlots: Number.isInteger(raw.reservedSlots) ? raw.reservedSlots : 0,
+    liveSlots: Number.isInteger(raw.liveSlots) ? raw.liveSlots : 0,
+    startingSlots: Number.isInteger(raw.startingSlots) ? raw.startingSlots : 0,
+    queueSize: Number.isInteger(raw.queueSize) ? raw.queueSize : 0,
+    waitingJobs: Number.isInteger(raw.waitingJobs) ? raw.waitingJobs : 0,
+    activeJobs: Number.isInteger(raw.activeJobs) ? raw.activeJobs : 0,
+    totalJobs: Number.isInteger(raw.totalJobs) ? raw.totalJobs : 0,
+    error: typeof raw.error === 'string' ? raw.error : ''
+  };
+}
+
+async function persistExtensionHeartbeatStatus(heartbeat) {
+  try {
+    if (typeof chrome !== 'undefined' && chrome?.storage?.local?.set) {
+      await chrome.storage.local.set({ [EXTENSION_HEARTBEAT_STORAGE_KEY]: heartbeat });
+    }
+  } catch {
+    // Heartbeat must stay read-only from the caller perspective.
+  }
+}
+
+async function buildExtensionHeartbeatStatus(options = {}) {
+  const generatedAt = Date.now();
+  const manifest = (() => {
+    try {
+      return typeof chrome !== 'undefined' && typeof chrome?.runtime?.getManifest === 'function'
+        ? chrome.runtime.getManifest()
+        : {};
+    } catch {
+      return {};
+    }
+  })();
+  const extensionId = (() => {
+    try {
+      return typeof chrome !== 'undefined' && typeof chrome?.runtime?.id === 'string' ? chrome.runtime.id : '';
+    } catch {
+      return '';
+    }
+  })();
+
+  const [watchlistRaw, queueRaw, supportId] = await Promise.all([
+    getWatchlistDispatchStatus(Boolean(options?.forceReload)).catch((error) => ({
+      success: false,
+      configured: false,
+      hasToken: false,
+      reason: 'watchlist_status_failed',
+      error: error?.message || String(error)
+    })),
+    options?.includeQueue === false
+      ? Promise.resolve(null)
+      : getAnalysisQueueStatusSnapshot().catch((error) => ({
+        success: false,
+        error: error?.message || String(error)
+      })),
+    ensureExtensionInstallationId().catch(() => '')
+  ]);
+
+  const watchlist = sanitizeExtensionHeartbeatWatchlistStatus(watchlistRaw);
+  const queue = queueRaw ? sanitizeExtensionHeartbeatQueueStatus(queueRaw) : null;
+  const companyPromptCount = Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY.length : 0;
+  const portfolioPromptCount = Array.isArray(PROMPTS_PORTFOLIO) ? PROMPTS_PORTFOLIO.length : 0;
+  const sourceMaterialsSubmitLoaded = typeof submitSourceMaterialForProcess === 'function';
+  const manualSourceQueueSubmitLoaded = typeof submitManualSourceMaterialForQueue === 'function';
+  const signedApiRequestLoaded = typeof performSignedIskraApiRequest === 'function';
+  const watchlistApiLoaded = typeof WatchlistApiUtils?.buildSignedJsonRequest === 'function';
+  const sourceMaterialsApiPathReady = SOURCE_MATERIALS_API_PATH === '/api/v1/source-materials';
+  const portfolioAutoCompany = typeof shouldRunPortfolioAlongsideCompany === 'function'
+    && shouldRunPortfolioAlongsideCompany(ANALYSIS_TYPE_COMPANY) === true;
+  const portfolioChatUrlReady = PORTFOLIO_CHAT_URL === 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project';
+  const queueAvailable = queue ? queue.success !== false : true;
+  const readyForDb = sourceMaterialsSubmitLoaded
+    && manualSourceQueueSubmitLoaded
+    && signedApiRequestLoaded
+    && watchlistApiLoaded
+    && sourceMaterialsApiPathReady
+    && watchlist.ready;
+
+  const checks = [
+    buildExtensionHeartbeatCheck('background_loaded', true, 'service_worker_active'),
+    buildExtensionHeartbeatCheck('company_prompts_loaded', companyPromptCount > 0, String(companyPromptCount)),
+    buildExtensionHeartbeatCheck('portfolio_prompts_loaded', portfolioPromptCount > 0, String(portfolioPromptCount)),
+    buildExtensionHeartbeatCheck('watchlist_signing_available', watchlistApiLoaded && signedApiRequestLoaded, 'hmac_client_loaded'),
+    buildExtensionHeartbeatCheck('watchlist_dispatch_configured', watchlist.ready, watchlist.reason || watchlist.tokenSource),
+    buildExtensionHeartbeatCheck('source_materials_api_path', sourceMaterialsApiPathReady, SOURCE_MATERIALS_API_PATH),
+    buildExtensionHeartbeatCheck('source_materials_submit_loaded', sourceMaterialsSubmitLoaded, 'submitSourceMaterialForProcess'),
+    buildExtensionHeartbeatCheck('manual_source_queue_submit_loaded', manualSourceQueueSubmitLoaded, 'submitManualSourceMaterialForQueue'),
+    buildExtensionHeartbeatCheck('manual_source_fail_closed', true, 'manual launch blocked when source save fails'),
+    buildExtensionHeartbeatCheck('portfolio_auto_company', portfolioAutoCompany, 'company launch always queues portfolio analysis'),
+    buildExtensionHeartbeatCheck('portfolio_chat_url', portfolioChatUrlReady, PORTFOLIO_CHAT_URL),
+    buildExtensionHeartbeatCheck('analysis_queue_available', queueAvailable, queue?.error || '')
+  ];
+
+  const heartbeat = {
+    success: true,
+    ok: checks.every((check) => check.ok === true),
+    readyForDb,
+    generatedAt,
+    generatedAtIso: new Date(generatedAt).toISOString(),
+    serviceWorkerStartedAt: EXTENSION_SERVICE_WORKER_STARTED_AT,
+    serviceWorkerStartedAtIso: new Date(EXTENSION_SERVICE_WORKER_STARTED_AT).toISOString(),
+    uptimeMs: Math.max(0, generatedAt - EXTENSION_SERVICE_WORKER_STARTED_AT),
+    extensionName: typeof manifest?.name === 'string' ? manifest.name : 'Iskra',
+    manifestVersion: typeof manifest?.version === 'string' ? manifest.version : '',
+    extensionId,
+    supportId: typeof supportId === 'string' && supportId ? supportId : watchlist.supportId,
+    featureRevision: EXTENSION_FEATURE_REVISION,
+    features: {
+      sourceMaterialsApiPath: SOURCE_MATERIALS_API_PATH,
+      sourceMaterialsEndpointConfigured: sourceMaterialsApiPathReady,
+      sourceMaterialsSubmitFunction: sourceMaterialsSubmitLoaded,
+      manualSourceQueueSubmitFunction: manualSourceQueueSubmitLoaded,
+      manualSourceFailClosed: true,
+      signedApiRequestFunction: signedApiRequestLoaded,
+      watchlistApiUtils: watchlistApiLoaded,
+      processContractUtils: Object.keys(ProcessContractUtils || {}).length > 0,
+      decisionContractUtils: Object.keys(DecisionContractUtils || {}).length > 0,
+      responseStorageUtils: Object.keys(ResponseStorageUtils || {}).length > 0,
+      dispatchShapeUtils: Object.keys(WatchlistDispatchShapeUtils || {}).length > 0,
+      portfolioAutoCompany,
+      portfolioChatUrl: PORTFOLIO_CHAT_URL,
+      companyChatUrl: CHAT_URL
+    },
+    prompts: {
+      companyCount: companyPromptCount,
+      portfolioCount: portfolioPromptCount,
+      companyLoaded: companyPromptCount > 0,
+      portfolioLoaded: portfolioPromptCount > 0
+    },
+    sourceMaterial: {
+      apiPath: SOURCE_MATERIALS_API_PATH,
+      requiredBeforeManualLaunch: true,
+      processLinkingEnabled: true
+    },
+    watchlist,
+    queue,
+    checks
+  };
+
+  await persistExtensionHeartbeatStatus(heartbeat);
+  return heartbeat;
+}
+
 function summarizeWatchlistDispatchStatusForLog(status) {
   if (!status || typeof status !== 'object') {
     return {
@@ -23530,6 +26126,7 @@ async function setWatchlistDispatchToken(rawInput) {
     keyId,
     keyIdSource: 'storage_local',
   };
+  watchlistDispatchHealthCache = null;
   return { success: true, source: 'storage_local', localSaved, syncSaved };
 }
 
@@ -23551,6 +26148,7 @@ async function clearWatchlistDispatchToken() {
   }
 
   watchlistDispatchCredentialsCache = null;
+  watchlistDispatchHealthCache = null;
   return {
     success: true,
     hasToken: false,
@@ -25311,6 +27909,10 @@ async function syncProcessWindowCloseRetryAlarm(nowTs = Date.now()) {
   if (!alarmName) {
     return { scheduled: false, reason: 'missing_alarm_name' };
   }
+  if (!isProcessWindowAutoCloseEnabled()) {
+    await clearAlarmSafe(alarmName);
+    return { scheduled: false, reason: 'process_window_auto_close_disabled' };
+  }
   const nextRetryAt = computeProcessRetryAlarmAt(processWindowCloseRetryDueAtByRunId, nowTs);
   if (!Number.isInteger(nextRetryAt) || nextRetryAt <= 0) {
     await clearAlarmSafe(alarmName);
@@ -25786,26 +28388,185 @@ function parsePromptChainText(rawText) {
   return [normalizedText.trim()];
 }
 
+function normalizeAnalysisTypeForPromptChain(value) {
+  const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+  if (normalized === ANALYSIS_TYPE_PORTFOLIO || normalized === 'portfolio_analysis') {
+    return ANALYSIS_TYPE_PORTFOLIO;
+  }
+  return ANALYSIS_TYPE_COMPANY;
+}
+
+function getPromptChainForAnalysisType(analysisType) {
+  const normalized = normalizeAnalysisTypeForPromptChain(analysisType);
+  if (normalized === ANALYSIS_TYPE_PORTFOLIO) {
+    return Array.isArray(PROMPTS_PORTFOLIO) ? PROMPTS_PORTFOLIO : [];
+  }
+  return Array.isArray(PROMPTS_COMPANY) ? PROMPTS_COMPANY : [];
+}
+
+function getChatUrlForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+    ? PORTFOLIO_CHAT_URL
+    : CHAT_URL;
+}
+
+function shouldRunPortfolioAlongsideCompany(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_COMPANY;
+}
+
+function getAnalysisLaunchQueuedCount(result, fallback = 0) {
+  if (Number.isInteger(result?.queuedCount)) return Math.max(0, result.queuedCount);
+  if (Number.isInteger(result?.queued)) return Math.max(0, result.queued);
+  if (Number.isInteger(result?.submittedCount)) return Math.max(0, result.submittedCount);
+  return Math.max(0, Number.isInteger(fallback) ? fallback : 0);
+}
+
+function getAnalysisLaunchBypassCount(result, fallback = 0) {
+  if (Number.isInteger(result?.queueBypassCount)) return Math.max(0, result.queueBypassCount);
+  if (Number.isInteger(result?.launchedCount)) return Math.max(0, result.launchedCount);
+  return Math.max(0, Number.isInteger(fallback) ? fallback : 0);
+}
+
+function pickAnalysisLaunchMetric(primaryResult, portfolioResult, key, fallback = 0) {
+  if (Number.isInteger(portfolioResult?.[key])) return portfolioResult[key];
+  if (Number.isInteger(primaryResult?.[key])) return primaryResult[key];
+  return fallback;
+}
+
+function getAnalysisLaunchErrorDetail(result) {
+  if (!result || typeof result !== 'object') return '';
+  if (typeof result.error === 'string' && result.error.trim()) return result.error.trim();
+  if (typeof result.reason === 'string' && result.reason.trim()) return result.reason.trim();
+
+  const failures = Array.isArray(result.failures) ? result.failures : [];
+  for (const failure of failures) {
+    if (typeof failure?.error === 'string' && failure.error.trim()) return failure.error.trim();
+    if (typeof failure?.reason === 'string' && failure.reason.trim()) return failure.reason.trim();
+  }
+
+  const skipped = Array.isArray(result.skipped) ? result.skipped : [];
+  for (const item of skipped) {
+    if (typeof item?.error === 'string' && item.error.trim()) return item.error.trim();
+    if (typeof item?.reason === 'string' && item.reason.trim()) return item.reason.trim();
+  }
+
+  return '';
+}
+
+function mergeAnalysisLaunchResults(primaryResult, portfolioResult = null, options = {}) {
+  const primaryFallbackQueued = Number.isInteger(options?.primaryFallbackQueued)
+    ? options.primaryFallbackQueued
+    : 0;
+  const primaryQueuedCount = getAnalysisLaunchQueuedCount(primaryResult, primaryFallbackQueued);
+  const portfolioQueuedCount = getAnalysisLaunchQueuedCount(portfolioResult, 0);
+  const portfolioLaunchedCount = getAnalysisLaunchBypassCount(portfolioResult, 0);
+  const portfolioQueued = !!portfolioResult && portfolioQueuedCount > 0;
+  const portfolioLaunched = !!portfolioResult && portfolioLaunchedCount > 0;
+  const primarySuccess = primaryResult?.success !== false;
+  const portfolioSuccess = !portfolioResult || portfolioResult.success !== false;
+  const queuedCount = primaryQueuedCount + portfolioQueuedCount;
+  const merged = {
+    ...(primaryResult && typeof primaryResult === 'object' ? primaryResult : {}),
+    success: primarySuccess && portfolioSuccess,
+    analysisType: typeof options?.analysisType === 'string' && options.analysisType.trim()
+      ? options.analysisType.trim()
+      : (typeof primaryResult?.analysisType === 'string' ? primaryResult.analysisType : ANALYSIS_TYPE_COMPANY),
+    extraPortfolioQueued: portfolioQueued,
+    extraPortfolioLaunched: portfolioLaunched,
+    extraPortfolioStarted: portfolioQueued || portfolioLaunched,
+    companyQueuedCount: primaryQueuedCount,
+    portfolioQueuedCount,
+    portfolioLaunchedCount,
+    portfolioResult,
+    queued: queuedCount,
+    queuedCount,
+    queueSize: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'queueSize', 0),
+    activeSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'activeSlots', 0),
+    reservedSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'reservedSlots', 0),
+    liveSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'liveSlots', 0),
+    startingSlots: pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'startingSlots', 0)
+  };
+
+  if (typeof options?.mode === 'string' && options.mode.trim()) {
+    merged.mode = options.mode.trim();
+  }
+  if (Number.isInteger(primaryResult?.maxConcurrent) || Number.isInteger(portfolioResult?.maxConcurrent)) {
+    merged.maxConcurrent = pickAnalysisLaunchMetric(primaryResult, portfolioResult, 'maxConcurrent', null);
+  }
+  if (Number.isInteger(primaryResult?.submittedCount) || Number.isInteger(portfolioResult?.submittedCount)) {
+    const primarySubmittedCount = Number.isInteger(primaryResult?.submittedCount)
+      ? Math.max(0, primaryResult.submittedCount)
+      : primaryQueuedCount;
+    const portfolioSubmittedCount = Number.isInteger(portfolioResult?.submittedCount)
+      ? Math.max(0, portfolioResult.submittedCount)
+      : portfolioQueuedCount;
+    merged.companySubmittedCount = primarySubmittedCount;
+    merged.portfolioSubmittedCount = portfolioSubmittedCount;
+    merged.submittedCount = primarySubmittedCount + portfolioSubmittedCount;
+  }
+  if (!merged.success) {
+    merged.error = getAnalysisLaunchErrorDetail(primaryResult)
+      || getAnalysisLaunchErrorDetail(portfolioResult)
+      || 'analysis_launch_failed';
+  }
+  return merged;
+}
+
+function getPromptFileNameForAnalysisType(analysisType) {
+  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO
+    ? 'prompts-portfolio.txt'
+    : 'prompts-company.txt';
+}
+
+async function fetchPromptResourceText(url, cacheKey = Date.now()) {
+  const resourceUrl = `${url}${url.includes('?') ? '&' : '?'}prompt_cache_bust=${encodeURIComponent(String(cacheKey))}`;
+  let response;
+  try {
+    response = await fetch(resourceUrl, { cache: 'no-store' });
+  } catch (error) {
+    console.warn('[prompts] Cache-busted prompt fetch failed, retrying base URL:', error);
+    response = await fetch(url, { cache: 'no-store' });
+  }
+  if (!response?.ok) {
+    response = await fetch(url, { cache: 'no-store' });
+  }
+  if (!response?.ok) {
+    throw new Error(`prompt_fetch_failed:${response?.status || 'unknown'}`);
+  }
+  return response.text();
+}
+
 // Load prompts from txt files.
 async function loadPrompts() {
   try {
     console.log('[prompts] Loading prompts from files...');
 
     const companyUrl = chrome.runtime.getURL('prompts-company.txt');
-    const companyResponse = await fetch(companyUrl);
-    const companyText = await companyResponse.text();
+    const portfolioUrl = chrome.runtime.getURL('prompts-portfolio.txt');
+    const cacheKey = Date.now();
+    const [companyText, portfolioText] = await Promise.all([
+      fetchPromptResourceText(companyUrl, cacheKey),
+      fetchPromptResourceText(portfolioUrl, cacheKey)
+    ]);
 
     // Parse in a way that tolerates UTF-8 and mojibake separator variants.
     PROMPTS_COMPANY = parsePromptChainText(companyText);
+    PROMPTS_PORTFOLIO = parsePromptChainText(portfolioText);
+    refreshCompanyStageMetadataFromPrompts(PROMPTS_COMPANY);
 
     if (PROMPTS_COMPANY.length <= 1 && /PROMPT(?:[ _-]+)SEPARATOR/.test(companyText)) {
       console.warn('[prompts] Separator token found but parsed as a single prompt - verify file encoding.');
     }
+    if (PROMPTS_PORTFOLIO.length <= 1 && /PROMPT(?:[ _-]+)SEPARATOR/.test(portfolioText)) {
+      console.warn('[prompts] Portfolio separator token found but parsed as a single prompt - verify file encoding.');
+    }
 
-    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}`);
+    console.log(`[prompts] Loaded company prompts: ${PROMPTS_COMPANY.length}; portfolio prompts: ${PROMPTS_PORTFOLIO.length}; stages: ${STAGE_METADATA_COMPANY.length}`);
   } catch (error) {
     console.error('[prompts] Failed loading prompts:', error);
     PROMPTS_COMPANY = [];
+    PROMPTS_PORTFOLIO = [];
+    refreshCompanyStageMetadataFromPrompts(PROMPTS_COMPANY);
   }
 }
 
@@ -25898,6 +28659,144 @@ function resolveSupportedSourceNameFromUrl(rawUrl) {
   }
 }
 
+function normalizeSourceMaterialLength(value) {
+  if (value === null || typeof value === 'undefined' || value === '') return null;
+  const parsed = Number(value);
+  if (!Number.isFinite(parsed) || parsed < 0) return null;
+  return Math.floor(parsed);
+}
+
+function normalizeSourceMaterialSubmitFailure(result = null, fallback = 'source_material_submit_failed') {
+  const candidates = [
+    result?.error,
+    result?.reason,
+    result?.payload?.detail,
+    result?.payload?.reason,
+    fallback
+  ];
+  for (const candidate of candidates) {
+    if (typeof candidate === 'string' && candidate.trim()) {
+      const trimmed = candidate.trim();
+      return typeof trimProblemLogText === 'function'
+        ? trimProblemLogText(trimmed, 160)
+        : trimmed.slice(0, 160);
+    }
+  }
+  return fallback;
+}
+
+async function reportManualSourceMaterialSaveEvent(eventName, options = {}) {
+  if (typeof reportAnalysisQueueEvent !== 'function') return null;
+  const level = normalizeProblemLogLevel(options?.level || 'info');
+  const status = trimProblemLogText(options?.status || (level === 'error' ? 'failed' : 'ok'), 40);
+  const reason = trimProblemLogText(options?.reason || eventName || 'source_material', 140);
+  const title = trimProblemLogText(options?.title || 'Manual source material', 160);
+  const manualTextSourceId = trimProblemLogText(options?.manualTextSourceId || '', 120);
+  const statusText = trimProblemLogText(options?.statusText || '', 240);
+  return reportAnalysisQueueEvent(eventName || 'source_material', {
+    level,
+    status,
+    reason,
+    title: `Source material: ${eventName || status}`,
+    runId: manualTextSourceId,
+    analysisType: normalizeAnalysisTypeForPromptChain(options?.analysisType),
+    sourceUrl: 'manual://source',
+    statusText,
+    message: trimProblemLogText(options?.message || statusText || reason, 260),
+    signature: trimProblemLogText([
+      'manual-source-material',
+      eventName,
+      manualTextSourceId,
+      status,
+      reason,
+      Date.now(),
+      Math.random().toString(36).slice(2, 8)
+    ].join('|'), 380)
+  });
+}
+
+async function submitManualSourceMaterialForQueue(text, title, options = {}) {
+  const safeText = typeof text === 'string' ? text : '';
+  if (!safeText.trim()) return {};
+  if (typeof submitSourceMaterialForProcess !== 'function') {
+    throw new Error('source_material_submit_unavailable');
+  }
+
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
+  const manualTextSourceId = typeof options?.manualTextSourceId === 'string' ? options.manualTextSourceId.trim() : '';
+  const analysisType = normalizeAnalysisTypeForPromptChain(options?.analysisType);
+  const processId = manualTextSourceId || `manual-source-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  await reportManualSourceMaterialSaveEvent('save_start', {
+    level: 'info',
+    status: 'starting',
+    reason: typeof options?.reason === 'string' ? options.reason : 'manual_source_enqueue',
+    title: safeTitle,
+    manualTextSourceId,
+    analysisType,
+    statusText: `textLength=${safeText.length} | includesPortfolio=${options?.includesPortfolio === true ? 'yes' : 'no'}`
+  }).catch(() => null);
+  const materialResult = await submitSourceMaterialForProcess({
+    text: safeText,
+    title: safeTitle,
+    sourceKind: 'manual_text',
+    sourceUrl: 'manual://source',
+    processKind: 'manual_source_enqueue',
+    processId,
+    runId: processId,
+    relation: 'manual_source_input',
+    metadata: {
+      analysis_type: analysisType,
+      manual_text_source_id: manualTextSourceId,
+      requested_instances: Number.isInteger(options?.instances) ? options.instances : null,
+      includes_portfolio: options?.includesPortfolio === true,
+      reason: typeof options?.reason === 'string' ? options.reason : ''
+    }
+  }, { retryCount: 1, timeoutMs: 15000 });
+
+  const payload = materialResult?.payload && typeof materialResult.payload === 'object'
+    ? materialResult.payload
+    : {};
+  if (materialResult?.success !== true || !payload.sourceMaterialId) {
+    const failureReason = normalizeSourceMaterialSubmitFailure(materialResult, 'source_material_enqueue_submit_failed');
+    console.warn('[source-material] manual enqueue submit failed; analysis launch blocked', {
+      reason: failureReason,
+      status: Number.isInteger(materialResult?.status) ? materialResult.status : null
+    });
+    await reportManualSourceMaterialSaveEvent('save_failed', {
+      level: 'error',
+      status: 'failed',
+      reason: failureReason,
+      title: safeTitle,
+      manualTextSourceId,
+      analysisType,
+      statusText: `status=${Number.isInteger(materialResult?.status) ? materialResult.status : 'n/a'} | textLength=${safeText.length}`,
+      message: `Nie uruchamiam analizy, bo material zrodlowy nie zostal zapisany: ${failureReason}`
+    }).catch(() => null);
+    throw new Error(failureReason);
+  }
+
+  const sourceMaterialId = typeof payload.sourceMaterialId === 'string' ? payload.sourceMaterialId.trim() : '';
+  const sourceMaterialHash = typeof payload.sourceMaterialHash === 'string' ? payload.sourceMaterialHash.trim() : '';
+  const sourceMaterialLength = normalizeSourceMaterialLength(payload.sourceMaterialLength);
+  await reportManualSourceMaterialSaveEvent('save_ok', {
+    level: 'info',
+    status: 'stored',
+    reason: 'source_material_stored',
+    title: safeTitle,
+    manualTextSourceId,
+    analysisType,
+    statusText: `sourceMaterialId=${sourceMaterialId.slice(0, 96)} | length=${Number.isInteger(sourceMaterialLength) ? sourceMaterialLength : safeText.length}`
+  }).catch(() => null);
+
+  return {
+    sourceMaterialId,
+    sourceMaterialHash,
+    sourceMaterialLength,
+    sourceMaterialStored: true,
+    sourceMaterialNeedsProcessLink: true
+  };
+}
+
 function normalizeResponseSourceMeta(sourceMeta = null, fallbackSource = '') {
   const raw = sourceMeta && typeof sourceMeta === 'object' ? sourceMeta : {};
   const sourceTitle = trimProblemLogText(
@@ -25918,10 +28817,35 @@ function normalizeResponseSourceMeta(sourceMeta = null, fallbackSource = '') {
     140
   );
   const sourceName = explicitSourceName || resolveSupportedSourceNameFromUrl(sourceUrl);
+  const sourceMaterialId = trimProblemLogText(
+    typeof raw.sourceMaterialId === 'string'
+      ? raw.sourceMaterialId
+      : (typeof raw.source_material_id === 'string' ? raw.source_material_id : ''),
+    260
+  );
+  const sourceMaterialHash = trimProblemLogText(
+    typeof raw.sourceMaterialHash === 'string'
+      ? raw.sourceMaterialHash
+      : (typeof raw.source_material_hash === 'string' ? raw.source_material_hash : ''),
+    180
+  );
+  const sourceMaterialLength = normalizeSourceMaterialLength(
+    raw.sourceMaterialLength ?? raw.source_material_length
+  );
+  const sourceMaterialText = typeof raw.sourceMaterialText === 'string'
+    ? raw.sourceMaterialText
+    : (typeof raw.source_material_text === 'string' ? raw.source_material_text : '');
   return {
     sourceTitle,
     sourceName,
-    sourceUrl
+    sourceUrl,
+    sourceMaterialId,
+    sourceMaterialHash,
+    sourceMaterialLength,
+    sourceMaterialStored: raw.sourceMaterialStored === true
+      || raw.source_material_stored === true
+      || !!sourceMaterialId,
+    sourceMaterialText
   };
 }
 
@@ -26114,9 +29038,7 @@ if (chrome?.alarms?.onAlarm) {
     }
 
     if (alarm.name === ISKRA_REMOTE_RUNNER.alarmName) {
-      runRemoteRunnerCycle('remote_runner_alarm').catch((error) => {
-        console.warn('[remote-runner] cycle alarm failed:', error);
-      });
+      requestRemoteRunnerCycle('remote_runner_alarm');
       return;
     }
 
@@ -26136,6 +29058,241 @@ chrome.contextMenus.onClicked.addListener((info, tab) => {
     });
   }
 });
+
+function extractSectorMemoryJsonFromText(text) {
+  const raw = typeof text === 'string' ? text.trim() : '';
+  if (!raw) {
+    return { jsonText: '', items: [], valid: false, reason: 'empty_text' };
+  }
+
+  const candidates = [raw];
+  const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  if (fenced && typeof fenced[1] === 'string') {
+    candidates.push(fenced[1].trim());
+  }
+  const arrayStart = raw.indexOf('[');
+  const arrayEnd = raw.lastIndexOf(']');
+  if (arrayStart >= 0 && arrayEnd >= arrayStart) {
+    candidates.push(raw.slice(arrayStart, arrayEnd + 1).trim());
+  }
+
+  for (const candidate of candidates) {
+    if (!candidate) continue;
+    try {
+      const parsed = JSON.parse(candidate);
+      if (!Array.isArray(parsed)) continue;
+      const items = parsed.map((item) => {
+        if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+        const sektor = typeof item.sektor === 'string' ? item.sektor.trim() : '';
+        const podsektor = typeof item.podsektor === 'string' ? item.podsektor.trim() : '';
+        const opis = typeof item.opis === 'string' ? item.opis.trim() : '';
+        if (!sektor || !podsektor || !opis) return null;
+        return { sektor, podsektor, opis };
+      });
+      if (items.some((item) => !item)) continue;
+      return {
+        jsonText: candidate,
+        items,
+        valid: true,
+        reason: 'sector_memory_array'
+      };
+    } catch (_error) {
+      // Keep trying other candidate shapes.
+    }
+  }
+
+  return { jsonText: '', items: [], valid: false, reason: 'invalid_sector_memory_json' };
+}
+
+function buildSectorMemoryResponseId(runId, responseText, promptNumber = 17) {
+  const normalizedRunId = typeof runId === 'string' && runId.trim()
+    ? runId.trim()
+    : 'no-run';
+  const prompt = Number.isInteger(promptNumber) && promptNumber > 0
+    ? promptNumber
+    : 17;
+  const fingerprint = textFingerprint(responseText || '') || 'nofp';
+  const rawId = `${normalizedRunId}_p${prompt}_sector_${String(responseText || '').length}_${fingerprint}`;
+  return rawId.replace(/[^A-Za-z0-9._:-]+/g, '_').slice(0, 180);
+}
+
+async function appendSectorMemoryLocalCopy(record) {
+  if (!record || typeof record !== 'object') {
+    return { success: false, reason: 'invalid_record' };
+  }
+  if (!chrome?.storage?.local) {
+    return { success: false, reason: 'chrome_storage_unavailable' };
+  }
+  try {
+    const snapshot = await chrome.storage.local.get([SECTOR_MEMORY_COPY_STORAGE_KEY]);
+    const current = Array.isArray(snapshot?.[SECTOR_MEMORY_COPY_STORAGE_KEY])
+      ? snapshot[SECTOR_MEMORY_COPY_STORAGE_KEY]
+      : [];
+    const responseId = typeof record.responseId === 'string' ? record.responseId : '';
+    const filtered = responseId
+      ? current.filter((item) => item?.responseId !== responseId)
+      : current;
+    const next = [...filtered, record].slice(-SECTOR_MEMORY_COPY_MAX_ITEMS);
+    await chrome.storage.local.set({ [SECTOR_MEMORY_COPY_STORAGE_KEY]: next });
+    return { success: true, count: next.length };
+  } catch (error) {
+    return {
+      success: false,
+      reason: 'local_copy_failed',
+      error: error?.message || String(error)
+    };
+  }
+}
+
+async function saveSectorMemoryResponse(
+  responseText,
+  source,
+  runId = null,
+  responseId = null,
+  conversationUrl = null,
+  sourceMeta = null,
+  stageMeta = null
+) {
+  const parsed = extractSectorMemoryJsonFromText(responseText);
+  const normalizedRunId = typeof runId === 'string' && runId.trim() ? runId.trim() : '';
+  const promptNumber = Number.isInteger(stageMeta?.sector_memory_response_prompt)
+    ? stageMeta.sector_memory_response_prompt
+    : (Number.isInteger(stageMeta?.selected_response_prompt) ? stageMeta.selected_response_prompt : 17);
+  const normalizedResponseId = typeof responseId === 'string' && responseId.trim()
+    ? responseId.trim()
+    : buildSectorMemoryResponseId(normalizedRunId, responseText, promptNumber);
+  const copyFingerprint = textFingerprint(responseText || '');
+  const normalizedConversationUrl = normalizeChatConversationUrl(conversationUrl);
+  const normalizedSourceMeta = normalizeResponseSourceMeta(sourceMeta, source);
+  const capturedAt = Date.now();
+  const localRecord = {
+    responseId: normalizedResponseId,
+    runId: normalizedRunId || null,
+    source: typeof source === 'string' ? source : '',
+    sourceTitle: normalizedSourceMeta.sourceTitle || '',
+    sourceName: normalizedSourceMeta.sourceName || '',
+    sourceUrl: normalizedSourceMeta.sourceUrl || '',
+    conversationUrl: normalizedConversationUrl || '',
+    text: typeof responseText === 'string' ? responseText : '',
+    itemCount: parsed.items.length,
+    promptNumber,
+    fingerprint: copyFingerprint,
+    capturedAt
+  };
+  const localCopy = await appendSectorMemoryLocalCopy(localRecord);
+
+  if (!parsed.valid) {
+    return {
+      attempted: false,
+      success: false,
+      reason: parsed.reason || 'invalid_sector_memory_json',
+      responseId: normalizedResponseId,
+      responseLength: typeof responseText === 'string' ? responseText.length : 0,
+      itemCount: 0,
+      localCopy
+    };
+  }
+
+  const payload = {
+    schema: 'economist.sector_memory_rows.v5',
+    responseId: normalizedResponseId,
+    runId: normalizedRunId || null,
+    source: typeof source === 'string' && source.trim() ? source.trim() : 'ChatGPT Stage 15 sector intelligence memory',
+    analysisType: 'sector_memory',
+    timestamp: new Date(capturedAt).toISOString(),
+    stage: 'stage_15',
+    generatedBy: 'chatgpt',
+    sourceRunId: normalizedRunId || '',
+    sourceMaterialId: normalizedSourceMeta.sourceMaterialId || '',
+    status: 'active',
+    validationStatus: 'valid',
+    minOpisChars: 120,
+    items: parsed.items,
+    metadata: {
+      source_title: normalizedSourceMeta.sourceTitle || '',
+      source_name: normalizedSourceMeta.sourceName || '',
+      source_url: normalizedSourceMeta.sourceUrl || '',
+      source_material_id: normalizedSourceMeta.sourceMaterialId || '',
+      source_material_hash: normalizedSourceMeta.sourceMaterialHash || '',
+      conversation_url: normalizedConversationUrl || '',
+      captured_prompt: promptNumber,
+      selected_response_reason: typeof stageMeta?.sector_memory_response_reason === 'string' && stageMeta.sector_memory_response_reason.trim()
+        ? stageMeta.sector_memory_response_reason.trim()
+        : 'sector_memory_json',
+      copy_fingerprint: copyFingerprint,
+      local_copy_saved: localCopy?.success === true
+    }
+  };
+
+  const apiResult = await performSignedIskraApiRequest({
+    method: 'POST',
+    path: SECTOR_MEMORY_INTAKE_PATH,
+    payload,
+    timeoutMs: 20000,
+    retryCount: 2,
+    backoffMs: 1200
+  });
+  const responsePayload = apiResult?.payload && typeof apiResult.payload === 'object'
+    ? apiResult.payload
+    : {};
+  const outcome = {
+    attempted: true,
+    success: apiResult?.success === true,
+    reason: apiResult?.success === true
+      ? 'saved'
+      : (typeof apiResult?.error === 'string' && apiResult.error.trim() ? apiResult.error.trim() : 'sector_memory_save_failed'),
+    responseId: normalizedResponseId,
+    responseLength: typeof responseText === 'string' ? responseText.length : 0,
+    itemCount: parsed.items.length,
+    acceptedCount: Number.isInteger(responsePayload.accepted_count) ? responsePayload.accepted_count : null,
+    rawOutputId: typeof responsePayload.raw_output_id === 'string' ? responsePayload.raw_output_id : '',
+    status: Number.isInteger(apiResult?.status) ? apiResult.status : null,
+    intakeUrl: typeof apiResult?.intakeUrl === 'string' ? apiResult.intakeUrl : '',
+    localCopy
+  };
+  if (normalizedRunId) {
+    await upsertProcess(normalizedRunId, {
+      sectorMemoryPersistence: outcome,
+      sectorMemoryResponseSaved: outcome.success,
+      sectorMemoryResponseCapturedAt: capturedAt,
+      sectorMemoryResponseLength: typeof responseText === 'string' ? responseText.length : 0,
+      sectorMemoryResponseItemCount: parsed.items.length,
+      timestamp: Date.now()
+    });
+  }
+  console[outcome.success ? 'log' : 'warn']('[sector-memory] fallback save result', outcome);
+  return outcome;
+}
+
+async function persistSectorMemoryResponseFromResult(result, options = {}) {
+  const responseText = typeof result?.sectorMemoryResponse === 'string'
+    ? result.sectorMemoryResponse
+    : '';
+  if (!responseText.trim()) {
+    return { attempted: false, reason: 'missing_sector_memory_response' };
+  }
+  const promptNumber = Number.isInteger(result?.sectorMemoryResponsePrompt)
+    ? result.sectorMemoryResponsePrompt
+    : 16;
+  const responseId = buildSectorMemoryResponseId(options?.runId || '', responseText, promptNumber);
+  return saveSectorMemoryResponse(
+    responseText,
+    options?.source || 'ChatGPT Stage 15 sector intelligence memory',
+    options?.runId || null,
+    responseId,
+    options?.conversationUrl || null,
+    options?.sourceMeta || null,
+    {
+      sector_memory_response_prompt: promptNumber,
+      sector_memory_response_stage_index: Number.isInteger(result?.sectorMemoryResponseStageIndex)
+        ? result.sectorMemoryResponseStageIndex
+        : (promptNumber > 0 ? promptNumber - 1 : null),
+      sector_memory_response_reason: typeof result?.sectorMemoryResponseReason === 'string'
+        ? result.sectorMemoryResponseReason
+        : 'sector_memory_json'
+    }
+  );
+}
 
 // Funkcja zapisująca odpowiedź do storage
 async function saveResponse(
@@ -26185,6 +29342,15 @@ async function saveResponse(
     const saveOptions = options && typeof options === 'object'
       ? options
       : {};
+    const responseSchema = typeof (saveOptions.schema || saveOptions.responseSchema) === 'string'
+      && (saveOptions.schema || saveOptions.responseSchema).trim()
+      ? (saveOptions.schema || saveOptions.responseSchema).trim()
+      : '';
+    const sourceRecordSuffix = typeof (saveOptions.sourceRecordSuffix || saveOptions.source_record_suffix) === 'string'
+      && (saveOptions.sourceRecordSuffix || saveOptions.source_record_suffix).trim()
+      ? (saveOptions.sourceRecordSuffix || saveOptions.source_record_suffix).trim()
+      : '';
+    const skipProcessPersistencePatch = saveOptions.skipProcessPersistencePatch === true;
     const deferDispatchFlush = saveOptions.deferDispatchFlush === true;
     const deferredFlushReason = typeof saveOptions.deferredFlushReason === 'string' && saveOptions.deferredFlushReason.trim()
       ? saveOptions.deferredFlushReason.trim()
@@ -26206,7 +29372,15 @@ async function saveResponse(
           normalizedResponseId
         )
       : null;
-    if (normalizedRunId) {
+    const dispatchSkipDecision = resolveSaveResponseDispatchSkipDecision(
+      analysisType,
+      responseSchema,
+      sourceRecordSuffix,
+      saveOptions
+    );
+    const skipWatchlistDispatch = dispatchSkipDecision.skip;
+    const skipWatchlistDispatchReason = dispatchSkipDecision.reason;
+    if (normalizedRunId && !skipProcessPersistencePatch) {
       await upsertProcess(normalizedRunId, {
         lifecycleStatus: 'finalizing',
         status: 'finalizing',
@@ -26245,6 +29419,12 @@ async function saveResponse(
       analysisType: analysisType,
       responseId: normalizedResponseId
     };
+    if (responseSchema) {
+      newResponse.schema = responseSchema;
+    }
+    if (sourceRecordSuffix) {
+      newResponse.sourceRecordSuffix = sourceRecordSuffix;
+    }
     if (normalizedSourceMeta.sourceTitle) {
       newResponse.sourceTitle = normalizedSourceMeta.sourceTitle;
     }
@@ -26253,6 +29433,18 @@ async function saveResponse(
     }
     if (normalizedSourceMeta.sourceUrl) {
       newResponse.sourceUrl = normalizedSourceMeta.sourceUrl;
+    }
+    if (normalizedSourceMeta.sourceMaterialId) {
+      newResponse.sourceMaterialId = normalizedSourceMeta.sourceMaterialId;
+    }
+    if (normalizedSourceMeta.sourceMaterialHash) {
+      newResponse.sourceMaterialHash = normalizedSourceMeta.sourceMaterialHash;
+    }
+    if (Number.isInteger(normalizedSourceMeta.sourceMaterialLength)) {
+      newResponse.sourceMaterialLength = normalizedSourceMeta.sourceMaterialLength;
+    }
+    if (normalizedSourceMeta.sourceMaterialStored) {
+      newResponse.sourceMaterialStored = true;
     }
     if (normalizedRunId) {
       newResponse.runId = normalizedRunId;
@@ -26270,7 +29462,7 @@ async function saveResponse(
       newResponse.conversationLogs = conversationLogs;
       newResponse.conversationLogCount = conversationLogs.length;
     }
-    if (normalizedRunId) {
+    if (normalizedRunId && !skipProcessPersistencePatch) {
       applyChatGptComputationStatePatch(newResponse, processRegistry.get(normalizedRunId) || null);
     }
     
@@ -26383,10 +29575,96 @@ async function saveResponse(
       'captured',
       `url=${conversationAnalysis.hasConversationUrl ? 'yes' : 'no'}, logs=${conversationAnalysis.conversationLogCount}, source=${conversationAnalysis.snapshotSource}`
     );
+    const normalizedSaveAnalysisType = dispatchSkipDecision.normalizedAnalysisType;
+    const normalizedResponseSchema = responseSchema.toLowerCase();
+    const shouldExtractPortfolioFeedbackSubmit = normalizedResponseSchema === 'portfolio.final_response.v1'
+      || normalizedResponseSchema === 'portfolio.final_response.v2'
+      || (
+        sourceRecordSuffix === 'portfolio_final_json'
+        || normalizedSaveAnalysisType === ANALYSIS_TYPE_PORTFOLIO
+      );
+    const portfolioFeedbackDispatchPayload = shouldExtractPortfolioFeedbackSubmit
+      ? extractPortfolioFeedbackSubmitPayloadFromFinalResponse(responseText, {
+        runId: normalizedRunId,
+        responseId: normalizedResponseId,
+        source,
+        sourceTitle: normalizedSourceMeta.sourceTitle || source,
+        timestamp: Date.now(),
+        stage: normalizedStage,
+        conversationUrl: normalizedConversationUrl,
+        conversationLogs
+      })
+      : null;
+    const dispatchPortfolioFeedbackSubmit = !!portfolioFeedbackDispatchPayload;
+    const effectiveSkipWatchlistDispatch = skipWatchlistDispatch && !dispatchPortfolioFeedbackSubmit;
+    const effectiveSkipWatchlistDispatchReason = dispatchPortfolioFeedbackSubmit
+      ? ''
+      : skipWatchlistDispatchReason;
+    const portfolioFeedbackFlushFocus = dispatchPortfolioFeedbackSubmit && typeof normalizeWatchlistFlushFocus === 'function'
+      ? normalizeWatchlistFlushFocus(
+        {
+          runId: portfolioFeedbackDispatchPayload.runId || normalizedRunId,
+          responseId: portfolioFeedbackDispatchPayload.responseId || normalizedResponseId,
+          forceMatchingReady: true,
+          prioritizeMatching: true
+        },
+        portfolioFeedbackDispatchPayload.runId || normalizedRunId,
+        portfolioFeedbackDispatchPayload.responseId || normalizedResponseId
+      )
+      : null;
+    const effectiveDispatchFlushFocus = portfolioFeedbackFlushFocus || dispatchFlushFocus;
+    const effectiveDispatchFlushReason = dispatchPortfolioFeedbackSubmit
+      ? 'portfolio_feedback_submit'
+      : dispatchFlushReason;
+    if (dispatchPortfolioFeedbackSubmit) {
+      appendDispatchProcessLog(
+        'portfolio_feedback_submit',
+        'extracted',
+        `responseId=${portfolioFeedbackDispatchPayload.responseId || 'n/a'}, layers=${Array.isArray(portfolioFeedbackDispatchPayload.layer_votes) ? portfolioFeedbackDispatchPayload.layer_votes.length : 0}, positions=${Array.isArray(portfolioFeedbackDispatchPayload.position_votes) ? portfolioFeedbackDispatchPayload.position_votes.length : 0}`
+      );
+    } else if (shouldExtractPortfolioFeedbackSubmit) {
+      appendDispatchProcessLog(
+        'portfolio_feedback_submit',
+        'missing',
+        'reason=extract_failed'
+      );
+    }
 
     try {
-      appendDispatchProcessLog('queue_attempt', 'start', `responseId=${normalizedResponseId}`);
-      const dispatchQueueResult = await enqueueWatchlistDispatch(lastSaved || newResponse, copyTrace);
+      if (effectiveSkipWatchlistDispatch) {
+        dispatchOutcome.queueSkipped = true;
+        dispatchOutcome.queueSkipReason = effectiveSkipWatchlistDispatchReason;
+        appendDispatchProcessLog('queue_result', 'skipped', `reason=${effectiveSkipWatchlistDispatchReason}`);
+        console.log(
+          `[copy-flow] [dispatch:queued-skipped] trace=${copyTrace} reason=${effectiveSkipWatchlistDispatchReason}`
+        );
+      } else {
+      appendDispatchProcessLog(
+        'queue_attempt',
+        'start',
+        `responseId=${dispatchPortfolioFeedbackSubmit ? portfolioFeedbackDispatchPayload.responseId : normalizedResponseId}, kind=${dispatchPortfolioFeedbackSubmit ? 'portfolio_feedback_submit' : 'watchlist_response'}`
+      );
+      const dispatchResponse = {
+        ...((lastSaved && typeof lastSaved === 'object') ? lastSaved : newResponse)
+      };
+      if (normalizedSourceMeta.sourceMaterialId) {
+        dispatchResponse.sourceMaterialId = normalizedSourceMeta.sourceMaterialId;
+      }
+      if (normalizedSourceMeta.sourceMaterialHash) {
+        dispatchResponse.sourceMaterialHash = normalizedSourceMeta.sourceMaterialHash;
+      }
+      if (Number.isInteger(normalizedSourceMeta.sourceMaterialLength)) {
+        dispatchResponse.sourceMaterialLength = normalizedSourceMeta.sourceMaterialLength;
+      }
+      if (normalizedSourceMeta.sourceMaterialStored) {
+        dispatchResponse.sourceMaterialStored = true;
+      }
+      if (!normalizedSourceMeta.sourceMaterialId && typeof normalizedSourceMeta.sourceMaterialText === 'string' && normalizedSourceMeta.sourceMaterialText.trim()) {
+        dispatchResponse.sourceMaterialText = normalizedSourceMeta.sourceMaterialText;
+      }
+      const dispatchQueueResult = dispatchPortfolioFeedbackSubmit
+        ? await enqueueWatchlistDispatchPayload(portfolioFeedbackDispatchPayload, copyTrace)
+        : await enqueueWatchlistDispatch(dispatchResponse, copyTrace);
       if (dispatchQueueResult?.queued) {
         dispatchOutcome.queued = true;
         dispatchOutcome.queueSize = Number.isInteger(dispatchQueueResult?.queueSize) ? dispatchQueueResult.queueSize : 0;
@@ -26416,10 +29694,10 @@ async function saveResponse(
             queueSize: dispatchOutcome.queueSize
           });
         } else {
-          appendDispatchProcessLog('flush_attempt', 'start', `reason=${dispatchFlushReason}`);
+          appendDispatchProcessLog('flush_attempt', 'start', `reason=${effectiveDispatchFlushReason}`);
           const flushResult = await flushWatchlistDispatchOutbox(
-            dispatchFlushReason,
-            dispatchFlushFocus ? { focus: dispatchFlushFocus } : {}
+            effectiveDispatchFlushReason,
+            effectiveDispatchFlushFocus ? { focus: effectiveDispatchFlushFocus } : {}
           );
           const mergedDispatchOutcome = mergeSaveResponseDispatchWithFlushResult(
             dispatchOutcome,
@@ -26469,6 +29747,7 @@ async function saveResponse(
         });
       } else {
         appendDispatchProcessLog('queue_result', 'unknown', 'enqueue_returned_unexpected_payload');
+      }
       }
       appendDispatchProcessLog(
         'dispatch_final',
@@ -26557,7 +29836,7 @@ async function saveResponse(
     console.log(`Nowy stan: ${verifiedResponses.length} odpowiedzi w storage (zweryfikowano lokalnie: ${verifiedResponses.length})`);
     console.log(`Fingerprint: ${copyFingerprint}`);
     console.log(`${'*'.repeat(80)}\n`);
-    if (normalizedRunId) {
+    if (normalizedRunId && !skipProcessPersistencePatch) {
       await upsertProcess(normalizedRunId, buildSaveResponseProcessPersistencePatch({
         responseId: normalizedResponseId,
         copyTrace,
@@ -26625,6 +29904,24 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     sendResponse({ ok: true, ts: Date.now() });
     return false;
   }
+  if (message.type === 'GET_EXTENSION_HEARTBEAT' || message.type === 'PING_EXTENSION_HEARTBEAT') {
+    buildExtensionHeartbeatStatus({
+      forceReload: message?.forceReload === true,
+      includeQueue: message?.includeQueue !== false
+    })
+      .then((heartbeat) => sendResponse(heartbeat))
+      .catch((error) => {
+        sendResponse({
+          success: false,
+          ok: false,
+          readyForDb: false,
+          error: error?.message || 'extension_heartbeat_failed',
+          generatedAt: Date.now(),
+          featureRevision: EXTENSION_FEATURE_REVISION
+        });
+      });
+    return true;
+  }
   if (message.type === 'SAVE_RESPONSE') {
     saveResponse(
       message.text,
@@ -26637,11 +29934,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       {
         sourceTitle: message.sourceTitle || message.source || '',
         sourceName: message.sourceName || '',
-        sourceUrl: message.sourceUrl || ''
+        sourceUrl: message.sourceUrl || '',
+        sourceMaterialId: message.sourceMaterialId || '',
+        sourceMaterialHash: message.sourceMaterialHash || '',
+        sourceMaterialLength: message.sourceMaterialLength,
+        sourceMaterialStored: message.sourceMaterialStored === true,
+        sourceMaterialText: message.sourceMaterialText || ''
       },
       {
         deferDispatchFlush: true,
-        deferredFlushReason: 'runtime_bridge_fast_ack'
+        deferredFlushReason: typeof message.deferredFlushReason === 'string' && message.deferredFlushReason.trim()
+          ? message.deferredFlushReason.trim()
+          : 'runtime_bridge_fast_ack',
+        dispatchFlushReason: typeof message.dispatchFlushReason === 'string' && message.dispatchFlushReason.trim()
+          ? message.dispatchFlushReason.trim()
+          : 'save_response',
+        schema: typeof (message.schema || message.responseSchema) === 'string'
+          ? (message.schema || message.responseSchema)
+          : '',
+        sourceRecordSuffix: typeof (message.sourceRecordSuffix || message.source_record_suffix) === 'string'
+          ? (message.sourceRecordSuffix || message.source_record_suffix)
+          : '',
+        skipWatchlistDispatch: message.skipWatchlistDispatch === true,
+        allowPortfolioFeedbackDispatch: message.allowPortfolioFeedbackDispatch === true,
+        skipProcessPersistencePatch: message.skipProcessPersistencePatch === true
       }
     )
       .then((saveResult) => {
@@ -26695,7 +30011,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         remote: message?.remote === true,
         executionMode: typeof message?.executionMode === 'string' ? message.executionMode : '',
         runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
-        selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : ''
+        selectedRunnerId: typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId : '',
+        includePortfolio: message?.includePortfolio === true
       });
       reportAdminActionEvent('run_analysis', {
         level: runResult?.success === true ? 'info' : 'warn',
@@ -27035,17 +30352,30 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     return true;
   } else if (message.type === 'MANUAL_SOURCE_SUBMIT') {
     const mode = message?.mode === 'pdf' ? 'pdf' : 'text';
-    const normalizedInstances = Math.max(1, Math.min(10, Number.isInteger(message?.instances) ? message.instances : 1));
+    const analysisType = normalizeAnalysisTypeForPromptChain(message?.analysisType);
+    const autoPortfolioAnalysis = shouldRunPortfolioAlongsideCompany(analysisType);
+    const normalizedInstances = analysisType === ANALYSIS_TYPE_PORTFOLIO
+      ? 1
+      : normalizeManualInstances(message?.instances);
+    const requestedRemote = message?.remote === true || normalizeRemoteExecutionMode(message?.executionMode) === 'remote';
     console.log('[manual-source] MANUAL_SOURCE_SUBMIT:', {
       mode,
+      analysisType,
+      autoPortfolioAnalysis,
+      remote: requestedRemote,
       titleLength: typeof message?.title === 'string' ? message.title.length : 0,
       textLength: typeof message?.text === 'string' ? message.text.length : 0,
       instances: normalizedInstances,
+      runnerId: typeof message?.runnerId === 'string' ? message.runnerId : '',
       pdfProviderId: typeof message?.pdfProviderId === 'string' ? message.pdfProviderId : '',
       pdfFiles: Array.isArray(message?.pdfFiles) ? message.pdfFiles.length : 0
     });
 
     if (mode === 'pdf') {
+      if (requestedRemote) {
+        sendResponse({ success: false, error: 'remote_pdf_not_supported' });
+        return true;
+      }
       const providerId = typeof message?.pdfProviderId === 'string' ? message.pdfProviderId.trim() : '';
       const pdfFiles = Array.isArray(message?.pdfFiles) ? message.pdfFiles : [];
       if (!providerId || pdfFiles.length === 0) {
@@ -27054,8 +30384,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       }
 
       (async () => {
-        const promptsReady = await ensureCompanyPromptsReady();
-        if (!promptsReady) {
+        const promptsReady = await ensurePromptChainReadyForAnalysisType(analysisType);
+        const portfolioPromptsReady = autoPortfolioAnalysis
+          ? await ensurePromptChainReadyForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
+          : true;
+        if (!promptsReady || !portfolioPromptsReady) {
           sendResponse({ success: false, error: 'prompts_not_loaded' });
           return;
         }
@@ -27064,7 +30397,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           title: typeof message?.title === 'string' ? message.title : '',
           instances: normalizedInstances,
           providerId,
-          pdfFiles
+          pdfFiles,
+          analysisType
         });
         sendResponse(queueResult);
       })().catch((error) => {
@@ -27074,23 +30408,68 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     }
 
     (async () => {
-      const promptsReady = await ensureCompanyPromptsReady();
-      if (!promptsReady) {
+      const promptsReady = await ensurePromptChainReadyForAnalysisType(analysisType);
+      const portfolioPromptsReady = autoPortfolioAnalysis
+        ? await ensurePromptChainReadyForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
+        : true;
+      if (!promptsReady || !portfolioPromptsReady) {
         sendResponse({ success: false, error: 'prompts_not_loaded' });
         return;
       }
 
-      const queueResult = await runManualSourceAnalysis(message.text, message.title, normalizedInstances);
+      if (requestedRemote) {
+        const remoteRunnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
+          ? message.runnerId.trim()
+          : (typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId.trim() : '');
+        const remoteResult = await submitManualSourceAnalysisToRemoteRunner(
+          message.text,
+          message.title,
+          normalizedInstances,
+          remoteRunnerId,
+          {
+            timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
+            retryCount: 1,
+            analysisType,
+            promptChain: getPromptChainForAnalysisType(analysisType)
+          }
+        );
+        const portfolioRemoteResult = autoPortfolioAnalysis
+          ? await submitManualSourceAnalysisToRemoteRunner(
+              message.text,
+              message.title,
+              1,
+              remoteRunnerId,
+              {
+                timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
+                retryCount: 1,
+                analysisType: ANALYSIS_TYPE_PORTFOLIO,
+                promptChain: getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
+              }
+            )
+          : null;
+        const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
+          analysisType,
+          mode: 'remote_text',
+          primaryFallbackQueued: normalizedInstances
+        });
+        sendResponse({
+          ...mergedRemoteResult,
+          mode: 'remote_text',
+          analysisType,
+          remote: true,
+          runnerId: remoteRunnerId || mergedRemoteResult?.runnerId || ''
+        });
+        return;
+      }
+
+      const queueResult = autoPortfolioAnalysis
+        ? await runManualSourceAnalysisWithPortfolio(message.text, message.title, normalizedInstances, analysisType)
+        : await runManualSourceAnalysis(message.text, message.title, normalizedInstances, analysisType);
       sendResponse({
-        success: true,
+        ...queueResult,
+        success: queueResult?.success !== false,
         mode: 'text',
-        queued: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : normalizedInstances,
-        queuedCount: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : normalizedInstances,
-        queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
-        activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
-        reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
-        liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
-        startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0
+        analysisType
       });
     })().catch((error) => {
       sendResponse({ success: false, error: error?.message || 'manual_source_start_failed' });
@@ -27426,6 +30805,21 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       .catch((error) => {
         console.warn('[copy-flow] [dispatch:status-failed]', error);
         sendResponse({ success: false, error: error?.message || 'status_failed' });
+      });
+    return true;
+  } else if (message.type === 'GET_WATCHLIST_DISPATCH_HEALTH') {
+    getWatchlistDispatchHealth(Boolean(message?.forceReload))
+      .then((status) => sendResponse({ success: status?.success === true, ...status }))
+      .catch((error) => {
+        console.warn('[copy-flow] [dispatch:health-failed]', error);
+        sendResponse({
+          success: false,
+          healthState: 'health_check_failed',
+          backendReachable: false,
+          authOk: false,
+          dbConnected: false,
+          error: error?.message || 'health_failed'
+        });
       });
     return true;
   } else if (message.type === 'GET_WATCHLIST_DISPATCH_PROCESS_LOGS') {
@@ -28000,6 +31394,8 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const detach = message?.detach === true;
     const targetTabId = Number.isInteger(message?.targetTabId) ? message.targetTabId : null;
     const targetWindowId = Number.isInteger(message?.targetWindowId) ? message.targetWindowId : null;
+    const explicitComposerThinkingEffort = normalizeComposerThinkingEffort(message?.composerThinkingEffort);
+    const useStoredComposerThinkingEffort = message?.useStoredComposerThinkingEffort === true;
     const resumeOptions = {
       reloadBeforeResume,
       detach
@@ -28018,9 +31414,22 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
       reloadBeforeResume,
       detach,
       targetTabId,
-      targetWindowId
+      targetWindowId,
+      composerThinkingEffort: explicitComposerThinkingEffort || '',
+      useStoredComposerThinkingEffort
     });
-    resumeFromStage(message.startIndex, resumeOptions)
+    (async () => {
+      let resolvedComposerThinkingEffort = explicitComposerThinkingEffort;
+      if (resolvedComposerThinkingEffort) {
+        await setStoredResumeComposerThinkingEffort(resolvedComposerThinkingEffort);
+      } else if (useStoredComposerThinkingEffort) {
+        resolvedComposerThinkingEffort = await getStoredResumeComposerThinkingEffort();
+      }
+      if (resolvedComposerThinkingEffort) {
+        resumeOptions.composerThinkingEffort = resolvedComposerThinkingEffort;
+      }
+      return resumeFromStage(message.startIndex, resumeOptions);
+    })()
       .then((result) => {
         const normalizedResult = result || { success: false, error: 'resume_result_missing' };
         reportAdminActionEvent('resume_stage_start', {
@@ -28159,9 +31568,11 @@ async function resumeFromStage(startIndex, options = {}) {
       return { success: false, error: 'start_index_out_of_range' };
     }
 
-    const processTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
+    const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort);
+    const rawProcessTitle = typeof options?.processTitle === 'string' && options.processTitle.trim()
       ? options.processTitle.trim()
       : `Resume from Stage ${startIndex + 1}`;
+    const processTitle = formatResumeProcessTitleWithThinkingEffort(rawProcessTitle, composerThinkingEffort);
     const reloadBeforeResume = options?.reloadBeforeResume !== false;
     const targetWindowId = Number.isInteger(options?.targetWindowId)
       ? options.targetWindowId
@@ -28176,15 +31587,14 @@ async function resumeFromStage(startIndex, options = {}) {
       resumeStartIndex: startIndex,
       reloadBeforeResume,
       forceRepeatLastPrompt: options?.forceRepeatLastPrompt === true,
+      bypassPause: options?.bypassPause !== false,
       skipStagePreflight: options?.skipStagePreflight === true,
       minStartIndex: Number.isInteger(options?.minStartIndex) ? options.minStartIndex : undefined,
       stagePlanMaxWaitMs: Number.isInteger(options?.stagePlanMaxWaitMs) ? options.stagePlanMaxWaitMs : undefined,
       precomputedStagePlan: options?.precomputedStagePlan && typeof options.precomputedStagePlan === 'object'
         ? options.precomputedStagePlan
         : undefined,
-      composerThinkingEffort: typeof options?.composerThinkingEffort === 'string'
-        ? options.composerThinkingEffort
-        : '',
+      composerThinkingEffort,
       invocationWindowId: targetWindowId,
       sourceWindowId: activeTab.windowId,
       sourceUrl: getTabEffectiveUrl(activeTab),
@@ -28415,6 +31825,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     ? options.queueJobId.trim()
     : '';
   const queueManaged = !!queueJobId;
+  const queueBatchId = typeof options?.queueBatchId === 'string' && options.queueBatchId.trim()
+    ? options.queueBatchId.trim()
+    : '';
+  const manualPdfBatchId = typeof options?.manualPdfBatchId === 'string' && options.manualPdfBatchId.trim()
+    ? options.manualPdfBatchId.trim()
+    : '';
+  const manualPdfProviderId = typeof options?.manualPdfProviderId === 'string' && options.manualPdfProviderId.trim()
+    ? options.manualPdfProviderId.trim()
+    : '';
   const remoteJobContext = options?.remote && typeof options.remote === 'object'
     ? sanitizeRemoteAnalysisQueueJobMetadata(options.remote)
     : null;
@@ -28428,7 +31847,29 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
     const isManualSource = manualUrl.startsWith('manual://');
     const isManualPdf = manualUrl === 'manual://pdf';
-    const sourceUrl = isManualSource ? (manualUrl || 'manual://source') : (typeof tab?.url === 'string' ? tab.url : '');
+    const explicitSourceUrl = typeof tab?.sourceUrl === 'string' && tab.sourceUrl.trim()
+      ? tab.sourceUrl.trim()
+      : '';
+    const sourceUrl = explicitSourceUrl || (isManualSource ? (manualUrl || 'manual://source') : (typeof tab?.url === 'string' ? tab.url : ''));
+    const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
+      ? options.sourceKind.trim()
+      : (typeof tab?.sourceKind === 'string' && tab.sourceKind.trim()
+        ? tab.sourceKind.trim()
+        : (isManualPdf ? 'manual_pdf' : (isManualSource ? 'manual_text' : 'article')));
+    const sourceName = isManualSource
+      ? (isManualPdf ? 'Manual PDF' : (sourceKind === 'desktop_tab'
+        ? (resolveSupportedSourceNameFromUrl(sourceUrl) || 'Desktop Tab')
+        : 'Manual Source'))
+      : (resolveSupportedSourceNameFromUrl(sourceUrl) || 'Unknown');
+    let sourceMaterialId = typeof tab?.sourceMaterialId === 'string' && tab.sourceMaterialId.trim()
+      ? tab.sourceMaterialId.trim()
+      : (typeof remoteJobContext?.sourceMaterialId === 'string' ? remoteJobContext.sourceMaterialId.trim() : '');
+    let sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' && tab.sourceMaterialHash.trim()
+      ? tab.sourceMaterialHash.trim()
+      : (typeof remoteJobContext?.sourceMaterialHash === 'string' ? remoteJobContext.sourceMaterialHash.trim() : '');
+    let sourceMaterialLength = normalizeSourceMaterialLength(
+      tab?.sourceMaterialLength ?? remoteJobContext?.sourceMaterialLength
+    );
     const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
       ? tab.manualPdfAttachment
       : null;
@@ -28444,10 +31885,18 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       needsAction: false,
       startedAt: Date.now(),
       timestamp: Date.now(),
+      sourceKind,
+      sourceName,
       sourceUrl,
       chatUrl,
+      ...(sourceMaterialId ? { sourceMaterialId } : {}),
+      ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+      ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
       ...(invocationWindowId !== null ? { invocationWindowId } : {}),
       ...(sourceWindowId !== null ? { sourceWindowId } : {}),
+      ...(queueBatchId ? { queueBatchId } : {}),
+      ...(manualPdfBatchId ? { manualPdfBatchId } : {}),
+      ...(manualPdfProviderId ? { manualPdfProviderId } : {}),
       ...(queueManaged
         ? {
           queueManaged: true,
@@ -28545,8 +31994,96 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
 
     const title = tab.title || 'Bez tytułu';
     processTitle = title;
+    const shouldSubmitSourceMaterialForProcess = extractedText.trim()
+      && (!sourceMaterialId || tab?.sourceMaterialNeedsProcessLink === true);
+    if (shouldSubmitSourceMaterialForProcess) {
+      const materialResult = await submitSourceMaterialForProcess({
+        text: extractedText,
+        title,
+        sourceKind,
+        sourceUrl,
+        runId: processId,
+        jobId: queueJobId,
+        batchId: remoteJobContext?.batchId || '',
+        submissionId: remoteJobContext?.submissionId || '',
+        runnerId: remoteJobContext?.remoteRunnerId || '',
+        relation: 'process_input',
+        metadata: {
+          analysis_type: analysisType,
+          source_name: sourceName,
+          queue_job_id: queueJobId,
+          remote_job_id: remoteJobContext?.remoteJobId || ''
+        }
+      }, { retryCount: 0, timeoutMs: 15000 });
+      const materialPayload = materialResult?.payload && typeof materialResult.payload === 'object'
+        ? materialResult.payload
+        : {};
+      if (materialResult?.success === true && typeof materialPayload.sourceMaterialId === 'string' && materialPayload.sourceMaterialId.trim()) {
+        sourceMaterialId = materialPayload.sourceMaterialId.trim();
+        sourceMaterialHash = typeof materialPayload.sourceMaterialHash === 'string' ? materialPayload.sourceMaterialHash.trim() : sourceMaterialHash;
+        sourceMaterialLength = normalizeSourceMaterialLength(materialPayload.sourceMaterialLength) ?? sourceMaterialLength;
+      } else {
+        const failureReason = normalizeSourceMaterialSubmitFailure(materialResult, 'source_material_submit_failed');
+        console.warn('[source-material] pre-submit failed', {
+          processId,
+          reason: failureReason,
+          status: Number.isInteger(materialResult?.status) ? materialResult.status : null
+        });
+        if (!sourceMaterialId) {
+          await reportAnalysisQueueEvent('source_material_save_failed', {
+            level: 'error',
+            status: 'failed',
+            reason: failureReason,
+            runId: processId,
+            jobId: queueJobId,
+            analysisType,
+            title,
+            sourceUrl,
+            currentPrompt: 0,
+            totalPrompts: promptChainSafe.length,
+            statusText: `status=${Number.isInteger(materialResult?.status) ? materialResult.status : 'n/a'} | sourceKind=${sourceKind}`,
+            message: `Nie uruchamiam procesu, bo material zrodlowy nie zostal zapisany: ${failureReason}`
+          }).catch(() => null);
+          await upsertProcess(processId, {
+            title,
+            analysisType,
+            status: 'failed',
+            needsAction: false,
+            statusText: 'Material zrodlowy nie zostal zapisany',
+            reason: 'source_material_submit_failed',
+            error: failureReason,
+            autoRecovery: null,
+            finishedAt: Date.now(),
+            timestamp: Date.now(),
+            sourceKind,
+            sourceName,
+            sourceUrl,
+            sourceMaterialStored: false
+          });
+          return {
+            success: false,
+            title,
+            reason: 'source_material_submit_failed',
+            error: failureReason
+          };
+        }
+      }
+    }
+    await upsertProcess(processId, {
+      title,
+      analysisType,
+      sourceKind,
+      sourceName,
+      sourceUrl,
+      sourceTextLength: extractedText.length,
+      ...(sourceMaterialId ? { sourceMaterialId } : {}),
+      ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+      ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
+      sourceMaterialStored: !!sourceMaterialId,
+      timestamp: Date.now()
+    });
     const firstPrompt = promptChainSafe[0] || '';
-    let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+    let payload = injectSourceTextIntoPromptTemplate(firstPrompt, extractedText);
     const restOfPrompts = promptChainSafe.slice(1);
     processTotalPrompts = promptChainSafe.length;
     const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
@@ -28560,8 +32097,14 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       totalPrompts: processTotalPrompts,
       needsAction: false,
       timestamp: Date.now(),
+      sourceKind,
+      sourceName,
       sourceUrl,
-      chatUrl
+      chatUrl,
+      ...(sourceMaterialId ? { sourceMaterialId } : {}),
+      ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+      ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
+      sourceMaterialStored: !!sourceMaterialId
     });
 
     const referenceWindow = await resolveReferenceWindowForChatCreation(
@@ -28645,7 +32188,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         {
           persistFinalResponseViaMessage: true,
           mode: 'runtime_message',
-          saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS
+          saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS,
+          sourceTitle: title,
+          sourceName,
+          sourceUrl,
+          sourceMaterialId,
+          sourceMaterialHash,
+          sourceMaterialLength,
+          sourceMaterialStored: !!sourceMaterialId,
+          sourceMaterialText: sourceMaterialId ? '' : extractedText
         },
         manualPdfAttachmentContext
       ];
@@ -28786,9 +32337,15 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ? result.lastResponse
       : '';
     const hasResultLastResponse = resultLastResponse.trim().length > 0;
+    const resultSectorMemoryResponse = typeof result?.sectorMemoryResponse === 'string'
+      ? result.sectorMemoryResponse
+      : '';
+    const hasResultSectorMemoryResponse = resultSectorMemoryResponse.trim().length > 0;
     const MAX_COMPLETED_RESPONSE_CHARS = 180000;
     let completedResponsePatch = {};
+    let sectorMemoryResponsePatch = {};
     let persistencePatch = null;
+    let dataGapPatch = {};
     if (isInjectRateLimitBlockedResult(result)) {
       const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
         executionPromptOffset,
@@ -28838,8 +32395,54 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         completedResponseSaved: false
       };
     }
+    if (hasResultSectorMemoryResponse) {
+      const sectorMemoryResponseTruncated = resultSectorMemoryResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+      sectorMemoryResponsePatch = {
+        sectorMemoryResponseText: sectorMemoryResponseTruncated
+          ? resultSectorMemoryResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+          : resultSectorMemoryResponse,
+        sectorMemoryResponseLength: resultSectorMemoryResponse.length,
+        sectorMemoryResponseTruncated,
+        sectorMemoryResponseCapturedAt: Date.now(),
+        sectorMemoryResponseSaved: false,
+        sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
+          ? result.sectorMemoryResponsePrompt
+          : 16,
+        sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
+          ? result.sectorMemoryResponseStageIndex
+          : 15,
+        sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
+          ? result.sectorMemoryResponseReason
+          : 'sector_memory_json'
+      };
+    }
 
-    if (result && result.success && hasResultLastResponse) {
+    if (isInjectDataGapTerminalResult(result)) {
+      const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
+        currentPrompt: executionPromptOffset,
+        totalPrompts: processTotalPrompts
+      });
+      finalStatus = dataGapSummary.lifecycleStatus;
+      finalPhase = dataGapSummary.phase;
+      finalStatusCode = dataGapSummary.statusCode;
+      finalStatusText = dataGapSummary.statusText;
+      finalReason = dataGapSummary.reason;
+      finalError = dataGapSummary.error;
+      finalActionRequired = dataGapSummary.actionRequired;
+      finalNeedsAction = dataGapSummary.needsAction;
+      dataGapPatch = {
+        dataGapDetected: true,
+        dataGapSignal: 'assistant_data_gap_stage',
+        dataGapStageId: resolveDataGapStageIdFromObject(result),
+        dataGapMissingInputs: ''
+      };
+      await renderFinalCounterStatusOnTab(chatTabId, {
+        heading: dataGapSummary.heading,
+        tone: dataGapSummary.tone,
+        lines: dataGapSummary.logLines,
+        autoCloseMs: 0
+      });
+    } else if (result && result.success && hasResultLastResponse) {
       const stageMeta = {};
       if (Number.isInteger(result?.selectedResponsePrompt)) {
         stageMeta.selected_response_prompt = result.selectedResponsePrompt;
@@ -28873,12 +32476,38 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           conversationUrl || null,
           {
             sourceTitle: title,
-            sourceName: resolveSupportedSourceNameFromUrl(
-              typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
-            ),
-            sourceUrl: typeof process?.sourceUrl === 'string' ? process.sourceUrl : ''
+            sourceName,
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId,
+            sourceMaterialText: sourceMaterialId ? '' : extractedText
           }
         );
+      const sectorMemoryPersistence = hasResultSectorMemoryResponse
+        ? await persistSectorMemoryResponseFromResult(result, {
+          source: title,
+          runId: processId,
+          conversationUrl: conversationUrl || null,
+          sourceMeta: {
+            sourceTitle: title,
+            sourceName,
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId
+          }
+        })
+        : null;
+      if (sectorMemoryPersistence?.attempted) {
+        sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
+        sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
+        sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
+          ? sectorMemoryPersistence.itemCount
+          : null;
+      }
       const persistenceSummary = buildPersistenceUiSummary({
         hasResponse: true,
         saveResult,
@@ -28983,6 +32612,22 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         lines: persistenceSummary.logLines,
         autoCloseMs: 0
       });
+    } else if (isForceStoppedExecutionResult(result)) {
+      const stopSummary = buildForceStoppedExecutionSummary(result);
+      finalStatus = stopSummary.lifecycleStatus;
+      finalPhase = stopSummary.phase;
+      finalStatusCode = stopSummary.statusCode;
+      finalStatusText = stopSummary.statusText;
+      finalReason = stopSummary.reason;
+      finalError = stopSummary.error;
+      finalActionRequired = stopSummary.actionRequired;
+      finalNeedsAction = stopSummary.needsAction;
+      await renderFinalCounterStatusOnTab(chatTabId, {
+        heading: stopSummary.heading,
+        tone: stopSummary.tone,
+        lines: stopSummary.logLines,
+        autoCloseMs: 0
+      });
     } else if (result && !result.success) {
       finalStatus = 'failed';
       finalPhase = 'response_wait';
@@ -29011,13 +32656,22 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     } else {
       finalStatus = 'failed';
       finalPhase = 'response_wait';
-      finalStatusCode = 'process.invalid_result';
-      finalStatusText = 'Nieoczekiwany wynik';
-      finalReason = 'invalid_result';
+      finalStatusCode = !result
+        ? 'process.missing_execute_result_payload'
+        : 'process.invalid_result';
+      finalStatusText = !result
+        ? 'Brak payloadu executeScript'
+        : 'Nieoczekiwany wynik';
+      finalReason = !result
+        ? 'missing_execute_result_payload'
+        : 'invalid_result';
+      finalError = !result
+        ? 'executeScript returned no result object'
+        : '';
       await renderFinalCounterStatusOnTab(chatTabId, {
         heading: 'Blad procesu',
         tone: 'error',
-        lines: ['Powod: invalid_result'],
+        lines: [`Powod: ${finalReason}`],
         autoCloseMs: 0
       });
     }
@@ -29039,6 +32693,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(persistencePatch ? persistencePatch : {}),
       ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
       ...(Object.keys(completedResponsePatch).length > 0 ? completedResponsePatch : {}),
+      ...(Object.keys(sectorMemoryResponsePatch).length > 0 ? sectorMemoryResponsePatch : {}),
+      ...(Object.keys(dataGapPatch).length > 0 ? dataGapPatch : {}),
       ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
         ? {
           currentPrompt: processTotalPrompts,
@@ -29053,12 +32709,25 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             })
         }
         : {}),
+      ...(finalReason === 'data_gap_stage'
+        ? {
+          currentPrompt: Number.isInteger(result?.currentPrompt) ? result.currentPrompt : executionPromptOffset,
+          totalPrompts: processTotalPrompts,
+          ...(Number.isInteger(result?.stageIndex)
+            ? {
+              stageIndex: result.stageIndex,
+              stageName: `Prompt ${result.stageIndex + 1}`
+            }
+            : {})
+        }
+        : {}),
       finishedAt: Date.now(),
       timestamp: Date.now()
     });
 
     return {
       success: finalStatus === 'completed',
+      stopped: finalStatus === 'stopped',
       title,
       reason: finalReason || '',
       error: finalError || ''
@@ -29096,6 +32765,17 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       return getAnalysisQueueStatusSnapshot();
     }
 
+    if (shouldBypassAnalysisQueueForAnalysisType(analysisType)) {
+      console.log(`[${analysisType}] Uruchamiam ${sourceTabs.length} analiz poza kolejka slotow`);
+      return launchAnalysisJobsOutsideQueue(sourceTabs, promptChain, chatUrl, analysisType, {
+        ...options,
+        reason: typeof options?.reason === 'string' && options.reason.trim()
+          ? options.reason.trim()
+          : 'process_articles_queue_bypass'
+      });
+    }
+
+    const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
     const invocationWindowId = Number.isInteger(options?.invocationWindowId)
       ? options.invocationWindowId
       : null;
@@ -29106,7 +32786,10 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         : (sourceUrl === 'manual://pdf'
           ? 'manual_pdf'
           : (sourceUrl.startsWith('manual://') ? 'manual_text' : 'article'));
-      return {
+      const sourceMaterialId = typeof tab?.sourceMaterialId === 'string' ? tab.sourceMaterialId.trim() : '';
+      const sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' ? tab.sourceMaterialHash.trim() : '';
+      const sourceMaterialLength = normalizeSourceMaterialLength(tab?.sourceMaterialLength);
+      const job = {
         kind: ANALYSIS_QUEUE_KIND_ARTICLE,
         analysisType,
         title: typeof tab?.title === 'string' && tab.title.trim() ? tab.title.trim() : 'Bez tytulu',
@@ -29116,10 +32799,16 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
         sourceWindowId: Number.isInteger(tab?.windowId) ? tab.windowId : null,
         sourceUrl,
         chatUrl: typeof chatUrl === 'string' ? chatUrl : '',
+        promptChainSnapshot,
         queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
         manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
         manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : ''
       };
+      if (sourceMaterialId) job.sourceMaterialId = sourceMaterialId;
+      if (sourceMaterialHash) job.sourceMaterialHash = sourceMaterialHash;
+      if (Number.isInteger(sourceMaterialLength)) job.sourceMaterialLength = sourceMaterialLength;
+      if (tab?.sourceMaterialStored === true || sourceMaterialId) job.sourceMaterialStored = true;
+      return job;
     });
 
     return enqueueAnalysisJobs(jobs, {
@@ -29212,12 +32901,41 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
       const sourceName = isManualSource
         ? (isManualPdf ? "Manual PDF" : "Manual Source")
         : (resolveSupportedSourceNameFromUrl(sourceUrl) || "Unknown");
+      const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
+        ? options.sourceKind.trim()
+        : (isManualPdf ? 'manual_pdf' : (isManualSource ? 'manual_text' : 'article'));
+      let sourceMaterialId = typeof tab?.sourceMaterialId === 'string' ? tab.sourceMaterialId.trim() : '';
+      let sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' ? tab.sourceMaterialHash.trim() : '';
+      let sourceMaterialLength = normalizeSourceMaterialLength(tab?.sourceMaterialLength);
+      if (!sourceMaterialId && typeof extractedText === 'string' && extractedText.trim()) {
+        const materialResult = await submitSourceMaterialForProcess({
+          text: extractedText,
+          title,
+          sourceKind,
+          sourceUrl,
+          runId: processId,
+          relation: 'process_input',
+          metadata: {
+            analysis_type: analysisType,
+            source_name: sourceName,
+            origin: 'legacy_direct_executor'
+          }
+        }, { retryCount: 0, timeoutMs: 15000 });
+        const materialPayload = materialResult?.payload && typeof materialResult.payload === 'object'
+          ? materialResult.payload
+          : {};
+        if (materialResult?.success === true && typeof materialPayload.sourceMaterialId === 'string' && materialPayload.sourceMaterialId.trim()) {
+          sourceMaterialId = materialPayload.sourceMaterialId.trim();
+          sourceMaterialHash = typeof materialPayload.sourceMaterialHash === 'string' ? materialPayload.sourceMaterialHash.trim() : sourceMaterialHash;
+          sourceMaterialLength = normalizeSourceMaterialLength(materialPayload.sourceMaterialLength) ?? sourceMaterialLength;
+        }
+      }
 
       // Wyciągnij treść pierwszego prompta z promptChain
       const firstPrompt = promptChain[0] || '';
       
-      // Wstaw treść artykułu do pierwszego prompta (zamień {{articlecontent}})
-      let payload = firstPrompt.replace('{{articlecontent}}', extractedText);
+      // Wstaw treść źródła do pierwszego prompta.
+      let payload = injectSourceTextIntoPromptTemplate(firstPrompt, extractedText);
       
       // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
       const restOfPrompts = promptChain.slice(1);
@@ -29233,8 +32951,14 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         needsAction: false,
         startedAt: Date.now(),
         timestamp: Date.now(),
+        sourceKind,
+        sourceName,
         sourceUrl,
         chatUrl,
+        ...(sourceMaterialId ? { sourceMaterialId } : {}),
+        ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
+        ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
+        sourceMaterialStored: !!sourceMaterialId,
         ...(invocationWindowId !== null ? { invocationWindowId } : {}),
         ...(sourceWindowId !== null ? { sourceWindowId } : {}),
         messages: []
@@ -29324,7 +33048,12 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS,
             sourceTitle: title,
             sourceName,
-            sourceUrl
+            sourceUrl,
+            sourceMaterialId,
+            sourceMaterialHash,
+            sourceMaterialLength,
+            sourceMaterialStored: !!sourceMaterialId,
+            sourceMaterialText: sourceMaterialId ? '' : extractedText
           },
           manualPdfAttachmentContext
         ];
@@ -29555,9 +33284,15 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         ? result.lastResponse
         : '';
       const hasResultLastResponse = resultLastResponse.trim().length > 0;
+      const resultSectorMemoryResponse = typeof result?.sectorMemoryResponse === 'string'
+        ? result.sectorMemoryResponse
+        : '';
+      const hasResultSectorMemoryResponse = resultSectorMemoryResponse.trim().length > 0;
       const MAX_COMPLETED_RESPONSE_CHARS = 180000;
       let completedResponsePatch = {};
+      let sectorMemoryResponsePatch = {};
       let persistencePatch = null;
+      let dataGapPatch = {};
       if (isInjectRateLimitBlockedResult(result)) {
         const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
           executionPromptOffset,
@@ -29608,8 +33343,55 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           completedResponseSaved: false
         };
       }
+      if (hasResultSectorMemoryResponse) {
+        const sectorMemoryResponseTruncated = resultSectorMemoryResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
+        sectorMemoryResponsePatch = {
+          sectorMemoryResponseText: sectorMemoryResponseTruncated
+            ? resultSectorMemoryResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
+            : resultSectorMemoryResponse,
+          sectorMemoryResponseLength: resultSectorMemoryResponse.length,
+          sectorMemoryResponseTruncated,
+          sectorMemoryResponseCapturedAt: Date.now(),
+          sectorMemoryResponseSaved: false,
+          sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
+            ? result.sectorMemoryResponsePrompt
+            : 16,
+          sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
+            ? result.sectorMemoryResponseStageIndex
+            : 15,
+          sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
+            ? result.sectorMemoryResponseReason
+            : 'sector_memory_json'
+        };
+      }
       
-      if (result && result.success && hasResultLastResponse) {
+      if (isInjectDataGapTerminalResult(result)) {
+        const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
+          currentPrompt: executionPromptOffset,
+          totalPrompts: processTotalPrompts
+        });
+        finalStatus = dataGapSummary.lifecycleStatus;
+        finalPhase = dataGapSummary.phase;
+        finalStatusCode = dataGapSummary.statusCode;
+        finalStatusText = dataGapSummary.statusText;
+        finalReason = dataGapSummary.reason;
+        finalError = dataGapSummary.error;
+        finalActionRequired = dataGapSummary.actionRequired;
+        finalNeedsAction = dataGapSummary.needsAction;
+        dataGapPatch = {
+          dataGapDetected: true,
+          dataGapSignal: 'assistant_data_gap_stage',
+          dataGapStageId: resolveDataGapStageIdFromObject(result),
+          dataGapMissingInputs: ''
+        };
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: dataGapSummary.heading,
+          tone: dataGapSummary.tone,
+          lines: dataGapSummary.logLines,
+          autoCloseMs: 0
+        });
+        console.log(`${'='.repeat(80)}\n`);
+      } else if (result && result.success && hasResultLastResponse) {
         console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
         console.log(`Zapisuję odpowiedź: ${resultLastResponse.length} znaków`);
         console.log(`Typ analizy: ${analysisType}`);
@@ -29662,9 +33444,37 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
             {
               sourceTitle: title,
               sourceName,
-              sourceUrl
+              sourceUrl,
+              sourceMaterialId,
+              sourceMaterialHash,
+              sourceMaterialLength,
+              sourceMaterialStored: !!sourceMaterialId,
+              sourceMaterialText: sourceMaterialId ? '' : extractedText
             }
           );
+        const sectorMemoryPersistence = hasResultSectorMemoryResponse
+          ? await persistSectorMemoryResponseFromResult(result, {
+            source: title,
+            runId: processId,
+            conversationUrl: conversationUrl || null,
+            sourceMeta: {
+              sourceTitle: title,
+              sourceName,
+              sourceUrl,
+              sourceMaterialId,
+              sourceMaterialHash,
+              sourceMaterialLength,
+              sourceMaterialStored: !!sourceMaterialId
+            }
+          })
+          : null;
+        if (sectorMemoryPersistence?.attempted) {
+          sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
+          sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
+          sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
+            ? sectorMemoryPersistence.itemCount
+            : null;
+        }
         const persistenceSummary = buildPersistenceUiSummary({
           hasResponse: true,
           saveResult,
@@ -29784,6 +33594,23 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
           autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
+      } else if (isForceStoppedExecutionResult(result)) {
+        const stopSummary = buildForceStoppedExecutionSummary(result);
+        finalStatus = stopSummary.lifecycleStatus;
+        finalPhase = stopSummary.phase;
+        finalStatusCode = stopSummary.statusCode;
+        finalStatusText = stopSummary.statusText;
+        finalReason = stopSummary.reason;
+        finalError = stopSummary.error;
+        finalActionRequired = stopSummary.actionRequired;
+        finalNeedsAction = stopSummary.needsAction;
+        await renderFinalCounterStatusOnTab(chatTabId, {
+          heading: stopSummary.heading,
+          tone: stopSummary.tone,
+          lines: stopSummary.logLines,
+          autoCloseMs: 0
+        });
+        console.log(`${'='.repeat(80)}\n`);
       } else if (result && !result.success) {
         console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
         finalStatus = 'failed';
@@ -29818,13 +33645,22 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         console.error(`lastResponse: ${result?.lastResponse}`);
         finalStatus = 'failed';
         finalPhase = 'response_wait';
-        finalStatusCode = 'process.invalid_result';
-        finalStatusText = 'Nieoczekiwany wynik';
-        finalReason = 'invalid_result';
+        finalStatusCode = !result
+          ? 'process.missing_execute_result_payload'
+          : 'process.invalid_result';
+        finalStatusText = !result
+          ? 'Brak payloadu executeScript'
+          : 'Nieoczekiwany wynik';
+        finalReason = !result
+          ? 'missing_execute_result_payload'
+          : 'invalid_result';
+        finalError = !result
+          ? 'executeScript returned no result object'
+          : '';
         await renderFinalCounterStatusOnTab(chatTabId, {
           heading: 'Blad procesu',
           tone: 'error',
-          lines: ['Powod: invalid_result'],
+          lines: [`Powod: ${finalReason}`],
           autoCloseMs: 0
         });
         console.log(`${'='.repeat(80)}\n`);
@@ -29844,14 +33680,18 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
         error: finalError,
         autoRecovery: null,
         ...(injectMetrics ? { injectMetrics } : {}),
-        ...(persistencePatch ? persistencePatch : {}),
-        ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
-        ...(Object.keys(completedResponsePatch).length > 0
-          ? completedResponsePatch
-          : {}),
-        ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
-          ? {
-            currentPrompt: processTotalPrompts,
+	        ...(persistencePatch ? persistencePatch : {}),
+	        ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
+	        ...(Object.keys(completedResponsePatch).length > 0
+	          ? completedResponsePatch
+	          : {}),
+	        ...(Object.keys(sectorMemoryResponsePatch).length > 0
+	          ? sectorMemoryResponsePatch
+	          : {}),
+	        ...(Object.keys(dataGapPatch).length > 0 ? dataGapPatch : {}),
+	        ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
+	          ? {
+	            currentPrompt: processTotalPrompts,
             totalPrompts: processTotalPrompts,
             ...(processTotalPrompts > 0
               ? {
@@ -29860,17 +33700,30 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
               }
               : {
                 stageName: 'Start'
-              })
-          }
-          : {}),
-        finishedAt: Date.now(),
-        timestamp: Date.now()
-      });
+	              })
+	          }
+	          : {}),
+	        ...(finalReason === 'data_gap_stage'
+	          ? {
+	            currentPrompt: Number.isInteger(result?.currentPrompt) ? result.currentPrompt : executionPromptOffset,
+	            totalPrompts: processTotalPrompts,
+	            ...(Number.isInteger(result?.stageIndex)
+	              ? {
+	                stageIndex: result.stageIndex,
+	                stageName: `Prompt ${result.stageIndex + 1}`
+	              }
+	              : {})
+	          }
+	          : {}),
+	        finishedAt: Date.now(),
+	        timestamp: Date.now()
+	      });
 
       const processSuccess = finalStatus === 'completed';
       console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
       return {
         success: processSuccess,
+        stopped: finalStatus === 'stopped',
         title,
         reason: finalReason || '',
         error: finalError || ''
@@ -29907,6 +33760,7 @@ async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, a
     .map((result, index) => {
       if (result.status === 'fulfilled') {
         if (result.value?.success) return null;
+        if (result.value?.stopped) return null;
         return {
           index,
           title: result.value?.title || tabs[index]?.title || 'Bez tytulu',
@@ -29955,6 +33809,7 @@ async function runAnalysis(options = {}) {
       : (typeof options?.selectedRunnerId === 'string' && options.selectedRunnerId.trim()
         ? options.selectedRunnerId.trim()
         : await getStoredSelectedRemoteRunnerId());
+    const includePortfolio = options?.includePortfolio === true;
 
     if (options?.stopExistingInWindow && Number.isInteger(invocationWindowId) && executionMode !== 'remote') {
       const preUngroupResult = await ungroupChatGptTabsInWindow(invocationWindowId, {
@@ -30010,6 +33865,16 @@ async function runAnalysis(options = {}) {
       return { success: false, error: 'prompts_not_loaded' };
     }
     console.log(`✅ Analiza spółki: ${PROMPTS_COMPANY.length} promptów`);
+    if (includePortfolio) {
+      const portfolioPromptsReady = await ensurePortfolioPromptsReady();
+      if (!portfolioPromptsReady || PROMPTS_PORTFOLIO.length === 0) {
+        console.error("❌ Brak promptów dla Portfolio Analysis w prompts-portfolio.txt");
+        return { success: false, error: 'portfolio_prompts_not_loaded' };
+      }
+      console.log(`✅ Portfolio Analysis: ${PROMPTS_PORTFOLIO.length} promptów`);
+    } else {
+      console.log('↪️ Portfolio Analysis: pominiete dla RUN_ANALYSIS');
+    }
     
     // KROK 2: Pobierz wszystkie artykuły
     console.log("\n📰 Krok 2: Pobieranie artykułów");
@@ -30022,9 +33887,14 @@ async function runAnalysis(options = {}) {
 
     console.log(`✅ Znaleziono ${orderedTabs.length} artykułów łącznie`);
     
-    // KROK 3: Uruchom analizę company dla wszystkich znalezionych artykułów
-    console.log("\n🚀 Krok 3: Uruchamianie analizy company");
+    // KROK 3: Uruchom analizę company; portfolio tylko gdy zostalo jawnie wlaczone.
+    console.log(includePortfolio
+      ? "\n🚀 Krok 3: Uruchamianie analizy company + portfolio"
+      : "\n🚀 Krok 3: Uruchamianie analizy company");
     console.log(`   - Analiza spółki: ${orderedTabs.length} artykułów`);
+    if (includePortfolio) {
+      console.log(`   - Portfolio Analysis: ${orderedTabs.length} artykułów`);
+    }
 
     if (executionMode === 'remote') {
       if (!selectedRunnerId) {
@@ -30042,30 +33912,61 @@ async function runAnalysis(options = {}) {
           totalTabs: orderedTabs.length
         };
       }
+      let preparedPortfolioBatch = null;
+      if (includePortfolio) {
+        preparedPortfolioBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_PORTFOLIO, ANALYSIS_TYPE_PORTFOLIO, {
+          runnerId: selectedRunnerId
+        });
+        if (preparedPortfolioBatch?.success !== true) {
+          return {
+            success: false,
+            error: preparedPortfolioBatch?.error || 'portfolio_remote_prepare_failed',
+            skippedCount: Array.isArray(preparedPortfolioBatch?.skipped) ? preparedPortfolioBatch.skipped.length : 0,
+            totalTabs: orderedTabs.length
+          };
+        }
+      }
 
       const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, selectedRunnerId, {
         invocationWindowId
       });
+      const portfolioRemoteResult = includePortfolio
+        ? await submitPreparedAnalysisBatchToRemoteRunner(preparedPortfolioBatch, selectedRunnerId, {
+            invocationWindowId
+          })
+        : null;
+      const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
+        analysisType: ANALYSIS_TYPE_COMPANY,
+        mode: 'remote_tabs',
+        primaryFallbackQueued: orderedTabs.length
+      });
       return {
-        ...remoteResult,
-        queuedCount: Number.isInteger(remoteResult?.submittedCount) ? remoteResult.submittedCount : 0
+        ...mergedRemoteResult,
+        remote: true,
+        runnerId: selectedRunnerId,
+        totalTabs: orderedTabs.length
       };
     }
 
-    const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+    const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, getChatUrlForAnalysisType(ANALYSIS_TYPE_COMPANY), 'company', {
       invocationWindowId,
       reason: 'run_analysis_enqueue'
+    });
+    const portfolioQueueResult = includePortfolio
+      ? await processArticles(orderedTabs, PROMPTS_PORTFOLIO, getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
+          invocationWindowId,
+          reason: 'run_analysis_portfolio_enqueue'
+        })
+      : null;
+    const mergedQueueResult = mergeAnalysisLaunchResults(queueResult, portfolioQueueResult, {
+      analysisType: ANALYSIS_TYPE_COMPANY,
+      mode: 'local_tabs',
+      primaryFallbackQueued: orderedTabs.length
     });
 
     console.log("\n✅ ZAKOŃCZONO URUCHAMIANIE PROCESÓW");
     return {
-      success: true,
-      queuedCount: Number.isInteger(queueResult?.queuedCount) ? queueResult.queuedCount : orderedTabs.length,
-      queueSize: Number.isInteger(queueResult?.queueSize) ? queueResult.queueSize : 0,
-      activeSlots: Number.isInteger(queueResult?.activeSlots) ? queueResult.activeSlots : 0,
-      reservedSlots: Number.isInteger(queueResult?.reservedSlots) ? queueResult.reservedSlots : 0,
-      liveSlots: Number.isInteger(queueResult?.liveSlots) ? queueResult.liveSlots : 0,
-      startingSlots: Number.isInteger(queueResult?.startingSlots) ? queueResult.startingSlots : 0,
+      ...mergedQueueResult,
       totalTabs: orderedTabs.length
     };
 
@@ -30077,12 +33978,110 @@ async function runAnalysis(options = {}) {
 
 // Funkcja uruchamiająca analizę z ręcznie wklejonego źródła
 function normalizeManualInstances(instances) {
-  return Math.max(1, Math.min(10, Number.isInteger(instances) ? instances : 1));
+  return Math.max(1, Math.min(20, Number.isInteger(instances) ? instances : 1));
 }
 
 function buildManualPdfPayload(fileName) {
   const safeName = typeof fileName === 'string' && fileName.trim() ? fileName.trim() : 'source.pdf';
   return `Nazwa pliku: ${safeName}\nPrzeanalizuj zalaczony PDF.`;
+}
+
+async function buildPreparedManualSourceRemoteBatch(text, title, instances, options = {}) {
+  const safeText = typeof text === 'string' ? text.trim() : '';
+  if (!safeText) {
+    return { success: false, error: 'manual_source_text_empty', items: [], skipped: [] };
+  }
+  const analysisType = normalizeAnalysisTypeForPromptChain(options?.analysisType);
+  const sourcePromptChain = Array.isArray(options?.promptChain)
+    ? options.promptChain
+    : getPromptChainForAnalysisType(analysisType);
+  const promptChainSnapshot = sanitizePromptChainSnapshot(sourcePromptChain);
+  if (promptChainSnapshot.length === 0) {
+    return { success: false, error: 'prompts_empty', items: [], skipped: [] };
+  }
+
+  const [controllerId, promptHash] = await Promise.all([
+    ensureExtensionInstallationId(),
+    computePromptChainHash(promptChainSnapshot)
+  ]);
+  if (!promptHash) {
+    return { success: false, error: 'prompt_hash_unavailable', items: [], skipped: [] };
+  }
+
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
+  const safeInstances = analysisType === ANALYSIS_TYPE_PORTFOLIO ? 1 : normalizeManualInstances(instances);
+  const batchId = createRemoteExecutionId('manual-remote-batch');
+  const submissionId = createRemoteExecutionId('manual-remote-submit');
+  const runnerId = typeof options?.runnerId === 'string' ? options.runnerId.trim() : '';
+  const createdAt = Date.now();
+  const items = [];
+  for (let index = 0; index < safeInstances; index += 1) {
+    const instanceIndex = index + 1;
+    items.push({
+      schema: 'iskra.remote_job.v1',
+      jobId: createRemoteExecutionId(`manual-${analysisType}-job`),
+      runId: createRemoteExecutionId(`manual-${analysisType}-run`),
+      batchId,
+      submissionId,
+      requestDedupeKey: `${submissionId}:${instanceIndex}`,
+      controllerId,
+      runnerId,
+      analysisType,
+      chatUrl: getChatUrlForAnalysisType(analysisType),
+      sourceMode: 'manual_text',
+      sourceKind: 'manual_text',
+      sourceUrl: 'manual://source',
+      submittedTitle: safeInstances > 1
+        ? `${safeTitle} [instancja ${instanceIndex}/${safeInstances}]`
+        : safeTitle,
+      text: safeText,
+      instanceIndex,
+      instanceTotal: safeInstances,
+      promptChainSnapshot,
+      promptHash,
+      usesRunnerPrompts: false,
+      createdAt
+    });
+  }
+
+  return {
+    success: true,
+    controllerId,
+    batchId,
+    submissionId,
+    promptChainSnapshot,
+    promptHash,
+    analysisType,
+    items,
+    skipped: []
+  };
+}
+
+async function submitManualSourceAnalysisToRemoteRunner(text, title, instances, runnerId, options = {}) {
+  const safeRunnerId = typeof runnerId === 'string' && runnerId.trim()
+    ? runnerId.trim()
+    : await getStoredSelectedRemoteRunnerId();
+  const preparedBatch = await buildPreparedManualSourceRemoteBatch(text, title, instances, {
+    runnerId: safeRunnerId,
+    analysisType: options?.analysisType,
+    promptChain: options?.promptChain
+  });
+  if (preparedBatch?.success !== true) {
+    return {
+      success: false,
+      remote: true,
+      runnerId: safeRunnerId,
+      error: preparedBatch?.error || 'manual_remote_prepare_failed',
+      submittedCount: 0,
+      queuedCount: 0,
+      failedCount: normalizeManualInstances(instances)
+    };
+  }
+  const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, safeRunnerId, options);
+  return {
+    ...remoteResult,
+    queuedCount: Number.isInteger(remoteResult?.submittedCount) ? remoteResult.submittedCount : 0
+  };
 }
 
 function normalizeManualPdfFiles(rawFiles) {
@@ -30224,13 +34223,29 @@ async function requestManualPdfProviderChunk({ providerId, token, offset = 0, ch
 }
 
 // Funkcja uruchamiajaca analize z recznie wklejonego zrodla
-async function runManualSourceAnalysis(text, title, instances) {
+async function runManualSourceAnalysis(text, title, instances, analysisType = ANALYSIS_TYPE_COMPANY) {
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const promptsReady = await ensurePromptChainReadyForAnalysisType(normalizedAnalysisType);
+  if (!promptsReady) {
+    return {
+      success: false,
+      error: normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO ? 'portfolio_prompts_not_loaded' : 'prompts_not_loaded'
+    };
+  }
+  const promptChain = getPromptChainForAnalysisType(normalizedAnalysisType);
   const safeText = typeof text === 'string' ? text : '';
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
-  const safeInstances = normalizeManualInstances(instances);
+  const safeInstances = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO ? 1 : normalizeManualInstances(instances);
   const timestamp = Date.now();
   const manualTextSourceId = generateManualTextSourceId('manual-text');
   const manualTextSource = buildManualTextSourceRecord(manualTextSourceId, safeText, safeTitle);
+  const sourceMaterialMeta = await submitManualSourceMaterialForQueue(safeText, safeTitle, {
+    manualTextSourceId,
+    analysisType: normalizedAnalysisType,
+    instances: safeInstances,
+    includesPortfolio: false,
+    reason: 'manual_source_enqueue'
+  });
   const pseudoTabs = [];
 
   for (let i = 0; i < safeInstances; i += 1) {
@@ -30238,20 +34253,100 @@ async function runManualSourceAnalysis(text, title, instances) {
       id: `manual-${timestamp}-${i}`,
       title: safeTitle,
       url: 'manual://source',
-      manualTextSourceId
+      manualTextSourceId,
+      ...sourceMaterialMeta
     });
   }
 
-  return processArticles(pseudoTabs, PROMPTS_COMPANY, CHAT_URL, 'company', {
+  return processArticles(pseudoTabs, promptChain, getChatUrlForAnalysisType(normalizedAnalysisType), normalizedAnalysisType, {
     manualTextSources: manualTextSource ? [manualTextSource] : [],
     sourceKind: 'manual_text',
     reason: 'manual_source_enqueue'
   });
 }
 
-async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFiles }) {
-  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+async function runManualSourceAnalysisWithPortfolio(text, title, instances, analysisType = ANALYSIS_TYPE_COMPANY) {
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  if (!shouldRunPortfolioAlongsideCompany(normalizedAnalysisType)) {
+    return runManualSourceAnalysis(text, title, instances, normalizedAnalysisType);
+  }
+  const promptsReady = await ensureCompanyPromptsReady();
+  const portfolioPromptsReady = await ensurePortfolioPromptsReady();
+  if (!promptsReady || !portfolioPromptsReady) {
+    return {
+      success: false,
+      error: !promptsReady ? 'prompts_not_loaded' : 'portfolio_prompts_not_loaded'
+    };
+  }
+
+  const safeText = typeof text === 'string' ? text : '';
+  const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
   const safeInstances = normalizeManualInstances(instances);
+  const timestamp = Date.now();
+  const manualTextSourceId = generateManualTextSourceId('manual-text');
+  const manualTextSource = buildManualTextSourceRecord(manualTextSourceId, safeText, safeTitle);
+  const manualTextSources = manualTextSource ? [manualTextSource] : [];
+  const sourceMaterialMeta = await submitManualSourceMaterialForQueue(safeText, safeTitle, {
+    manualTextSourceId,
+    analysisType: ANALYSIS_TYPE_COMPANY,
+    instances: safeInstances,
+    includesPortfolio: true,
+    reason: 'manual_source_company_portfolio_enqueue'
+  });
+  const companyTabs = [];
+  for (let i = 0; i < safeInstances; i += 1) {
+    companyTabs.push({
+      id: `manual-${timestamp}-company-${i}`,
+      title: safeTitle,
+      url: 'manual://source',
+      manualTextSourceId,
+      ...sourceMaterialMeta
+    });
+  }
+  const portfolioTabs = [{
+    id: `manual-${timestamp}-portfolio-0`,
+    title: safeTitle,
+    url: 'manual://source',
+    manualTextSourceId,
+    ...sourceMaterialMeta
+  }];
+
+  const queueResult = await processArticles(companyTabs, getPromptChainForAnalysisType(ANALYSIS_TYPE_COMPANY), getChatUrlForAnalysisType(ANALYSIS_TYPE_COMPANY), ANALYSIS_TYPE_COMPANY, {
+    manualTextSources,
+    sourceKind: 'manual_text',
+    reason: 'manual_source_enqueue'
+  });
+  const portfolioQueueResult = await processArticles(portfolioTabs, getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO), ANALYSIS_TYPE_PORTFOLIO, {
+    manualTextSources,
+    sourceKind: 'manual_text',
+    reason: 'manual_source_portfolio_enqueue'
+  });
+  return mergeAnalysisLaunchResults(queueResult, portfolioQueueResult, {
+    analysisType: ANALYSIS_TYPE_COMPANY,
+    mode: 'text',
+    primaryFallbackQueued: safeInstances
+  });
+}
+
+async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFiles, analysisType = ANALYSIS_TYPE_COMPANY }) {
+  const safeProviderId = typeof providerId === 'string' ? providerId.trim() : '';
+  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
+  const safeInstances = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO ? 1 : normalizeManualInstances(instances);
+  const includePortfolio = shouldRunPortfolioAlongsideCompany(normalizedAnalysisType);
+  const analysisPlans = [{
+    analysisType: normalizedAnalysisType,
+    promptChainSnapshot: sanitizePromptChainSnapshot(getPromptChainForAnalysisType(normalizedAnalysisType)),
+    chatUrl: getChatUrlForAnalysisType(normalizedAnalysisType),
+    instances: safeInstances
+  }];
+  if (includePortfolio) {
+    analysisPlans.push({
+      analysisType: ANALYSIS_TYPE_PORTFOLIO,
+      promptChainSnapshot: sanitizePromptChainSnapshot(getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)),
+      chatUrl: getChatUrlForAnalysisType(ANALYSIS_TYPE_PORTFOLIO),
+      instances: 1
+    });
+  }
   const normalizedFiles = normalizeManualPdfFiles(pdfFiles);
 
   if (!safeProviderId) {
@@ -30277,47 +34372,58 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
 
   const batchId = `manual-pdf-batch-${safeProviderId}-${Date.now()}`;
   const queueJobs = [];
+  let companyJobCount = 0;
+  let portfolioJobCount = 0;
   let jobIndex = 0;
   for (const file of normalizedFiles) {
-    for (let instanceIndex = 1; instanceIndex <= safeInstances; instanceIndex += 1) {
-      const isMultiInstance = safeInstances > 1;
-      const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : file.name;
-      const runTitle = isMultiInstance
-        ? `${baseTitle} [${file.name}] [instancja ${instanceIndex}/${safeInstances}]`
-        : `${baseTitle} [${file.name}]`;
-      queueJobs.push({
-        kind: ANALYSIS_QUEUE_KIND_ARTICLE,
-        analysisType: 'company',
-        title: runTitle,
-        sourceKind: 'manual_pdf',
-        manualPdfBatchId: batchId,
-        manualPdfProviderId: safeProviderId,
-        queueBatchId: batchId,
-        tabSnapshot: {
-          id: `manual-pdf-${Date.now()}-${jobIndex}`,
+    for (const plan of analysisPlans) {
+      for (let instanceIndex = 1; instanceIndex <= plan.instances; instanceIndex += 1) {
+        const isMultiInstance = plan.instances > 1;
+        const baseTitle = typeof title === 'string' && title.trim() ? title.trim() : file.name;
+        const runTitle = isMultiInstance
+          ? `${baseTitle} [${file.name}] [instancja ${instanceIndex}/${plan.instances}]`
+          : `${baseTitle} [${file.name}]`;
+        queueJobs.push({
+          kind: ANALYSIS_QUEUE_KIND_ARTICLE,
+          analysisType: plan.analysisType,
           title: runTitle,
-          url: 'manual://pdf',
-          manualText: buildManualPdfPayload(file.name),
-          manualPdfAttachment: {
-            enabled: true,
-            providerId: safeProviderId,
-            token: file.token,
-            name: file.name,
-            mimeType: 'application/pdf',
-            size: file.size,
-            instanceIndex,
-            instanceTotal: safeInstances
+          sourceKind: 'manual_pdf',
+          manualPdfBatchId: batchId,
+          manualPdfProviderId: safeProviderId,
+          queueBatchId: batchId,
+          chatUrl: plan.chatUrl,
+          promptChainSnapshot: plan.promptChainSnapshot,
+          tabSnapshot: {
+            id: `manual-pdf-${Date.now()}-${jobIndex}`,
+            title: runTitle,
+            url: 'manual://pdf',
+            manualText: buildManualPdfPayload(file.name),
+            manualPdfAttachment: {
+              enabled: true,
+              providerId: safeProviderId,
+              token: file.token,
+              name: file.name,
+              mimeType: 'application/pdf',
+              size: file.size,
+              instanceIndex,
+              instanceTotal: plan.instances
+            }
           }
+        });
+        if (plan.analysisType === ANALYSIS_TYPE_PORTFOLIO) {
+          portfolioJobCount += 1;
+        } else {
+          companyJobCount += 1;
         }
-      });
-      jobIndex += 1;
+        jobIndex += 1;
+      }
     }
   }
 
   await notifyManualPdfProviderStatus(
     safeProviderId,
     'running',
-    `Zakolejkowano ${queueJobs.length} zadan PDF (${normalizedFiles.length} plikow x ${safeInstances} instancji).`,
+    `Zakolejkowano ${queueJobs.length} zadan PDF.`,
     {
       totalJobs: queueJobs.length,
       completedJobs: 0,
@@ -30325,21 +34431,78 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
     }
   );
 
-  const enqueueResult = await enqueueAnalysisJobs(queueJobs, {
-    reason: 'manual_pdf_enqueue'
-  });
-  registerManualPdfQueueBatch(batchId, safeProviderId, enqueueResult?.jobs || []);
+  const queuedPdfJobs = queueJobs.filter((job) => !shouldBypassAnalysisQueueForAnalysisType(job?.analysisType));
+  const bypassPdfJobs = queueJobs.filter((job) => shouldBypassAnalysisQueueForAnalysisType(job?.analysisType));
+  const emptyQueueSnapshot = queuedPdfJobs.length === 0
+    ? await getAnalysisQueueStatusSnapshot()
+    : null;
+  const enqueueResult = queuedPdfJobs.length > 0
+    ? await enqueueAnalysisJobs(queuedPdfJobs, {
+        reason: 'manual_pdf_enqueue'
+      })
+    : {
+        success: true,
+        jobs: [],
+        queuedCount: 0,
+        maxConcurrent: Number.isInteger(emptyQueueSnapshot?.maxConcurrent) ? emptyQueueSnapshot.maxConcurrent : null,
+        queueSize: Number.isInteger(emptyQueueSnapshot?.queueSize) ? emptyQueueSnapshot.queueSize : 0,
+        activeSlots: Number.isInteger(emptyQueueSnapshot?.activeSlots) ? emptyQueueSnapshot.activeSlots : 0,
+        reservedSlots: Number.isInteger(emptyQueueSnapshot?.reservedSlots) ? emptyQueueSnapshot.reservedSlots : 0,
+        liveSlots: Number.isInteger(emptyQueueSnapshot?.liveSlots) ? emptyQueueSnapshot.liveSlots : 0,
+        startingSlots: Number.isInteger(emptyQueueSnapshot?.startingSlots) ? emptyQueueSnapshot.startingSlots : 0
+      };
+  const bypassResult = bypassPdfJobs.length > 0
+    ? await launchAnalysisJobsOutsideQueue(
+        bypassPdfJobs.map((job) => ({
+          ...job.tabSnapshot,
+          sourceKind: job.sourceKind,
+          sourceUrl: job.sourceUrl,
+          sourceMaterialId: job.sourceMaterialId,
+          sourceMaterialHash: job.sourceMaterialHash,
+          sourceMaterialLength: job.sourceMaterialLength,
+          sourceMaterialStored: job.sourceMaterialStored === true
+        })),
+        bypassPdfJobs[0].promptChainSnapshot,
+        bypassPdfJobs[0].chatUrl,
+        bypassPdfJobs[0].analysisType,
+        {
+          sourceKind: 'manual_pdf',
+          queueBatchId: batchId,
+          manualPdfBatchId: batchId,
+          manualPdfProviderId: safeProviderId,
+          reason: 'manual_pdf_portfolio_queue_bypass'
+        }
+      )
+    : null;
+  registerManualPdfQueueBatch(batchId, safeProviderId, [
+    ...(Array.isArray(enqueueResult?.jobs) ? enqueueResult.jobs : []),
+    ...(Array.isArray(bypassResult?.jobs) ? bypassResult.jobs : [])
+  ]);
+  const bypassCount = Number.isInteger(bypassResult?.queueBypassCount)
+    ? Math.max(0, bypassResult.queueBypassCount)
+    : 0;
+  const portfolioQueuedCount = Math.max(0, portfolioJobCount - bypassCount);
   return {
     success: true,
     mode: 'pdf',
+    analysisType: normalizedAnalysisType,
+    extraPortfolioQueued: portfolioQueuedCount > 0,
+    extraPortfolioLaunched: bypassCount > 0,
+    extraPortfolioStarted: portfolioJobCount > 0,
+    companyQueuedCount: companyJobCount,
+    portfolioQueuedCount,
+    portfolioLaunchedCount: bypassCount,
+    launchedCount: bypassCount,
+    queueBypassCount: bypassCount,
+    queueBypass: bypassCount > 0,
     queued: enqueueResult?.queuedCount || 0,
     queuedCount: enqueueResult?.queuedCount || 0,
-    maxConcurrent: Number.isInteger(enqueueResult?.maxConcurrent) ? enqueueResult.maxConcurrent : null,
-    queueSize: Number.isInteger(enqueueResult?.queueSize) ? enqueueResult.queueSize : 0,
-    activeSlots: Number.isInteger(enqueueResult?.activeSlots) ? enqueueResult.activeSlots : 0,
-    reservedSlots: Number.isInteger(enqueueResult?.reservedSlots) ? enqueueResult.reservedSlots : 0,
-    liveSlots: Number.isInteger(enqueueResult?.liveSlots) ? enqueueResult.liveSlots : 0,
-    startingSlots: Number.isInteger(enqueueResult?.startingSlots) ? enqueueResult.startingSlots : 0,
+    maxConcurrent: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'maxConcurrent', null),
+    queueSize: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'queueSize', 0),
+    activeSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'activeSlots', 0),
+    reservedSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'reservedSlots', 0),
+    liveSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'liveSlots', 0),
+    startingSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'startingSlots', 0),
     batchId
   };
 }
@@ -30780,6 +34943,12 @@ async function injectToChat(
     console.log(`  Prompts: ${promptChain?.length || 0}`);
     console.log(`${'='.repeat(80)}\n`);
 
+    const normalizedInjectedAnalysisType = typeof analysisType === 'string'
+      ? analysisType.trim().toLowerCase()
+      : '';
+    const isPortfolioAnalysis = normalizedInjectedAnalysisType === 'portfolio'
+      || normalizedInjectedAnalysisType === 'portfolio_analysis';
+
     const persistenceMeta = persistenceContext && typeof persistenceContext === 'object'
       ? persistenceContext
       : {};
@@ -30792,19 +34961,53 @@ async function injectToChat(
     const sourceUrlForSave = typeof persistenceMeta.sourceUrl === 'string'
       ? persistenceMeta.sourceUrl.trim()
       : '';
+    const sourceMaterialIdForSave = typeof persistenceMeta.sourceMaterialId === 'string'
+      ? persistenceMeta.sourceMaterialId.trim()
+      : '';
+    const sourceMaterialHashForSave = typeof persistenceMeta.sourceMaterialHash === 'string'
+      ? persistenceMeta.sourceMaterialHash.trim()
+      : '';
+    const sourceMaterialLengthForSave = (() => {
+      const rawLength = persistenceMeta.sourceMaterialLength;
+      if (rawLength === null || typeof rawLength === 'undefined' || rawLength === '') return null;
+      const parsed = Number(rawLength);
+      return Number.isFinite(parsed) && parsed >= 0 ? Math.floor(parsed) : null;
+    })();
+    const sourceMaterialStoredForSave = persistenceMeta.sourceMaterialStored === true || !!sourceMaterialIdForSave;
+    const sourceMaterialTextForSave = typeof persistenceMeta.sourceMaterialText === 'string'
+      ? persistenceMeta.sourceMaterialText
+      : '';
+
+    function applySourceMaterialMetaForSave(target, options = {}) {
+      if (!target || typeof target !== 'object') return target;
+      if (sourceMaterialIdForSave) target.sourceMaterialId = sourceMaterialIdForSave;
+      if (sourceMaterialHashForSave) target.sourceMaterialHash = sourceMaterialHashForSave;
+      if (Number.isInteger(sourceMaterialLengthForSave)) target.sourceMaterialLength = sourceMaterialLengthForSave;
+      if (sourceMaterialStoredForSave) target.sourceMaterialStored = true;
+      if (options.includeText === true && !sourceMaterialIdForSave && sourceMaterialTextForSave.trim()) {
+        target.sourceMaterialText = sourceMaterialTextForSave;
+      }
+      return target;
+    }
 
     if (chrome?.runtime?.onMessage?.addListener) {
       forceStopListener = (message, sender, sendResponse) => {
         if (!isForceStopForCurrentRun(message)) return;
         markForceStopRequested(message);
-        console.warn(`[injectToChat] Otrzymano PROCESS_FORCE_STOP (runId=${runId || 'n/a'})`);
+        console.warn(`[injectToChat] Otrzymano PROCESS_FORCE_STOP (runId=${runId || 'n/a'})`, {
+          reason: forceStopReason,
+          origin: forceStopOrigin,
+          messageRunId: typeof message?.runId === 'string' ? message.runId : ''
+        });
         if (typeof sendResponse === 'function') {
           try {
             sendResponse({
               success: true,
               acknowledged: true,
               stopped: true,
-              runId: runId || null
+              runId: runId || null,
+              reason: forceStopReason,
+              origin: forceStopOrigin
             });
           } catch (error) {
             // Ignore sendResponse issues.
@@ -30835,6 +35038,7 @@ async function injectToChat(
       responseAccepted: 0,
       responseAcceptedEmpty: 0,
       responseDuplicateAccepted: 0,
+      missingResponsePromptResends: 0,
       stageCompleted: 0,
       captureOk: 0,
       captureEmpty: 0
@@ -30845,10 +35049,11 @@ async function injectToChat(
     const stageCompletedPromptIndexes = new Set();
     const responseFingerprintsAccepted = new Map();
     const responseAcceptedByPrompt = new Map();
+    const missingResponsePromptResendAttemptsByPrompt = new Map();
     let dataGapRewindState = null;
 
     const runTag = `runId=${runId || 'n/a'}`;
-    const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+(?:\.[0-9]+)?)$/i;
+    const DATA_GAP_DIRECTIVE_REGEX = /^DATA_GAP_STAGE\s*=\s*([0-9]+)$/i;
     const DATA_GAP_MAX_REPLAYS_PER_STAGE = 2;
     const dataGapReplayCountsByStage = new Map();
 
@@ -30923,6 +35128,10 @@ async function injectToChat(
     let _swKeepaliveCleanup = null;
     const forceStopResult = () => {
       if (typeof _swKeepaliveCleanup === 'function') { try { _swKeepaliveCleanup(); } catch (_) {} }
+      console.warn(`[injectToChat] FORCE_STOP_EXIT ${runTag}`, {
+        reason: forceStopReason,
+        origin: forceStopOrigin
+      });
       return {
         success: false,
         lastResponse: '',
@@ -30939,6 +35148,13 @@ async function injectToChat(
       return (text || '').replace(/\s+/g, ' ').trim();
     }
 
+    function normalizeChatGptActionText(value) {
+      return compactText(String(value ?? ''))
+        .toLowerCase()
+        .normalize('NFD')
+        .replace(/[\u0300-\u036f]/g, '');
+    }
+
     // executeScript serializes only this injected function body, so any UI
     // classifier used here must stay local instead of referencing background
     // helpers from the service worker scope.
@@ -30949,43 +35165,42 @@ async function injectToChat(
         .toLowerCase();
     }
 
-    function isInjectedChatGptLimitOrRestrictionText(text) {
+    function isInjectedChatGptLimitOrRestrictionText(text, source = 'text') {
       const lowered = normalizeInjectedChatGptUiText(text);
       if (!lowered) return false;
-      return /\blimit\s*:/.test(lowered);
+      const sourceKey = normalizeInjectedChatGptUiText(source);
+      const trustedUiSource = (
+        sourceKey.includes('alert') ||
+        sourceKey.includes('status') ||
+        sourceKey.includes('error') ||
+        sourceKey.includes('banner') ||
+        sourceKey.includes('toast')
+      );
+      return trustedUiSource && /^(?:limit|rate limit|usage limit)\s*:/.test(lowered) && lowered.length <= 240;
     }
 
     function normalizeDataGapStageId(value) {
       const raw = typeof value === 'string' ? value.trim() : String(value ?? '').trim();
       if (!raw) return '';
-      const match = raw.match(/^(\d+)(?:\.(\d+))?$/);
+      const compact = raw.replace(/\s+/g, '').toUpperCase();
+      const match = compact.match(/^(\d+)$/);
       if (!match) return '';
-      const whole = String(Number.parseInt(match[1], 10));
-      const fractionRaw = typeof match[2] === 'string' ? match[2] : '';
-      if (!fractionRaw) return whole;
-      const fraction = fractionRaw.replace(/0+$/, '');
-      return fraction ? `${whole}.${fraction}` : whole;
+      return String(Number.parseInt(match[1], 10));
     }
 
     function parseDataGapDirectiveResponse(text) {
       if (typeof text !== 'string') return null;
       const lines = text
         .split(/\r?\n/)
-        .map((line) => line.trim())
-        .filter((line) => line.length > 0);
-      if (lines.length === 0) return null;
-      const match = lines[0].match(DATA_GAP_DIRECTIVE_REGEX);
-      if (!match) return null;
-      const stageId = normalizeDataGapStageId(match[1]);
-      if (!stageId) return null;
-      // Accept multi-line format (DATA_GAP_STAGE + optional MISSING/RECOVERY lines)
-      // but only if every additional line is a known DATA_GAP annotation.
-      const ALLOWED_EXTRA_LINE = /^(?:MISSING|RECOVERY)\s*:/i;
-      for (let idx = 1; idx < lines.length; idx += 1) {
-        if (!ALLOWED_EXTRA_LINE.test(lines[idx])) return null;
-      }
-      return {
-        stageId,
+	      .map((line) => line.trim())
+	      .filter((line) => line.length > 0);
+	      if (lines.length !== 1) return null;
+	      const match = lines[0].match(DATA_GAP_DIRECTIVE_REGEX);
+	      if (!match) return null;
+	      const stageId = normalizeDataGapStageId(match[1]);
+	      if (!stageId) return null;
+	      return {
+	        stageId,
         rawLine: lines[0]
       };
     }
@@ -31201,9 +35416,10 @@ async function injectToChat(
     const normalizeThinkingEffortLocal = (value) => {
       const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
       if (!normalized) return '';
-      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+      if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
         return normalized;
       }
+      if (normalized === 'high' || normalized === 'heavy') return 'high';
       return '';
     };
     const requestedComposerThinkingEffort = normalizeThinkingEffortLocal(progressContext?.composerThinkingEffort);
@@ -31282,6 +35498,14 @@ async function injectToChat(
         ? autoRecoveryContext.reasons.filter((reason) => typeof reason === 'string')
         : []
     );
+    const missingResponsePromptResendMaxAttempts = Number.isInteger(autoRecoveryContext?.missingResponsePromptResendMaxAttempts)
+      && autoRecoveryContext.missingResponsePromptResendMaxAttempts >= 0
+      ? Math.min(autoRecoveryContext.missingResponsePromptResendMaxAttempts, 5)
+      : 2;
+    const missingResponsePromptResendDelayMs = Number.isInteger(autoRecoveryContext?.missingResponsePromptResendDelayMs)
+      && autoRecoveryContext.missingResponsePromptResendDelayMs >= 0
+      ? Math.min(autoRecoveryContext.missingResponsePromptResendDelayMs, 30_000)
+      : 1500;
     const persistenceMode = typeof persistenceContext?.mode === 'string'
       ? persistenceContext.mode.trim()
       : '';
@@ -31406,12 +35630,20 @@ async function injectToChat(
           .filter((item) => item && typeof item === 'object')
           .map((item) => ({
             responseId: typeof item.responseId === 'string' ? item.responseId.trim() : '',
+            schema: typeof item.schema === 'string' ? item.schema.trim() : '',
             text: typeof item.text === 'string' ? item.text : '',
             source: typeof item.source === 'string' ? item.source : '',
             sourceTitle: typeof item.sourceTitle === 'string' ? item.sourceTitle : '',
             sourceName: typeof item.sourceName === 'string' ? item.sourceName : '',
             sourceUrl: typeof item.sourceUrl === 'string' ? item.sourceUrl : '',
+            sourceMaterialId: typeof item.sourceMaterialId === 'string' ? item.sourceMaterialId : '',
+            sourceMaterialHash: typeof item.sourceMaterialHash === 'string' ? item.sourceMaterialHash : '',
+            sourceMaterialLength: Number.isInteger(item.sourceMaterialLength) ? item.sourceMaterialLength : null,
+            sourceMaterialStored: item.sourceMaterialStored === true,
+            sourceMaterialText: typeof item.sourceMaterialText === 'string' ? item.sourceMaterialText : '',
             analysisType: typeof item.analysisType === 'string' ? item.analysisType : '',
+            sourceRecordSuffix: typeof item.sourceRecordSuffix === 'string' ? item.sourceRecordSuffix : '',
+            skipProcessPersistencePatch: item.skipProcessPersistencePatch === true,
             runId: typeof item.runId === 'string' ? item.runId : '',
             conversationUrl: typeof item.conversationUrl === 'string' ? item.conversationUrl : '',
             stage: item.stage && typeof item.stage === 'object' && !Array.isArray(item.stage)
@@ -31490,9 +35722,10 @@ async function injectToChat(
       };
       const normalizeThinkingEffort = (value) => {
         const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
-        if (normalized === 'light' || normalized === 'standard' || normalized === 'extended' || normalized === 'heavy') {
+        if (normalized === 'light' || normalized === 'standard' || normalized === 'extended') {
           return normalized;
         }
+        if (normalized === 'high' || normalized === 'heavy') return 'high';
         return '';
       };
 
@@ -31542,15 +35775,29 @@ async function injectToChat(
         ? runId.trim()
         : '';
       const timestamp = Date.now();
-      const source = sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : '');
+      const source = typeof options?.source === 'string' && options.source.trim()
+        ? options.source.trim()
+        : (sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : ''));
+      const responseSourceTitle = typeof options?.sourceTitle === 'string' && options.sourceTitle.trim()
+        ? options.sourceTitle.trim()
+        : (sourceTitleForSave || source);
+      const responseSchema = typeof options?.schema === 'string' && options.schema.trim()
+        ? options.schema.trim()
+        : '';
+      const responseAnalysisType = typeof options?.analysisType === 'string' && options.analysisType.trim()
+        ? options.analysisType.trim()
+        : (typeof analysisType === 'string' ? analysisType : '');
+      const sourceRecordSuffix = typeof options?.sourceRecordSuffix === 'string' && options.sourceRecordSuffix.trim()
+        ? options.sourceRecordSuffix.trim()
+        : '';
       const record = {
         responseId: normalizedResponseId,
         text: normalizedText.slice(0, MAX_COMPLETED_RESPONSE_CHARS),
         source,
-        sourceTitle: sourceTitleForSave || source,
+        sourceTitle: responseSourceTitle,
         sourceName: sourceNameForSave || '',
         sourceUrl: sourceUrlForSave || '',
-        analysisType: typeof analysisType === 'string' ? analysisType : '',
+        analysisType: responseAnalysisType,
         runId: normalizedRunId,
         conversationUrl: typeof location?.href === 'string' ? location.href : '',
         stage: stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
@@ -31558,8 +35805,16 @@ async function injectToChat(
           : null,
         savedAt: timestamp,
         lastError: typeof options?.lastError === 'string' ? options.lastError.trim() : '',
-        attempts: Number.isInteger(options?.attempts) ? options.attempts : 0
+        attempts: Number.isInteger(options?.attempts) ? options.attempts : 0,
+        skipProcessPersistencePatch: options?.skipProcessPersistencePatch === true
       };
+      if (responseSchema) {
+        record.schema = responseSchema;
+      }
+      if (sourceRecordSuffix) {
+        record.sourceRecordSuffix = sourceRecordSuffix;
+      }
+      applySourceMaterialMetaForSave(record, { includeText: true });
       applyInjectedChatGptComputationStatePatch(
         record,
         typeof detectChatGptComputationState === 'function'
@@ -31590,11 +35845,19 @@ async function injectToChat(
         const attempt = await sendRuntimeMessageWithTimeout({
           type: 'SAVE_RESPONSE',
           text: item.text,
+          schema: item.schema || '',
           source: item.source || item.sourceTitle || '',
           sourceTitle: item.sourceTitle || item.source || '',
           sourceName: item.sourceName || '',
           sourceUrl: item.sourceUrl || '',
+          sourceMaterialId: item.sourceMaterialId || '',
+          sourceMaterialHash: item.sourceMaterialHash || '',
+          sourceMaterialLength: item.sourceMaterialLength,
+          sourceMaterialStored: item.sourceMaterialStored === true,
+          sourceMaterialText: item.sourceMaterialText || '',
           analysisType: item.analysisType || analysisType,
+          sourceRecordSuffix: item.sourceRecordSuffix || '',
+          skipProcessPersistencePatch: item.skipProcessPersistencePatch === true,
           runId: item.runId || '',
           responseId: item.responseId || '',
           stage: item.stage && typeof item.stage === 'object' ? item.stage : null,
@@ -31626,7 +35889,7 @@ async function injectToChat(
       return { attempted: true, origin, replayed, failed, remaining: keep.length };
     }
 
-    async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null) {
+    async function persistResponseViaLocalEmergencyFallback(responseText, responseId, stageMeta = null, options = {}) {
       const storageUtils = globalThis.ResponseStorageUtils || null;
       const decisionUtils = globalThis.DecisionContractUtils || null;
       const normalizedText = typeof responseText === 'string' ? responseText : '';
@@ -31647,8 +35910,21 @@ async function injectToChat(
         ? runId.trim()
         : '';
       const timestamp = Date.now();
-      const source = sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : '');
-      const normalizedAnalysisType = typeof analysisType === 'string' ? analysisType : '';
+      const source = typeof options?.source === 'string' && options.source.trim()
+        ? options.source.trim()
+        : (sourceTitleForSave || (typeof articleTitle === 'string' ? articleTitle : ''));
+      const responseSourceTitle = typeof options?.sourceTitle === 'string' && options.sourceTitle.trim()
+        ? options.sourceTitle.trim()
+        : sourceTitleForSave;
+      const normalizedAnalysisType = typeof options?.analysisType === 'string' && options.analysisType.trim()
+        ? options.analysisType.trim()
+        : (typeof analysisType === 'string' ? analysisType : '');
+      const responseSchema = typeof options?.schema === 'string' && options.schema.trim()
+        ? options.schema.trim()
+        : '';
+      const sourceRecordSuffix = typeof options?.sourceRecordSuffix === 'string' && options.sourceRecordSuffix.trim()
+        ? options.sourceRecordSuffix.trim()
+        : '';
       const stage = stageMeta && typeof stageMeta === 'object' && !Array.isArray(stageMeta)
         ? stageMeta
         : null;
@@ -31661,8 +35937,14 @@ async function injectToChat(
         analysisType: normalizedAnalysisType,
         responseId: normalizedResponseId
       };
-      if (sourceTitleForSave) {
-        responseRecord.sourceTitle = sourceTitleForSave;
+      if (responseSchema) {
+        responseRecord.schema = responseSchema;
+      }
+      if (sourceRecordSuffix) {
+        responseRecord.sourceRecordSuffix = sourceRecordSuffix;
+      }
+      if (responseSourceTitle) {
+        responseRecord.sourceTitle = responseSourceTitle;
       }
       if (sourceNameForSave) {
         responseRecord.sourceName = sourceNameForSave;
@@ -31670,6 +35952,7 @@ async function injectToChat(
       if (sourceUrlForSave) {
         responseRecord.sourceUrl = sourceUrlForSave;
       }
+      applySourceMaterialMetaForSave(responseRecord, { includeText: false });
       if (normalizedRunId) {
         responseRecord.runId = normalizedRunId;
       }
@@ -31718,8 +36001,26 @@ async function injectToChat(
         responseCount = nextResponses.length;
       }
 
+      if (options?.skipWatchlistDispatch === true) {
+        return {
+          success: true,
+          responseId: normalizedResponseId,
+          responseStored,
+          outboxQueued: false,
+          dispatchSkipped: true,
+          dispatchSkipReason: 'skip_watchlist_dispatch',
+          responseCount,
+          queueSize: 0
+        };
+      }
+
       const dispatchPayload = normalizeWatchlistDispatchPayload({
         ...(savedResponse && typeof savedResponse === 'object' ? savedResponse : responseRecord),
+        ...(() => {
+          const material = {};
+          applySourceMaterialMetaForSave(material, { includeText: true });
+          return material;
+        })(),
         text: typeof savedResponse?.text === 'string' && savedResponse.text.trim()
           ? savedResponse.text
           : normalizedText,
@@ -31935,7 +36236,7 @@ async function injectToChat(
       const raw = typeof promptText === 'string' ? promptText : '';
       if (!raw.trim()) return [];
       const scoped = raw.slice(0, 3200);
-      const nextStageMatch = scoped.match(/This will help for the next stage:\s*Stage\s*([0-9]+(?:\.[0-9]+)?)/i);
+      const nextStageMatch = scoped.match(/This will help for the next stage:\s*Stage\s*([0-9]+)/i);
       if (nextStageMatch && nextStageMatch[1]) {
         const normalizedNextStage = normalizeDataGapStageId(nextStageMatch[1]);
         if (normalizedNextStage) {
@@ -31943,7 +36244,7 @@ async function injectToChat(
         }
       }
       const stageIds = [];
-      const stagePattern = /\bstage\s*([0-9]+(?:\.[0-9]+)?)(?![0-9.])/gi;
+      const stagePattern = /\bstage\s*([0-9]+)(?![0-9A-Z_.])/gi;
       let match;
       while ((match = stagePattern.exec(scoped)) !== null) {
         const normalized = normalizeDataGapStageId(match[1]);
@@ -32432,12 +36733,28 @@ async function injectToChat(
       };
     }
 
-    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex) {
+    async function persistFinalResponseViaRuntimeMessage(responseText, responseId, selectedPrompt, selectedStageIndex, selectedResponseReason = 'last_prompt', options = {}) {
       const normalizedText = typeof responseText === 'string' ? responseText : '';
       if (!normalizedText.trim()) {
         return { ok: false, error: 'empty_response' };
       }
 
+      const responseOptions = options && typeof options === 'object' ? options : {};
+      const responseSource = typeof responseOptions.source === 'string' && responseOptions.source.trim()
+        ? responseOptions.source.trim()
+        : (sourceTitleForSave || articleTitle || '');
+      const responseSourceTitle = typeof responseOptions.sourceTitle === 'string' && responseOptions.sourceTitle.trim()
+        ? responseOptions.sourceTitle.trim()
+        : (sourceTitleForSave || articleTitle || '');
+      const responseAnalysisType = typeof responseOptions.analysisType === 'string' && responseOptions.analysisType.trim()
+        ? responseOptions.analysisType.trim()
+        : analysisType;
+      const responseSchema = typeof responseOptions.schema === 'string' && responseOptions.schema.trim()
+        ? responseOptions.schema.trim()
+        : '';
+      const sourceRecordSuffix = typeof responseOptions.sourceRecordSuffix === 'string' && responseOptions.sourceRecordSuffix.trim()
+        ? responseOptions.sourceRecordSuffix.trim()
+        : '';
       const stageMeta = {};
       if (Number.isInteger(selectedPrompt)) {
         stageMeta.selected_response_prompt = selectedPrompt;
@@ -32446,7 +36763,12 @@ async function injectToChat(
         stageMeta.selected_response_stage_index = selectedStageIndex;
       }
       if (Number.isInteger(selectedPrompt)) {
-        stageMeta.selected_response_reason = 'last_prompt';
+        stageMeta.selected_response_reason = typeof selectedResponseReason === 'string' && selectedResponseReason.trim()
+          ? selectedResponseReason.trim()
+          : 'last_prompt';
+      }
+      if (responseOptions.stageMeta && typeof responseOptions.stageMeta === 'object' && !Array.isArray(responseOptions.stageMeta)) {
+        Object.assign(stageMeta, responseOptions.stageMeta);
       }
       const promptFromStage = Number.isInteger(stageMeta?.selected_response_prompt)
         ? stageMeta.selected_response_prompt
@@ -32456,22 +36778,52 @@ async function injectToChat(
         : buildInjectedResponseId(normalizedText, promptFromStage);
       const pageEmergencySave = stagePageEmergencyResponse(normalizedText, normalizedResponseId, stageMeta, {
         lastError: '',
-        attempts: 0
+        attempts: 0,
+        schema: responseSchema,
+        analysisType: responseAnalysisType,
+        sourceRecordSuffix,
+        source: responseSource,
+        sourceTitle: responseSourceTitle,
+        skipProcessPersistencePatch: responseOptions.skipProcessPersistencePatch === true
       });
 
       const messagePayload = {
         type: 'SAVE_RESPONSE',
         text: normalizedText,
-        source: sourceTitleForSave || articleTitle || '',
-        sourceTitle: sourceTitleForSave || articleTitle || '',
+        source: responseSource,
+        sourceTitle: responseSourceTitle,
         sourceName: sourceNameForSave || '',
         sourceUrl: sourceUrlForSave || '',
-        analysisType,
+        analysisType: responseAnalysisType,
         runId: typeof runId === 'string' ? runId : '',
         responseId: normalizedResponseId,
         stage: Object.keys(stageMeta).length > 0 ? stageMeta : null,
         conversationUrl: typeof location?.href === 'string' ? location.href : ''
       };
+      if (responseSchema) {
+        messagePayload.schema = responseSchema;
+      }
+      if (sourceRecordSuffix) {
+        messagePayload.sourceRecordSuffix = sourceRecordSuffix;
+      }
+      if (typeof responseOptions.deferredFlushReason === 'string' && responseOptions.deferredFlushReason.trim()) {
+        messagePayload.deferredFlushReason = responseOptions.deferredFlushReason.trim();
+      }
+      if (typeof responseOptions.dispatchFlushReason === 'string' && responseOptions.dispatchFlushReason.trim()) {
+        messagePayload.dispatchFlushReason = responseOptions.dispatchFlushReason.trim();
+      }
+      if (responseOptions.skipWatchlistDispatch === true) {
+        messagePayload.skipWatchlistDispatch = true;
+      }
+      if (responseOptions.allowPortfolioFeedbackDispatch === true) {
+        messagePayload.allowPortfolioFeedbackDispatch = true;
+      }
+      if (responseOptions.skipProcessPersistencePatch === true) {
+        messagePayload.skipProcessPersistencePatch = true;
+      }
+      applySourceMaterialMetaForSave(messagePayload, {
+        includeText: responseOptions.includeSourceMaterialText !== false
+      });
 
       const saveAttempt = await sendRuntimeMessageWithTimeout(messagePayload, persistenceTimeoutMs);
       if (!saveAttempt.ok) {
@@ -32482,7 +36834,8 @@ async function injectToChat(
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
               normalizedResponseId,
-              stageMeta
+              stageMeta,
+              responseOptions
             );
           } catch (error) {
             emergencyLocalSave = {
@@ -32520,7 +36873,8 @@ async function injectToChat(
             emergencyLocalSave = await persistResponseViaLocalEmergencyFallback(
               normalizedText,
               normalizedResponseId,
-              stageMeta
+              stageMeta,
+              responseOptions
             );
           } catch (error) {
             emergencyLocalSave = {
@@ -32555,6 +36909,60 @@ async function injectToChat(
         saveResult: runtimeResponse?.saveResult && typeof runtimeResponse.saveResult === 'object'
           ? runtimeResponse.saveResult
           : null
+      };
+    }
+
+    async function copyPortfolioPromptOneResponseToDatabase(responseText) {
+      const normalizedAnalysisType = typeof analysisType === 'string'
+        ? analysisType.trim().toLowerCase()
+        : '';
+      if (normalizedAnalysisType !== 'portfolio' && normalizedAnalysisType !== 'portfolio_analysis') {
+        return { attempted: false, reason: 'not_portfolio_analysis' };
+      }
+      const normalizedText = typeof responseText === 'string' ? responseText : '';
+      if (!normalizedText.trim()) {
+        return { attempted: false, reason: 'empty_response' };
+      }
+
+      const selectedPrompt = 1;
+      const selectedStageIndex = 0;
+      const responseId = buildInjectedResponseId(normalizedText, selectedPrompt);
+      console.log(
+        `[copy-flow] [portfolio-prompt1:start] prompt=${selectedPrompt} len=${normalizedText.length} responseId=${responseId}`
+      );
+      const saveResult = await persistFinalResponseViaRuntimeMessage(
+        normalizedText,
+        responseId,
+        selectedPrompt,
+        selectedStageIndex,
+        PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE,
+        {
+          schema: PORTFOLIO_PROMPT_ONE_RESPONSE_SCHEMA,
+          analysisType: PORTFOLIO_PROMPT_ONE_RESPONSE_ANALYSIS_TYPE,
+          source: PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE,
+          sourceTitle: sourceTitleForSave || articleTitle || 'Portfolio Prompt 1',
+          sourceRecordSuffix: PORTFOLIO_PROMPT_ONE_RESPONSE_REASON,
+          deferredFlushReason: 'portfolio_prompt1_runtime_bridge_fast_ack',
+          dispatchFlushReason: PORTFOLIO_PROMPT_ONE_RESPONSE_REASON,
+          skipProcessPersistencePatch: true,
+          includeSourceMaterialText: false,
+          stageMeta: {
+            source: 'portfolio_prompt_process',
+            category: 'portfolio_prompt_copy',
+            artifact_name: PORTFOLIO_PROMPT_ONE_RESPONSE_SOURCE
+          }
+        }
+      );
+      const ok = saveResult?.ok === true && saveResult?.saveResult?.success === true;
+      console[ok ? 'log' : 'warn'](
+        `[copy-flow] [portfolio-prompt1:${ok ? 'ok' : 'failed'}] prompt=${selectedPrompt} responseId=${responseId} trace=${saveResult?.saveResult?.copyTrace || 'n/a'} error=${saveResult?.error || ''}`
+      );
+      return {
+        attempted: true,
+        ok,
+        responseId,
+        saveResult: saveResult?.saveResult || null,
+        error: saveResult?.error || ''
       };
     }
 
@@ -32996,7 +37404,7 @@ async function injectToChat(
 
     function detectGenerationBlockerStateFromText(text, source = 'text') {
       const blockerText = compactText(text || '');
-      if (!blockerText || !isInjectedChatGptLimitOrRestrictionText(blockerText)) {
+      if (!blockerText || !isInjectedChatGptLimitOrRestrictionText(blockerText, source)) {
         return null;
       }
       return buildGenerationBlockerState({ text: blockerText, source });
@@ -33024,20 +37432,19 @@ async function injectToChat(
         textCandidates.push({ text: normalizedText, source });
       };
 
-      appendCandidate(state.lastAssistantText, 'last_assistant_text');
-      appendCandidate(state.lastAssistantTurnText, 'last_assistant_turn');
       appendCandidate(state.lastAlertText, 'last_alert_text');
 
       const scopedContainers = [state.lastAssistant, state.lastAssistantContainer].filter(Boolean);
       for (const container of scopedContainers) {
-        const scopedCandidates = [
-          ...container.querySelectorAll('[role="alert"]'),
-          ...container.querySelectorAll('[role="status"]'),
-          ...container.querySelectorAll('[class*="error"]'),
-          ...container.querySelectorAll('[class*="text"]')
+        const scopedCandidateGroups = [
+          { source: 'scoped_alert', nodes: container.querySelectorAll('[role="alert"]') },
+          { source: 'scoped_status', nodes: container.querySelectorAll('[role="status"]') },
+          { source: 'scoped_error', nodes: container.querySelectorAll('[class*="error"]') }
         ];
-        scopedCandidates.forEach((node) => {
-          appendCandidate(node?.textContent || '', 'scoped_candidate');
+        scopedCandidateGroups.forEach((group) => {
+          Array.from(group.nodes).forEach((node) => {
+            appendCandidate(node?.textContent || '', group.source);
+          });
         });
       }
 
@@ -33149,11 +37556,37 @@ async function injectToChat(
     function isRetryableChatGptGenerationErrorText(text) {
       const lowered = compactText(text || '').toLowerCase();
       if (!lowered) return false;
+      const normalized = lowered.replace(/[\u2018\u2019]/g, "\'");
+      const standaloneRetryInstruction = normalized
+        .replace(/\s+(?:retry|try again|regenerate)\s*$/i, '')
+        .trim();
+      const isShortRetryInstruction =
+        normalized.length <= 180 &&
+        normalized.includes('try again later') &&
+        (
+          normalized.includes("you've hit your limit") ||
+          normalized.includes('you have hit your limit') ||
+          normalized.includes('you hit your limit') ||
+          normalized.includes("you've reached your limit") ||
+          normalized.includes('you have reached your limit') ||
+          normalized.includes('you reached your limit') ||
+          normalized.includes('too many requests') ||
+          standaloneRetryInstruction === 'please try again later.' ||
+          standaloneRetryInstruction === 'please try again later' ||
+          standaloneRetryInstruction === 'try again later.' ||
+          standaloneRetryInstruction === 'try again later'
+        );
       return (
+        isShortRetryInstruction ||
         lowered.includes('something went wrong while generating the response') ||
+        lowered.includes('something went wrong. if this issue persists') ||
         (
           lowered.includes('something went wrong') &&
           lowered.includes('generating the response')
+        ) ||
+        (
+          lowered.includes('something went wrong') &&
+          lowered.includes('help.openai.com')
         ) ||
         (
           lowered.includes('help.openai.com') &&
@@ -33186,6 +37619,7 @@ async function injectToChat(
         lastAssistantText: compactText(lastAssistant ? (lastAssistant.innerText || lastAssistant.textContent || '') : ''),
         lastUserTurnText: compactText(lastUserContainer ? (lastUserContainer.innerText || lastUserContainer.textContent || '') : ''),
         lastAssistantTurnText: compactText(lastAssistantContainer ? (lastAssistantContainer.innerText || lastAssistantContainer.textContent || '') : ''),
+        lastAlert,
         lastAlertText: compactText(lastAlert ? (lastAlert.innerText || lastAlert.textContent || '') : ''),
         turnLikelyCurrent: assistantMessages.length >= userMessages.length
       };
@@ -33201,6 +37635,45 @@ async function injectToChat(
         lastUserTurnText: state.lastUserTurnText,
         lastAssistantTurnText: state.lastAssistantTurnText
       };
+    }
+
+    function normalizeResponseBaselineSnapshot(snapshot) {
+      if (!snapshot || typeof snapshot !== 'object') return null;
+      const assistantCount = Number.isInteger(snapshot.assistantCount) ? snapshot.assistantCount : null;
+      const lastAssistantText = compactText(
+        typeof snapshot.lastAssistantText === 'string' ? snapshot.lastAssistantText : ''
+      );
+      const lastAssistantTurnText = compactText(
+        typeof snapshot.lastAssistantTurnText === 'string' ? snapshot.lastAssistantTurnText : ''
+      );
+      if (assistantCount === null && !lastAssistantText && !lastAssistantTurnText) return null;
+      return {
+        assistantCount,
+        lastAssistantText,
+        lastAssistantTurnText
+      };
+    }
+
+    function assistantResponseAdvancedSinceSnapshot(assistantCount, assistantText, snapshot, minDelta = 30) {
+      const baseline = normalizeResponseBaselineSnapshot(snapshot);
+      if (!baseline) return true;
+      const currentCount = Number.isInteger(assistantCount) ? assistantCount : null;
+      if (currentCount !== null && baseline.assistantCount !== null && currentCount > baseline.assistantCount) {
+        return true;
+      }
+
+      const currentText = compactText(typeof assistantText === 'string' ? assistantText : '');
+      if (!currentText) return false;
+
+      const baselineTexts = [baseline.lastAssistantText, baseline.lastAssistantTurnText].filter(Boolean);
+      if (baselineTexts.length === 0) return currentText.length >= 50;
+
+      return baselineTexts.every((baselineText) => {
+        if (currentText === baselineText) return false;
+        const lengthDelta = Math.abs(currentText.length - baselineText.length);
+        if (lengthDelta >= minDelta) return true;
+        return currentText.length >= 50 && computeCopyFingerprint(currentText) !== computeCopyFingerprint(baselineText);
+      });
     }
 
     function hasAssistantAdvancedSince(snapshot, minDelta = 30) {
@@ -33294,12 +37767,12 @@ async function injectToChat(
 
     function elementTextForActionMatch(element) {
       if (!(element instanceof HTMLElement)) return '';
-      return compactText([
+      return normalizeChatGptActionText([
         element.innerText || '',
         element.textContent || '',
         element.getAttribute('aria-label') || '',
         element.getAttribute('title') || ''
-      ].join(' ')).toLowerCase();
+      ].join(' '));
     }
 
     function isRetryActionElement(element) {
@@ -33313,6 +37786,7 @@ async function injectToChat(
         text.includes('try again') ||
         text.includes('regenerate') ||
         text.includes('sprobuj ponownie') ||
+        text.includes('ponow probe') ||
         text.includes('ponow')
       );
     }
@@ -33359,20 +37833,33 @@ async function injectToChat(
       addScope(state.lastAssistant, 3);
       addScope(state.lastAssistantContainer, 2);
 
-      const alerts = [
-        ...document.querySelectorAll('[role="alert"]'),
-        ...document.querySelectorAll('[role="status"]')
-      ];
-      const lastAlert = alerts.length > 0 ? alerts[alerts.length - 1] : null;
-      addScope(lastAlert, 3);
+      if (state.lastAlert && isRetryableChatGptGenerationErrorText(state.lastAlertText)) {
+        addScope(state.lastAlert, 2);
+      }
 
       return scopes.filter((scope) => hasRetryableChatGptGenerationErrorInElement(scope));
     }
 
+    function findVisibleRetryActionButton(excludedCandidates = new Set()) {
+      const candidates = [
+        ...document.querySelectorAll('button'),
+        ...document.querySelectorAll('[role="button"]')
+      ];
+      for (const candidate of candidates) {
+        if (excludedCandidates.has(candidate)) continue;
+        if (isRetryActionElement(candidate)) {
+          return candidate;
+        }
+      }
+      return null;
+    }
+
+    function hasVisibleRetryActionButton() {
+      return !!findVisibleRetryActionButton();
+    }
+
     function findRetryButtonForRetryableGenerationError() {
       const scopes = collectRetryableErrorScopes();
-      if (!scopes.length) return null;
-
       const seenCandidates = new Set();
       for (const scope of scopes) {
         const candidates = [
@@ -33388,18 +37875,7 @@ async function injectToChat(
         }
       }
 
-      const globalCandidates = [
-        ...document.querySelectorAll('button'),
-        ...document.querySelectorAll('[role="button"]')
-      ];
-      for (const candidate of globalCandidates) {
-        if (seenCandidates.has(candidate)) continue;
-        if (isRetryActionElement(candidate)) {
-          return candidate;
-        }
-      }
-
-      return null;
+      return findVisibleRetryActionButton(seenCandidates);
     }
 
     async function clickRetryForRetryableGenerationError(phase = 'unknown') {
@@ -33433,6 +37909,16 @@ async function injectToChat(
       };
     }
 
+    function hasRetryableChatGptGenerationErrorMessage() {
+      if (hasHardGenerationErrorMessage()) {
+        return true;
+      }
+      if (collectRetryableErrorScopes().length > 0) {
+        return true;
+      }
+      return hasVisibleRetryActionButton();
+    }
+
     async function detectPromptSentDespiteFailure(snapshot, promptText, maxWaitMs = 6000) {
       const start = Date.now();
       const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
@@ -33460,10 +37946,16 @@ async function injectToChat(
 
     async function classifyTimeoutOutcome(snapshot, promptText) {
       const base = snapshot && typeof snapshot === 'object' ? snapshot : getPromptDomSnapshot();
-      const promptFragment = getPromptProbeFragment(promptText);
 
       if (captureGenerationBlockerState()) {
         return 'blocked';
+      }
+
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('timeout_classification');
+        if (retryResult.clicked) {
+          return 'still_generating';
+        }
       }
 
       if (hasHardGenerationErrorMessage()) {
@@ -33478,10 +37970,7 @@ async function injectToChat(
       }
 
       const generation = isGenerating();
-      const current = getPromptDomSnapshot();
-      const userAdvanced = current.userCount > (Number.isInteger(base.userCount) ? base.userCount : 0);
-      const userMatchesPrompt = !promptFragment || current.lastUserText.includes(promptFragment);
-      if (generation.generating || (userAdvanced && userMatchesPrompt)) {
+      if (generation.generating) {
         return 'still_generating';
       }
 
@@ -33595,6 +38084,8 @@ async function injectToChat(
 
     function inferChatGptModeKindFromText(text) {
       if (containsWord(text, 'thinking')) return 'thinking';
+      if (normalizeDomText(text).includes('zaawansowan')) return 'thinking';
+      if (containsWord(text, 'advanced')) return 'thinking';
       if (containsWord(text, 'instant')) return 'instant';
       if (containsWord(text, 'auto')) return 'auto';
       return '';
@@ -33615,6 +38106,7 @@ async function injectToChat(
       if (effort === 'light') return 'Light';
       if (effort === 'standard') return 'Standard';
       if (effort === 'extended') return 'Extended';
+      if (effort === 'high') return 'High';
       if (effort === 'heavy') return 'Heavy';
       return '';
     }
@@ -33640,7 +38132,7 @@ async function injectToChat(
     function detectThinkingEffortState() {
       const checkedItem = getCheckedThinkingEffortMenuItem();
       const checkedLabel = getElementReadableText(checkedItem);
-      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+      for (const effort of ['high', 'heavy', 'extended', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(checkedLabel, effort)) {
           return {
             effort,
@@ -33651,7 +38143,7 @@ async function injectToChat(
 
       const pillButton = findThinkingEffortPillButton();
       const pillLabel = getElementReadableText(pillButton);
-      for (const effort of ['heavy', 'extended', 'standard', 'light']) {
+      for (const effort of ['high', 'heavy', 'extended', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(pillLabel, effort)) {
           return {
             effort,
@@ -33725,8 +38217,9 @@ async function injectToChat(
     function getThinkingEffortKeywords(effort) {
       if (effort === 'light') return ['light', 'lekki'];
       if (effort === 'standard') return ['standard'];
-      if (effort === 'extended') return ['extended', 'rozszerzony'];
-      if (effort === 'heavy') return ['heavy', 'ciezki'];
+      if (effort === 'extended') return ['extended', 'rozszerzon'];
+      if (effort === 'high') return ['high'];
+      if (effort === 'heavy') return ['heavy', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
       return [];
     }
 
@@ -33735,11 +38228,14 @@ async function injectToChat(
       if (!normalizedText) return false;
       return (
         normalizedText.includes('thinking effort')
+        || normalizedText.includes('high thinking')
         || normalizedText.includes('heavy thinking')
         || normalizedText.includes('extended thinking')
         || normalizedText.includes('standard thinking')
         || normalizedText.includes('light thinking')
         || normalizedText.includes('thinking')
+        || normalizedText.includes('advanced')
+        || normalizedText.includes('zaawansowan')
         || normalizedText.includes('myslen')
         || normalizedText.includes('wysilek')
       );
@@ -33758,6 +38254,7 @@ async function injectToChat(
         matchesThinkingEffortLabel(text, 'light')
         || matchesThinkingEffortLabel(text, 'standard')
         || matchesThinkingEffortLabel(text, 'extended')
+        || matchesThinkingEffortLabel(text, 'high')
         || matchesThinkingEffortLabel(text, 'heavy')
       );
     }
@@ -33838,38 +38335,111 @@ async function injectToChat(
       const selector = [
         'button.__composer-pill[aria-haspopup="menu"]',
         'button.__composer-pill',
-        'button[aria-haspopup="menu"][class*="composer-pill"]'
+        'button[aria-haspopup="menu"][class*="composer-pill"]',
+        'button[class*="composer-pill"]',
+        '[role="button"][class*="composer-pill"]',
+        'button[aria-haspopup="menu"]',
+        '[role="button"][aria-haspopup="menu"]',
+        '[aria-haspopup="menu"]',
+        'button',
+        '[role="button"]',
+        '[tabindex="0"]',
+        'button[data-testid*="composer"]',
+        '[role="button"][data-testid*="composer"]',
+        'button[data-testid*="model"]',
+        '[role="button"][data-testid*="model"]'
       ].join(', ');
       const candidates = Array.from(document.querySelectorAll(selector));
-      return candidates.filter((button) => isElementVisibleForInteraction(button));
+      const seen = new Set();
+      return candidates.filter((button) => {
+        if (!(button instanceof HTMLElement)) return false;
+        if (seen.has(button)) return false;
+        seen.add(button);
+        if (!isElementVisibleForInteraction(button)) return false;
+        if (button.closest('[data-message-author-role]')) return false;
+        const text = getElementMatchText(button);
+        if (!hasThinkingContextToken(text) && !isThinkingEffortMenuLabel(text)) return false;
+        const className = normalizeDomText(button.className || '');
+        const isComposerControl = !!(
+          className.includes('composer-pill')
+          || button.closest('form')
+          || button.closest('[data-testid*="composer"]')
+          || button.closest('[id*="composer"]')
+        );
+        const hasMenuSignal = !!(
+          button.getAttribute('aria-haspopup')
+          || button.getAttribute('aria-expanded')
+          || button.closest('[role="menu"]')
+          || button.closest('[data-radix-popper-content-wrapper]')
+        );
+        const isStrongThinkingEffortControl = text.includes('zaawansowan') && isThinkingEffortMenuLabel(text);
+        return isStrongThinkingEffortControl || isComposerControl || hasMenuSignal;
+      });
+    }
+
+    function scoreThinkingEffortPillButton(button, effort = '') {
+      if (!(button instanceof HTMLElement)) return -1;
+      const text = getElementMatchText(button);
+      const className = normalizeDomText(button.className || '');
+      const id = normalizeDomText(button.id || '');
+      const hasThinkingSignal = hasThinkingContextToken(text) || isThinkingEffortMenuLabel(text);
+      if (effort && !matchesThinkingEffortLabel(text, effort)) return -1;
+      if (!effort && !hasThinkingSignal) return -1;
+
+      let score = 0;
+      if (hasThinkingContextToken(text)) score += 120;
+      if (isThinkingEffortMenuLabel(text)) score += 80;
+      if (text.includes('zaawansowan')) score += 120;
+      if (text.includes('advanced')) score += 120;
+      if (matchesThinkingEffortLabel(text, 'high')) score += 95;
+      if (matchesThinkingEffortLabel(text, 'extended')) score += 90;
+      if (containsWord(text, 'pro')) score += 20;
+      if (button.getAttribute('aria-haspopup')) score += 60;
+      if (button.getAttribute('aria-expanded')) score += 30;
+      if (button.closest('form')) score += 40;
+      if (button.closest('[data-testid*="composer"]') || button.closest('[id*="composer"]')) score += 35;
+      if (effort && matchesThinkingEffortLabel(text, effort)) score += 180;
+      if (className.includes('__composer-pill') || className.includes('composer-pill')) score += 30;
+      if (id.startsWith('radix-')) score += 8;
+      return score;
+    }
+
+    function getThinkingEffortPillButtons(targetEffort = '') {
+      const effort = normalizeThinkingEffortLocal(targetEffort);
+      const candidates = getThinkingPillCandidates();
+      if (!candidates.length) return [];
+      return candidates
+        .map((button) => ({
+          button,
+          score: scoreThinkingEffortPillButton(button, effort)
+        }))
+        .filter((item) => item.score > 0)
+        .sort((a, b) => b.score - a.score)
+        .map((item) => item.button);
     }
 
     function findThinkingEffortPillButton(targetEffort = '') {
-      const candidates = getThinkingPillCandidates();
-      if (!candidates.length) return null;
+      return getThinkingEffortPillButtons(targetEffort)[0] || null;
+    }
 
-      let best = null;
-      let bestScore = -1;
-      for (const button of candidates) {
-        const text = getElementMatchText(button);
-        const className = normalizeDomText(button.className || '');
-        const id = normalizeDomText(button.id || '');
-        let score = 0;
+    function isModelModeSwitcherText(text) {
+      const normalizedText = normalizeDomText(text);
+      return (
+        containsWord(text, 'instant')
+        || containsWord(text, 'thinking')
+        || containsWord(text, 'auto')
+        || containsWord(text, 'advanced')
+        || normalizedText.includes('zaawansowan')
+      );
+    }
 
-        if (hasThinkingContextToken(text)) score += 120;
-        if (isThinkingEffortMenuLabel(text)) score += 80;
-        if (targetEffort && matchesThinkingEffortLabel(text, targetEffort)) score += 180;
-        if (className.includes('__composer-pill')) score += 30;
-        if (id.startsWith('radix-')) score += 8;
-
-        if (score > bestScore) {
-          bestScore = score;
-          best = button;
-        }
-      }
-
-      if (best) return best;
-      return candidates[0] || null;
+    function isComposerModeSwitcherButton(button) {
+      if (!(button instanceof HTMLElement)) return false;
+      const className = normalizeDomText(button.className || '');
+      if (!className.includes('composer-pill')) return false;
+      const text = getElementMatchText(button);
+      if (!isModelModeSwitcherText(text)) return false;
+      return !isThinkingEffortMenuLabel(text);
     }
 
     function isLikelyComposerButton(element) {
@@ -33887,7 +38457,7 @@ async function injectToChat(
       return candidates.filter((button) => {
         if (!(button instanceof HTMLElement)) return false;
         if (!isElementVisibleForInteraction(button)) return false;
-        if (isLikelyComposerButton(button)) return false;
+        if (isLikelyComposerButton(button) && !isComposerModeSwitcherButton(button)) return false;
         return true;
       });
     }
@@ -33919,9 +38489,10 @@ async function injectToChat(
         const className = normalizeDomText(button.className || '');
         let score = 0;
 
+        if (isComposerModeSwitcherButton(button)) score += 220;
         if (text.includes('chatgpt')) score += 180;
         if (text.includes('gpt')) score += 120;
-        if (containsWord(text, 'thinking') || containsWord(text, 'instant') || containsWord(text, 'auto') || containsWord(text, 'pro')) score += 90;
+        if (isModelModeSwitcherText(text) || containsWord(text, 'pro')) score += 90;
         if (containsWord(text, 'model')) score += 50;
         if (button.closest('header') || button.closest('nav')) score += 30;
         if (className.includes('model')) score += 25;
@@ -33964,6 +38535,31 @@ async function injectToChat(
       return exact || fallback;
     }
 
+    function isThinkingModeSelectedFromVisibleMenu() {
+      const thinkingModeItem = findThinkingModeMenuItem();
+      return !!(thinkingModeItem && isMenuItemChecked(thinkingModeItem));
+    }
+
+    function isThinkingModeReadyInComposer() {
+      if (findThinkingEffortPillButton('')) return true;
+      if (isThinkingModeSelectedFromVisibleMenu()) return true;
+      const switcher = findModelSwitcherButton();
+      const switcherLabel = getElementMatchText(switcher);
+      return inferChatGptModeKindFromText(switcherLabel) === 'thinking';
+    }
+
+    function getThinkingModeDebugSnapshot(extra = {}) {
+      const switcher = findModelSwitcherButton();
+      const effortPill = findThinkingEffortPillButton('');
+      return {
+        ...(extra && typeof extra === 'object' ? extra : {}),
+        modelSwitcherLabel: getElementReadableText(switcher),
+        effortPillLabel: getElementReadableText(effortPill),
+        visibleModelItems: getVisibleModelModeMenuItems().map((item) => getElementReadableText(item)).slice(0, 8),
+        visibleEffortItems: getVisibleThinkingEffortMenuItems().map((item) => getElementReadableText(item)).slice(0, 8)
+      };
+    }
+
     async function openModelModeMenu(maxWaitMs = 3200) {
       const startedAt = Date.now();
       while (Date.now() - startedAt < maxWaitMs) {
@@ -33992,7 +38588,12 @@ async function injectToChat(
 
       while (Date.now() - startedAt < maxWaitMs) {
         attempts += 1;
-        if (findThinkingEffortPillButton(effort)) {
+        if (isThinkingModeReadyInComposer()) {
+          console.log('[thinking-mode] thinking mode already ready', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
+          closeThinkingEffortMenuBestEffort();
           return { success: true, attempts };
         }
 
@@ -34004,14 +38605,36 @@ async function injectToChat(
 
         const thinkingModeItem = findThinkingModeMenuItem();
         if (thinkingModeItem && !isMenuItemChecked(thinkingModeItem)) {
+          console.log('[thinking-mode] selecting Thinking mode', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts,
+            targetLabel: getElementReadableText(thinkingModeItem)
+          }));
           await activateElement(thinkingModeItem);
           await new Promise((resolve) => setTimeout(resolve, 260));
+        } else if (!thinkingModeItem) {
+          console.warn('[thinking-mode] Thinking item not found in model mode menu', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
+        }
+        if (isThinkingModeReadyInComposer()) {
+          console.log('[thinking-mode] thinking mode ready after mode menu', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
+          closeThinkingEffortMenuBestEffort();
+          return { success: true, attempts };
         }
 
         closeThinkingEffortMenuBestEffort();
         await new Promise((resolve) => setTimeout(resolve, 260));
 
-        if (findThinkingEffortPillButton(effort)) {
+        if (isThinkingModeReadyInComposer()) {
+          console.log('[thinking-mode] thinking mode ready after settle', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            attempts
+          }));
           return { success: true, attempts };
         }
       }
@@ -34020,10 +38643,20 @@ async function injectToChat(
     }
 
     function getVisibleThinkingEffortMenuItems() {
-      const all = Array.from(document.querySelectorAll('[role="menuitemradio"]'));
+      const selector = [
+        '[role="menuitemradio"]',
+        '[role="menuitem"]',
+        '[role="menu"] button',
+        '[data-radix-popper-content-wrapper] button',
+        '[data-radix-menu-content] button'
+      ].join(', ');
+      const all = Array.from(document.querySelectorAll(selector));
       return all.filter((item) => {
         if (!(item instanceof HTMLElement)) return false;
         if (!isElementVisibleForInteraction(item)) return false;
+        if (item.matches('button') && !item.closest('[role="menu"], [data-radix-popper-content-wrapper], [data-radix-menu-content]')) {
+          return false;
+        }
         const text = getElementMatchText(item);
         return isThinkingEffortMenuLabel(text);
       });
@@ -34047,7 +38680,7 @@ async function injectToChat(
       for (const labelNode of labelCandidates) {
         const text = getElementMatchText(labelNode);
         if (!matchesThinkingEffortLabel(text, effort)) continue;
-        const container = labelNode.closest('[role="menuitemradio"]');
+        const container = labelNode.closest('[role="menuitemradio"], [role="menuitem"], button');
         if (container && isElementVisibleForInteraction(container)) {
           return container;
         }
@@ -34099,19 +38732,35 @@ async function injectToChat(
           return true;
         }
 
-        let button = findThinkingEffortPillButton(effort);
-        if (!button) {
-          await ensureThinkingModeReadyForEffort(effort, 3500);
-          button = findThinkingEffortPillButton(effort);
-        }
-        if (button) {
-          await activateElement(button);
+        let buttons = [
+          ...getThinkingEffortPillButtons(effort),
+          ...getThinkingEffortPillButtons('')
+        ].filter((button, index, all) => button && all.indexOf(button) === index);
+        if (!buttons.length) {
+          await ensureThinkingModeReadyForEffort('', 3500);
+          buttons = [
+            ...getThinkingEffortPillButtons(effort),
+            ...getThinkingEffortPillButtons('')
+          ].filter((button, index, all) => button && all.indexOf(button) === index);
         }
 
-        await new Promise((resolve) => setTimeout(resolve, 170));
-        const postClickItems = getVisibleThinkingEffortMenuItems();
-        if (postClickItems.length > 0) {
-          return true;
+        for (const button of buttons) {
+          console.log('[thinking-effort] opening effort menu from pill', getThinkingModeDebugSnapshot({
+            requestedEffort: effort,
+            buttonLabel: getElementReadableText(button)
+          }));
+          await activateElement(button);
+
+          await new Promise((resolve) => setTimeout(resolve, 450));
+          const postClickItems = getVisibleThinkingEffortMenuItems();
+          if (postClickItems.length > 0) {
+            console.log('[thinking-effort] effort menu opened', {
+              requestedEffort: effort,
+              buttonLabel: getElementReadableText(button),
+              visibleItems: postClickItems.map((item) => getElementReadableText(item)).slice(0, 8)
+            });
+            return true;
+          }
         }
       }
 
@@ -34170,6 +38819,11 @@ async function injectToChat(
           continue;
         }
 
+        console.log('[thinking-effort] selecting effort item', {
+          effort,
+          attempt,
+          targetLabel: getElementReadableText(targetItem)
+        });
         await activateElement(targetItem);
         await new Promise((resolve) => setTimeout(resolve, 260));
 
@@ -34242,6 +38896,74 @@ async function injectToChat(
         success: false,
         effort: requestedComposerThinkingEffort,
         error: result?.error || 'thinking_effort_not_set'
+      };
+    }
+
+    async function ensureThinkingModeBeforeRun(counterRef = null) {
+      const maxAttempts = 3;
+      let lastResult = null;
+
+      for (let attempt = 1; attempt <= maxAttempts; attempt += 1) {
+        updateCounter(
+          counterRef,
+          preChainCurrentPrompt,
+          totalPromptsForRun,
+          requestedComposerThinkingEffort
+            ? `Wlaczam Thinking (${requestedComposerThinkingEffort})...`
+            : 'Wlaczam tryb Thinking...'
+        );
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          currentPrompt: preChainCurrentPrompt,
+          totalPrompts: totalPromptsForRun,
+          phase: 'editor_ready',
+          statusText: requestedComposerThinkingEffort
+            ? `Wlaczam Thinking (${requestedComposerThinkingEffort})`
+            : 'Wlaczam tryb Thinking',
+          reason: 'ensure_thinking_mode',
+          thinkingModeAttempt: attempt,
+          thinkingModeMaxAttempts: maxAttempts,
+          needsAction: false
+        });
+
+        const thinkingModeReady = await ensureThinkingModeReadyForEffort(requestedComposerThinkingEffort || '', 9000);
+        lastResult = thinkingModeReady || null;
+        if (!thinkingModeReady?.success) {
+          await new Promise((resolve) => setTimeout(resolve, 420));
+          continue;
+        }
+
+        if (!requestedComposerThinkingEffort) {
+          notifyProcess('PROCESS_PROGRESS', {
+            status: 'running',
+            currentPrompt: preChainCurrentPrompt,
+            totalPrompts: totalPromptsForRun,
+            phase: 'editor_ready',
+            statusText: 'Thinking gotowy',
+            reason: 'thinking_mode_set',
+            needsAction: false
+          });
+          return {
+            success: true,
+            mode: 'thinking',
+            details: thinkingModeReady
+          };
+        }
+
+        const effortResult = await ensureRequestedComposerThinkingEffort(counterRef);
+        lastResult = effortResult || lastResult;
+        if (effortResult?.success) {
+          return effortResult;
+        }
+
+        await new Promise((resolve) => setTimeout(resolve, 420));
+      }
+
+      return {
+        success: false,
+        effort: requestedComposerThinkingEffort || '',
+        error: requestedComposerThinkingEffort ? 'thinking_effort_not_set' : 'thinking_mode_not_set',
+        details: lastResult
       };
     }
 
@@ -34904,6 +39626,86 @@ async function injectToChat(
     return false;
   }
 
+  function getLastAssistantMessageElement() {
+    const assistantMessages = Array.from(document.querySelectorAll('[data-message-author-role="assistant"]'));
+    return assistantMessages.length > 0 ? assistantMessages[assistantMessages.length - 1] : null;
+  }
+
+  function isInComposerArea(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    return !!(
+      element.closest('form') ||
+      element.closest('[data-testid*="composer" i]') ||
+      element.closest('[id*="composer" i]') ||
+      element.closest('[data-testid="composer-input"]') ||
+      element.closest('footer')
+    );
+  }
+
+  function isInLastAssistantMessage(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const lastAssistantMsg = getLastAssistantMessageElement();
+    return !!(lastAssistantMsg && lastAssistantMsg.contains(element));
+  }
+
+  function isElementVisibleForStatus(element) {
+    if (!(element instanceof HTMLElement)) return false;
+    const rect = element.getBoundingClientRect();
+    if (!rect || rect.width < 1 || rect.height < 1) return false;
+    const style = window.getComputedStyle(element);
+    if (!style) return false;
+    if (style.display === 'none') return false;
+    if (style.visibility === 'hidden') return false;
+    if (Number.parseFloat(style.opacity || '1') === 0) return false;
+    if (element.closest('[aria-hidden="true"]')) return false;
+    return true;
+  }
+
+  function findVisibleGenerationIndicator(selectors, options = {}) {
+    const selectorText = Array.isArray(selectors) ? selectors.filter(Boolean).join(', ') : String(selectors || '');
+    if (!selectorText) return null;
+
+    const roots = [];
+    if (options?.includeLastAssistant !== false) {
+      const lastAssistantMsg = getLastAssistantMessageElement();
+      if (lastAssistantMsg) roots.push(lastAssistantMsg);
+    }
+    if (options?.includeComposer === true) {
+      const composerRoot = document.querySelector('form') ||
+        document.querySelector('[data-testid*="composer" i]') ||
+        document.querySelector('[id*="composer" i]') ||
+        document.querySelector('footer');
+      if (composerRoot) roots.push(composerRoot);
+    }
+
+    const candidates = [];
+    const seen = new Set();
+    const pushCandidate = (candidate) => {
+      if (!(candidate instanceof HTMLElement)) return;
+      if (seen.has(candidate)) return;
+      seen.add(candidate);
+      candidates.push(candidate);
+    };
+
+    if (roots.length > 0) {
+      roots.forEach((root) => {
+        if (!(root instanceof HTMLElement)) return;
+        if (root.matches(selectorText)) pushCandidate(root);
+        root.querySelectorAll(selectorText).forEach(pushCandidate);
+      });
+    } else {
+      document.querySelectorAll(selectorText).forEach(pushCandidate);
+    }
+
+    return candidates.find((candidate) => isElementVisibleForStatus(candidate)) || null;
+  }
+
+  function hasPendingUserTurnByDom() {
+    const userMessages = document.querySelectorAll('[data-message-author-role="user"]').length;
+    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+    return userMessages > 0 && userMessages > assistantMessages;
+  }
+
   function findActiveStopButton() {
     const selectors = [
       '[data-testid="stop-button"]',
@@ -34942,17 +39744,15 @@ async function injectToChat(
         continue;
       }
 
-      const inComposerArea = !!(
-        candidate.closest('form') ||
-        candidate.closest('[data-testid*="composer" i]') ||
-        candidate.closest('[id*="composer" i]') ||
-        candidate.closest('footer')
-      );
-      if (candidate.matches('[data-testid="stop-button"]') || inComposerArea) {
+      const inComposerArea = isInComposerArea(candidate);
+      const inLastAssistantMessage = isInLastAssistantMessage(candidate);
+      if (inComposerArea) {
         return candidate;
       }
 
-      fallback = fallback || candidate;
+      if (inLastAssistantMessage) {
+        fallback = fallback || candidate;
+      }
     }
 
     return fallback;
@@ -34966,49 +39766,50 @@ async function injectToChat(
       return { generating: true, reason: 'stopButton', element: stopButton };
     }
     
-    // 2. Thinking indicators - TYLKO w ostatniej wiadomości assistant!
-    // Znajdź ostatnią wiadomość assistant
-    const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
-    if (assistantMessages.length > 0) {
-      const lastAssistantMsg = assistantMessages[assistantMessages.length - 1];
-      
-      // Sprawdź thinking indicator TYLKO w ostatniej wiadomości
-      const thinkingInLastMsg = lastAssistantMsg.querySelector('[class*="thinking"]') ||
-                                lastAssistantMsg.querySelector('[class*="Thinking"]') ||
-                                lastAssistantMsg.querySelector('[data-testid*="thinking"]') ||
-                                lastAssistantMsg.querySelector('[aria-label*="Thinking"]') ||
-                                lastAssistantMsg.querySelector('[aria-label*="thinking"]');
-      if (thinkingInLastMsg) {
-        return { generating: true, reason: 'thinkingIndicator', element: thinkingInLastMsg };
-      }
+    // 2. Thinking indicators - only visible indicators in the latest assistant turn.
+    const thinkingInLastMsg = findVisibleGenerationIndicator([
+      '[class*="thinking"]',
+      '[class*="Thinking"]',
+      '[data-testid*="thinking"]',
+      '[aria-label*="Thinking"]',
+      '[aria-label*="thinking"]'
+    ]);
+    if (thinkingInLastMsg) {
+      return { generating: true, reason: 'thinkingIndicator', element: thinkingInLastMsg };
     }
     
-    // 3. Update indicators
-    const updateIndicators = document.querySelector('[aria-label*="Update"]') ||
-                            document.querySelector('[aria-label*="update"]') ||
-                            document.querySelector('[class*="updating"]') ||
-                            document.querySelector('[class*="Updating"]') ||
-                            document.querySelector('[data-testid*="update"]');
+    // 3. Update indicators scoped to the active turn/composer. Global hidden app spinners are noisy.
+    const updateIndicators = findVisibleGenerationIndicator([
+      '[aria-label*="Update"]',
+      '[aria-label*="update"]',
+      '[class*="updating"]',
+      '[class*="Updating"]',
+      '[data-testid*="update"]'
+    ], { includeComposer: true });
     if (updateIndicators) {
       return { generating: true, reason: 'updateIndicator', element: updateIndicators };
     }
     
-    // 4. Streaming indicators
-    const streamingIndicators = document.querySelector('[class*="streaming"]') ||
-                               document.querySelector('[class*="Streaming"]') ||
-                               document.querySelector('[data-testid*="streaming"]') ||
-                               document.querySelector('[aria-label*="Streaming"]');
+    // 4. Streaming indicators scoped to the active turn/composer.
+    const streamingIndicators = findVisibleGenerationIndicator([
+      '[class*="streaming"]',
+      '[class*="Streaming"]',
+      '[data-testid*="streaming"]',
+      '[aria-label*="Streaming"]'
+    ], { includeComposer: true });
     if (streamingIndicators) {
       return { generating: true, reason: 'streamingIndicator', element: streamingIndicators };
     }
     
-    // 5. Typing/Loading indicators
-    const typingIndicators = document.querySelector('[class*="typing"]') ||
-                            document.querySelector('[class*="Typing"]') ||
-                            document.querySelector('[class*="loading"]') ||
-                            document.querySelector('[class*="Loading"]') ||
-                            document.querySelector('[aria-label*="typing"]') ||
-                            document.querySelector('[aria-label*="loading"]');
+    // 5. Typing/loading indicators scoped to the active turn/composer.
+    const typingIndicators = findVisibleGenerationIndicator([
+      '[class*="typing"]',
+      '[class*="Typing"]',
+      '[class*="loading"]',
+      '[class*="Loading"]',
+      '[aria-label*="typing"]',
+      '[aria-label*="loading"]'
+    ], { includeComposer: true });
     if (typingIndicators) {
       return { generating: true, reason: 'typingIndicator', element: typingIndicators };
     }
@@ -35016,21 +39817,215 @@ async function injectToChat(
     // 6. Editor disabled (fallback - mniej pewny)
     const editor = document.querySelector('[role="textbox"]') ||
                   document.querySelector('[contenteditable]');
-    const editorDisabled = editor && editor.getAttribute('contenteditable') === 'false';
+    const editorDisabled = editor
+      && isElementVisibleForInteraction(editor)
+      && editor.getAttribute('contenteditable') === 'false'
+      && hasPendingUserTurnByDom();
     if (editorDisabled) {
       return { generating: true, reason: 'editorDisabled', element: editor };
     }
     
     return { generating: false, reason: 'none', element: null };
   }
+
+  function findChatGptContinueGeneratingButton() {
+    const candidates = Array.from(document.querySelectorAll('button'));
+    for (const button of candidates) {
+      if (!(button instanceof HTMLElement)) continue;
+      if (button.id === 'continue-wait-btn' || button.id === 'continue-skip-btn') continue;
+      if (!isElementVisibleForInteraction(button)) continue;
+      if (button.disabled) continue;
+
+      const label = normalizeChatGptActionText(getElementReadableText(button));
+      if (!label) continue;
+
+      const hasContinueIntent = label.includes('continue') || label.includes('kontynuuj');
+      const hasGenerationIntent = (
+        label === 'continue' ||
+        label === 'kontynuuj' ||
+        label.includes('generat') ||
+        label.includes('response') ||
+        label.includes('answer') ||
+        label.includes('odpowiedz') ||
+        label.includes('odpowiedzi') ||
+        label.includes('generowanie')
+      );
+      if (hasContinueIntent && hasGenerationIntent) {
+        return button;
+      }
+    }
+    return null;
+  }
+
+  async function clickChatGptContinueGeneratingIfAvailable(reason = 'incomplete_response') {
+    const continueButton = findChatGptContinueGeneratingButton();
+    if (!continueButton) {
+      return { clicked: false, reason: 'not_found' };
+    }
+
+    try {
+      continueButton.click();
+      console.warn('[response-completion] Kliknieto natywne Continue w ChatGPT', {
+        reason,
+        label: getElementReadableText(continueButton)
+      });
+      await new Promise((resolve) => setTimeout(resolve, 1200));
+      return { clicked: true, reason: 'clicked' };
+    } catch (error) {
+      console.warn('[response-completion] Nie udalo sie kliknac natywnego Continue', {
+        reason,
+        error: error?.message || String(error)
+      });
+      return { clicked: false, reason: 'click_failed', error: error?.message || String(error) };
+    }
+  }
+
+  async function waitForChatGptGenerationFinishedBeforeNextPrompt(
+    maxWaitMs,
+    counter = null,
+    progressMeta = {}
+  ) {
+    const safeMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
+    const waitProgress = progressMeta && typeof progressMeta === 'object' ? progressMeta : {};
+    const waitCurrentPrompt = Number.isInteger(waitProgress.currentPrompt) ? waitProgress.currentPrompt : preChainCurrentPrompt;
+    const waitTotalPrompts = Number.isInteger(waitProgress.totalPrompts) ? waitProgress.totalPrompts : totalPromptsForRun;
+    const waitStageIndex = Number.isInteger(waitProgress.stageIndex) ? waitProgress.stageIndex : null;
+    const waitStageName = typeof waitProgress.stageName === 'string' && waitProgress.stageName.trim()
+      ? waitProgress.stageName.trim()
+      : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
+    const startTime = Date.now();
+    let stableReadyHits = 0;
+    let clickedContinue = false;
+    let lastHeartbeatAt = Date.now();
+    let lastAssistantText = (() => {
+      const lastMsg = getLastAssistantMessageElement();
+      return lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
+    })();
+    let lastAssistantChangeAt = Date.now();
+
+    while (true) {
+      if (shouldStopNow()) {
+        return { finished: false, reason: 'force_stopped', clickedContinue };
+      }
+      if (captureGenerationBlockerState()) {
+        return { finished: false, reason: 'blocked', clickedContinue };
+      }
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('generation_finish_guard');
+        if (retryResult.clicked) {
+          stableReadyHits = 0;
+          lastAssistantChangeAt = Date.now();
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+      }
+
+      const continueButton = findChatGptContinueGeneratingButton();
+      if (continueButton) {
+        const continueResult = await clickChatGptContinueGeneratingIfAvailable('generation_finish_guard');
+        if (continueResult.clicked) {
+          clickedContinue = true;
+          stableReadyHits = 0;
+          lastAssistantChangeAt = Date.now();
+          continue;
+        }
+      }
+
+      const genStatus = isGenerating();
+      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
+                     document.querySelector('div[contenteditable="true"]') ||
+                     document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
+      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const lastMsg = getLastAssistantMessageElement();
+      const currentLastText = lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
+      if (currentLastText && currentLastText !== lastAssistantText) {
+        lastAssistantText = currentLastText;
+        lastAssistantChangeAt = Date.now();
+        stableReadyHits = 0;
+      }
+
+      const textStable = Date.now() - lastAssistantChangeAt >= 3000;
+      const generationFinished = !genStatus.generating && editorReady && textStable && !findChatGptContinueGeneratingButton();
+      if (generationFinished) {
+        stableReadyHits += 1;
+        if (stableReadyHits >= 2) {
+          return { finished: true, reason: 'generation_finished', clickedContinue };
+        }
+      } else {
+        stableReadyHits = 0;
+        if (counter) {
+          updateCounter(counter, waitCurrentPrompt, waitTotalPrompts, 'Czekam az ChatGPT skonczy generowac...');
+        }
+      }
+
+      if (runId && Date.now() - lastHeartbeatAt >= 30_000) {
+        lastHeartbeatAt = Date.now();
+        notifyProcess('PROCESS_PROGRESS', {
+          status: 'running',
+          lifecycleStatus: 'running',
+          currentPrompt: waitCurrentPrompt,
+          totalPrompts: waitTotalPrompts,
+          ...(waitStageIndex !== null ? { stageIndex: waitStageIndex } : {}),
+          ...(waitStageName ? { stageName: waitStageName } : {}),
+          phase: 'generation_finish_guard',
+          statusCode: 'chat.generation_finish_guard',
+          statusText: 'Czekam az ChatGPT skonczy generowac odpowiedz',
+          reason: genStatus.generating ? (genStatus.reason || 'generating') : 'interface_not_stable',
+          needsAction: false,
+          chatGptGenerating: genStatus.generating === true ? 'yes' : 'no'
+        });
+      }
+
+      if (safeMaxWaitMs > 0 && (Date.now() - startTime) >= safeMaxWaitMs) {
+        return { finished: false, reason: 'timeout', clickedContinue };
+      }
+
+      await new Promise((resolve) => setTimeout(resolve, 500));
+    }
+  }
   
   // Funkcja czekająca na zakończenie odpowiedzi ChatGPT
   // Snapshot ostatniej odpowiedzi assistant
 
-  async function waitForResponse(maxWaitMs) {
+  async function waitForResponse(maxWaitMs, progressMeta = {}) {
     if (shouldStopNow()) return false;
     const safeMaxWaitMs = Number.isFinite(maxWaitMs) && maxWaitMs > 0 ? maxWaitMs : 0;
-    const initialSnapshot = getAssistantSnapshot();
+    const waitProgress = progressMeta && typeof progressMeta === 'object' ? progressMeta : {};
+    const waitCurrentPrompt = Number.isInteger(waitProgress.currentPrompt) ? waitProgress.currentPrompt : preChainCurrentPrompt;
+    const waitTotalPrompts = Number.isInteger(waitProgress.totalPrompts) ? waitProgress.totalPrompts : totalPromptsForRun;
+    const waitStageIndex = Number.isInteger(waitProgress.stageIndex) ? waitProgress.stageIndex : null;
+    const waitStageName = typeof waitProgress.stageName === 'string' && waitProgress.stageName.trim()
+      ? waitProgress.stageName.trim()
+      : (waitCurrentPrompt > 0 ? `Prompt ${waitCurrentPrompt}` : '');
+    const waitPromptText = typeof waitProgress.promptText === 'string' ? waitProgress.promptText : '';
+    const waitPromptNumber = Number.isInteger(waitProgress.promptNumber) ? waitProgress.promptNumber : waitCurrentPrompt;
+    const responseBaselineSnapshot = normalizeResponseBaselineSnapshot(waitProgress.responseBaselineSnapshot);
+    const requireFreshResponse = waitProgress.requireFreshResponse === true || !!responseBaselineSnapshot;
+    const emitResponseWaitHeartbeat = (phase, elapsedMs = 0, extra = {}) => {
+      if (!runId) return;
+      const elapsedSec = Math.max(0, Math.round(elapsedMs / 1000));
+      notifyProcess('PROCESS_PROGRESS', {
+        status: 'running',
+        lifecycleStatus: 'running',
+        currentPrompt: waitCurrentPrompt,
+        totalPrompts: waitTotalPrompts,
+        ...(waitStageIndex !== null ? { stageIndex: waitStageIndex } : {}),
+        ...(waitStageName ? { stageName: waitStageName } : {}),
+        phase: 'response_wait',
+        statusCode: 'chat.response_waiting',
+        statusText: elapsedSec > 0 ? `Czekam na odpowiedz (${elapsedSec}s)` : 'Czekam na odpowiedz',
+        reason: phase || 'response_wait',
+        needsAction: false,
+        ...extra
+      });
+    };
+    const initialSnapshot = responseBaselineSnapshot
+      ? {
+          count: Number.isInteger(responseBaselineSnapshot.assistantCount) ? responseBaselineSnapshot.assistantCount : 0,
+          lastText: responseBaselineSnapshot.lastAssistantText || responseBaselineSnapshot.lastAssistantTurnText || '',
+          source: 'prompt_baseline'
+        }
+      : getAssistantSnapshot();
     const initialAssistantCount = initialSnapshot.count;
     const initialAssistantText = initialSnapshot.lastText || '';
     const initialAssistantLength = initialAssistantText.length;
@@ -35038,29 +40033,28 @@ async function injectToChat(
     let responseSeenInDOM = false;
     let lastObservedResponseCount = initialAssistantCount;
     let generationErrorRetryAttempts = 0;
-    const maxGenerationErrorRetryAttempts = 2;
     const tryRecoverFromGenerationError = async (phase) => {
-      if (!hasHardGenerationErrorMessage()) return false;
-      if (generationErrorRetryAttempts >= maxGenerationErrorRetryAttempts) {
-        return false;
-      }
+      if (!hasRetryableChatGptGenerationErrorMessage()) return false;
       const retryResult = await clickRetryForRetryableGenerationError(phase);
       if (!retryResult.clicked) {
         console.warn(`[chatgpt-retry] Nie udalo sie kliknac Retry (${retryResult.reason || 'unknown'}).`);
         return false;
       }
       generationErrorRetryAttempts += 1;
+      console.warn(`[chatgpt-retry] Retry attempt #${generationErrorRetryAttempts} accepted in ${phase}.`);
       responseSeenInDOM = false;
       lastObservedResponseCount = getAssistantSnapshot().count;
       await new Promise((resolve) => setTimeout(resolve, 1200));
       return true;
     };
     console.log('Czekam na odpowiedz ChatGPT...');
+    emitResponseWaitHeartbeat('response_wait_start', 0);
 
     // Faza 1: wykryj start odpowiedzi.
     const phase1StartTime = Date.now();
     let phase1IdleSince = Date.now();
     let responseStarted = false;
+    let lastResponseWaitHeartbeatAt = Date.now();
 
     while (true) {
       if (shouldStopNow()) return false;
@@ -35068,7 +40062,7 @@ async function injectToChat(
         console.warn('[FAZA 1] Wykryto limit/restriction w ChatGPT.');
         return false;
       }
-      if (hasHardGenerationErrorMessage()) {
+      if (hasRetryableChatGptGenerationErrorMessage()) {
         if (await tryRecoverFromGenerationError('phase1')) {
           phase1IdleSince = Date.now();
           responseStarted = false;
@@ -35086,12 +40080,15 @@ async function injectToChat(
       const lastTextChanged = lastAssistantText && lastAssistantText !== initialAssistantText;
       const lengthDelta = Math.abs(lastAssistantText.length - initialAssistantLength);
       const meaningfulTextChange = lastTextChanged && lengthDelta >= MIN_RESPONSE_DELTA;
+      const freshResponseStarted = responseBaselineSnapshot
+        ? assistantResponseAdvancedSinceSnapshot(phase1ResponseNodes.length, lastAssistantText, responseBaselineSnapshot, MIN_RESPONSE_DELTA)
+        : (hasNewContent || meaningfulTextChange);
 
-      if (hasNewContent || meaningfulTextChange) {
+      if (freshResponseStarted) {
         responseSeenInDOM = true;
       }
 
-      if (genStatus.generating || hasNewContent || meaningfulTextChange) {
+      if (genStatus.generating || freshResponseStarted) {
         responseStarted = true;
         break;
       }
@@ -35110,6 +40107,10 @@ async function injectToChat(
         const elapsed = Math.round((Date.now() - phase1StartTime) / 1000);
         console.log(`[FAZA 1] Czekam na start odpowiedzi... (${elapsed}s)`);
       }
+      if (Date.now() - lastResponseWaitHeartbeatAt >= 30_000) {
+        lastResponseWaitHeartbeatAt = Date.now();
+        emitResponseWaitHeartbeat('response_wait_phase1', Date.now() - phase1StartTime);
+      }
 
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
@@ -35126,6 +40127,25 @@ async function injectToChat(
     let logInterval = 0;
     let lastAssistantText = initialAssistantText;
     let lastAssistantChangeAt = Date.now();
+    let lastPhase2GeneratingActivityAt = Date.now();
+    let lastPhase2GenerationSignature = '';
+    let phase2StaleGenerationOverrideWarned = false;
+    let phase2IncompleteStaleReadyWarnKey = '';
+    const phase2StaleGeneratingReadyOverrideMs = 45_000;
+    const phase2StaleGeneratingFailMs = 180_000;
+    const getPhase2GenerationSignature = (genStatus) => {
+      if (!genStatus?.generating) return '';
+      const element = genStatus.element instanceof HTMLElement ? genStatus.element : null;
+      if (!element) return `${genStatus.reason || 'unknown'}|no-element`;
+      return [
+        genStatus.reason || 'unknown',
+        element.tagName || '',
+        element.id || '',
+        element.getAttribute('data-testid') || '',
+        element.getAttribute('aria-label') || '',
+        compactText(element.textContent || '').slice(0, 80)
+      ].join('|');
+    };
 
     while (true) {
       if (shouldStopNow()) return false;
@@ -35133,7 +40153,7 @@ async function injectToChat(
         console.warn('[FAZA 2] Wykryto limit/restriction w ChatGPT.');
         return false;
       }
-      if (hasHardGenerationErrorMessage()) {
+      if (hasRetryableChatGptGenerationErrorMessage()) {
         if (await tryRecoverFromGenerationError('phase2')) {
           phase2IdleSince = Date.now();
           lastAssistantChangeAt = Date.now();
@@ -35156,6 +40176,18 @@ async function injectToChat(
                         document.querySelector('button[aria-label*="Send"]');
 
       const genStatus = isGenerating();
+      if (!genStatus.generating) {
+        lastPhase2GenerationSignature = '';
+        lastPhase2GeneratingActivityAt = Date.now();
+        phase2StaleGenerationOverrideWarned = false;
+      } else {
+        const generationSignature = getPhase2GenerationSignature(genStatus);
+        if (generationSignature !== lastPhase2GenerationSignature) {
+          lastPhase2GenerationSignature = generationSignature;
+          lastPhase2GeneratingActivityAt = Date.now();
+          phase2StaleGenerationOverrideWarned = false;
+        }
+      }
 
       if (logInterval % 10 === 0) {
         const phase2Elapsed = Math.round((Date.now() - phase2StartTime) / 1000);
@@ -35173,6 +40205,15 @@ async function injectToChat(
         });
       }
       logInterval += 1;
+      if (Date.now() - lastResponseWaitHeartbeatAt >= 30_000) {
+        lastResponseWaitHeartbeatAt = Date.now();
+        emitResponseWaitHeartbeat('response_wait_phase2', Date.now() - phase2StartTime, {
+          responseSeenInDOM,
+          requireFreshResponse,
+          chatGptGenerating: genStatus.generating === true ? 'yes' : 'no',
+          chatGptGenerationReason: typeof genStatus.reason === 'string' ? genStatus.reason : ''
+        });
+      }
 
       const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
       const noGeneration = !genStatus.generating;
@@ -35195,6 +40236,8 @@ async function injectToChat(
       if (textChangedNow) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
+        lastPhase2GeneratingActivityAt = Date.now();
+        phase2StaleGenerationOverrideWarned = false;
       }
 
       const hasNewAssistantMessage = currentResponseCount > initialAssistantCount;
@@ -35205,7 +40248,10 @@ async function injectToChat(
       const phase2TextChanged = currentLastText && currentLastText !== initialAssistantText;
       const phase2LengthDelta = Math.abs(currentLastText.length - initialAssistantLength);
       const meaningfulTextChange = phase2TextChanged && phase2LengthDelta >= MIN_RESPONSE_DELTA;
-      if (hasNewAssistantMessage || meaningfulTextChange) {
+      const freshResponseSeen = responseBaselineSnapshot
+        ? assistantResponseAdvancedSinceSnapshot(currentResponseCount, currentLastText, responseBaselineSnapshot, MIN_RESPONSE_DELTA)
+        : (hasNewAssistantMessage || meaningfulTextChange);
+      if (freshResponseSeen) {
         responseSeenInDOM = true;
       }
 
@@ -35225,13 +40271,52 @@ async function injectToChat(
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
 
-      if (genStatus.generating || textChangedNow || responseCountChanged || hasProgressText) {
+      if (textChangedNow || responseCountChanged || hasProgressText) {
         phase2IdleSince = Date.now();
+        lastPhase2GeneratingActivityAt = Date.now();
+        phase2StaleGenerationOverrideWarned = false;
       }
 
       const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && !hasProgressText;
+      const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastPhase2GeneratingActivityAt) : 0;
+      const generationLooksStaleReadyBase = genStatus.generating
+        && editorReady
+        && responseSeenInDOM
+        && textStable
+        && !hasProgressText
+        && staleGeneratingForMs >= phase2StaleGeneratingReadyOverrideMs;
+      const staleReadyCompletion = getResponseCompletionReadiness(currentLastText, waitPromptText, waitPromptNumber, {
+        forStaleGenerating: true
+      });
+      const generationLooksStaleReady = generationLooksStaleReadyBase && staleReadyCompletion.ready;
+      if (generationLooksStaleReadyBase && !staleReadyCompletion.ready) {
+        const warnKey = [
+          staleReadyCompletion.reason || 'unknown',
+          (staleReadyCompletion.missingMarkers || []).join(','),
+          currentLastText.length
+        ].join('|');
+        if (warnKey !== phase2IncompleteStaleReadyWarnKey) {
+          phase2IncompleteStaleReadyWarnKey = warnKey;
+          console.warn('[FAZA 2] Nie ignoruje stale generating - odpowiedz nie wyglada na kompletna.', {
+            reason: genStatus.reason,
+            staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+            responseLength: currentLastText.length,
+            completionReason: staleReadyCompletion.reason,
+            missingMarkers: staleReadyCompletion.missingMarkers || []
+          });
+        }
+      }
+      if (generationLooksStaleReady && !phase2StaleGenerationOverrideWarned) {
+        phase2StaleGenerationOverrideWarned = true;
+        console.warn('[FAZA 2] Ignoruje stale generating indicator; response DOM is stable.', {
+          reason: genStatus.reason,
+          staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+          responseCount: currentResponseCount,
+          completionReason: staleReadyCompletion.reason
+        });
+      }
 
-      if (isReady) {
+      if (isReady || generationLooksStaleReady) {
         consecutiveReady += 1;
         if (consecutiveReady >= 1) {
           await new Promise((resolve) => setTimeout(resolve, 1000));
@@ -35256,6 +40341,11 @@ async function injectToChat(
         return false;
       }
 
+      if (genStatus.generating && !generationLooksStaleReady && staleGeneratingForMs >= phase2StaleGeneratingFailMs && !hasProgressText) {
+        console.error(`[FAZA 2] Timeout stale-generating po ${Math.round(staleGeneratingForMs / 1000)}s (reason=${genStatus.reason}).`);
+        return false;
+      }
+
       await new Promise((resolve) => setTimeout(resolve, 500));
     }
   }
@@ -35272,6 +40362,23 @@ async function injectToChat(
           blocked: true,
           error: initialBlocker.blockerText || initialBlocker.statusText || 'Wymaga akcji: limit/restriction w ChatGPT.'
         };
+      }
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('connection_check');
+        if (retryResult.clicked) {
+          const retryWaitOk = await waitForResponse(responseWaitMs, {
+            currentPrompt: preChainCurrentPrompt,
+            totalPrompts: totalPromptsForRun,
+            stageName: preChainCurrentPrompt > 0 ? `Prompt ${preChainCurrentPrompt}` : 'ChatGPT retry'
+          });
+          if (!retryWaitOk && hasRetryableChatGptGenerationErrorMessage()) {
+            return {
+              healthy: false,
+              retryClicked: true,
+              error: 'Kliknieto Retry, ale ChatGPT nadal pokazuje blad generowania.'
+            };
+          }
+        }
       }
       // Sprawdź czy są błędy w konsoli (HTTP2, 404, itp.)
       const hasConnectionErrors = await checkForConnectionErrors();
@@ -35394,7 +40501,13 @@ async function injectToChat(
   }
   
   // Funkcja wyciągająca ostatnią odpowiedź ChatGPT z DOM
-  async function getLastResponseText() {
+  async function getLastResponseText(options = {}) {
+    const captureOptions = options && typeof options === 'object' ? options : {};
+    const expectedPromptText = typeof captureOptions.promptText === 'string' ? captureOptions.promptText : '';
+    const expectedPromptNumber = Number.isInteger(captureOptions.promptNumber) ? captureOptions.promptNumber : 0;
+    const preferLatest = captureOptions.preferLatest === true || !!expectedPromptText;
+    const responseBaselineSnapshot = normalizeResponseBaselineSnapshot(captureOptions.responseBaselineSnapshot);
+    const requireFreshResponse = captureOptions.requireFreshResponse === true || !!responseBaselineSnapshot;
     console.log("🔍 Wyciągam ostatnią odpowiedź ChatGPT...");
     
     // Funkcja pomocnicza - wyciąga tylko treść głównej odpowiedzi, pomija źródła/linki
@@ -35486,28 +40599,6 @@ async function injectToChat(
       }
       
       if (messages.length > 0) {
-        const preferredStructured = findPreferredStructuredAssistantResponse(
-          Array.from(messages),
-          extractMainContent
-        );
-        if (preferredStructured && preferredStructured.text) {
-          if (preferredStructured.index !== messages.length - 1) {
-            console.log('[copy-flow] [capture:structured-fallback]', {
-              selectedAssistantIndex: preferredStructured.index + 1,
-              assistantCount: messages.length,
-              validLineCount: preferredStructured.analysis.validLineCount,
-              preferredRoleRows: preferredStructured.analysis.preferredRoleRows
-            });
-          } else {
-            console.log('[copy-flow] [capture:structured-current]', {
-              assistantCount: messages.length,
-              validLineCount: preferredStructured.analysis.validLineCount,
-              preferredRoleRows: preferredStructured.analysis.preferredRoleRows
-            });
-          }
-          return preferredStructured.text;
-        }
-
         const lastMessage = messages[messages.length - 1];
         
         // Sprawdź czy to nie jest tylko thinking indicator
@@ -35520,6 +40611,64 @@ async function injectToChat(
         }
         
         const text = extractMainContent(lastMessage);
+        if (
+          requireFreshResponse &&
+          !assistantResponseAdvancedSinceSnapshot(messages.length, text, responseBaselineSnapshot, 10)
+        ) {
+          console.warn('[response-capture] Latest assistant response is stale for current prompt; waiting for a fresh assistant turn', {
+            assistantCount: messages.length,
+            baselineAssistantCount: responseBaselineSnapshot?.assistantCount ?? null,
+            promptNumber: expectedPromptNumber,
+            characters: text.length
+          });
+          continue;
+        }
+
+        if (preferLatest && expectedPromptText) {
+          const expectedReadiness = getResponseCompletionReadiness(text, expectedPromptText, expectedPromptNumber);
+          if (expectedReadiness.ready) {
+            console.log('[response-capture] Latest assistant response passes DOM/basic completion readiness', {
+              assistantCount: messages.length,
+              promptNumber: expectedPromptNumber,
+              stageId: expectedReadiness.stageId || '',
+              reason: expectedReadiness.reason,
+              characters: text.length
+            });
+            return text;
+          }
+
+          console.warn('[response-capture] Latest assistant response does not yet match current prompt contract', {
+            assistantCount: messages.length,
+            promptNumber: expectedPromptNumber,
+            reason: expectedReadiness.reason,
+            missingMarkers: expectedReadiness.missingMarkers || [],
+            characters: text.length
+          });
+        }
+
+        if (!preferLatest) {
+          const preferredStructured = findPreferredStructuredAssistantResponse(
+            Array.from(messages),
+            extractMainContent
+          );
+          if (preferredStructured && preferredStructured.text) {
+            if (preferredStructured.index !== messages.length - 1) {
+              console.log('[copy-flow] [capture:structured-fallback]', {
+                selectedAssistantIndex: preferredStructured.index + 1,
+                assistantCount: messages.length,
+                validLineCount: preferredStructured.analysis.validLineCount,
+                preferredRoleRows: preferredStructured.analysis.preferredRoleRows
+              });
+            } else {
+              console.log('[copy-flow] [capture:structured-current]', {
+                assistantCount: messages.length,
+                validLineCount: preferredStructured.analysis.validLineCount,
+                preferredRoleRows: preferredStructured.analysis.preferredRoleRows
+              });
+            }
+            return preferredStructured.text;
+          }
+        }
         
         // Jeśli znaleziono niepustą odpowiedź - sukces!
         if (text.length > 0) {
@@ -35597,6 +40746,17 @@ async function injectToChat(
           const assistantMsg = turn.querySelector('[data-message-author-role="assistant"]');
           if (assistantMsg) {
             const text = extractMainContent(assistantMsg);
+            if (
+              requireFreshResponse &&
+              !assistantResponseAdvancedSinceSnapshot(
+                document.querySelectorAll('[data-message-author-role="assistant"]').length,
+                text,
+                responseBaselineSnapshot,
+                10
+              )
+            ) {
+              continue;
+            }
             if (text.length > 0) {
               console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2): ${text.length} znaków`);
               console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -35610,6 +40770,17 @@ async function injectToChat(
         for (let i = turnContainers.length - 1; i >= 0; i--) {
           const turn = turnContainers[i];
           const text = extractMainContent(turn);
+          if (
+            requireFreshResponse &&
+            !assistantResponseAdvancedSinceSnapshot(
+              document.querySelectorAll('[data-message-author-role="assistant"]').length,
+              text,
+              responseBaselineSnapshot,
+              10
+            )
+          ) {
+            continue;
+          }
           if (text.length > 50) { // Minimum 50 znaków
             console.log(`✅ Znaleziono odpowiedź przez conversation-turn (fallback 2b): ${text.length} znaków`);
             console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -35633,6 +40804,17 @@ async function injectToChat(
       if (articles.length > 0) {
         const lastArticle = articles[articles.length - 1];
         const text = extractMainContent(lastArticle);
+        if (
+          requireFreshResponse &&
+          !assistantResponseAdvancedSinceSnapshot(
+            document.querySelectorAll('[data-message-author-role="assistant"]').length,
+            text,
+            responseBaselineSnapshot,
+            10
+          )
+        ) {
+          continue;
+        }
         if (text.length > 0) {
           console.log(`✅ Znaleziono odpowiedź przez article (fallback 3): ${text.length} znaków`);
           console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -35664,6 +40846,17 @@ async function injectToChat(
           // Weź ostatni element
           const lastElement = elements[elements.length - 1];
           const text = extractMainContent(lastElement);
+          if (
+            requireFreshResponse &&
+            !assistantResponseAdvancedSinceSnapshot(
+              document.querySelectorAll('[data-message-author-role="assistant"]').length,
+              text,
+              responseBaselineSnapshot,
+              10
+            )
+          ) {
+            continue;
+          }
           if (text.length > 50) { // Minimum 50 znaków
             console.log(`✅ Znaleziono odpowiedź przez ${selector} (fallback 4): ${text.length} znaków`);
             console.log(`📝 Preview: "${text.substring(0, 200)}${text.length > 200 ? '...' : ''}"`);
@@ -35734,7 +40927,480 @@ async function injectToChat(
     console.log(`📊 Walidacja: ✅ OK (${text.length} >= ${minLength} znaków)`);
     return true;
   }
+
+  function extractPromptStageIdForCompletionContract(promptText, promptNumber = 0) {
+    const rawPrompt = typeof promptText === 'string' ? promptText : '';
+    const directMatch = rawPrompt.match(/^\s*#?\s*STAGE\s+(\d+)(?!\d)/im);
+    if (directMatch) {
+      return String(Number.parseInt(directMatch[1], 10));
+    }
+
+    const head = rawPrompt.slice(0, 2600);
+    const roleMatch = head.match(/\brole\s*:\s*stage\s+(\d+)(?!\d)/i)
+      || head.match(/\brole\s+is\s+stage\s+(\d+)(?!\d)/i);
+    if (roleMatch) {
+      return String(Number.parseInt(roleMatch[1], 10));
+    }
+
+    const handoffMarkerMatch = rawPrompt.match(/===\s*STAGE\s+(\d+)(?!\d)[^=\n]*HANDOFF\s*===/i);
+    if (handoffMarkerMatch) {
+      return String(Number.parseInt(handoffMarkerMatch[1], 10));
+    }
+
+    const safePromptNumber = Number.isInteger(promptNumber) ? promptNumber : 0;
+    if (safePromptNumber > 0 && safePromptNumber <= 16 && /\bSTAGE\b/i.test(head)) {
+      return String(Math.max(0, safePromptNumber - 1));
+    }
+    return '';
+  }
+
+  function buildStageResponseCompletionContract(promptText, promptNumber = 0) {
+    const rawPrompt = typeof promptText === 'string' ? promptText : '';
+    const markers = [];
+    const stageId = extractPromptStageIdForCompletionContract(rawPrompt, promptNumber);
+    const requiresEndHandoff = /===\s*END\s+HANDOFF\s*===/i.test(rawPrompt);
+
+    if (requiresEndHandoff) {
+      if (stageId) {
+        markers.push({
+          label: `=== STAGE ${stageId} ... HANDOFF ===`,
+          pattern: new RegExp(`===\\s*STAGE\\s*${escapeRegexLocal(stageId)}(?!\\d)[^=\\n]*HANDOFF\\s*===`, 'i')
+        });
+      }
+      markers.push({
+        label: '=== END HANDOFF ===',
+        pattern: /===\s*END\s+HANDOFF\s*===/i
+      });
+    }
+
+    return {
+      stageId,
+      markers,
+      requiresJsonArray: /\bfinal\s+(?:answer|output)\s+must\s+be\s+only\s+the\s+JSON\s+array\b/i.test(rawPrompt)
+    };
+  }
+
+  function responseTextContainsCompleteJsonArray(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return false;
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const arrayStart = raw.indexOf('[');
+    const arrayEnd = raw.lastIndexOf(']');
+    if (arrayStart >= 0 && arrayEnd > arrayStart) {
+      candidates.push(raw.slice(arrayStart, arrayEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        if (Array.isArray(JSON.parse(candidate))) {
+          return true;
+        }
+      } catch (_error) {
+        // Try next candidate.
+      }
+    }
+    return false;
+  }
+
+  function getResponseCompletionReadiness(text, promptText = '', promptNumber = 0, options = {}) {
+    const rawText = typeof text === 'string' ? text.trim() : '';
+    const normalizedText = compactText(rawText);
+    if (!normalizedText) {
+      return { ready: false, reason: 'empty_response' };
+    }
+
+    const dataGapDirective = parseDataGapDirectiveResponse(rawText);
+    if (dataGapDirective) {
+      return { ready: true, reason: 'data_gap_stage', stageId: dataGapDirective.stageId };
+    }
+
+    if (normalizedText.length < 50) {
+      return { ready: false, reason: 'too_short' };
+    }
+
+    if (options?.forStaleGenerating === true && normalizedText.length < 200) {
+      return { ready: false, reason: 'too_short_for_stale_generating_override' };
+    }
+
+    const rawPrompt = typeof promptText === 'string' ? promptText : '';
+    const completionContract = rawPrompt
+      ? buildStageResponseCompletionContract(rawPrompt, promptNumber)
+      : { markers: [], requiresJsonArray: false, stageId: '' };
+
+    const missingMarkers = [];
+    for (const marker of completionContract.markers) {
+      if (!marker.pattern.test(rawText)) {
+        missingMarkers.push(marker.label);
+      }
+    }
+
+    if (completionContract.requiresJsonArray && !responseTextContainsCompleteJsonArray(rawText)) {
+      return {
+        ready: false,
+        reason: 'invalid_or_incomplete_json_array',
+        stageId: completionContract.stageId
+      };
+    }
+
+    return {
+      ready: true,
+      reason: missingMarkers.length > 0
+        ? 'basic_response_ready_missing_soft_markers'
+        : (
+            completionContract.markers.length > 0 || completionContract.requiresJsonArray
+              ? 'completion_contract_satisfied'
+              : 'basic_response_ready'
+          ),
+      stageId: completionContract.stageId,
+      missingMarkers
+    };
+  }
+
+  function validateStageResponseForPrompt(text, promptText, promptNumber = 0) {
+    const safeText = typeof text === 'string' ? text : '';
+    if (!validateResponse(safeText)) {
+      return {
+        valid: false,
+        reason: compactText(safeText) ? 'basic_response_invalid' : 'empty_response',
+        statusText: compactText(safeText) ? 'Odpowiedz za krotka albo bledna' : 'Brak odpowiedzi'
+      };
+    }
+
+    const completionContract = buildStageResponseCompletionContract(promptText, promptNumber);
+    const missingMarkers = [];
+    for (const marker of completionContract.markers) {
+      if (!marker.pattern.test(safeText)) {
+        missingMarkers.push(marker.label);
+      }
+    }
+
+    if (completionContract.requiresJsonArray && !responseTextContainsCompleteJsonArray(safeText)) {
+      return {
+        valid: false,
+        reason: 'invalid_or_incomplete_json_array',
+        stageId: completionContract.stageId,
+        statusText: 'Odpowiedz niepelna - JSON array nie jest domkniety'
+      };
+    }
+
+    if (missingMarkers.length > 0) {
+      console.warn('[response-validation] Brak markerow oczekiwanych przez prompt, ale DOM/tekst wskazuje zakonczona odpowiedz - traktuje jako soft diagnostic', {
+        stageId: completionContract.stageId || '',
+        missingMarkers,
+        responseLength: safeText.length
+      });
+    }
+
+    return {
+      valid: true,
+      reason: missingMarkers.length > 0 ? 'ok_missing_soft_markers' : 'ok',
+      stageId: completionContract.stageId,
+      missingMarkers,
+      statusText: 'Odpowiedz kompletna'
+    };
+  }
+
+  function extractStage12InvestmentJsonText(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return '';
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const objectStart = raw.indexOf('{');
+    const objectEnd = raw.lastIndexOf('}');
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      candidates.push(raw.slice(objectStart, objectEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        const schema = typeof parsed?.schema === 'string'
+          ? parsed.schema.trim().toLowerCase()
+          : '';
+        const records = Array.isArray(parsed?.records) ? parsed.records : [];
+        const recordsLookLikeFinalRows = records.length > 0 && records.every((record) => (
+          record
+          && typeof record === 'object'
+          && !Array.isArray(record)
+          && (
+            record.decision_role
+            || record.decisionRole
+            || (record.fields && typeof record.fields === 'object' && !Array.isArray(record.fields))
+          )
+        ));
+        if (
+          parsed
+          && typeof parsed === 'object'
+          && !Array.isArray(parsed)
+          && (!schema || schema === 'economist.response.v2')
+          && recordsLookLikeFinalRows
+        ) {
+          return candidate;
+        }
+      } catch (_error) {
+        // Keep trying other candidate shapes.
+      }
+    }
+    return '';
+  }
+
+  function extractPortfolioFinalJsonText(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return '';
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const objectStart = raw.indexOf('{');
+    const objectEnd = raw.lastIndexOf('}');
+    if (objectStart >= 0 && objectEnd > objectStart) {
+      candidates.push(raw.slice(objectStart, objectEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) continue;
+        const schema = typeof parsed.schema === 'string' ? parsed.schema.trim().toLowerCase() : '';
+        const status = typeof parsed.status === 'string' ? parsed.status.trim() : '';
+        const hasLegacyPortfolioShape = (
+          parsed.save && typeof parsed.save === 'object' && !Array.isArray(parsed.save)
+        ) || (
+          parsed.totals && typeof parsed.totals === 'object' && !Array.isArray(parsed.totals)
+        ) || (
+          Object.prototype.hasOwnProperty.call(parsed, 'feedback_payload')
+        ) || (
+          parsed.mcp_confirmation && typeof parsed.mcp_confirmation === 'object' && !Array.isArray(parsed.mcp_confirmation)
+        ) || (
+          parsed.execution_summary && typeof parsed.execution_summary === 'object' && !Array.isArray(parsed.execution_summary)
+        ) || (
+          Object.prototype.hasOwnProperty.call(parsed, 'mcp_feedback_json')
+        ) || (
+          Array.isArray(parsed.positions) && Array.isArray(parsed.layers)
+        );
+        const hasPortfolioSummary = (
+          typeof parsed.thesis_construction_summary === 'string'
+          || typeof parsed.author_thesis_commentary === 'string'
+        );
+        const hasPortfolioConstructionCommentary = (
+          typeof parsed.portfolio_construction_commentary === 'string'
+          || typeof parsed.portfolio_decision_narrative === 'string'
+        );
+        const hasTextPortfolioShape = (
+          hasPortfolioSummary
+          && hasPortfolioConstructionCommentary
+          && Array.isArray(parsed.positions)
+          && Array.isArray(parsed.layers)
+        );
+        const isPortfolioSchema = schema === 'portfolio.final_response.v1' || schema === 'portfolio.final_response.v2';
+        if (hasTextPortfolioShape || ((status || isPortfolioSchema) && hasLegacyPortfolioShape)) {
+          return candidate;
+        }
+      } catch (_error) {
+        // Keep trying other candidate shapes.
+      }
+    }
+    return '';
+  }
+
+  function rememberStage12InvestmentJson(promptNumber, responseText) {
+    const candidate = extractStage12InvestmentJsonText(responseText);
+    if (!candidate) return false;
+    const canonicalStage12Prompt = 15;
+    const hasExistingStage12 = typeof window._stage12ResponseToSave === 'string'
+      && window._stage12ResponseToSave.trim();
+    if (hasExistingStage12 && Number.isInteger(promptNumber) && promptNumber > canonicalStage12Prompt) {
+      console.log(
+        `[copy-flow] [capture:stage12-json-skip-copy] prompt=${promptNumber} keptPrompt=${window._stage12ResponsePrompt || canonicalStage12Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+      );
+      return true;
+    }
+    window._stage12ResponseToSave = candidate;
+    window._stage12ResponsePrompt = canonicalStage12Prompt;
+    console.log(
+      `[copy-flow] [capture:stage12-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalStage12Prompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+    );
+    return true;
+  }
+
+  function extractSectorMemoryJsonText(text) {
+    const raw = typeof text === 'string' ? text.trim() : '';
+    if (!raw) return '';
+
+    const candidates = [raw];
+    const fenced = raw.match(/```(?:json)?\s*([\s\S]*?)```/i);
+    if (fenced && typeof fenced[1] === 'string') {
+      candidates.push(fenced[1].trim());
+    }
+
+    const arrayStart = raw.indexOf('[');
+    const arrayEnd = raw.lastIndexOf(']');
+    if (arrayStart >= 0 && arrayEnd >= arrayStart) {
+      candidates.push(raw.slice(arrayStart, arrayEnd + 1).trim());
+    }
+
+    for (const candidate of candidates) {
+      if (!candidate) continue;
+      try {
+        const parsed = JSON.parse(candidate);
+        if (!Array.isArray(parsed)) continue;
+        const validItems = parsed.every((item) => {
+          if (!item || typeof item !== 'object' || Array.isArray(item)) return false;
+          const sektor = typeof item.sektor === 'string' ? item.sektor.trim() : '';
+          const podsektor = typeof item.podsektor === 'string' ? item.podsektor.trim() : '';
+          const opis = typeof item.opis === 'string' ? item.opis.trim() : '';
+          return !!(sektor && podsektor && opis);
+        });
+        if (validItems) {
+          return candidate;
+        }
+      } catch (_error) {
+        // Keep trying other candidate shapes.
+      }
+    }
+    return '';
+  }
+
+  function rememberSectorMemoryJson(promptNumber, responseText) {
+    const candidate = extractSectorMemoryJsonText(responseText);
+    if (!candidate) return false;
+    const canonicalSectorMemoryPrompt = 16;
+    const hasExistingSectorMemory = typeof window._sectorMemoryResponseToSave === 'string'
+      && window._sectorMemoryResponseToSave.trim();
+    if (hasExistingSectorMemory && Number.isInteger(promptNumber) && promptNumber > canonicalSectorMemoryPrompt) {
+      console.log(
+        `[copy-flow] [capture:sector-memory-json-skip-copy] prompt=${promptNumber} keptPrompt=${window._sectorMemoryResponsePrompt || canonicalSectorMemoryPrompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+      );
+      return true;
+    }
+    window._sectorMemoryResponseToSave = candidate;
+    window._sectorMemoryResponsePrompt = canonicalSectorMemoryPrompt;
+    console.log(
+      `[copy-flow] [capture:sector-memory-json] prompt=${Number.isInteger(promptNumber) ? promptNumber : 'n/a'} selectedPrompt=${canonicalSectorMemoryPrompt} len=${candidate.length} fp=${computeCopyFingerprint(candidate)}`
+    );
+    return true;
+  }
   
+  // Missing-response recovery: resend the same prompt before manual fallback.
+  async function resendPromptAfterMissingResponse(
+    reason,
+    promptText,
+    counter,
+    absoluteCurrentPrompt,
+    totalPromptsForRun,
+    absoluteStageIndex
+  ) {
+    if (missingResponsePromptResendMaxAttempts <= 0) {
+      return { resent: false, reason: 'disabled', attempts: 0 };
+    }
+
+    const promptKey = normalizePromptMetricIndex(absoluteCurrentPrompt)
+      || (Number.isInteger(absoluteCurrentPrompt) ? absoluteCurrentPrompt : 0)
+      || 0;
+    const previousAttempts = missingResponsePromptResendAttemptsByPrompt.get(promptKey) || 0;
+    if (previousAttempts >= missingResponsePromptResendMaxAttempts) {
+      return {
+        resent: false,
+        reason: 'max_attempts_exhausted',
+        attempts: previousAttempts,
+        maxAttempts: missingResponsePromptResendMaxAttempts
+      };
+    }
+
+    const nextAttempt = previousAttempts + 1;
+    missingResponsePromptResendAttemptsByPrompt.set(promptKey, nextAttempt);
+    runMetrics.missingResponsePromptResends += 1;
+
+    const safePrompt = Number.isInteger(absoluteCurrentPrompt) && absoluteCurrentPrompt > 0
+      ? absoluteCurrentPrompt
+      : 0;
+    const safeStageIndex = Number.isInteger(absoluteStageIndex)
+      ? absoluteStageIndex
+      : (safePrompt > 0 ? safePrompt - 1 : null);
+    const stageName = safePrompt > 0 ? `Prompt ${safePrompt}` : 'Prompt';
+    const statusText = `Brak odpowiedzi - ponawiam prompt ${nextAttempt}/${missingResponsePromptResendMaxAttempts}`;
+
+    console.warn('[no-response-resend] Resending previous prompt', {
+      reason,
+      prompt: safePrompt,
+      attempt: nextAttempt,
+      maxAttempts: missingResponsePromptResendMaxAttempts
+    });
+    updateCounter(counter, safePrompt, totalPromptsForRun, statusText);
+    notifyProcess('PROCESS_PROGRESS', {
+      status: 'running',
+      lifecycleStatus: 'running',
+      currentPrompt: safePrompt,
+      totalPrompts: totalPromptsForRun,
+      ...(safeStageIndex !== null ? { stageIndex: safeStageIndex } : {}),
+      stageName,
+      phase: 'prompt_send',
+      statusCode: 'chat.no_response_resend',
+      statusText,
+      reason: `no_response_resend_${reason || 'missing_response'}`,
+      needsAction: false,
+      timestamp: Date.now()
+    });
+
+    if (missingResponsePromptResendDelayMs > 0) {
+      await new Promise((resolve) => setTimeout(resolve, missingResponsePromptResendDelayMs));
+    }
+    if (shouldStopNow()) {
+      return { resent: false, stopped: true, reason: 'force_stopped' };
+    }
+
+    const resendPromptSnapshotBeforeSend = getPromptDomSnapshot();
+    const resent = await sendPromptUntilSuccess(
+      promptText,
+      interfaceReadyWaitMs,
+      counter,
+      safePrompt,
+      totalPromptsForRun,
+      {
+        allowInferSent: true,
+        promptSnapshotBeforeSend: resendPromptSnapshotBeforeSend
+      }
+    );
+    if (shouldStopNow()) {
+      return { resent: false, stopped: true, reason: 'force_stopped' };
+    }
+
+    if (!resent) {
+      const blocker = captureGenerationBlockerState();
+      return {
+        resent: false,
+        reason: blocker ? 'blocked' : 'resend_send_failed',
+        blocker,
+        attempts: nextAttempt,
+        maxAttempts: missingResponsePromptResendMaxAttempts
+      };
+    }
+
+    return {
+      resent: true,
+      reason: 'resent',
+      attempts: nextAttempt,
+      maxAttempts: missingResponsePromptResendMaxAttempts
+    };
+  }
+
   // Funkcja czekająca aż interface ChatGPT będzie gotowy do wysłania kolejnego prompta
   async function waitForInterfaceReady(maxWaitMs, counter = null, promptIndex = 0, promptTotal = 0) {
     if (shouldStopNow()) return false;
@@ -35781,6 +41447,25 @@ async function injectToChat(
     let lastAssistantText = '';
     let lastAssistantChangeAt = Date.now();
     let readyIdleSince = Date.now();
+    let lastGeneratingActivityAt = Date.now();
+    let lastGenerationSignature = '';
+    let staleGenerationOverrideWarned = false;
+    let incompleteStaleReadyWarnKey = '';
+    const staleGeneratingReadyOverrideMs = 45_000;
+    const staleGeneratingFailMs = 180_000;
+    const getGenerationSignature = (genStatus) => {
+      if (!genStatus?.generating) return '';
+      const element = genStatus.element instanceof HTMLElement ? genStatus.element : null;
+      if (!element) return `${genStatus.reason || 'unknown'}|no-element`;
+      return [
+        genStatus.reason || 'unknown',
+        element.tagName || '',
+        element.id || '',
+        element.getAttribute('data-testid') || '',
+        element.getAttribute('aria-label') || '',
+        compactText(element.textContent || '').slice(0, 80)
+      ].join('|');
+    };
     const initialAssistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
     if (initialAssistantMessages.length > 0) {
       const lastMsg = initialAssistantMessages[initialAssistantMessages.length - 1];
@@ -35802,12 +41487,36 @@ async function injectToChat(
         console.warn('⚠️ Wykryto limit/restriction podczas czekania na gotowość interfejsu.');
         return false;
       }
+      if (hasRetryableChatGptGenerationErrorMessage()) {
+        const retryResult = await clickRetryForRetryableGenerationError('interface_ready');
+        if (retryResult.clicked) {
+          readyIdleSince = Date.now();
+          consecutiveReady = 0;
+          if (counter) {
+            updateCounter(counter, promptIndex, promptTotal, 'ChatGPT error - Retry');
+          }
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+      }
       // Sprawdź wszystkie elementy interfejsu
       const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
                      document.querySelector('div[contenteditable="true"]');
       
       // POPRAWKA: Użyj isGenerating() zamiast tylko sprawdzania stopButton
       const genStatus = isGenerating();
+      if (!genStatus.generating) {
+        lastGenerationSignature = '';
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
+      } else {
+        const generationSignature = getGenerationSignature(genStatus);
+        if (generationSignature !== lastGenerationSignature) {
+          lastGenerationSignature = generationSignature;
+          lastGeneratingActivityAt = Date.now();
+          staleGenerationOverrideWarned = false;
+        }
+      }
       
       // Interface jest gotowy gdy:
       // 1. BRAK wskaźników generowania (isGenerating() == false)
@@ -35821,6 +41530,8 @@ async function injectToChat(
       if (textChangedNow) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
       }
       const progressText = (currentLastText || '').toLowerCase();
       const hasProgressText = progressText.includes('research in progress') ||
@@ -35832,11 +41543,55 @@ async function injectToChat(
         progressText.includes('collecting sources') ||
         progressText.includes('checking sources') ||
         progressText.includes('looking up');
-      if (genStatus.generating || textChangedNow || hasProgressText) {
+      if (textChangedNow || hasProgressText) {
         readyIdleSince = Date.now();
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
       }
       const textStable = Date.now() - lastAssistantChangeAt >= 2500;
-      const isReady = noGeneration && editorReady && textStable && !hasProgressText;
+      const currentUserCount = document.querySelectorAll('[data-message-author-role="user"]').length;
+      const currentAssistantCount = document.querySelectorAll('[data-message-author-role="assistant"]').length;
+      const conversationLooksBalanced = currentAssistantCount > 0 && currentAssistantCount >= currentUserCount;
+      const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastGeneratingActivityAt) : 0;
+      const generationLooksStaleBase = genStatus.generating
+        && editorReady
+        && textStable
+        && !hasProgressText
+        && conversationLooksBalanced
+        && staleGeneratingForMs >= staleGeneratingReadyOverrideMs;
+      const staleReadyCompletion = getResponseCompletionReadiness(currentLastText, '', promptIndex, {
+        forStaleGenerating: true
+      });
+      const generationLooksStale = generationLooksStaleBase && staleReadyCompletion.ready;
+      if (generationLooksStaleBase && !staleReadyCompletion.ready) {
+        const warnKey = [
+          staleReadyCompletion.reason || 'unknown',
+          (staleReadyCompletion.missingMarkers || []).join(','),
+          currentLastText.length
+        ].join('|');
+        if (warnKey !== incompleteStaleReadyWarnKey) {
+          incompleteStaleReadyWarnKey = warnKey;
+          console.warn('[interface-ready] Nie ignoruje stale generating - ostatnia odpowiedz nie wyglada na kompletna.', {
+            reason: genStatus.reason,
+            staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+            userCount: currentUserCount,
+            assistantCount: currentAssistantCount,
+            responseLength: currentLastText.length,
+            completionReason: staleReadyCompletion.reason
+          });
+        }
+      }
+      if (generationLooksStale && !staleGenerationOverrideWarned) {
+        staleGenerationOverrideWarned = true;
+        console.warn('[interface-ready] Stale generating indicator ignored; editor and conversation look ready.', {
+          reason: genStatus.reason,
+          staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+          userCount: currentUserCount,
+          assistantCount: currentAssistantCount,
+          completionReason: staleReadyCompletion.reason
+        });
+      }
+      const isReady = (noGeneration || generationLooksStale) && editorReady && textStable && !hasProgressText;
       
       if (isReady) {
         consecutiveReady++;
@@ -35873,9 +41628,16 @@ async function injectToChat(
           editorReady: editorReady,
           textStable: textStable,
           hasProgressText: hasProgressText,
+          conversationLooksBalanced,
+          staleGeneratingFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
           consecutiveReady: consecutiveReady,
           stalledFor: `${Math.round((Date.now() - readyIdleSince) / 1000)}s`
         });
+      }
+
+      if (genStatus.generating && !generationLooksStale && staleGeneratingForMs >= staleGeneratingFailMs && !hasProgressText) {
+        console.error(`❌ Timeout stale-generating interfejsu (${Math.round(staleGeneratingForMs / 1000)}s, reason=${genStatus.reason})`);
+        return false;
       }
 
       if (effectiveMaxWaitMs > 0 && !genStatus.generating && (Date.now() - readyIdleSince) >= effectiveMaxWaitMs) {
@@ -36406,6 +42168,7 @@ async function injectToChat(
     await new Promise(resolve => setTimeout(resolve, 500));
     
     console.log("✓ Klikam Send...");
+    const sendClickSnapshot = getPromptDomSnapshot();
     submitButton.click();
     
     // WERYFIKACJA: Sprawdź czy kliknięcie zadziałało
@@ -36443,25 +42206,31 @@ async function injectToChat(
       const userMessages = document.querySelectorAll('[data-message-author-role="user"]');
       const assistantMessages = document.querySelectorAll('[data-message-author-role="assistant"]');
       const hasMessages = userMessages.length > 0 || assistantMessages.length > 0;
+      const baseUserCount = Number.isInteger(sendClickSnapshot.userCount) ? sendClickSnapshot.userCount : 0;
+      const userAdvancedSinceClick = userMessages.length > baseUserCount;
       
       // GŁÓWNY wskaźnik: stopButton (najbardziej pewny)
       const hasStopButton = !!stopBtn;
-      
-      // ALTERNATYWNY wskaźnik: interface zablokowany + są jakieś wiadomości w DOM
-      const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages;
-      
+
       // NOWY wskaźnik: sprawdź czy nasza wiadomość pojawiła się w DOM
       let messageInDOM = false;
       if (userMessages.length > 0) {
         const lastUserMessage = userMessages[userMessages.length - 1];
         const messageText = lastUserMessage.textContent || lastUserMessage.innerText || '';
-        // Sprawdź czy ostatnia wiadomość użytkownika zawiera fragment naszego prompta
-        const promptFragment = normalizedPromptText.substring(0, 50);
-        if (messageText.includes(promptFragment)) {
+        const normalizedMessageText = compactText(messageText);
+        const previousLastUserText = typeof sendClickSnapshot.lastUserText === 'string'
+          ? sendClickSnapshot.lastUserText
+          : '';
+        const userMessageChangedSinceClick = normalizedMessageText && normalizedMessageText !== previousLastUserText;
+        const promptFragment = getPromptProbeFragment(normalizedPromptText);
+        if ((userAdvancedSinceClick || userMessageChangedSinceClick) && (!promptFragment || normalizedMessageText.includes(promptFragment))) {
           messageInDOM = true;
-          console.log(`✅ Znaleziono naszą wiadomość w DOM (${messageText.length} znaków)`);
+          console.log(`✅ Znaleziono naszą wiadomość w DOM (${normalizedMessageText.length} znaków)`);
         }
       }
+
+      // ALTERNATYWNY wskaźnik: interface zablokowany po nowym user turnie.
+      const interfaceBlocked = (editorDisabled || (editorEmpty && sendDisabled)) && hasMessages && userAdvancedSinceClick;
       
       // Jeśli którykolwiek z PEWNYCH wskaźników potwierdza wysłanie:
       if (hasStopButton || interfaceBlocked || messageInDOM) {
@@ -36472,6 +42241,7 @@ async function injectToChat(
           sendDisabled,
           userMsgCount: userMessages.length,
           assistantMsgCount: assistantMessages.length,
+          userAdvancedSinceClick,
           messageInDOM
         });
         verified = true;
@@ -36597,30 +42367,30 @@ async function injectToChat(
       
       // Stwórz licznik
       const counter = createCounter();
-      const thinkingEffortResult = await ensureRequestedComposerThinkingEffort(counter);
+      const thinkingModeResult = await ensureThinkingModeBeforeRun(counter);
       if (shouldStopNow()) {
         return forceStopResult();
       }
-      if (!thinkingEffortResult?.success) {
+      if (!thinkingModeResult?.success) {
         const effortLabel = requestedComposerThinkingEffort || 'unknown';
-        const effortError = thinkingEffortResult?.error || 'thinking_effort_not_set';
-        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, `Blad trybu thinking: ${effortLabel}`);
+        const effortError = thinkingModeResult?.error || 'thinking_mode_not_set';
+        updateCounter(counter, preChainCurrentPrompt, totalPromptsForRun, 'Thinking: nie potwierdzono, kontynuuje');
         notifyProcess('PROCESS_PROGRESS', {
-          status: 'failed',
+          status: 'running',
+          lifecycleStatus: 'running',
           currentPrompt: preChainCurrentPrompt,
           totalPrompts: totalPromptsForRun,
-          statusText: `Nie ustawiono trybu thinking (${effortLabel})`,
-          reason: 'thinking_effort_not_set',
+          phase: 'editor_ready',
+          statusCode: 'chat.thinking_mode_unconfirmed',
+          statusText: `Nie potwierdzono trybu Thinking${requestedComposerThinkingEffort ? ` (${effortLabel})` : ''}; kontynuuje`,
+          reason: 'thinking_mode_unconfirmed',
           error: effortError,
           needsAction: false
         });
-        return {
-          success: false,
-          lastResponse: '',
-          error: 'thinking_effort_not_set',
-          details: effortError,
-          metrics: buildMetricsSnapshot({ completed: false, reason: 'thinking_effort_not_set' })
-        };
+        console.warn('[thinking-mode] mode not confirmed after setup attempts; continuing prompt chain', {
+          effort: effortLabel,
+          error: effortError
+        });
       }
 
       if (!isResume) {
@@ -36691,7 +42461,16 @@ async function injectToChat(
         }
 
         updateCounter(counter, promptOffset, totalPromptsForRun, 'Czekam na odpowiedz...');
-        const payloadResponseCompleted = await waitForResponse(responseWaitMs);
+        const payloadResponseCompleted = await waitForResponse(responseWaitMs, {
+          currentPrompt: promptOffset,
+          totalPrompts: totalPromptsForRun,
+          stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+          stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+          promptText: payload,
+          promptNumber: promptOffset,
+          responseBaselineSnapshot: payloadPromptSnapshot,
+          requireFreshResponse: true
+        });
         if (shouldStopNow()) {
           return forceStopResult();
         }
@@ -36708,14 +42487,103 @@ async function injectToChat(
             });
           }
         }
-        console.log('Artykul przetworzony');
+        console.log('Artykul przetworzony - waliduje Stage 0 przed prompt chain');
 
-        stage0Response = await getLastResponseText();
         const stage0PromptIndex = normalizePromptMetricIndex(promptOffset);
-        const stage0Validated = validateResponse(stage0Response);
-        registerStageCompletion(stage0PromptIndex, stage0Response, stage0Validated);
+        let stage0Validation = null;
+        let stage0ValidationWaitAttempts = 0;
+        while (true) {
+          if (shouldStopNow()) {
+            return forceStopResult();
+          }
+
+          stage0Response = await getLastResponseText({
+            promptText: payload,
+            promptNumber: promptOffset,
+            preferLatest: true,
+            responseBaselineSnapshot: payloadPromptSnapshot,
+            requireFreshResponse: true
+          });
+          stage0Validation = validateStageResponseForPrompt(stage0Response, payload, promptOffset);
+          if (stage0Validation.valid) {
+            break;
+          }
+
+          console.error('[stage0] Nie wysylam prompt chain - Stage 0 jest niekompletny', {
+            responseLength: stage0Response.length,
+            reason: stage0Validation.reason,
+            missingMarkers: stage0Validation.missingMarkers || []
+          });
+          updateCounter(
+            counter,
+            promptOffset,
+            totalPromptsForRun,
+            stage0Validation.statusText || 'Stage 0 niekompletny'
+          );
+
+          const shouldTryNativeContinue = compactText(stage0Response) && (
+            stage0Validation.reason === 'invalid_or_incomplete_json_array' ||
+            stage0Validation.reason === 'basic_response_invalid'
+          );
+          if (shouldTryNativeContinue) {
+            const nativeContinueResult = await clickChatGptContinueGeneratingIfAvailable(stage0Validation.reason);
+            if (nativeContinueResult.clicked) {
+              updateCounter(counter, promptOffset, totalPromptsForRun, 'Kontynuuje uciety Stage 0...');
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: promptOffset,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+                stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+                promptText: payload,
+                promptNumber: promptOffset,
+                responseBaselineSnapshot: payloadPromptSnapshot,
+                requireFreshResponse: true
+              });
+              continue;
+            }
+          }
+
+          const action = await showContinueButton(counter, promptOffset, totalPromptsForRun, 'stage0_invalid_response');
+          if (action === 'skip') {
+            console.warn('[stage0] Ignoruje skip - Stage 1 nie moze ruszyc bez kompletnego Stage 0', {
+              reason: stage0Validation.reason,
+              missingMarkers: stage0Validation.missingMarkers || []
+            });
+            updateCounter(counter, promptOffset, totalPromptsForRun, 'Nie wysylam Stage 1 - Stage 0 niekompletny');
+          }
+
+          stage0ValidationWaitAttempts += 1;
+          console.log(`[stage0] Czekam ponownie na kompletna odpowiedz Stage 0 (attempt ${stage0ValidationWaitAttempts})`);
+          await waitForResponse(responseWaitMs, {
+            currentPrompt: promptOffset,
+            totalPrompts: totalPromptsForRun,
+            stageIndex: promptOffset > 0 ? promptOffset - 1 : null,
+            stageName: promptOffset > 0 ? `Prompt ${promptOffset}` : 'Payload',
+            promptText: payload,
+            promptNumber: promptOffset,
+            responseBaselineSnapshot: payloadPromptSnapshot,
+            requireFreshResponse: true
+          });
+        }
+
+        registerStageCompletion(stage0PromptIndex, stage0Response, true);
         if (stage0Response && stage0Response.trim().length > 0) {
           console.log(`Stage 0 captured (${stage0Response.length} znakow) - bedzie wstawione w prompt chain`);
+          copyPortfolioPromptOneResponseToDatabase(stage0Response)
+            .then((portfolioPromptOneCopy) => {
+              if (portfolioPromptOneCopy?.attempted) {
+                console[portfolioPromptOneCopy.ok ? 'log' : 'warn']('[copy-flow] [portfolio-prompt1:result]', {
+                  responseId: portfolioPromptOneCopy.responseId || '',
+                  ok: portfolioPromptOneCopy.ok === true,
+                  error: portfolioPromptOneCopy.error || ''
+                });
+              }
+            })
+            .catch((error) => {
+              console.warn('[copy-flow] [portfolio-prompt1:background-copy-failed]', {
+                error: error?.message || String(error)
+              });
+            });
         } else {
           console.warn('Nie udalo sie pobrac Stage 0 (pusty tekst) - prompt chain bez wstawienia');
           stage0Response = '';
@@ -36799,7 +42667,17 @@ async function injectToChat(
         function startSwKeepalive() {
           if (_swKeepaliveTimer) return;
           _swKeepaliveTimer = setInterval(() => {
-            if (!chrome?.runtime?.sendMessage) {
+            let sendMessage = null;
+            try {
+              sendMessage = chrome?.runtime?.sendMessage;
+            } catch (error) {
+              _swKeepaliveErrors++;
+              if (_swKeepaliveErrors <= 5) {
+                console.warn(`[sw-keepalive] chrome.runtime unavailable (errors=${_swKeepaliveErrors}): ${error?.message || error}`);
+              }
+              return;
+            }
+            if (typeof sendMessage !== 'function') {
               _swKeepaliveErrors++;
               if (_swKeepaliveErrors <= 3) {
                 console.warn(`[sw-keepalive] chrome.runtime unavailable (errors=${_swKeepaliveErrors})`);
@@ -36807,7 +42685,17 @@ async function injectToChat(
               return;
             }
             _swKeepaliveCount++;
-            chrome.runtime.sendMessage({ type: 'KEEPALIVE', seq: _swKeepaliveCount }).catch((err) => {
+            let keepalivePromise = null;
+            try {
+              keepalivePromise = sendMessage.call(chrome.runtime, { type: 'KEEPALIVE', seq: _swKeepaliveCount });
+            } catch (err) {
+              _swKeepaliveErrors++;
+              if (_swKeepaliveErrors <= 5) {
+                console.warn(`[sw-keepalive] ping #${_swKeepaliveCount} threw: ${err?.message || err}`);
+              }
+              return;
+            }
+            Promise.resolve(keepalivePromise).catch((err) => {
               _swKeepaliveErrors++;
               if (_swKeepaliveErrors <= 5) {
                 console.warn(`[sw-keepalive] ping #${_swKeepaliveCount} failed: ${err?.message || err}`);
@@ -37040,7 +42928,16 @@ async function injectToChat(
               return forceStopResult();
             }
             console.log(`[${i + 1}/${promptChain.length}] Wywołuję waitForResponse()...`);
-            const completed = await waitForResponse(responseWaitMs);
+            const completed = await waitForResponse(responseWaitMs, {
+              currentPrompt: absoluteCurrentPrompt,
+              totalPrompts: totalPromptsForRun,
+              stageIndex: absoluteStageIndex,
+              stageName: `Prompt ${absoluteCurrentPrompt}`,
+              promptText: prompt,
+              promptNumber: absoluteCurrentPrompt,
+              responseBaselineSnapshot: promptSnapshotBeforeSend,
+              requireFreshResponse: true
+            });
             if (shouldStopNow()) {
               return forceStopResult();
             }
@@ -37084,6 +42981,39 @@ async function injectToChat(
                 });
               }
                
+              const resendAfterTimeout = await resendPromptAfterMissingResponse(
+                'timeout',
+                prompt,
+                counter,
+                absoluteCurrentPrompt,
+                totalPromptsForRun,
+                absoluteStageIndex
+              );
+              if (shouldStopNow() || resendAfterTimeout.stopped) {
+                return forceStopResult();
+              }
+              if (resendAfterTimeout.blocker) {
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                return buildGenerationBlockedResult({
+                  blocker: resendAfterTimeout.blocker,
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  phase: 'prompt_send'
+                });
+              }
+              if (resendAfterTimeout.resent) {
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
+                continue;
+              }
+              if (resendAfterTimeout.reason === 'max_attempts_exhausted') {
+                console.warn('[no-response-resend] Prompt resend limit exhausted after timeout', {
+                  prompt: absoluteCurrentPrompt,
+                  attempts: resendAfterTimeout.attempts,
+                  maxAttempts: resendAfterTimeout.maxAttempts
+                });
+              }
+
               const autoRecoveryHandoff = maybeTriggerAutoRecovery(
                 'timeout',
                 i,
@@ -37124,7 +43054,13 @@ async function injectToChat(
               return forceStopResult();
             }
             console.log(`[${i + 1}/${promptChain.length}] Walidacja odpowiedzi...`);
-            responseText = await getLastResponseText();
+            responseText = await getLastResponseText({
+              promptText: prompt,
+              promptNumber: absoluteCurrentPrompt,
+              preferLatest: true,
+              responseBaselineSnapshot: promptSnapshotBeforeSend,
+              requireFreshResponse: true
+            });
             const validationBlocker = captureGenerationBlockerState(responseText, 'validation_text');
             if (validationBlocker) {
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
@@ -37136,30 +43072,144 @@ async function injectToChat(
                 phase: 'capture_validate'
               });
             }
-            if (
-              isRetryableChatGptGenerationErrorText(responseText) &&
-              validationGenerationErrorRetryAttempts < 2
-            ) {
+            if (isRetryableChatGptGenerationErrorText(responseText) || hasRetryableChatGptGenerationErrorMessage()) {
               const retryResult = await clickRetryForRetryableGenerationError('validation');
               if (retryResult.clicked) {
                 validationGenerationErrorRetryAttempts += 1;
-                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'ChatGPT error - Retry');
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, `ChatGPT error - Retry #${validationGenerationErrorRetryAttempts}`);
                 await new Promise((resolve) => setTimeout(resolve, 1200));
-                await waitForResponse(responseWaitMs);
+                await waitForResponse(responseWaitMs, {
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  stageName: `Prompt ${absoluteCurrentPrompt}`,
+                  promptText: prompt,
+                  promptNumber: absoluteCurrentPrompt,
+                  responseBaselineSnapshot: promptSnapshotBeforeSend,
+                  requireFreshResponse: true
+                });
                 continue;
               }
             }
             const dataGapDirective = parseDataGapDirectiveResponse(responseText);
-            const isValid = validateResponse(responseText);
+            const stageResponseValidation = validateStageResponseForPrompt(
+              responseText,
+              prompt,
+              absoluteCurrentPrompt
+            );
+            const isValid = stageResponseValidation.valid;
             
             if (!isValid) {
               // Odpowiedź niepoprawna - pokaż przyciski i czekaj na user
               console.error(`❌ Odpowiedź niepoprawna przy promptcie ${i + 1}/${promptChain.length}`);
-              console.error(`❌ Długość: ${responseText.length} znaków (wymagane min 50)`);
-              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Odpowiedz za krotka');
+              const missingSoftMarkers = Array.isArray(stageResponseValidation.missingMarkers) && stageResponseValidation.missingMarkers.length > 0
+                ? ` (${stageResponseValidation.missingMarkers.join(', ')})`
+                : '';
+              console.error(`❌ Długość: ${responseText.length} znaków; powód: ${stageResponseValidation.reason}${missingSoftMarkers}`);
+              updateCounter(
+                counter,
+                absoluteCurrentPrompt,
+                totalPromptsForRun,
+                stageResponseValidation.statusText || 'Odpowiedz niepoprawna'
+              );
+              if (!compactText(responseText)) {
+                const resendAfterEmptyResponse = await resendPromptAfterMissingResponse(
+                  'empty_response',
+                  prompt,
+                  counter,
+                  absoluteCurrentPrompt,
+                  totalPromptsForRun,
+                  absoluteStageIndex
+                );
+                if (shouldStopNow() || resendAfterEmptyResponse.stopped) {
+                  return forceStopResult();
+                }
+                if (resendAfterEmptyResponse.blocker) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Limit/restriction - wznow pozniej');
+                  return buildGenerationBlockedResult({
+                    blocker: resendAfterEmptyResponse.blocker,
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    phase: 'prompt_send'
+                  });
+                }
+                if (resendAfterEmptyResponse.resent) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
+                  await waitForResponse(responseWaitMs, {
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    stageName: `Prompt ${absoluteCurrentPrompt}`,
+                    promptText: prompt,
+                    promptNumber: absoluteCurrentPrompt,
+                    responseBaselineSnapshot: promptSnapshotBeforeSend,
+                    requireFreshResponse: true
+                  });
+                  if (shouldStopNow()) {
+                    return forceStopResult();
+                  }
+                  continue;
+                }
+                if (resendAfterEmptyResponse.reason === 'max_attempts_exhausted') {
+                  console.warn('[no-response-resend] Prompt resend limit exhausted after empty response', {
+                    prompt: absoluteCurrentPrompt,
+                    attempts: resendAfterEmptyResponse.attempts,
+                    maxAttempts: resendAfterEmptyResponse.maxAttempts
+                  });
+                }
+              }
+              const shouldTryNativeContinue = compactText(responseText) && (
+                stageResponseValidation.reason === 'invalid_or_incomplete_json_array' ||
+                stageResponseValidation.reason === 'basic_response_invalid'
+              );
+              if (shouldTryNativeContinue) {
+                const nativeContinueResult = await clickChatGptContinueGeneratingIfAvailable(stageResponseValidation.reason);
+                if (nativeContinueResult.clicked) {
+                  updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Kontynuuje ucieta odpowiedz...');
+                  await waitForResponse(responseWaitMs, {
+                    currentPrompt: absoluteCurrentPrompt,
+                    totalPrompts: totalPromptsForRun,
+                    stageIndex: absoluteStageIndex,
+                    stageName: `Prompt ${absoluteCurrentPrompt}`,
+                    promptText: prompt,
+                    promptNumber: absoluteCurrentPrompt,
+                    responseBaselineSnapshot: promptSnapshotBeforeSend,
+                    requireFreshResponse: true
+                  });
+                  if (shouldStopNow()) {
+                    return forceStopResult();
+                  }
+                  continue;
+                }
+              }
               const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'invalid_response');
+              const mustWaitForCompleteResponse = (
+                stageResponseValidation.reason === 'invalid_or_incomplete_json_array'
+              );
               
-              if (action === 'skip') {
+              if (action === 'skip' && mustWaitForCompleteResponse) {
+                console.warn('[response-completion] Ignoruje skip dla niepelnej odpowiedzi etapu', {
+                  prompt: absoluteCurrentPrompt,
+                  reason: stageResponseValidation.reason,
+                  missingMarkers: stageResponseValidation.missingMarkers || []
+                });
+                updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Nie wysylam kolejnego etapu - JSON nie jest domkniety');
+                await waitForResponse(responseWaitMs, {
+                  currentPrompt: absoluteCurrentPrompt,
+                  totalPrompts: totalPromptsForRun,
+                  stageIndex: absoluteStageIndex,
+                  stageName: `Prompt ${absoluteCurrentPrompt}`,
+                  promptText: prompt,
+                  promptNumber: absoluteCurrentPrompt,
+                  responseBaselineSnapshot: promptSnapshotBeforeSend,
+                  requireFreshResponse: true
+                });
+                if (shouldStopNow()) {
+                  return forceStopResult();
+                }
+                continue;
+              } else if (action === 'skip') {
                 console.log(`⏭️ User wybrał pominięcie - akceptuję krótką odpowiedź i idę dalej`);
                 responseValid = true; // Wyjdź z pętli walidacji
                 break;
@@ -37170,12 +43220,74 @@ async function injectToChat(
               updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam na odpowiedz...');
               
               // Poczekaj na zakończenie odpowiedzi ChatGPT
-              await waitForResponse(responseWaitMs);
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`,
+                promptText: prompt,
+                promptNumber: absoluteCurrentPrompt,
+                responseBaselineSnapshot: promptSnapshotBeforeSend,
+                requireFreshResponse: true
+              });
               if (shouldStopNow()) {
                 return forceStopResult();
               }
               
               // Powtórz walidację
+              continue;
+            }
+
+            updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Czekam az ChatGPT skonczy generowac...');
+            const generationFinished = await waitForChatGptGenerationFinishedBeforeNextPrompt(
+              responseWaitMs,
+              counter,
+              {
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`
+              }
+            );
+            if (shouldStopNow()) {
+              return forceStopResult();
+            }
+            if (!generationFinished.finished) {
+              console.warn('[response-completion] Nie wysylam kolejnego etapu - generowanie nadal nie jest zakonczone', {
+                prompt: absoluteCurrentPrompt,
+                reason: generationFinished.reason,
+                clickedContinue: generationFinished.clickedContinue === true
+              });
+              updateCounter(counter, absoluteCurrentPrompt, totalPromptsForRun, 'Nie wysylam kolejnego etapu - ChatGPT nadal generuje');
+              const action = await showContinueButton(counter, absoluteCurrentPrompt, totalPromptsForRun, 'generation_not_finished');
+              console.warn('[response-completion] Decyzja po generation_not_finished', {
+                prompt: absoluteCurrentPrompt,
+                action
+              });
+              await waitForResponse(responseWaitMs, {
+                currentPrompt: absoluteCurrentPrompt,
+                totalPrompts: totalPromptsForRun,
+                stageIndex: absoluteStageIndex,
+                stageName: `Prompt ${absoluteCurrentPrompt}`,
+                promptText: prompt,
+                promptNumber: absoluteCurrentPrompt,
+                responseBaselineSnapshot: promptSnapshotBeforeSend,
+                requireFreshResponse: true
+              });
+              if (shouldStopNow()) {
+                return forceStopResult();
+              }
+              continue;
+            }
+            const postGenerationResponseText = await getLastResponseText({
+              promptText: prompt,
+              promptNumber: absoluteCurrentPrompt,
+              preferLatest: true,
+              responseBaselineSnapshot: promptSnapshotBeforeSend,
+              requireFreshResponse: true
+            });
+            if (postGenerationResponseText !== responseText || generationFinished.clickedContinue) {
+              responseText = postGenerationResponseText;
               continue;
             }
             
@@ -37186,148 +43298,45 @@ async function injectToChat(
 
           if (responseDataGapDirective) {
             const dataGapStageId = responseDataGapDirective.stageId;
-            logDataGap('ROLLBACK_TRIGGERED_BY_RESPONSE', {
+            logDataGap('TERMINAL_RESPONSE_DETECTED', {
               requestedStageId: dataGapStageId,
               currentPrompt: absoluteCurrentPrompt,
               localPromptIndex: i,
               totalPromptsInRun: totalPromptsForRun
             }, 'warn');
             console.warn(
-              `[data-gap] Wykryto DATA_GAP_STAGE=${dataGapStageId} na promptcie ${absoluteCurrentPrompt} - uruchamiam rollback i replay etapow`
+              `[data-gap] Wykryto DATA_GAP_STAGE=${dataGapStageId} na promptcie ${absoluteCurrentPrompt} - zatrzymuje proces i zamykam karte`
             );
             updateCounter(
               counter,
               absoluteCurrentPrompt,
               totalPromptsForRun,
-              `Data gap: stage ${dataGapStageId} - uzupelniam`
+              `Data gap: stage ${dataGapStageId} - zamykam karte`
             );
-            const queueResult = await queueMissingPromptForDataGap(
+            stopSwKeepalive();
+            return {
+              success: false,
+              stopped: true,
+              dataGapTerminal: true,
+              dataGapDetected: true,
+              dataGapSignal: 'assistant_data_gap_stage',
               dataGapStageId,
-              prompt,
-              i,
-              absoluteCurrentPrompt
-            );
-            if (!queueResult.inserted) {
-              const dataGapError = queueResult.error || 'data_gap_queue_failed';
-              logDataGap('ROLLBACK_FAILED', {
-                requestedStageId: dataGapStageId,
-                currentPrompt: absoluteCurrentPrompt,
-                error: dataGapError,
-                replayKey: queueResult.replayKey || '',
-                replayCount: queueResult.replayCount
-              }, 'error');
-              console.error(
-                `[data-gap] Nie udało się dołączyć brakującego etapu ${dataGapStageId}: ${dataGapError}`,
-                queueResult
-              );
-              notifyProcess('PROCESS_PROGRESS', {
-                status: 'failed',
-                lifecycleStatus: 'failed',
-                currentPrompt: absoluteCurrentPrompt,
-                totalPrompts: totalPromptsForRun,
-                stageIndex: absoluteStageIndex,
-                stageName: `Prompt ${absoluteCurrentPrompt}`,
-                phase: 'capture_validate',
-                actionRequired: 'none',
-                statusCode: 'process.data_gap_unresolved',
-                statusText: `DATA_GAP nierozwiazany (${dataGapStageId})`,
-                reason: 'data_gap_unresolved',
-                error: dataGapError,
-                needsAction: false
-              });
-              stopSwKeepalive();
-              return {
-                success: false,
-                lastResponse: '',
-                error: `DATA_GAP unresolved for stage ${dataGapStageId}: ${dataGapError}`,
-                metrics: buildMetricsSnapshot({
-                  completed: false,
-                  reason: 'data_gap_unresolved',
-                  dataGapStage: dataGapStageId
-                })
-              };
-            }
-
-            const rewindPromptNumber = Number.isInteger(queueResult.promptNumber) && queueResult.promptNumber > 0
-              ? queueResult.promptNumber
-              : (
-                canonicalPromptLookup?.promptNumberByStageId instanceof Map && canonicalPromptLookup.promptNumberByStageId.has(queueResult.stageId)
-                  ? canonicalPromptLookup.promptNumberByStageId.get(queueResult.stageId)
-                  : findPromptNumberByStageIdInCanonicalPrompts(canonicalPromptLookup?.prompts, queueResult.stageId)
-              );
-            const rewindTargetPrompt = Number.isInteger(rewindPromptNumber) && rewindPromptNumber > 0
-              ? rewindPromptNumber
-              : absoluteCurrentPrompt;
-            const rewindMetrics = rewindExecutionMetricsFromPrompt(rewindTargetPrompt);
-            const rewindStageIndex = rewindTargetPrompt > 0 ? (rewindTargetPrompt - 1) : absoluteStageIndex;
-            const rewindFromPrompt = absoluteCurrentPrompt;
-            const rewindStartIndex = Number.isInteger(queueResult.insertedAtIndex)
-              ? queueResult.insertedAtIndex
-              : (i + 1);
-            const rewindEndIndex = (
-              Number.isInteger(queueResult.insertedAtIndex)
-              && Number.isInteger(queueResult.insertedCount)
-              && queueResult.insertedCount > 0
-            )
-              ? (queueResult.insertedAtIndex + queueResult.insertedCount - 1)
-              : null;
-            dataGapRewindState = {
-              stageId: queueResult.stageId,
-              rewindPromptNumber: rewindTargetPrompt,
-              fromPromptNumber: rewindFromPrompt,
-              startChainIndex: rewindStartIndex,
-              endChainIndex: rewindEndIndex,
-              mode: queueResult.mode
-            };
-
-            updateCounter(
-              counter,
-              rewindTargetPrompt,
-              totalPromptsForRun,
-              `↩️ DATA_GAP rewind do P${rewindTargetPrompt}`
-            );
-            notifyProcess('PROCESS_PROGRESS', {
-              status: 'running',
-              lifecycleStatus: 'running',
-              currentPrompt: rewindTargetPrompt,
+              lastResponse: responseText || responseDataGapDirective.rawLine || '',
+              conversationUrl: typeof location?.href === 'string' ? location.href : '',
+              currentPrompt: absoluteCurrentPrompt,
               totalPrompts: totalPromptsForRun,
-              stageIndex: rewindStageIndex,
-              stageName: `Prompt ${rewindTargetPrompt}`,
-              phase: 'prompt_send',
-              statusCode: 'process.data_gap_rewind',
-              statusText: `DATA_GAP rewind -> Prompt ${rewindTargetPrompt}`,
-              reason: 'data_gap_rewind_applied',
-              allowLowerProgress: true,
-              needsAction: false
-            });
-            logDataGap('ROLLBACK_QUEUED', {
-              stageId: queueResult.stageId,
-              mode: queueResult.mode,
-              source: queueResult.source,
-              replayCount: queueResult.replayCount,
-              promptNumber: queueResult.promptNumber,
-              currentPromptNumber: queueResult.currentPromptNumber,
-              rewindPromptNumber: rewindTargetPrompt,
-              rewindFromPrompt,
-              insertedCount: queueResult.insertedCount,
-              insertedAtIndex: queueResult.insertedAtIndex,
-              chainLengthBefore: queueResult.chainLengthBefore,
-              chainLengthAfter: queueResult.chainLengthAfter,
-              rewindMetrics
-            }, 'warn');
-            console.log('[data-gap] Prompt dolaczony', {
-              stageId: queueResult.stageId,
-              mode: queueResult.mode,
-              source: queueResult.source,
-              replayCount: queueResult.replayCount,
-              promptRange: formatPromptNumberRange(queueResult.promptNumber, queueResult.currentPromptNumber),
-              insertedCount: queueResult.insertedCount,
-              rewindTargetPrompt,
-              rewindFromPrompt
-            });
-            const gapDelayMs = 900;
-            await new Promise((resolve) => setTimeout(resolve, gapDelayMs));
-            continue;
+              stageIndex: absoluteStageIndex,
+              stageName: `Prompt ${absoluteCurrentPrompt}`,
+              phase: 'data_gap_stage',
+              statusCode: 'process.data_gap_stage',
+              reason: 'data_gap_stage',
+              error: `DATA_GAP_STAGE=${dataGapStageId}`,
+              metrics: buildMetricsSnapshot({
+                completed: false,
+                reason: 'data_gap_stage',
+                dataGapStage: dataGapStageId
+              })
+            };
           }
         
         console.log(`✅ Prompt ${i + 1}/${promptChain.length} zakończony - odpowiedź poprawna`);
@@ -37345,6 +43354,8 @@ async function injectToChat(
         });
         const stageValidated = validateResponse(responseText);
         registerStageCompletion(absoluteCurrentPrompt, responseText, stageValidated);
+        rememberStage12InvestmentJson(absoluteCurrentPrompt, responseText);
+        rememberSectorMemoryJson(absoluteCurrentPrompt, responseText);
           
           // Zapamiętaj TYLKO odpowiedź z ostatniego prompta (do zwrócenia na końcu)
           const isLastPrompt = (i === promptChain.length - 1);
@@ -37399,12 +43410,42 @@ async function injectToChat(
           : Math.max(counterCurrent, 1);
         updateCounter(counter, counterCurrent, counterTotal, 'Prompt chain zakonczony. Trwa zapis do bazy...');
         
-        // Zwróć ostatnią odpowiedź do zapisania
-        const lastResponse = window._lastResponseToSave || '';
+        // Company chains zapisują Stage 14 JSON nawet jeśli później powstaje osobny JSON pamięci sektorowej.
+        // Portfolio chains są JSON-only na końcu, więc zapisujemy finalny JSON z ostatniego prompta.
+        const lastPromptResponse = window._lastResponseToSave || '';
+        const stage12Response = window._stage12ResponseToSave || '';
+        const stage12ResponsePrompt = Number.isInteger(window._stage12ResponsePrompt)
+          ? window._stage12ResponsePrompt
+          : null;
+        const sectorMemoryResponse = window._sectorMemoryResponseToSave || '';
+        const sectorMemoryResponsePrompt = Number.isInteger(window._sectorMemoryResponsePrompt)
+          ? window._sectorMemoryResponsePrompt
+          : null;
+        const portfolioFinalJsonResponse = isPortfolioAnalysis
+          ? (extractPortfolioFinalJsonText(lastPromptResponse) || lastPromptResponse)
+          : '';
+        const useStage12InvestmentResponse = !isPortfolioAnalysis && !!stage12Response;
+        const selectedResponseReason = isPortfolioAnalysis
+          ? 'portfolio_final_json'
+          : (useStage12InvestmentResponse ? 'stage14_investment_json' : 'last_prompt');
+        const lastResponse = isPortfolioAnalysis
+          ? portfolioFinalJsonResponse
+          : (stage12Response || lastPromptResponse);
         delete window._lastResponseToSave;
-        console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków)`);
-        console.log(`[copy-flow] [capture:return] prompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)}`);
-        const selectedPrompt = completedPrompt;
+        delete window._stage12ResponseToSave;
+        delete window._stage12ResponsePrompt;
+        delete window._sectorMemoryResponseToSave;
+        delete window._sectorMemoryResponsePrompt;
+        console.log(`🔙 Zwracam odpowiedź do zapisu (${lastResponse.length} znaków, reason=${selectedResponseReason})`);
+        console.log(`[copy-flow] [capture:return] prompt=${useStage12InvestmentResponse ? stage12ResponsePrompt : completedPrompt} completedPrompt=${completedPrompt} len=${lastResponse.length} fp=${computeCopyFingerprint(lastResponse)} reason=${selectedResponseReason}`);
+        if (sectorMemoryResponse) {
+          console.log(
+            `[copy-flow] [capture:return-sector-memory] prompt=${sectorMemoryResponsePrompt || 16} completedPrompt=${completedPrompt} len=${sectorMemoryResponse.length} fp=${computeCopyFingerprint(sectorMemoryResponse)} reason=sector_memory_json`
+          );
+        }
+        const selectedPrompt = useStage12InvestmentResponse && Number.isInteger(stage12ResponsePrompt)
+          ? stage12ResponsePrompt
+          : completedPrompt;
         const selectedStageIndex = selectedPrompt > 0 ? (selectedPrompt - 1) : null;
         const responseId = buildInjectedResponseId(lastResponse, selectedPrompt);
         let persistedViaMessage = false;
@@ -37418,7 +43459,19 @@ async function injectToChat(
             lastResponse,
             responseId,
             selectedPrompt,
-            selectedStageIndex
+            selectedStageIndex,
+            selectedResponseReason,
+            isPortfolioAnalysis
+              ? {
+                schema: 'portfolio.final_response.v2',
+                sourceRecordSuffix: 'portfolio_final_json',
+                allowPortfolioFeedbackDispatch: true,
+                dispatchFlushReason: 'portfolio_final_json',
+                stageMeta: {
+                  selected_response_kind: 'portfolio_final_json'
+                }
+              }
+              : {}
           );
           if (tabSaveResult.ok) {
             persistedViaMessage = true;
@@ -37549,7 +43602,17 @@ async function injectToChat(
           responseId,
           selectedResponsePrompt: selectedPrompt,
           selectedResponseStageIndex: selectedStageIndex,
-          selectedResponseReason: 'last_prompt',
+          selectedResponseReason,
+          sectorMemoryResponse,
+          sectorMemoryResponsePrompt: sectorMemoryResponse
+            ? (sectorMemoryResponsePrompt || 16)
+            : null,
+          sectorMemoryResponseStageIndex: sectorMemoryResponse
+            ? ((sectorMemoryResponsePrompt || 16) - 1)
+            : null,
+          sectorMemoryResponseReason: sectorMemoryResponse
+            ? 'sector_memory_json'
+            : '',
           persistedViaMessage,
           persistedSaveResult,
           persistedSaveError,
@@ -37657,15 +43720,3 @@ function waitForTabComplete(tabId) {
     });
   });
 }
-
-
-
-
-
-
-
-
-
-
-
-

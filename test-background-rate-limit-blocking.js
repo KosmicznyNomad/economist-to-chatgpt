@@ -4,7 +4,7 @@ const path = require('path');
 const vm = require('vm');
 
 const backgroundPath = path.join(__dirname, 'background.js');
-const backgroundSource = fs.readFileSync(backgroundPath, 'utf8');
+const backgroundSource = fs.readFileSync(backgroundPath, 'utf8').replace(/\r\n/g, '\n');
 
 function extractFunctionSource(source, functionName) {
   const pattern = new RegExp(`(?:async\\s+)?function\\s+${functionName}\\s*\\(`);
@@ -205,10 +205,16 @@ const context = {
 
 vm.createContext(context);
 [
+  'compactText',
+  'normalizeChatGptActionText',
   'normalizeChatGptUiText',
+  'normalizeInjectedChatGptUiText',
   'isChatGptLimitOrRestrictionText',
+  'isInjectedChatGptLimitOrRestrictionText',
   'isInjectRateLimitBlockedResult',
-  'buildInjectRateLimitNeedsActionPatch'
+  'buildInjectRateLimitNeedsActionPatch',
+  'isHardGenerationErrorText',
+  'isRetryableChatGptGenerationErrorText'
 ].forEach((functionName) => {
   vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
     filename: 'background.js'
@@ -218,14 +224,22 @@ vm.createContext(context);
 function testClassifierRecognizesLimitAndRestrictionMessages() {
   assert.strictEqual(
     context.isChatGptLimitOrRestrictionText('limit: reached for this run'),
+    false
+  );
+  assert.strictEqual(
+    context.isChatGptLimitOrRestrictionText('limit: reached for this run', 'global_alert'),
     true
   );
   assert.strictEqual(
-    context.isChatGptLimitOrRestrictionText('  LIMIT : temporary block  '),
+    context.isChatGptLimitOrRestrictionText('  LIMIT : temporary block  ', 'last_alert_text'),
     true
   );
   assert.strictEqual(
     context.isChatGptLimitOrRestrictionText('Too many requests. Please try again later.'),
+    false
+  );
+  assert.strictEqual(
+    context.isChatGptLimitOrRestrictionText("You've hit your limit. Please try again later."),
     false
   );
   assert.strictEqual(
@@ -235,6 +249,21 @@ function testClassifierRecognizesLimitAndRestrictionMessages() {
   assert.strictEqual(
     context.isChatGptLimitOrRestrictionText('Something went wrong while generating the response.'),
     false
+  );
+  assert.strictEqual(
+    context.isChatGptLimitOrRestrictionText(
+      '=== END HANDOFF === LIMIT: this is normal model output, not a ChatGPT UI blocker',
+      'last_assistant_text'
+    ),
+    false
+  );
+  assert.strictEqual(
+    context.isInjectedChatGptLimitOrRestrictionText('LIMIT: temporary block', 'last_assistant_turn'),
+    false
+  );
+  assert.strictEqual(
+    context.isInjectedChatGptLimitOrRestrictionText('LIMIT: temporary block', 'global_alert'),
+    true
   );
 }
 
@@ -276,6 +305,48 @@ function testBlockedResultHelperAndPatchBuilder() {
   assert.strictEqual(patch.chatUrl, 'https://chatgpt.com/c/alpha');
 }
 
+function testRetryableGenerationErrorClassifier() {
+  const retryableMessage = 'Something went wrong while generating the response. If this issue persists please contact us through our help center at help.openai.com.';
+  assert.strictEqual(context.isHardGenerationErrorText(retryableMessage), true);
+  assert.strictEqual(context.isRetryableChatGptGenerationErrorText(retryableMessage), true);
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Something went wrong while generating the response.'),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText("You've hit your limit. Please try again later."),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText("You\u2019ve hit your limit. Please try again later."),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Too many requests. Please try again later.'),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Please try again later. Retry'),
+    true
+  );
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText(
+      'This is a longer normal response mentioning that someone may try again later after reviewing context.'
+    ),
+    false
+  );
+  assert.strictEqual(context.isRetryableChatGptGenerationErrorText('Network error'), false);
+  assert.strictEqual(
+    context.isRetryableChatGptGenerationErrorText('Streaming interrupted while waiting for the complete message.'),
+    false
+  );
+}
+
+function testRetryActionTextNormalizationHandlesPolishLabels() {
+  assert.strictEqual(context.normalizeChatGptActionText('Ponów próbę'), 'ponow probe');
+  assert.strictEqual(context.normalizeChatGptActionText('Spróbuj ponownie'), 'sprobuj ponownie');
+}
+
 function testInjectKeepsLimitClassifierInsideInjectedScope() {
   const start = backgroundSource.indexOf('async function injectToChat(');
   const end = backgroundSource.indexOf('\nfunction sleep(', start);
@@ -286,12 +357,57 @@ function testInjectKeepsLimitClassifierInsideInjectedScope() {
 
   assert.match(injectSource, /function isInjectedChatGptLimitOrRestrictionText\s*\(/);
   assert.doesNotMatch(injectSource, /\bisChatGptLimitOrRestrictionText\s*\(/);
+  const blockerScanSource = injectSource.slice(
+    injectSource.indexOf('function captureGenerationBlockerState'),
+    injectSource.indexOf('function buildGenerationBlockedResult')
+  );
+  assert(
+    !blockerScanSource.includes('[class*="text"]'),
+    'limit detector must not scan generic assistant text nodes'
+  );
+  assert.match(injectSource, /function clickRetryForRetryableGenerationError\s*\(/);
+  assert.match(injectSource, /function findVisibleRetryActionButton\s*\(/);
+  assert.match(injectSource, /hasVisibleRetryActionButton\(\)/);
+  assert.match(injectSource, /statusCode:\s*'chat\.retry_generation_error'/);
+  assert.match(injectSource, /lastAlert,\s*\n\s*lastAlertText:/);
+  assert.match(injectSource, /isRetryableChatGptGenerationErrorText\(state\.lastAlertText\)/);
+  assert.doesNotMatch(injectSource, /maxGenerationErrorRetryAttempts/);
+}
+
+function testInjectResendsPromptBeforeManualNoResponseRecovery() {
+  const start = backgroundSource.indexOf('async function injectToChat(');
+  const end = backgroundSource.indexOf('\nfunction sleep(', start);
+  if (start < 0 || end < 0 || end <= start) {
+    throw new Error('Could not isolate injectToChat source');
+  }
+  const injectSource = backgroundSource.slice(start, end);
+
+  assert.match(injectSource, /function resendPromptAfterMissingResponse\s*\(/);
+  assert.match(injectSource, /statusCode:\s*'chat\.no_response_resend'/);
+  assert.match(injectSource, /missingResponsePromptResendMaxAttempts/);
+
+  const timeoutResendIndex = injectSource.indexOf("await resendPromptAfterMissingResponse(\n                'timeout'");
+  const timeoutAutoRecoveryIndex = injectSource.indexOf("const autoRecoveryHandoff = maybeTriggerAutoRecovery(\n                'timeout'");
+  assert(timeoutResendIndex > 0, 'timeout branch should resend the previous prompt');
+  assert(timeoutAutoRecoveryIndex > 0, 'timeout branch should keep fallback recovery');
+  assert(
+    timeoutResendIndex < timeoutAutoRecoveryIndex,
+    'timeout resend must run before stopping or external auto recovery'
+  );
+
+  assert(
+    injectSource.includes("await resendPromptAfterMissingResponse(\n                  'empty_response'"),
+    'empty captured response should resend the previous prompt before manual invalid-response handling'
+  );
 }
 
 function main() {
   testClassifierRecognizesLimitAndRestrictionMessages();
   testBlockedResultHelperAndPatchBuilder();
+  testRetryableGenerationErrorClassifier();
+  testRetryActionTextNormalizationHandlesPolishLabels();
   testInjectKeepsLimitClassifierInsideInjectedScope();
+  testInjectResendsPromptBeforeManualNoResponseRecovery();
   console.log('test-background-rate-limit-blocking.js passed');
 }
 

@@ -2,16 +2,23 @@ const ProblemLogUiUtils = globalThis.ProblemLogUiUtils || {};
 
 const refreshBtn = document.getElementById('refresh-btn');
 const remoteBtn = document.getElementById('remote-btn');
+const healthBtn = document.getElementById('health-btn');
 const copyBtn = document.getElementById('copy-btn');
 const clearBtn = document.getElementById('clear-btn');
 const supportIdInput = document.getElementById('support-id-input');
 const meta = document.getElementById('meta');
 const statusEl = document.getElementById('status');
 const rowsBody = document.getElementById('rows-body');
+const dispatchHealthStatus = document.getElementById('dispatch-health-status');
+const dispatchHealthMain = document.getElementById('dispatch-health-main');
+const dispatchHealthDetail = document.getElementById('dispatch-health-detail');
+const dispatchHealthRefreshBtn = document.getElementById('dispatch-health-refresh-btn');
 
 let lastEntries = [];
 let autoRefreshTimer = null;
 let refreshInFlight = false;
+let dispatchHealthInFlight = false;
+let dispatchHealthSnapshot = null;
 let currentSupportId = '';
 let currentViewMode = 'local';
 
@@ -110,6 +117,120 @@ function setStatus(text, isError = false) {
   statusEl.hidden = false;
   statusEl.textContent = safeText;
   statusEl.classList.toggle('error', !!isError);
+}
+
+function formatDispatchHealthCheckedAt(ts) {
+  if (!Number.isInteger(ts) || ts <= 0) return 'nigdy';
+  try {
+    return new Date(ts).toLocaleTimeString();
+  } catch {
+    return 'n/a';
+  }
+}
+
+function getDispatchHealthTone(status) {
+  if (!status || typeof status !== 'object') return '';
+  if (status.success === true && status.dbConnected === true) return 'ok';
+  if (status.configured === false || status.authOk === false || status.backendReachable === false) return 'error';
+  if (status.dbConnected === false) return 'error';
+  return '';
+}
+
+function formatDispatchHealthLines(status) {
+  if (!status || typeof status !== 'object') {
+    return {
+      main: 'DB: status nieznany',
+      detail: 'Nie udalo sie odczytac statusu polaczenia.'
+    };
+  }
+  const checkedAt = formatDispatchHealthCheckedAt(status.checkedAt);
+  const queueSize = Number.isInteger(status.queueSize) ? status.queueSize : 0;
+  const keyId = typeof status.keyId === 'string' && status.keyId.trim() ? status.keyId.trim() : '-';
+  const latency = Number.isInteger(status.databaseLatencyMs) ? `, DB ${status.databaseLatencyMs}ms` : '';
+  if (status.success === true && status.dbConnected === true) {
+    return {
+      main: 'DB: OK - zapis ma dokad isc',
+      detail: `Konfiguracja OK, backend OK, baza OK. Key ${keyId}, kolejka=${queueSize}${latency}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.configured === false) {
+    return {
+      main: 'DB: NIE - brak konfiguracji wtyczki',
+      detail: `Powod: ${status.reason || status.healthError || 'missing_dispatch_credentials'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.authOk === false && status.backendReachable === true) {
+    return {
+      main: 'DB: NIE - backend odpowiada, ale auth nie przechodzi',
+      detail: `HTTP ${status.status || '-'}, powod: ${status.healthError || status.reason || 'auth_failed'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.backendReachable === false) {
+    return {
+      main: 'DB: NIE - brak polaczenia z backendem',
+      detail: `${status.healthError || status.error || 'network_error'}, endpoint=${status.intakeUrl || '-'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  if (status.dbConnected === false) {
+    return {
+      main: 'DB: NIE - backend dziala, ale baza nie odpowiada',
+      detail: `${status.healthErrorType || 'db_error'}: ${status.healthError || status.intakeStatus || 'db_error'}, sprawdzono ${checkedAt}.`
+    };
+  }
+  return {
+    main: 'DB: status niepewny',
+    detail: `${status.healthState || status.reason || 'unknown'}, kolejka=${queueSize}, sprawdzono ${checkedAt}.`
+  };
+}
+
+function renderDispatchHealthStatus(status, options = {}) {
+  if (!dispatchHealthStatus || !dispatchHealthMain || !dispatchHealthDetail) return;
+  const lines = formatDispatchHealthLines(status);
+  const tone = options.loading ? '' : getDispatchHealthTone(status);
+  dispatchHealthStatus.className = `connection-status${tone ? ` ${tone}` : ''}`;
+  dispatchHealthMain.textContent = options.loading ? 'DB: sprawdzam...' : lines.main;
+  dispatchHealthDetail.textContent = options.loading
+    ? 'Weryfikuje konfiguracje, backend i polaczenie z baza.'
+    : lines.detail;
+  if (dispatchHealthRefreshBtn) {
+    dispatchHealthRefreshBtn.disabled = dispatchHealthInFlight;
+  }
+  if (healthBtn) {
+    healthBtn.disabled = dispatchHealthInFlight;
+  }
+}
+
+async function refreshDispatchHealthStatus(forceReload = false) {
+  if (!dispatchHealthStatus || dispatchHealthInFlight) return dispatchHealthSnapshot;
+  dispatchHealthInFlight = true;
+  renderDispatchHealthStatus(dispatchHealthSnapshot, { loading: true });
+  try {
+    const response = await sendRuntimeMessage({
+      type: 'GET_WATCHLIST_DISPATCH_HEALTH',
+      forceReload
+    });
+    dispatchHealthSnapshot = response && typeof response === 'object'
+      ? response
+      : { success: false, healthState: 'empty_response', healthError: 'empty_response' };
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+    return dispatchHealthSnapshot;
+  } catch (error) {
+    dispatchHealthSnapshot = {
+      success: false,
+      configured: false,
+      backendReachable: false,
+      authOk: false,
+      dbConnected: false,
+      healthState: 'runtime_error',
+      healthError: error?.message || String(error),
+      checkedAt: Date.now()
+    };
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+    return dispatchHealthSnapshot;
+  } finally {
+    dispatchHealthInFlight = false;
+    renderDispatchHealthStatus(dispatchHealthSnapshot);
+  }
 }
 
 function formatDateTime(ts) {
@@ -369,6 +490,18 @@ if (remoteBtn) {
   });
 }
 
+if (healthBtn) {
+  healthBtn.addEventListener('click', () => {
+    void refreshDispatchHealthStatus(true);
+  });
+}
+
+if (dispatchHealthRefreshBtn) {
+  dispatchHealthRefreshBtn.addEventListener('click', () => {
+    void refreshDispatchHealthStatus(true);
+  });
+}
+
 if (copyBtn) {
   copyBtn.addEventListener('click', async () => {
     try {
@@ -404,11 +537,20 @@ autoRefreshTimer = setInterval(() => {
   }
 }, 15000);
 
+const dispatchHealthTimer = setInterval(() => {
+  if (document.hidden) return;
+  void refreshDispatchHealthStatus(false);
+}, 60000);
+
 window.addEventListener('beforeunload', () => {
   if (autoRefreshTimer) {
     clearInterval(autoRefreshTimer);
     autoRefreshTimer = null;
   }
+  if (dispatchHealthTimer) {
+    clearInterval(dispatchHealthTimer);
+  }
 });
 
 void refreshProblemLogs({ force: true, silent: true });
+void refreshDispatchHealthStatus(true);

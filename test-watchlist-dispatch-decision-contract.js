@@ -129,7 +129,6 @@ function makeStructuredV2Record(overrides = {}) {
     decision_role: 'PRIMARY',
     fields: {
       data_decyzji: '2026-04-12',
-      status_decyzji: 'WATCH',
       spolka: 'Camtek (CAMT:NASDAQ)',
       material_zrodlowy_podcast: 'SemiAnalysis Rubin Ultra',
       teza_inwestycyjna: 'Camtek thesis',
@@ -139,7 +138,8 @@ function makeStructuredV2Record(overrides = {}) {
       voi_falsy_kluczowe_ryzyka: 'VOI: orders'
     },
     taxonomy: {
-      sector: 'Technologia',
+      sector: 'Semiconductors',
+      worldview_bucket: 'Fizyczne waskie gardla dyktuja wartosc',
       company_family: 'Polprzewodniki',
       company_type: 'Metrologia',
       revenue_model: 'Sprzet i software',
@@ -159,7 +159,9 @@ function makeStructuredV2Record(overrides = {}) {
       ]
     },
     extras: {
-      record_version: 'watchlist.v2_enhanced'
+      identity: {
+        decision_category: 'WATCH'
+      }
     }
   };
   return {
@@ -234,6 +236,12 @@ vm.createContext(context);
   'sanitizeStructuredWatchlistRecord',
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
+  'cloneJsonCompatibleValue',
+  'parseJsonObjectCandidate',
+  'isPortfolioFeedbackSubmitPayload',
+  'normalizePortfolioFeedbackSubmitDispatchPayload',
+  'normalizePortfolioFinalResponseFeedbackSubmitPayload',
+  'extractPortfolioFeedbackSubmitPayloadFromFinalResponse',
   'mapDispatchDecisionRecord',
   'normalizeWatchlistDispatchPayload',
   'normalizeOutboundWatchlistDispatchPayload'
@@ -321,13 +329,11 @@ function testFallbackMapperPreservesKpiScorecard() {
 
 function testStructuredV2PayloadPreservesRecords() {
   const text = JSON.stringify({
-    schema: 'economist.response.v2',
     records: [
       {
         decision_role: 'PRIMARY',
         fields: {
           data_decyzji: '2026-03-20',
-          status_decyzji: 'WATCH',
           spolka: 'Alpha Corp (ALP:NASDAQ)',
           zrodlo_tezy: 'Alpha source',
           material_zrodlowy_podcast: 'Alpha source',
@@ -336,7 +342,7 @@ function testStructuredV2PayloadPreservesRecords() {
           base_scenario_total: 'Base_TOTAL: 20',
           bull_scenario_total: 'Bull_TOTAL: 30',
           voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
-          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sektor: 'Software',
           rodzina_spolki: 'Technologia i oprogramowanie',
           typ_spolki: 'Software',
           model_przychodu: 'Subscription',
@@ -344,7 +350,8 @@ function testStructuredV2PayloadPreservesRecords() {
           waluta: 'USD'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Software',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Software',
           revenue_model: 'Subscription',
@@ -374,13 +381,16 @@ function testStructuredV2PayloadPreservesRecords() {
             { key: 'MR', value: 6 }
           ]
         },
-        extras: {}
+        extras: {
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       },
       {
         decision_role: 'SECONDARY',
         fields: {
           data_decyzji: '2026-03-20',
-          status_decyzji: 'WATCH',
           spolka: 'Beta Corp (BET:NASDAQ)',
           zrodlo_tezy: 'Beta source',
           material_zrodlowy_podcast: 'Beta source',
@@ -389,7 +399,7 @@ function testStructuredV2PayloadPreservesRecords() {
           base_scenario_total: 'Base_TOTAL: 21',
           bull_scenario_total: 'Bull_TOTAL: 31',
           voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.0/5.0, EntryScore: 7.9/10, Sizing: 2%',
-          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sektor: 'Software',
           rodzina_spolki: 'Technologia i oprogramowanie',
           typ_spolki: 'Software',
           model_przychodu: 'Subscription',
@@ -397,7 +407,8 @@ function testStructuredV2PayloadPreservesRecords() {
           waluta: 'USD'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Software',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Software',
           revenue_model: 'Subscription',
@@ -427,7 +438,12 @@ function testStructuredV2PayloadPreservesRecords() {
             { key: 'MR', value: 6 }
           ]
         },
-        extras: { shortfall_reason: '' }
+        extras: {
+          shortfall_reason: '',
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       }
     ]
   });
@@ -447,6 +463,9 @@ function testStructuredV2PayloadPreservesRecords() {
   assert.strictEqual(payload.decisionRecords.length, 2);
   assert.strictEqual(payload.records[0].decision_role, 'PRIMARY');
   assert.strictEqual(payload.records[0].fields.spolka, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(payload.records[0].fields.status_decyzji, undefined);
+  assert.strictEqual(payload.records[0].taxonomy.sector, 'Software');
+  assert.strictEqual(payload.records[0].taxonomy.worldview_bucket, 'Software steruje praca, pieniedzmi i ryzykiem');
   assert.strictEqual(payload.records[0].kpi.items.length, 10);
   assert.strictEqual(payload.records[0].opportunity.value_chain_position, 'Platforma');
   assert.strictEqual(payload.records[1].character.primary_kill_risk, 'procurement delay');
@@ -599,7 +618,7 @@ function testStructuredJsonDispatchPayloadBackfillsAliasFields() {
           ]
         },
         extras: {
-          record_version: 'watchlist.v2_enhanced'
+          note: 'alias-compatible'
         }
       }
     ]
@@ -619,7 +638,8 @@ function testStructuredJsonDispatchPayloadBackfillsAliasFields() {
   assert.strictEqual(payload.decisionRecords.length, 1);
   assert.strictEqual(payload.records[0].decision_role, 'SECONDARY');
   assert.strictEqual(payload.records[0].fields.spolka, 'AT&S (ATS:VIE)');
-  assert.strictEqual(payload.records[0].fields.status_decyzji, 'WATCH');
+  assert.strictEqual(payload.records[0].fields.decyzja, 'WATCH');
+  assert.strictEqual(payload.records[0].fields.status_decyzji, undefined);
   assert.strictEqual(payload.records[0].opportunity.invoice_issuer, 'AT&S Austria Technologie & Systemtechnik AG');
   assert.strictEqual(payload.records[0].character.market_expectation_state, 'Rynek dyskontuje duration');
   assert.strictEqual(payload.records[0].kpi.items[0].value, 5);
@@ -720,26 +740,106 @@ function testDispatchPayloadPreservesChatGptComputationTelemetry() {
   });
 
   assert.strictEqual(payload.schema, 'economist.response.v2');
-  assert.strictEqual(payload.composerThinkingEffort, 'heavy');
+  assert.strictEqual(payload.composerThinkingEffort, 'high');
   assert.strictEqual(payload.chatGptModeKind, 'thinking');
   assert.strictEqual(payload.chatGptPlanHint, 'pro');
   assert.strictEqual(payload.chatGptModeLabel, 'Thinking');
   assert.strictEqual(payload.chatGptModelSwitcherLabel, 'ChatGPT Pro');
-  assert.strictEqual(payload.chatGptThinkingEffortDetected, 'heavy');
+  assert.strictEqual(payload.chatGptThinkingEffortDetected, 'high');
   assert.strictEqual(payload.chatGptThinkingEffortLabel, 'Heavy');
   assert.strictEqual(payload.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
   assert.strictEqual(payload.chatGptComputationDetectedAt, 1_710_000_123_456);
 
   const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
-  assert.strictEqual(outbound.composerThinkingEffort, 'heavy');
+  assert.strictEqual(outbound.composerThinkingEffort, 'high');
   assert.strictEqual(outbound.chatGptModeKind, 'thinking');
   assert.strictEqual(outbound.chatGptPlanHint, 'pro');
   assert.strictEqual(outbound.chatGptModeLabel, 'Thinking');
   assert.strictEqual(outbound.chatGptModelSwitcherLabel, 'ChatGPT Pro');
-  assert.strictEqual(outbound.chatGptThinkingEffortDetected, 'heavy');
+  assert.strictEqual(outbound.chatGptThinkingEffortDetected, 'high');
   assert.strictEqual(outbound.chatGptThinkingEffortLabel, 'Heavy');
   assert.strictEqual(outbound.chatGptComputationLabel, 'ChatGPT Pro | Thinking | Heavy');
   assert.strictEqual(outbound.chatGptComputationDetectedAt, 1_710_000_123_456);
+}
+
+function testPortfolioPromptOnePayloadKeepsRoutingMetadata() {
+  const payload = context.normalizeWatchlistDispatchPayload({
+    schema: 'portfolio.layer_ranking.v1',
+    text: 'Ranking warstw value chain: #1 infrastructure, #2 software.',
+    source: 'Portfolio Prompt 1: Layer Ranking',
+    sourceTitle: 'Source article title',
+    analysisType: 'portfolio_layer_ranking',
+    sourceRecordSuffix: 'portfolio_layer_ranking',
+    responseId: 'resp-portfolio-p1',
+    runId: 'run-portfolio',
+    stage: {
+      selected_response_prompt: 1,
+      selected_response_stage_index: 0,
+      selected_response_reason: 'portfolio_layer_ranking',
+      artifact_name: 'Portfolio Prompt 1: Layer Ranking'
+    },
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'portfolio.layer_ranking.v1');
+  assert.strictEqual(payload.analysisType, 'portfolio_layer_ranking');
+  assert.strictEqual(payload.sourceRecordSuffix, 'portfolio_layer_ranking');
+  assert.strictEqual(payload.stage.selected_response_prompt, 1);
+  assert.strictEqual(payload.stage.selected_response_reason, 'portfolio_layer_ranking');
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'portfolio.layer_ranking.v1');
+  assert.strictEqual(outbound.analysisType, 'portfolio_layer_ranking');
+  assert.strictEqual(outbound.sourceRecordSuffix, 'portfolio_layer_ranking');
+  assert.strictEqual(outbound.stage.selected_response_stage_index, 0);
+}
+
+function testPortfolioFinalTextPayloadBecomesFeedbackSubmit() {
+  const payload = context.normalizeWatchlistDispatchPayload({
+    schema: 'portfolio.final_response.v2',
+    responseId: 'resp-portfolio-final',
+    runId: 'run-portfolio',
+    source: 'Portfolio final JSON',
+    sourceTitle: 'Portfolio final JSON',
+    analysisType: 'portfolio',
+    timestamp: 1_710_000_000_000,
+    text: JSON.stringify({
+      thesis_construction_summary: 'Popyt -> bottleneck -> pricing power -> marża. Teza autora opisuje przesunięcie marży do właścicieli bottlenecku.',
+      portfolio_construction_commentary: 'Portfel jest tekstowym feedbackiem wobec tezy autora, a nie payloadem transakcyjnym.',
+      layers: [
+        {
+          layer_id: 'cloud_infrastructure',
+          layer_name: 'Cloud infrastructure',
+          vote: 'HOLD',
+          layer_business_thesis: 'Warstwa zarabia na wynajmie i sprzedaży infrastruktury cloud. Może być atrakcyjna, gdy scarcity compute daje pricing power. Warstwa ma mieszany capture.'
+        }
+      ],
+      positions: [
+        {
+          symbol: 'GOOGL',
+          layer_id: 'cloud_infrastructure',
+          current_qty: 10,
+          target_qty: 12,
+          value_capture_assessment: 'proxy',
+          position_thesis: 'GOOGL jest proxy, ale ma enterprise lock-in. Docelowa liczba akcji rośnie, bo teza premiuje platformy z dystrybucją.'
+        }
+      ],
+      portfolio_gaps: [],
+      warnings: [],
+      errors: []
+    })
+  });
+
+  assert.strictEqual(payload.schema, 'portfolio.feedback.submit.v1');
+  assert.strictEqual(payload.responseId, 'resp-portfolio-final:portfolio_feedback_submit');
+  assert.strictEqual(payload.analysisType, 'portfolio_feedback_submit');
+  assert.strictEqual(payload.review.review_id, 'resp-portfolio-final:portfolio_final_feedback');
+  assert.strictEqual(payload.review.portfolio_feedback.includes('tekstowym feedbackiem'), true);
+  assert.strictEqual(payload.position_votes[0].action, 'INCREASE');
+  assert.strictEqual(payload.position_votes[0].current_qty, 10);
+  assert.strictEqual(payload.position_votes[0].target_qty, 12);
+  assert.strictEqual(payload.position_votes[0].qty_delta, 2);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(payload.position_votes[0], 'priority'), false);
 }
 
 function main() {
@@ -752,6 +852,8 @@ function main() {
   testStructuredV2DispatchWithoutTextSynthesizesPayloadText();
   testOutboundStructuredV2WithoutTextAcceptsDirectRecords();
   testDispatchPayloadPreservesChatGptComputationTelemetry();
+  testPortfolioPromptOnePayloadKeepsRoutingMetadata();
+  testPortfolioFinalTextPayloadBecomesFeedbackSubmit();
   console.log('test-watchlist-dispatch-decision-contract.js: ok');
 }
 

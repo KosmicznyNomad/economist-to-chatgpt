@@ -8,7 +8,6 @@
   const DECISION_ROLES = new Set(['PRIMARY', 'SECONDARY']);
   const CANONICAL_FIELD_KEYS = [
     'data_decyzji',
-    'status_decyzji',
     'spolka',
     'zrodlo_tezy',
     'material_zrodlowy_podcast',
@@ -27,7 +26,6 @@
   ];
   const STRUCTURED_FIELD_ALIASES = {
     data_decyzji: ['decision_date', 'date'],
-    status_decyzji: ['decyzja', 'decision', 'status'],
     spolka: ['nazwa_spolki', 'nazwa', 'company_name', 'company', 'issuer_name', 'issuer'],
     zrodlo_tezy: ['source_thesis'],
     material_zrodlowy_podcast: ['source_material', 'material'],
@@ -43,6 +41,7 @@
   };
   const TAXONOMY_KEY_ALIASES = {
     sector: ['sektor'],
+    worldview_bucket: ['worldviewBucket', 'theme', 'thesis_theme'],
     company_family: ['companyFamily', 'rodzina_spolki'],
     company_type: ['companyType', 'typ_spolki'],
     revenue_model: ['revenueModel', 'model_przychodu'],
@@ -104,6 +103,41 @@
     if (normalized === 'OBSERWUJ') return 'WATCH';
     if (normalized === 'SPRZEDAJ' || normalized === 'UNIKAJ') return 'AVOID';
     return normalized;
+  }
+
+  function normalizeStructuredDecisionAction(value) {
+    const normalized = normalizeText(value).toUpperCase();
+    if (!normalized) return '';
+    if (normalized.includes('AVOID')) return 'AVOID';
+    if (normalized.includes('WATCH')) return 'WATCH';
+    if (normalized.includes('BUY')) return 'BUY';
+    return normalizeStructuredDecisionStatus(normalized);
+  }
+
+  function deriveStructuredDecisionStatus(record, fields, extras) {
+    const safeRecord = record && typeof record === 'object' ? record : {};
+    const safeFields = fields && typeof fields === 'object' ? fields : {};
+    const safeExtras = extras && typeof extras === 'object' ? extras : {};
+    const identity = safeExtras.identity && typeof safeExtras.identity === 'object' ? safeExtras.identity : {};
+    const candidates = [
+      safeRecord.decisionStatus,
+      safeRecord.decision_status,
+      safeRecord.decision,
+      safeRecord.decisionAction,
+      safeRecord.decision_action,
+      safeFields.status_decyzji,
+      safeFields.decyzja,
+      safeFields.decision,
+      safeFields.status,
+      safeFields.decision_action,
+      identity.decision_category,
+      identity.decision_action
+    ];
+    for (const candidate of candidates) {
+      const normalized = normalizeStructuredDecisionAction(candidate);
+      if (normalized) return normalized;
+    }
+    return 'WATCH';
   }
 
   function normalizeStructuredExchange(value) {
@@ -180,6 +214,7 @@
     const character = cloneStructuredObject(record.character);
     const kpi = cloneStructuredObject(record.kpi);
     const extras = cloneStructuredObject(record.extras);
+    const decisionStatus = deriveStructuredDecisionStatus(record, fields, extras);
     const compositeValue = Number.isFinite(record.compositeValue)
       ? record.compositeValue
       : (Number.isFinite(field10Meta.compositeValue) ? field10Meta.compositeValue : null);
@@ -194,8 +229,8 @@
       record_format: normalizeText(record.recordFormat),
       decisionDate: normalizeText(record.decisionDate),
       decision_date: normalizeText(record.decisionDate),
-      decisionStatus: normalizeText(record.decisionStatus),
-      decision_status: normalizeText(record.decisionStatus),
+      decisionStatus,
+      decision_status: decisionStatus,
       decisionRole: normalizeText(record.decisionRole),
       decision_role: normalizeText(record.decisionRole),
       company: normalizeText(record.company),
@@ -260,8 +295,6 @@
       confidence_in_thesis: normalizeText(record.confidenceInThesis || character.confidence_in_thesis),
       primaryKillRisk: normalizeText(record.primaryKillRisk || character.primary_kill_risk),
       primary_kill_risk: normalizeText(record.primaryKillRisk || character.primary_kill_risk),
-      recordVersion: normalizeText(record.recordVersion || extras.record_version),
-      record_version: normalizeText(record.recordVersion || extras.record_version),
       fields,
       taxonomy,
       opportunity,

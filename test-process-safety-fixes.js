@@ -393,6 +393,142 @@ async function testHeartbeatAutoStopsLongStaleProcessWithoutLocalContext() {
   assert.strictEqual(upserts[0].patch.reason, 'heartbeat_stale_no_context');
 }
 
+async function testHeartbeatAutoStopsLiveProcessAfterResponseCeiling() {
+  const nowTs = 1_773_918_300_000;
+  const warnings = [];
+  const upserts = [];
+  const context = {
+    console,
+    Math,
+    Number,
+    Date: createFixedDate(nowTs),
+    PROCESS_MONITOR_HEARTBEAT: {
+      touchIntervalMs: 30_000,
+      staleTtlMs: 90_000,
+      staleWarnCooldownMs: 60_000,
+      autoStopNoContextTtlMs: 15 * 60_000,
+      autoStopLiveStaleTtlMs: 60_000,
+      autoStopFinalizingStaleTtlMs: 60_000
+    },
+    processMonitorHeartbeatSweepInProgress: false,
+    processStaleWarnLastEmitTsByRunId: new Map(),
+    processRegistry: new Map([
+      ['run-live-stale', {
+        id: 'run-live-stale',
+        status: 'running',
+        lifecycleStatus: 'running',
+        tabId: 10,
+        windowId: 20,
+        timestamp: nowTs - 2 * 60_000,
+        lastProgressAt: nowTs - 2 * 60_000
+      }]
+    ]),
+    ensureProcessRegistryReady: async () => {},
+    pruneProcessRecords: (items) => items,
+    isClosedProcessStatus: (status) => status === 'completed' || status === 'failed' || status === 'stopped',
+    isQueuedProcessStatus: (status) => status === 'queued',
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    shouldAttemptStaleFinalPromptRecovery: () => false,
+    shouldEmitProcessStaleWarning: () => true,
+    appendProcessHeartbeatStaleWarning: async (...args) => {
+      warnings.push(args);
+      return true;
+    },
+    getAnalysisQueueProcessActivityState: async () => ({ active: true, live: true, recent: false }),
+    upsertProcess: async (runId, patch) => {
+      upserts.push({ runId, patch });
+      return { id: runId, ...patch };
+    },
+    pruneProcessStaleWarnMap: () => {}
+  };
+
+  vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'getProcessLastActivityTimestamp'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'getProcessLastProgressTimestamp'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'runProcessMonitorHeartbeatSweep'), context);
+
+  const result = await context.runProcessMonitorHeartbeatSweep('test');
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.staleDetected, 1);
+  assert.strictEqual(result.autoStopped, 1);
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(upserts.length, 1);
+  assert.strictEqual(upserts[0].runId, 'run-live-stale');
+  assert.strictEqual(upserts[0].patch.status, 'stopped');
+  assert.strictEqual(upserts[0].patch.reason, 'heartbeat_stale_live_timeout');
+}
+
+async function testHeartbeatAutoStopsStaleFinalizingWithoutSavedResponse() {
+  const nowTs = 1_773_918_400_000;
+  const warnings = [];
+  const upserts = [];
+  const context = {
+    console,
+    Math,
+    Number,
+    Date: createFixedDate(nowTs),
+    PROCESS_MONITOR_HEARTBEAT: {
+      touchIntervalMs: 30_000,
+      staleTtlMs: 90_000,
+      staleWarnCooldownMs: 60_000,
+      autoStopNoContextTtlMs: 15 * 60_000,
+      autoStopLiveStaleTtlMs: 60_000,
+      autoStopFinalizingStaleTtlMs: 60_000
+    },
+    processMonitorHeartbeatSweepInProgress: false,
+    processStaleWarnLastEmitTsByRunId: new Map(),
+    processRegistry: new Map([
+      ['run-finalizing-stale', {
+        id: 'run-finalizing-stale',
+        status: 'finalizing',
+        lifecycleStatus: 'finalizing',
+        currentPrompt: 0,
+        totalPrompts: 0,
+        timestamp: nowTs - 2 * 60_000,
+        lastProgressAt: nowTs - 2 * 60_000
+      }]
+    ]),
+    ensureProcessRegistryReady: async () => {},
+    pruneProcessRecords: (items) => items,
+    isClosedProcessStatus: (status) => status === 'completed' || status === 'failed' || status === 'stopped',
+    isQueuedProcessStatus: (status) => status === 'queued',
+    normalizeProcessLifecycleStatus(value, fallback = 'running') {
+      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
+      return normalized || fallback;
+    },
+    hasProcessCloseableSavedResponse: () => false,
+    shouldAttemptStaleFinalPromptRecovery: () => false,
+    shouldEmitProcessStaleWarning: () => true,
+    appendProcessHeartbeatStaleWarning: async (...args) => {
+      warnings.push(args);
+      return true;
+    },
+    upsertProcess: async (runId, patch) => {
+      upserts.push({ runId, patch });
+      return { id: runId, ...patch };
+    },
+    pruneProcessStaleWarnMap: () => {}
+  };
+
+  vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'getProcessLastActivityTimestamp'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'getProcessLastProgressTimestamp'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'runProcessMonitorHeartbeatSweep'), context);
+
+  const result = await context.runProcessMonitorHeartbeatSweep('test');
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.staleDetected, 1);
+  assert.strictEqual(result.autoStopped, 1);
+  assert.strictEqual(warnings.length, 1);
+  assert.strictEqual(upserts.length, 1);
+  assert.strictEqual(upserts[0].runId, 'run-finalizing-stale');
+  assert.strictEqual(upserts[0].patch.status, 'stopped');
+  assert.strictEqual(upserts[0].patch.reason, 'heartbeat_stale_finalizing');
+}
+
 function testCompanyAuditFrontierSkipsFuturePrompts() {
   const context = {
     console,
@@ -443,11 +579,54 @@ function testCompanyAuditFrontierSkipsFuturePrompts() {
   );
 }
 
+function testForceStoppedExecutionSummaryIsStoppedNotFailed() {
+  const context = {
+    console
+  };
+  vm.createContext(context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'isForceStoppedExecutionResult'), context);
+  vm.runInContext(extractFunctionSource(backgroundSource, 'buildForceStoppedExecutionSummary'), context);
+
+  const bulkResumeResult = {
+    success: false,
+    stopped: true,
+    error: 'force_stopped',
+    reason: 'bulk_resume_prepare',
+    origin: 'resume-all'
+  };
+  assert.strictEqual(context.isForceStoppedExecutionResult(bulkResumeResult), true);
+  const bulkSummary = context.buildForceStoppedExecutionSummary(bulkResumeResult);
+  assert.strictEqual(bulkSummary.lifecycleStatus, 'stopped');
+  assert.strictEqual(bulkSummary.statusCode, 'process.stopped');
+  assert.strictEqual(bulkSummary.reason, 'bulk_resume_prepare');
+  assert.strictEqual(bulkSummary.error, '');
+  assert.strictEqual(bulkSummary.needsAction, false);
+  assert.match(bulkSummary.statusText, /wznowieniem zbiorczym/);
+
+  const legacyResult = {
+    success: false,
+    error: 'force_stopped'
+  };
+  assert.strictEqual(context.isForceStoppedExecutionResult(legacyResult), true);
+  const legacySummary = context.buildForceStoppedExecutionSummary(legacyResult);
+  assert.strictEqual(legacySummary.lifecycleStatus, 'stopped');
+  assert.strictEqual(legacySummary.reason, 'force_stop');
+  assert.strictEqual(legacySummary.error, '');
+
+  assert.strictEqual(
+    context.isForceStoppedExecutionResult({ success: false, error: 'textarea_not_found' }),
+    false
+  );
+}
+
 async function main() {
   await testHeartbeatUsesRealProgressTimestamp();
   await testHeartbeatStillFlagsOldProgressWhenRecordWasTouched();
   await testHeartbeatAutoStopsLongStaleProcessWithoutLocalContext();
+  await testHeartbeatAutoStopsLiveProcessAfterResponseCeiling();
+  await testHeartbeatAutoStopsStaleFinalizingWithoutSavedResponse();
   testCompanyAuditFrontierSkipsFuturePrompts();
+  testForceStoppedExecutionSummaryIsStoppedNotFailed();
   console.log('test-process-safety-fixes: ok');
 }
 

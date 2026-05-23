@@ -145,13 +145,11 @@ function makeCurrent16Line(role, company) {
 
 function makeStructuredV2Response(company = 'Alpha Corp') {
   return JSON.stringify({
-    schema: 'economist.response.v2',
     records: [
       {
         decision_role: 'PRIMARY',
         fields: {
           data_decyzji: '2026-03-20',
-          status_decyzji: 'WATCH',
           spolka: `${company} (ALP:NASDAQ)`,
           zrodlo_tezy: 'Alpha source',
           material_zrodlowy_podcast: 'Alpha source',
@@ -160,7 +158,7 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
           base_scenario_total: 'Base_TOTAL: 20',
           bull_scenario_total: 'Bull_TOTAL: 30',
           voi_falsy_kluczowe_ryzyka: 'VOI: alpha, Fals: beta, Primary risk: gamma, Composite: 4.2/5.0, EntryScore: 8.1/10, Sizing: 3%',
-          sektor: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sektor: 'Software',
           rodzina_spolki: 'Technologia i oprogramowanie',
           typ_spolki: 'Software',
           model_przychodu: 'Subscription',
@@ -168,7 +166,8 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
           waluta: 'USD'
         },
         taxonomy: {
-          sector: 'Software steruje praca, pieniedzmi i ryzykiem',
+          sector: 'Software',
+          worldview_bucket: 'Software steruje praca, pieniedzmi i ryzykiem',
           company_family: 'Technologia i oprogramowanie',
           company_type: 'Software',
           revenue_model: 'Subscription',
@@ -190,9 +189,44 @@ function makeStructuredV2Response(company = 'Alpha Corp') {
             { key: 'MR', value: 6 }
           ]
         },
-        extras: {}
+        extras: {
+          identity: {
+            decision_category: 'WATCH'
+          }
+        }
       }
     ]
+  });
+}
+
+function makePortfolioFinalResponse() {
+  return JSON.stringify({
+    thesis_construction_summary: 'Popyt -> bottleneck -> pricing power -> marża. Autor opisuje zmianę ekonomiki rynku jako przesunięcie marży do właścicieli bottlenecku. Warstwa z pricing power przechwytuje wartość, a warstwa finansująca cudzy capex ma słabszą pozycję.',
+    portfolio_construction_commentary: 'Portfel jest mieszanką realnego capture i proxy. Największy problem to koncentracja w jednej ścieżce sukcesu zamiast kilku niezależnych mechanizmów.',
+    layers: [
+      {
+        layer_id: 'cloud_infrastructure',
+        layer_name: 'Cloud infrastructure',
+        author_rank: 1,
+        vote: 'HOLD',
+        exposure_quality: 'mixed',
+        layer_business_thesis: 'Warstwa zarabia na cloud capacity i usługach infrastrukturalnych. Może być atrakcyjna, gdy deficyt compute pozwala podnieść ceny szybciej niż koszty. Warstwa ma realny udział w tezie autora, ale portfel miesza capture z proxy.'
+      }
+    ],
+    positions: [
+      {
+        symbol: 'GOOGL',
+        layer_id: 'cloud_infrastructure',
+        author_layer_rank: 1,
+        current_qty: 10,
+        target_qty: 12,
+        value_capture_assessment: 'proxy',
+        position_thesis: 'GOOGL uczestniczy w tezie przez cloud i TPU, ale capture jest rozwodniony przez resztę biznesu. Autor premiuje właścicieli dystrybucji i compute, więc pozycja może mieć większą docelową liczbę akcji niż obecnie. Ryzykiem jest to, że capex cloud pochłonie część marży zanim pricing power agentic workflows stanie się trwały.'
+      }
+    ],
+    portfolio_gaps: ['Brakuje czystszego właściciela bottlenecku.'],
+    warnings: [],
+    errors: []
   });
 }
 
@@ -200,6 +234,9 @@ const context = {
   console,
   JSON,
   DecisionContractUtils,
+  ANALYSIS_TYPE_COMPANY: 'company',
+  ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
+  RESPONSE_CONVERSATION_LOG_MAX_ITEMS: 40,
   STRUCTURED_WATCHLIST_OPPORTUNITY_KEYS: [
     'value_chain_position',
     'price_dislocation_reason',
@@ -222,8 +259,40 @@ const context = {
     }
     return '';
   },
+  getCompletedProcessLocalSaveState(process) {
+    if (!process || typeof process !== 'object') return null;
+    if (typeof process?.persistenceStatus?.saveOk === 'boolean') {
+      return process.persistenceStatus.saveOk;
+    }
+    if (typeof process?.completedResponseSaved === 'boolean') {
+      return process.completedResponseSaved;
+    }
+    if (typeof process?.finalStagePersistence?.success === 'boolean') {
+      return process.finalStagePersistence.success;
+    }
+    return null;
+  },
+  hasCompletedProcessLocalSave(process) {
+    if (!process || typeof process !== 'object') return false;
+    if (typeof process?.persistenceStatus?.saveOk === 'boolean') {
+      return process.persistenceStatus.saveOk === true;
+    }
+    if (typeof process?.completedResponseSaved === 'boolean') {
+      return process.completedResponseSaved === true;
+    }
+    return process?.finalStagePersistence?.success === true;
+  },
   extractLastAssistantResponseFromTab() {
     throw new Error('DOM fallback should not be used in this test');
+  },
+  normalizeChatConversationUrl(value) {
+    return typeof value === 'string' ? value.trim() : '';
+  },
+  normalizeConversationLogSnapshot(value) {
+    return Array.isArray(value) ? value : [];
+  },
+  generateResponseId(runId = '') {
+    return `generated-${runId || 'none'}`;
   }
 };
 
@@ -238,7 +307,18 @@ vm.createContext(context);
   'sanitizeStructuredWatchlistRecord',
   'extractStructuredWatchlistJsonCandidates',
   'extractStructuredWatchlistResponseFromText',
+  'extractPortfolioFinalResponseFromText',
+  'normalizeAnalysisTypeForPromptChain',
+  'cloneJsonCompatibleValue',
+  'parseJsonObjectCandidate',
+  'isPortfolioFeedbackSubmitPayload',
+  'normalizePortfolioFeedbackSubmitDispatchPayload',
+  'normalizePortfolioFinalResponseFeedbackSubmitPayload',
+  'extractPortfolioFeedbackSubmitPayloadFromFinalResponse',
+  'resolveSaveResponseDispatchSkipDecision',
   'buildResponseContractValidation',
+  'getCompletedProcessLocalSaveState',
+  'hasCompletedProcessLocalSave',
   'getCompletedProcessFinalityState',
   'resolveCompletedProcessFinalResponseText'
 ].forEach((functionName) => {
@@ -247,8 +327,8 @@ vm.createContext(context);
 
 async function testRequiresCompletedPayload() {
   const result = await context.resolveCompletedProcessFinalResponseText({
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: ''
   });
 
@@ -259,7 +339,7 @@ async function testRequiresCompletedPayload() {
 async function testAcceptsCompletedPayloadEvenWhenPromptCountersLag() {
   const result = await context.resolveCompletedProcessFinalResponseText({
     currentPrompt: 11,
-    totalPrompts: 12,
+    totalPrompts: 15,
     completedResponseText: makeStructuredV2Response('Alpha Corp')
   });
 
@@ -269,8 +349,8 @@ async function testAcceptsCompletedPayloadEvenWhenPromptCountersLag() {
 
 async function testRejectsInvalidFinalContract() {
   const result = await context.resolveCompletedProcessFinalResponseText({
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: 'plain text without final contract'
   });
 
@@ -280,13 +360,76 @@ async function testRejectsInvalidFinalContract() {
 
 async function testAcceptsStructuredV2FinalContract() {
   const result = await context.resolveCompletedProcessFinalResponseText({
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: makeStructuredV2Response('Alpha Corp')
   });
 
   assert.strictEqual(result.success, true);
   assert.strictEqual(result.contractKind, 'economist.response.v2');
+}
+
+async function testAcceptsPortfolioFinalJsonContract() {
+  const responseText = makePortfolioFinalResponse();
+  const result = await context.resolveCompletedProcessFinalResponseText({
+    analysisType: 'portfolio',
+    currentPrompt: 3,
+    totalPrompts: 3,
+    completedResponseText: responseText
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.contractKind, 'portfolio.final_response.v2');
+  assert.strictEqual(result.responseText, responseText);
+  assert.strictEqual(result.contract.portfolioFinalResponse.payload.thesis_construction_summary.includes('Popyt -> bottleneck'), true);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(result.contract.portfolioFinalResponse.payload, 'prompt_1_response_copy'), false);
+}
+
+function testExtractsPortfolioFeedbackSubmitPayloadFromTextFinalJson() {
+  const responseText = makePortfolioFinalResponse();
+  const payload = context.extractPortfolioFeedbackSubmitPayloadFromFinalResponse(responseText, {
+    runId: 'run-portfolio',
+    responseId: 'resp-portfolio-final',
+    source: 'Portfolio final JSON',
+    sourceTitle: 'Portfolio final JSON'
+  });
+
+  assert.strictEqual(payload.schema, 'portfolio.feedback.submit.v1');
+  assert.strictEqual(payload.tool, undefined);
+  assert.strictEqual(payload.responseId, 'resp-portfolio-final:portfolio_feedback_submit');
+  assert.strictEqual(payload.analysisType, 'portfolio_feedback_submit');
+  assert.strictEqual(payload.review.review_id, 'resp-portfolio-final:portfolio_final_feedback');
+  assert.strictEqual(payload.layer_votes.length, 1);
+  assert.strictEqual(payload.layer_votes[0].layer_id, 'cloud_infrastructure');
+  assert.strictEqual(payload.position_votes.length, 1);
+  assert.strictEqual(payload.position_votes[0].symbol, 'GOOGL');
+  assert.strictEqual(payload.position_votes[0].action, 'INCREASE');
+  assert.strictEqual(payload.position_votes[0].current_qty, 10);
+  assert.strictEqual(payload.position_votes[0].target_qty, 12);
+  assert.strictEqual(payload.position_votes[0].qty_delta, 2);
+  assert.strictEqual(Object.prototype.hasOwnProperty.call(payload.position_votes[0], 'priority'), false);
+}
+
+function testPortfolioFinalJsonIsNotLocalOnlyDispatchSkipped() {
+  const decision = context.resolveSaveResponseDispatchSkipDecision(
+    'portfolio',
+    'portfolio.final_response.v2',
+    'portfolio_final_json',
+    { allowPortfolioFeedbackDispatch: true }
+  );
+
+  assert.strictEqual(decision.skip, false);
+  assert.strictEqual(decision.allowPortfolioFeedbackDispatch, true);
+
+  const legacyPortfolioDecision = context.resolveSaveResponseDispatchSkipDecision(
+    'portfolio',
+    '',
+    '',
+    {}
+  );
+
+  assert.strictEqual(legacyPortfolioDecision.skip, true);
+  assert.strictEqual(legacyPortfolioDecision.reason, 'portfolio_analysis_saved_locally');
 }
 
 async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {
@@ -304,8 +447,8 @@ async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {
   const result = await context.resolveCompletedProcessFinalResponseText({
     id: 'run-alpha',
     analysisType: 'company',
-    currentPrompt: 12,
-    totalPrompts: 12,
+    currentPrompt: 15,
+    totalPrompts: 15,
     completedResponseText: '',
     chatUrl: 'https://chatgpt.com/c/alpha',
     finalStagePersistence: {
@@ -341,13 +484,13 @@ function testCriticalCompletedResponsePatchFlushesImmediately() {
     {
       id: 'run-alpha',
       lifecycleStatus: 'finalizing',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: ''
     },
     {
       id: 'run-alpha',
       lifecycleStatus: 'finalizing',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: ''
     },
     {
@@ -362,13 +505,13 @@ function testCriticalCompletedResponsePatchFlushesImmediately() {
     {
       id: 'run-alpha',
       lifecycleStatus: 'completed',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: 'dispatch_pending'
     },
     {
       id: 'run-alpha',
       lifecycleStatus: 'completed',
-      currentPrompt: 12,
+      currentPrompt: 15,
       queueState: 'dispatch_pending'
     },
     {
@@ -396,6 +539,8 @@ function testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot() {
   });
 
   [
+    'getCompletedProcessLocalSaveState',
+    'hasCompletedProcessLocalSave',
     'getCompletedProcessFinalityState',
     'normalizeProcessLifecycleStatus',
     'normalizeProcessStatus',
@@ -413,9 +558,9 @@ function testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot() {
     id: 'run-alpha',
     status: 'finalizing',
     lifecycleStatus: 'finalizing',
-    currentPrompt: 12,
-    totalPrompts: 12,
-    stageIndex: 11,
+    currentPrompt: 15,
+    totalPrompts: 15,
+    stageIndex: 14,
     completedResponseSaved: true,
     persistenceStatus: {
       saveOk: true,
@@ -465,7 +610,7 @@ async function testProcessProgressCarriesCompletedResponsePayload() {
     },
     ensureProcessRegistryReady: async () => {},
     processRegistry: new Map([
-      ['run-progress', { id: 'run-progress', currentPrompt: 12, totalPrompts: 12 }]
+      ['run-progress', { id: 'run-progress', currentPrompt: 15, totalPrompts: 15 }]
     ]),
     applyChatGptComputationStatePatch(target, source) {
       if (!target || typeof target !== 'object' || !source || typeof source !== 'object') {
@@ -513,6 +658,9 @@ async function main() {
   await testAcceptsCompletedPayloadEvenWhenPromptCountersLag();
   await testRejectsInvalidFinalContract();
   await testAcceptsStructuredV2FinalContract();
+  await testAcceptsPortfolioFinalJsonContract();
+  testExtractsPortfolioFeedbackSubmitPayloadFromTextFinalJson();
+  testPortfolioFinalJsonIsNotLocalOnlyDispatchSkipped();
   await testFallsBackToCanonicalStorageWhenProcessPayloadMissing();
   testCriticalCompletedResponsePatchFlushesImmediately();
   testCompletedPersistenceRetryAcceptsLegacyFinalizingSnapshot();

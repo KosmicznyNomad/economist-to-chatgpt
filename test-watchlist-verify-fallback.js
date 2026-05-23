@@ -354,9 +354,48 @@ async function testQuarantinedVerifyStateIsTerminal() {
   );
 }
 
+async function testProblemLogVerifyIsSkippedWithoutNetworkProbe() {
+  let fetchCalled = false;
+  const context = createBaseContext(async () => {
+    fetchCalled = true;
+    throw new Error('fetch should not run for problem-log verify');
+  });
+  loadVerifyHelpers(context);
+
+  const result = await context.verifyWatchlistDispatchDelivery({
+    deliveryAcceptedAt: Date.now(),
+    deliveryEventId: '27001',
+    deliveryRequestId: 'req-problem-log',
+    deliveryIntakeUrl: 'https://iskierka-watchlist.duckdns.org/api/v1/intake/economist-response',
+    payload: {
+      schema: 'iskra.problem_log.v1',
+      responseId: 'plog-1',
+      runId: 'run-plog',
+      analysisType: 'problem_log:error'
+    }
+  }, 'run-plog/plog-1');
+
+  assert.strictEqual(fetchCalled, false, 'Problem-log verify should not hit the verify endpoint.');
+  assert.strictEqual(result.success, true, 'Problem-log verify should settle successfully without remote verify.');
+  assert.strictEqual(result.pending, false);
+  assert.strictEqual(result.state, 'verify_not_supported');
+  assert.strictEqual(result.reason, 'problem_log_verify_not_supported');
+  assert.strictEqual(
+    context.logs.some((entry) => entry.code === 'verify_skipped_problem_log'),
+    true,
+    'Problem-log bypass should emit a dedicated diagnostic log.'
+  );
+  assert.strictEqual(
+    context.history.some((entry) => entry.reason === 'problem_log_verify_not_supported' && entry.success === true),
+    true,
+    'Problem-log bypass should be recorded as a successful settled verify history event.'
+  );
+}
+
 async function main() {
   await testMissingVerifyEndpointFallsBackToAcceptedDelivery();
   await testQuarantinedVerifyStateIsTerminal();
+  await testProblemLogVerifyIsSkippedWithoutNetworkProbe();
 
   console.log('watchlist verify fallback test: ok');
 }

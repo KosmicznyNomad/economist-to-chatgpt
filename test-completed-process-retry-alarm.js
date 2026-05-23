@@ -202,9 +202,9 @@ function createCompletedProcess() {
     id: 'run-persist',
     status: 'completed',
     lifecycleStatus: 'completed',
-    currentPrompt: 12,
-    totalPrompts: 12,
-    stageIndex: 11,
+    currentPrompt: 15,
+    totalPrompts: 15,
+    stageIndex: 14,
     completedResponseSaved: true,
     completedResponseText: '{"schema":"economist.response.v2","records":[{"ticker":"ABC","decision":"PRIMARY"}]}',
     persistenceStatus: {

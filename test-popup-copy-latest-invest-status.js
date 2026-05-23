@@ -190,6 +190,47 @@ function main() {
   assert(batchStatus.includes('Terminal DB errors: 1.'));
   assert(!batchStatus.includes('Fallback save'));
 
+  const batchStatusDerivedFromResults = context.formatCopyLatestInvestFinalResponseStatus({
+    batch: true,
+    requested: 4,
+    copied: 4,
+    failed: 0,
+    windowCount: 4,
+    textLength: 1600,
+    conversationUrlCount: 4,
+    persistenceAttemptedCount: 4,
+    localSaveSuccessCount: 1,
+    intakeAcceptedCount: 1,
+    verifiedDbCount: 1,
+    terminalFailureCount: 0,
+    results: [
+      {
+        success: true,
+        title: 'Alpha',
+        persistence: { attempted: true, success: true, localSaveOk: true, acceptedByIntake: true, verifiedInDb: true, terminalFailure: false }
+      },
+      {
+        success: true,
+        title: 'Beta',
+        persistence: { attempted: true, success: true, localSaveOk: true, acceptedByIntake: true, verifiedInDb: false, terminalFailure: false }
+      },
+      {
+        success: true,
+        title: 'Gamma',
+        persistence: { attempted: true, success: true, localSaveOk: true, acceptedByIntake: false, verifiedInDb: false, terminalFailure: false }
+      },
+      {
+        success: true,
+        title: 'Delta',
+        persistence: { attempted: true, success: true, localSaveOk: true, acceptedByIntake: false, verifiedInDb: false, terminalFailure: false }
+      }
+    ]
+  });
+
+  assert(batchStatusDerivedFromResults.includes('Lokalny zapis: 4/4 OK.'));
+  assert(batchStatusDerivedFromResults.includes('Intake accepted: 2/4.'));
+  assert(batchStatusDerivedFromResults.includes('DB verified: 1/4.'));
+
   const acceptedButUnverified = context.formatFinalStagePersistenceStatus({
     success: true,
     accepted: 1,

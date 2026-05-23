@@ -92,6 +92,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '(') {
       parenDepth += 1;
       continue;
@@ -182,6 +183,7 @@ function extractFunctionSource(source, functionName) {
       inTemplate = true;
       continue;
     }
+
     if (char === '{') depth += 1;
     if (char === '}') {
       depth -= 1;
@@ -194,137 +196,91 @@ function extractFunctionSource(source, functionName) {
   throw new Error(`Function end not found: ${functionName}`);
 }
 
-function buildContext(overrides = {}) {
-  const context = {
+function main() {
+  const context = vm.createContext({
     console,
-    createCalls: [],
-    getRemoteRunnerStatusViaApi: async () => ({
-      success: true,
-      payload: {
-        runner: {
-          runnerId: 'runner-1',
-          state: 'ready',
-          queueable: true
-        }
-      }
-    }),
-    createRemoteJobViaApi: async (payload) => {
-      context.createCalls.push(payload);
-      return {
-        success: true,
-        payload: {
-          success: true,
-          created: true,
-          idempotent: false,
-          job: {
-            jobId: payload.jobId,
-            runnerId: payload.runnerId,
-            status: 'queued'
-          }
-        }
-      };
+    Date
+  });
+
+  [
+    'isWatchlistOutboxDeliveryAccepted',
+    'normalizeWatchlistFlushFocus',
+    'watchlistOutboxItemMatchesFocus',
+    'prepareWatchlistOutboxForFlush',
+    'getWatchlistOutboxFlushPriority',
+    'sortWatchlistOutboxForFlush'
+  ].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
+      filename: 'background.js'
+    });
+  });
+
+  const now = Date.now();
+  const focus = context.normalizeWatchlistFlushFocus({
+    runId: 'run-target',
+    responseId: 'resp-target',
+    forceMatchingReady: true,
+    prioritizeMatching: true
+  });
+
+  assert.strictEqual(focus.runId, 'run-target');
+  assert.strictEqual(focus.responseId, 'resp-target');
+  assert.strictEqual(focus.forceMatchingReady, true);
+  assert.strictEqual(focus.prioritizeMatching, true);
+
+  const items = [
+    {
+      payload: { runId: 'run-older', responseId: 'resp-older' },
+      queuedAt: now - 30_000,
+      deliveryAcceptedAt: 0,
+      nextAttemptAt: 0,
+      attemptCount: 0,
+      verifyAttemptCount: 0,
+      lastError: ''
     },
-    ...overrides
-  };
+    {
+      payload: { runId: 'run-target', responseId: 'resp-target' },
+      queuedAt: now - 5_000,
+      deliveryAcceptedAt: now - 4_000,
+      nextAttemptAt: now + 120_000,
+      attemptCount: 3,
+      verifyAttemptCount: 3,
+      lastError: 'verify:materialization_pending'
+    },
+    {
+      payload: { runId: 'run-other', responseId: 'resp-other' },
+      queuedAt: now - 10_000,
+      deliveryAcceptedAt: now - 9_000,
+      nextAttemptAt: now + 60_000,
+      attemptCount: 2,
+      verifyAttemptCount: 2,
+      lastError: 'verify:materialization_pending'
+    }
+  ];
 
-  vm.createContext(context);
-  vm.runInContext(extractFunctionSource(backgroundSource, 'submitPreparedAnalysisBatchToRemoteRunner'), context, {
-    filename: 'background.js'
-  });
-  return context;
+  assert.strictEqual(context.watchlistOutboxItemMatchesFocus(items[1], focus), true);
+  assert.strictEqual(context.watchlistOutboxItemMatchesFocus(items[0], focus), false);
+
+  const prepared = context.prepareWatchlistOutboxForFlush(items, focus);
+  assert.notStrictEqual(prepared, items);
+  assert.strictEqual(prepared[1].nextAttemptAt, 0, 'Focused item should bypass backoff.');
+  assert.strictEqual(prepared[1].lastError, 'verify:materialization_pending', 'Accepted verify item should keep diagnostic error text.');
+  assert.strictEqual(prepared[0].nextAttemptAt, 0, 'Non-focused ready item should remain unchanged.');
+  assert.strictEqual(prepared[2].nextAttemptAt, now + 60_000, 'Non-focused deferred item should keep original retry window.');
+
+  const sorted = context.sortWatchlistOutboxForFlush(prepared, now, focus);
+  assert.deepStrictEqual(
+    sorted.map((item) => item.payload.responseId),
+    ['resp-target', 'resp-older', 'resp-other'],
+    'Focused retry should prioritize the requested response ahead of older queue items.'
+  );
+
+  console.log('watchlist focused flush test: ok');
 }
 
-async function testRejectsBusyRunnerBeforeSubmittingJobs() {
-  const context = buildContext({
-    getRemoteRunnerStatusViaApi: async () => ({
-      success: true,
-      payload: {
-        runner: {
-          runnerId: 'runner-1',
-          state: 'busy',
-          queueable: false,
-          reason: 'local_busy'
-        }
-      }
-    })
-  });
-
-  const result = await context.submitPreparedAnalysisBatchToRemoteRunner({
-    items: [
-      { jobId: 'job-1', runId: 'run-1' },
-      { jobId: 'job-2', runId: 'run-2' }
-    ],
-    skipped: []
-  }, 'runner-1');
-
-  assert.strictEqual(result.success, false);
-  assert.strictEqual(result.error, 'runner_busy');
-  assert.strictEqual(result.submittedCount, 0);
-  assert.strictEqual(result.failedCount, 2);
-  assert.strictEqual(context.createCalls.length, 0);
-}
-
-async function testSubmitsBatchWhenRunnerReady() {
-  const context = buildContext();
-  const result = await context.submitPreparedAnalysisBatchToRemoteRunner({
-    batchId: 'batch-1',
-    submissionId: 'submit-1',
-    items: [
-      { jobId: 'job-1', runId: 'run-1' },
-      { jobId: 'job-2', runId: 'run-2' }
-    ],
-    skipped: [{ title: 'Skipped source' }]
-  }, 'runner-1');
-
-  assert.strictEqual(result.success, true);
-  assert.strictEqual(result.runnerId, 'runner-1');
-  assert.strictEqual(result.submittedCount, 2);
-  assert.strictEqual(result.createdCount, 2);
-  assert.strictEqual(result.failedCount, 0);
-  assert.strictEqual(result.skippedCount, 1);
-  assert.strictEqual(context.createCalls.length, 2);
-  assert.strictEqual(context.createCalls[0].runnerId, 'runner-1');
-  assert.strictEqual(context.createCalls[1].runnerId, 'runner-1');
-}
-
-async function testSubmitsBatchWhenRunnerBusyButQueueable() {
-  const context = buildContext({
-    getRemoteRunnerStatusViaApi: async () => ({
-      success: true,
-      payload: {
-        runner: {
-          runnerId: 'runner-1',
-          state: 'busy',
-          queueable: true,
-          reason: 'local_busy'
-        }
-      }
-    })
-  });
-
-  const result = await context.submitPreparedAnalysisBatchToRemoteRunner({
-    batchId: 'batch-busy',
-    submissionId: 'submit-busy',
-    items: [
-      { jobId: 'job-1', runId: 'run-1' }
-    ],
-    skipped: []
-  }, 'runner-1');
-
-  assert.strictEqual(result.success, true);
-  assert.strictEqual(result.submittedCount, 1);
-  assert.strictEqual(context.createCalls.length, 1);
-  assert.strictEqual(context.createCalls[0].runnerId, 'runner-1');
-}
-
-async function main() {
-  await testRejectsBusyRunnerBeforeSubmittingJobs();
-  await testSubmitsBatchWhenRunnerReady();
-  await testSubmitsBatchWhenRunnerBusyButQueueable();
-  console.log('remote runner submit test: ok');
-}
-
-main().catch((error) => {
+try {
+  main();
+} catch (error) {
   console.error(error?.stack || error?.message || String(error));
   process.exitCode = 1;
-});
+}
