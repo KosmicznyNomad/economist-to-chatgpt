@@ -329,6 +329,8 @@ Based on the Evidence Ledger (cite anchor IDs throughout):
 
 **Spend type**: State whether the author's mechanism creates mandatory, replacement, regulated, or discretionary spend (cite A# where possible)
 
+Your edge here is structural understanding. In 2-3 sentences, reason out: what prior belief or industry norm has actually broken, why money must now move, and through what mechanism — technically and economically. Reach the thesis from this reasoning; the spine labels are a consequence of it, not a starting point.
+
 ## Step 0.6 — Thesis Candidate Generation
 
 Generate 3 thesis candidates. Each must be one conditional sentence:
@@ -577,6 +579,8 @@ to rank companies.
 
 OPTIMIZATION TARGET:
 Identify the few sub-segments where spend is most forced, margins are most defensible, and public companies can capture a material share of value.
+
+Your edge here is sector economics. Building on Stage 0's mechanism, reason in 2-3 sentences where margin is physically captured along this chain and where it leaks. Let the sub-segment boundaries fall out of that economic reasoning; assign the gate/impact labels only afterward as a consequence.
 
 ### MECHANIC 1: Sub-Segment Derivation
 
@@ -1103,6 +1107,12 @@ Q4 — Post-sale economics: After the primary product is sold, who captures the 
 Q5 — Geographic anomalies: Are there foreign-listed companies (Japan, Korea, Taiwan, Germany, Netherlands) that supply critical components but trade at discount due to home-market valuation practices? These are systematically underpriced because US-focused analysts under-cover them.
 
 Output the discovery walk explicitly. If after this walk the universe consists only of large US-listed obvious names, state this and explain why the value chain has no investable Layer 3+ expression.
+
+Your edge here is discovery and positioning — finding the real capture point others miss, not the obvious name. For each surviving candidate, reason in plain language before any tier or exposure label:
+- How does this company actually make money, and why does the customer keep paying?
+- Where does its technological or value-chain position give a real advantage versus its 2-3 closest alternatives, and why this one and not the neighbour?
+- What specific fact would change the view?
+Then run a LIVE READ (3-5 sentences of current, contested reality): latest earnings tone and guidance change, short-seller/bear theses, insider and management changes, regulatory or legal controversy, customer/contract wins or losses, supply-chain news, and the present bull-vs-bear debate and positioning. Integrate Stage 1's sector economics; do not re-derive them. Tier and exposure labels come last, from this reasoning.
 
 1. **Generate an evidence-driven public company universe.**
    - Do not force 20-30 companies. Include only companies with a plausible public equity link to the selected invoice items or bottlenecks.
@@ -1756,6 +1766,8 @@ Use the source hierarchy from the Global Definitions block. Prefer company filin
 
 Record every search query in working notes. Label load-bearing statements as SOURCE / ASSUMPTION / INFERENCE.
 
+Your edge here is evidence — whether money is actually moving, now. Run a LIVE READ per company and reason in 3-5 sentences over current, contested reality: latest earnings tone and guidance change, contract/order wins and losses, funded vs ceiling reality, bear theses on the thesis stream, management changes, regulatory or supply-chain events, leaks/rumours, and the live bull-vs-bear debate. Integrate Stage 2's understanding of how each company makes money; test it against this evidence. The traction class is the conclusion of this reasoning, not its substitute.
+
 ## Process: Execute for All Valuation-Eligible Companies Advanced From Stage 2
 
 For each Candidate company advanced from Stage 2, work through these steps internally:
@@ -1900,6 +1912,8 @@ Use internet research for every company. Preferred sources: annual report/10-K/2
 Pull conceptual and financial information needed to understand the company's business economics: segments, how each segment earns money, management growth plan, market expectations, cycle position, and what part of the thesis is already embedded.
 
 Label load-bearing data as SOURCE / ASSUMPTION / INFERENCE with confidence HIGH / MEDIUM / LOW. Do not silently invent price, market cap, shares, revenue, EBIT, FCF, net debt, segment data, guidance, consensus, or peer multiples.
+
+Your edge here is understanding the economic engine — why returns exist at all. In 2-3 sentences, reason out the real driver of this business's per-share value and the strongest bear case a competent investor holds, integrating what Stage 2 and Stage 3 already established. Let that reasoning shape Bear/Base/Bull; consensus and guidance are inputs to challenge, not the answer.
 
 CORE TYPE - TRZY ZASADNICZE KATEGORIE
 
@@ -3028,6 +3042,8 @@ Identify the nearest concrete event that can change market perception:
 
 Tie every trigger to a KPI or observation. Do not use vague catalysts.
 
+Your edge here is competitive judgment and synthesis. Before ranking, reason in prose, integrating everything earlier stages established. First, a head-to-head: how each finalist makes money, where each has a durable advantage versus its closest alternative, and which you would rather own if the thesis runs a year slow. Second, the strongest bear case a competent investor holds on each — the real reason someone sells. Run a LIVE READ on both so this reflects current reality. The ranking is the output of this reasoning; do not let a label or score stand in for the judgment.
+
 PHASE 7: FINAL SELECTION — FORCED RANKING
 
 Always select the top 2 companies from the universe that passed
@@ -3223,6 +3239,7 @@ For each finalist:
    - per-share value creation
    - whether the thesis improves returns through Segment Rebase, Capacity Rent, or Core Rebase rather than only revenue growth
    - whether incremental growth has higher, similar, or lower ROIC than the existing business
+   - your edge here is the quality of capital: reason in plain language whether this is quality growth or only revenue growth — does incremental capital earn above its cost, and what physically or economically makes those returns durable or fragile? State the conclusion before any returns-quality verdict.
 6. If thesis growth requires heavy working capital, performance bonds, capex, or dilution such that incremental ROIC falls below the cost of capital, downgrade Returns Quality by 1-2 points and flag VALUE_DESTRUCTIVE_GROWTH.
 
 ## Required Output
@@ -5487,6 +5504,7 @@ Warunek wejścia — kiedy to staje się kupowalne
 Warunek niewchodzenia — kiedy nadal nie należy kupować
 Reguły:
 bez odwołań do stage’ów
+opieraj treść na realnym zrozumieniu zintegrowanym z wcześniejszych etapów — jak firma zarabia, ekonomika i fizyka procesu, gdzie jest trwała przewaga, najmocniejszy bear case, porównanie z alternatywami — a nie na etykietach; etykieta ma być widocznym skutkiem rozumowania, nie jego zamiennikiem
 bez semikolonów
 bez pustych fraz
 ma być naprawdę praktyczne
