@@ -449,7 +449,7 @@ async function refreshRemoteRunnerStatus() {
 }
 
 function getAnalysisQueueUiMetrics(status) {
-  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 7;
+  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 4;
   const reservedSlots = Number.isInteger(status?.reservedSlots)
     ? Math.max(0, status.reservedSlots)
     : (Number.isInteger(status?.activeSlots) ? Math.max(0, status.activeSlots) : 0);

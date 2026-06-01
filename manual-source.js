@@ -780,7 +780,7 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
     return;
   }
 
-  const maxConcurrent = Number.isInteger(response?.maxConcurrent) ? response.maxConcurrent : 7;
+  const maxConcurrent = Number.isInteger(response?.maxConcurrent) ? response.maxConcurrent : 4;
   const usedSlots = Number.isInteger(response?.reservedSlots)
     ? response.reservedSlots
     : (Number.isInteger(response?.activeSlots) ? response.activeSlots : 0);
