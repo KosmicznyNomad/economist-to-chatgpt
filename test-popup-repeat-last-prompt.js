@@ -5,6 +5,8 @@ const vm = require('vm');
 
 const popupPath = path.join(__dirname, 'popup.js');
 const popupSource = fs.readFileSync(popupPath, 'utf8');
+const popupHtmlPath = path.join(__dirname, 'popup.html');
+const popupHtmlSource = fs.readFileSync(popupHtmlPath, 'utf8');
 
 function extractFunctionSource(source, functionName) {
   const pattern = new RegExp(`(?:async\\s+)?function\\s+${functionName}\\s*\\(`);
@@ -312,11 +314,30 @@ async function testRepeatLastPromptForwardsExplicitEffort() {
   assert.strictEqual(Object.prototype.hasOwnProperty.call(runtimeMessages[0], 'useStoredComposerThinkingEffort'), false);
 }
 
+function testResumeIntensiveShortcutDoesNotRequestProMode() {
+  const { context } = createContext();
+  assert.strictEqual(context.normalizePopupComposerThinkingEffort('pro'), 'heavy');
+  assert.strictEqual(context.normalizePopupComposerThinkingEffort('intensywne'), 'heavy');
+  assert.strictEqual(context.humanizePopupThinkingEffort('pro'), 'intensywny');
+  assert.ok(
+    popupHtmlSource.includes('id="resumeAllHeavyBtn">Wznow (intensywny)</button>'),
+    'Resume shortcut label should match the Thinking intensive ChatGPT layout.'
+  );
+  assert.ok(popupSource.includes("origin: 'popup-resume-all-thinking-intensive'"));
+  assert.ok(popupSource.includes("composerThinkingEffort: 'heavy',"));
+  assert.strictEqual(
+    popupSource.includes("origin: 'popup-resume-all-pro'"),
+    false,
+    'Popup resume shortcut must not force the top-level Pro mode.'
+  );
+}
+
 async function main() {
   await testResumeAllUsesStoredEffortByDefault();
   await testResumeAllForwardsExplicitEffort();
   await testRepeatLastPromptUsesStoredEffortByDefault();
   await testRepeatLastPromptForwardsExplicitEffort();
+  testResumeIntensiveShortcutDoesNotRequestProMode();
   console.log('test-popup-repeat-last-prompt.js passed');
 }
 

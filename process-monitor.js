@@ -754,7 +754,13 @@ function humanizeThinkingEffort(value) {
   if (normalized === 'standard') return 'Standard';
   if (normalized === 'extended') return 'Heavy';
   if (normalized === 'heavy') return 'Heavy';
-  if (normalized === 'pro') return 'Pro';
+  if (
+    normalized === 'pro'
+    || normalized === 'intensive'
+    || normalized === 'intensywny'
+    || normalized === 'intensywne'
+    || normalized === 'intensywn'
+  ) return 'Heavy';
   return '';
 }
 

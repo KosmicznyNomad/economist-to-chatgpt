@@ -236,6 +236,32 @@ async function testCountsAllLiveProcesses() {
   assert.strictEqual(context.analysisQueueState.waitingJobs.length, 1, 'Waiting job should stay queued when slots are full.');
 }
 
+async function testOpenAnalysisTabsBlockNewQueueStarts() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-wait-open-tabs', runId: 'run-wait-open-tabs', sequence: 1, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 3,
+    lastSequence: 1
+  };
+  context.countOpenAnalysisChatTabs = async () => 3;
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(status.activeSlots, 3, 'Open ChatGPT analysis tabs should occupy queue slots.');
+  assert.strictEqual(status.reservedSlots, 3, 'Open ChatGPT analysis tabs should reserve queue capacity.');
+  assert.strictEqual(status.openAnalysisChatTabs, 3, 'Queue status should expose the open analysis tab count.');
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('open_analysis_tabs_full');
+  assert.strictEqual(context.startedJobs.length, 0, 'Queue must not start new jobs when open analysis tabs fill the cap.');
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-wait-open-tabs'],
+    'Waiting job should stay queued until existing analysis tabs are closed.'
+  );
+}
+
 async function testGracePreventsPrematureSlotRelease() {
   context = buildScenarioContext();
   const now = Date.now();
@@ -717,6 +743,7 @@ function buildScenarioContext() {
       return scenarioContext.analysisQueueState;
     },
     getAnalysisQueueSnapshot: async () => clone(scenarioContext.analysisQueueState),
+    countOpenAnalysisChatTabs: async () => 0,
     sanitizeAnalysisQueueJob: (job) => clone(job),
     pruneProcessRecords: (records) => clone(records),
     getTabByIdSafe: async (tabId) => (scenarioContext.liveTabs.has(tabId) ? { id: tabId } : null),
@@ -797,6 +824,7 @@ function loadScenarioFunctions(scenarioContext, functionNames) {
 
 async function main() {
   await testCountsAllLiveProcesses();
+  await testOpenAnalysisTabsBlockNewQueueStarts();
   await testGracePreventsPrematureSlotRelease();
   await testClosedWindowDoesNotConsumeSlot();
   await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();

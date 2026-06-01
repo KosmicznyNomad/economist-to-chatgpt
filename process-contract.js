@@ -315,6 +315,53 @@
     return promptLabel || stageName;
   }
 
+  function getDispatchSnapshotFromProcess(process = {}) {
+    const persistenceStatus = process?.persistenceStatus && typeof process.persistenceStatus === 'object'
+      ? process.persistenceStatus
+      : null;
+    const finalStagePersistence = process?.finalStagePersistence && typeof process.finalStagePersistence === 'object'
+      ? process.finalStagePersistence
+      : null;
+    if (persistenceStatus?.dispatch && typeof persistenceStatus.dispatch === 'object') {
+      return persistenceStatus.dispatch;
+    }
+    if (process?.completedResponseDispatch && typeof process.completedResponseDispatch === 'object') {
+      return process.completedResponseDispatch;
+    }
+    if (finalStagePersistence) {
+      return finalStagePersistence;
+    }
+    return null;
+  }
+
+  function getDispatchSkipReasonFromProcess(process = {}) {
+    const dispatch = getDispatchSnapshotFromProcess(process);
+    if (!dispatch || typeof dispatch !== 'object') return '';
+    const queueSkipReason = normalizeText(dispatch.queueSkipReason || '');
+    if (dispatch.queueSkipped === true && queueSkipReason) return queueSkipReason;
+    const flushSkipReason = normalizeText(dispatch.flushSkipReason || '');
+    if (dispatch.flushSkipped === true && flushSkipReason) return flushSkipReason;
+    const failureReason = normalizeText(dispatch.failureReason || '');
+    if (normalizeCodeToken(dispatch.state || '') === 'dispatch_skipped' && failureReason) {
+      return failureReason;
+    }
+    return '';
+  }
+
+  function formatDispatchSkippedStatusText(process = {}) {
+    const reason = getDispatchSkipReasonFromProcess(process);
+    if (reason === 'portfolio_analysis_saved_locally') {
+      return 'Zapis lokalny gotowy. Portfolio zapisane lokalnie - sync do Watchlist celowo pominiety.';
+    }
+    if (reason === 'dispatch_skipped_by_options' || reason === 'skip_watchlist_dispatch') {
+      return 'Zapis lokalny gotowy. Sync do Watchlist pominiety przez opcje procesu.';
+    }
+    if (reason) {
+      return `Zapis lokalny gotowy. Sync do Watchlist pominiety (${reason}).`;
+    }
+    return 'Zapis lokalny gotowy. Sync do Watchlist pominiety.';
+  }
+
   function buildOperatorStatusText(rawProcess = {}) {
     const process = rawProcess && typeof rawProcess === 'object' ? rawProcess : {};
     const lifecycleStatus = isForceStoppedRecord(process)
@@ -375,7 +422,7 @@
       case 'dispatch.confirmed':
         return 'Zakonczono. Zapis lokalny i sync do Watchlist gotowe.';
       case 'dispatch.skipped':
-        return 'Zapis lokalny gotowy. Sync do Watchlist pominiety.';
+        return formatDispatchSkippedStatusText(process);
       case 'dispatch.failed':
         return 'Zapis lokalny gotowy. Sync do Watchlist nieudany.';
       case 'storage.save_failed':

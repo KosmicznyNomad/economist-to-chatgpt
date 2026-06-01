@@ -55,6 +55,37 @@ function testFinalizingCompletionSemantics() {
   assert.match(completed.statusText, /sync do Watchlist gotowe/i);
 }
 
+function testDispatchSkippedStatusIncludesReason() {
+  const portfolioLocalOnly = ProcessContractUtils.getProcessContract({
+    lifecycleStatus: 'completed',
+    phase: 'dispatch_remote',
+    statusCode: 'dispatch.skipped',
+    persistenceStatus: {
+      dispatch: {
+        state: 'dispatch_skipped',
+        queueSkipped: true,
+        queueSkipReason: 'portfolio_analysis_saved_locally'
+      }
+    }
+  });
+  assert.match(portfolioLocalOnly.statusText, /Portfolio zapisane lokalnie/i);
+  assert.match(portfolioLocalOnly.statusText, /celowo pominiety/i);
+
+  const invalidPayload = ProcessContractUtils.getProcessContract({
+    lifecycleStatus: 'completed',
+    phase: 'dispatch_remote',
+    statusCode: 'dispatch.skipped',
+    persistenceStatus: {
+      dispatch: {
+        state: 'dispatch_skipped',
+        queueSkipped: true,
+        queueSkipReason: 'invalid_payload'
+      }
+    }
+  });
+  assert.match(invalidPayload.statusText, /invalid_payload/);
+}
+
 function testRateLimitNeedsActionContract() {
   const contract = ProcessContractUtils.getProcessContract({
     lifecycleStatus: 'running',
@@ -88,6 +119,7 @@ function main() {
   testLegacyFailureBackfill();
   testNeedsActionInference();
   testFinalizingCompletionSemantics();
+  testDispatchSkippedStatusIncludesReason();
   testRateLimitNeedsActionContract();
   testForceStoppedLegacyFailureBackfill();
   console.log('test-process-contract.js passed');

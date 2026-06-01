@@ -77,12 +77,36 @@ function testInstantComposerPillCanOpenModelModeMenu() {
   requiredIndexOf('function isThinkingModeReadyInComposer()');
   requiredIndexOf('function getThinkingEffortPillButtons(targetEffort = \'\')');
   requiredIndexOf("if (effort === 'heavy') return ['heavy', 'advanced', 'zaawansowan', 'zaa', 'extended', 'rozszerzon', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
-  requiredIndexOf("if (effort === 'pro') return ['pro'];");
+  assert.strictEqual(
+    backgroundSource.includes("if (effort === 'pro') return ['pro'];"),
+    false,
+    'Pro is a top-level mode in the current ChatGPT layout, not a Thinking effort keyword.'
+  );
   requiredIndexOf("normalizedText.includes('zaawansowan')");
   requiredIndexOf("console.log('[thinking-mode] selecting Thinking mode'");
 }
 
-function testAdvancedExtendedProPillCanOpenEffortMenu() {
+function testStandaloneProModeDoesNotSatisfyThinkingMode() {
+  requiredIndexOf('function isStandaloneProLabel(text)');
+  requiredIndexOf('function isStandaloneProModeControl(element)');
+  requiredIndexOf("normalizedText === 'pro'");
+  requiredIndexOf("normalizedText === 'chatgpt pro'");
+  requiredIndexOf('/^(?:pro\\s+)*pro$/.test(normalizedText)');
+  requiredIndexOf('/^(?:chatgpt\\s+pro\\s+)*chatgpt\\s+pro$/.test(normalizedText)');
+  requiredIndexOf('if (isStandaloneProModeControl(button)) return false;');
+  requiredIndexOf('if (isStandaloneProModeControl(button)) return -1;');
+  requiredIndexOf('if (isStandaloneProModeControl(button)) return true;');
+  requiredIndexOf('if (isStandaloneProModeControl(item)) continue;');
+  requiredIndexOf('if (isStandaloneProModeControl(item)) return false;');
+  requiredIndexOf('const visibleItems = getVisibleThinkingEffortMenuItems();');
+  assert.strictEqual(
+    backgroundSource.includes('includeStandalonePro'),
+    false,
+    'Standalone Pro menu items must stay out of Thinking effort detection.'
+  );
+}
+
+function testAdvancedExtendedIntensivePillCanOpenEffortMenu() {
   requiredIndexOf("'button'");
   requiredIndexOf("'[role=\"button\"]'");
   requiredIndexOf("'[tabindex=\"0\"]'");
@@ -93,8 +117,8 @@ function testAdvancedExtendedProPillCanOpenEffortMenu() {
   requiredIndexOf("if (effort === 'heavy') return ['heavy', 'advanced', 'zaawansowan', 'zaa', 'extended', 'rozszerzon', 'intensive', 'intensywn', 'ciezki', 'ciężk'];");
   requiredIndexOf("normalized === 'advanced'");
   requiredIndexOf("normalized === 'zaawansowany'");
-  requiredIndexOf("if (normalized === 'pro') return 'pro';");
-  requiredIndexOf("const isStrongThinkingEffortControl = text.includes('zaawansowan') && isThinkingEffortMenuLabel(text);");
+  requiredIndexOf("if (normalized === 'pro') return 'heavy';");
+  requiredIndexOf("const isStrongThinkingEffortControl = (text.includes('zaawansowan') || text.includes('intensywn')) && isThinkingEffortMenuLabel(text);");
   requiredIndexOf('return isStrongThinkingEffortControl || isComposerControl || hasMenuSignal;');
   requiredIndexOf('scoreThinkingEffortPillButton(button, effort)');
   requiredIndexOf('...getThinkingEffortPillButtons(effort)');
@@ -110,7 +134,8 @@ function main() {
   testThinkingModeIsCheckedEvenWithoutRequestedEffort();
   testGenericComposerPillDoesNotSatisfyThinkingMode();
   testInstantComposerPillCanOpenModelModeMenu();
-  testAdvancedExtendedProPillCanOpenEffortMenu();
+  testStandaloneProModeDoesNotSatisfyThinkingMode();
+  testAdvancedExtendedIntensivePillCanOpenEffortMenu();
   console.log('test-thinking-mode-before-run.js passed');
 }
 

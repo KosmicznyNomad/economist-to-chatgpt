@@ -15,6 +15,13 @@ const INVEST_GPT_PATH_BASE = (() => {
     return '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka';
   }
 })();
+const PORTFOLIO_GPT_PATH_BASE = (() => {
+  try {
+    return new URL(PORTFOLIO_CHAT_URL).pathname.replace(/\/project\/?$/i, '').replace(/\/+$/, '');
+  } catch (error) {
+    return '/g/g-p-69f5df201ec08191bdffe0376f17191e';
+  }
+})();
 
 const PAUSE_MS = 1000;
 const WAIT_FOR_TEXTAREA_MS = 10000; // 10 sekund na znalezienie textarea
@@ -34,7 +41,7 @@ const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
-const ANALYSIS_QUEUE_MAX_CONCURRENT = 7;
+const ANALYSIS_QUEUE_MAX_CONCURRENT = 3;
 const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
 const ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS = 45 * 1000;
 const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
@@ -345,6 +352,10 @@ function normalizeComposerThinkingEffort(value) {
     || normalized === 'zaawansowan'
     || normalized === 'zaa'
     || normalized === 'extended'
+    || normalized === 'intensive'
+    || normalized === 'intensywny'
+    || normalized === 'intensywne'
+    || normalized === 'intensywn'
   ) {
     return 'heavy';
   }
@@ -354,9 +365,7 @@ function normalizeComposerThinkingEffort(value) {
   if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') {
     return 'light';
   }
-  if (normalized === 'pro') {
-    return 'pro';
-  }
+  if (normalized === 'pro') return 'heavy';
   if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') {
     return normalized;
   }
@@ -2912,9 +2921,15 @@ async function getAnalysisQueueStatusSnapshot() {
     ensureProcessRegistryReady()
   ]);
   const activeProcesses = await collectAnalysisQueueActiveProcesses();
-  const activeSlots = activeProcesses.length;
-  const reservedSlots = snapshot.activeJobs.length;
-  const liveSlots = activeProcesses.filter((entry) => entry?.activity?.live === true).length;
+  const openAnalysisChatTabs = typeof countOpenAnalysisChatTabs === 'function'
+    ? await countOpenAnalysisChatTabs().catch(() => 0)
+    : 0;
+  const activeSlots = Math.max(activeProcesses.length, openAnalysisChatTabs);
+  const reservedSlots = Math.max(snapshot.activeJobs.length, openAnalysisChatTabs);
+  const liveSlots = Math.max(
+    activeProcesses.filter((entry) => entry?.activity?.live === true).length,
+    openAnalysisChatTabs
+  );
   const startingSlots = Math.max(0, reservedSlots - liveSlots);
   return {
     success: true,
@@ -2925,6 +2940,7 @@ async function getAnalysisQueueStatusSnapshot() {
     reservedSlots,
     liveSlots,
     startingSlots,
+    openAnalysisChatTabs,
     queueSize: snapshot.waitingJobs.length,
     waitingJobs: snapshot.waitingJobs.length,
     activeJobs: reservedSlots,
@@ -9590,6 +9606,8 @@ function getProcessQueueDeliveryState(process) {
     : '';
   const queueSkipped = dispatch?.queueSkipped === true;
   const flushSkipped = dispatch?.flushSkipped === true;
+  const queueSkipReason = typeof dispatch?.queueSkipReason === 'string' ? dispatch.queueSkipReason.trim() : '';
+  const flushSkipReason = typeof dispatch?.flushSkipReason === 'string' ? dispatch.flushSkipReason.trim() : '';
   const confirmed = saveOk === true && isExplicitlyVerifiedDispatch(dispatch);
 
   return {
@@ -9602,6 +9620,8 @@ function getProcessQueueDeliveryState(process) {
     state,
     queueSkipped,
     flushSkipped,
+    queueSkipReason,
+    flushSkipReason,
     confirmed
   };
 }
@@ -9731,15 +9751,20 @@ async function markTrackedProcessStoppedForClosedTab(tabId, removeInfo = null) {
     const persistenceSummary = summarizeFinalStagePersistence(persistResult);
     const refreshedProcess = processRegistry.get(process.id) || process;
     const delivery = getProcessQueueDeliveryState(refreshedProcess);
+    const dispatchSkipped = delivery.queueSkipped === true
+      || delivery.flushSkipped === true
+      || delivery.state === 'dispatch_skipped';
     await upsertProcess(process.id, {
       lifecycleStatus: 'completed',
       status: 'completed',
       phase: delivery.confirmed === true ? 'verify_remote' : 'dispatch_remote',
       actionRequired: 'none',
-      statusCode: delivery.confirmed === true ? 'dispatch.confirmed' : 'dispatch.verify_pending',
+      statusCode: delivery.confirmed === true
+        ? 'dispatch.confirmed'
+        : (dispatchSkipped ? 'dispatch.skipped' : 'dispatch.verify_pending'),
       reason: delivery.confirmed === true
         ? 'tab_closed_after_completion'
-        : 'tab_closed_after_completion_pending_dispatch',
+        : (dispatchSkipped ? 'tab_closed_after_completion_dispatch_skipped' : 'tab_closed_after_completion_pending_dispatch'),
       needsAction: false,
       autoRecovery: null,
       finishedAt: now,
@@ -12007,7 +12032,14 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           nowTs: now,
           excludedRunIds: releasedRunIds
         });
-        let reservedSlots = occupiedSlots.length;
+        const openAnalysisChatTabs = typeof countOpenAnalysisChatTabs === 'function'
+          ? await countOpenAnalysisChatTabs().catch(() => 0)
+          : 0;
+        let reservedSlots = Math.max(
+          occupiedSlots.length,
+          state.activeJobs.length,
+          openAnalysisChatTabs
+        );
         sortAnalysisQueueWaitingJobs(state.waitingJobs);
         let manualPdfReservedSlots = state.activeJobs.filter((job) => job?.sourceKind === 'manual_pdf').length;
         while (reservedSlots < state.maxConcurrent && state.waitingJobs.length > 0) {
@@ -19045,12 +19077,75 @@ function isInvestGptUrl(url) {
   }
 }
 
+function isPortfolioGptUrl(url) {
+  if (typeof url !== 'string') return false;
+  const compactUrl = url.trim();
+  if (!compactUrl) return false;
+
+  const matchesPortfolioPath = (pathname) => {
+    const normalizedPath = typeof pathname === 'string'
+      ? pathname.replace(/\/+$/, '').toLowerCase()
+      : '';
+    const portfolioPathBase = typeof PORTFOLIO_GPT_PATH_BASE === 'string'
+      ? PORTFOLIO_GPT_PATH_BASE.replace(/\/+$/, '').toLowerCase()
+      : '';
+    if (!normalizedPath || !portfolioPathBase) return false;
+    return normalizedPath === portfolioPathBase || normalizedPath.startsWith(`${portfolioPathBase}/`);
+  };
+
+  try {
+    const parsed = new URL(compactUrl);
+    if (!['http:', 'https:'].includes(parsed.protocol)) return false;
+    if (!CHAT_GPT_HOSTS.has(parsed.hostname.toLowerCase())) return false;
+    return matchesPortfolioPath(parsed.pathname || '');
+  } catch (error) {
+    const normalizedBase = typeof PORTFOLIO_CHAT_URL === 'string'
+      ? PORTFOLIO_CHAT_URL.toLowerCase().replace(/\/project(?:[/?#].*)?$/i, '')
+      : '';
+    const normalizedUrl = compactUrl.toLowerCase();
+    if (!normalizedBase || !normalizedUrl.startsWith(normalizedBase)) return false;
+    if (normalizedUrl.length === normalizedBase.length) return true;
+    const separator = normalizedUrl.charAt(normalizedBase.length);
+    return separator === '/' || separator === '?' || separator === '#';
+  }
+}
+
+function isAnalysisGptUrl(url) {
+  return isInvestGptUrl(url) || isPortfolioGptUrl(url);
+}
+
 function getTabEffectiveUrl(tab) {
   if (!tab || typeof tab !== 'object') return '';
   const url = typeof tab.url === 'string' ? tab.url.trim() : '';
   if (url) return url;
   const pendingUrl = typeof tab.pendingUrl === 'string' ? tab.pendingUrl.trim() : '';
   return pendingUrl;
+}
+
+async function countOpenAnalysisChatTabs() {
+  if (typeof chrome === 'undefined' || !chrome?.tabs || typeof chrome.tabs.query !== 'function') {
+    return 0;
+  }
+
+  let tabs = [];
+  try {
+    tabs = await chrome.tabs.query({});
+  } catch (error) {
+    return 0;
+  }
+
+  if (!Array.isArray(tabs)) return 0;
+  const tabIds = new Set();
+  let fallbackCount = 0;
+  for (const tab of tabs) {
+    if (!isAnalysisGptUrl(getTabEffectiveUrl(tab))) continue;
+    if (Number.isInteger(tab?.id)) {
+      tabIds.add(tab.id);
+    } else {
+      fallbackCount += 1;
+    }
+  }
+  return tabIds.size + fallbackCount;
 }
 
 function compareTabsByWindowAndIndex(left, right) {
@@ -22371,6 +22466,11 @@ function buildPersistenceUiSummary(options = {}) {
     || (Number.isInteger(dispatch?.accepted) && dispatch.accepted > 0 && (!Number.isInteger(dispatch?.sent) || dispatch.sent === 0))
     || (Number.isInteger(dispatch?.sent) && dispatch.sent > 0 && !isExplicitlyVerifiedDispatch(dispatch));
   const confirmedDispatch = isExplicitlyVerifiedDispatch(dispatch);
+  const resultReason = confirmedDispatch
+    ? 'dispatch_confirmed'
+    : (dispatch?.queueSkipped === true
+      ? 'dispatch_skipped'
+      : (pendingDispatch ? 'dispatch_pending' : 'saved_local'));
   const lifecycleStatus = 'completed';
   const phase = confirmedDispatch
     ? 'verify_remote'
@@ -22387,7 +22487,7 @@ function buildPersistenceUiSummary(options = {}) {
     phase,
     statusCode,
     statusText: `Zakonczono | ${localSaveSummary}${bridgeStatusChunk} | ${dispatchSummary} | ${verifySummary}`,
-    reason: '',
+    reason: resultReason,
     tone,
     logLines,
     dispatchSummary,
@@ -35505,10 +35605,14 @@ async function injectToChat(
         || normalized === 'zaawansowan'
         || normalized === 'zaa'
         || normalized === 'extended'
+        || normalized === 'intensive'
+        || normalized === 'intensywny'
+        || normalized === 'intensywne'
+        || normalized === 'intensywn'
       ) return 'heavy';
       if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') return 'standard';
       if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') return 'light';
-      if (normalized === 'pro') return 'pro';
+      if (normalized === 'pro') return 'heavy';
       if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') {
         return normalized;
       }
@@ -35823,10 +35927,14 @@ async function injectToChat(
           || normalized === 'zaawansowan'
           || normalized === 'zaa'
           || normalized === 'extended'
+          || normalized === 'intensive'
+          || normalized === 'intensywny'
+          || normalized === 'intensywne'
+          || normalized === 'intensywn'
         ) return 'heavy';
         if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') return 'standard';
         if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') return 'light';
-        if (normalized === 'pro') return 'pro';
+        if (normalized === 'pro') return 'heavy';
         if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') {
           return normalized;
         }
@@ -38145,6 +38253,26 @@ async function injectToChat(
       return regex.test(normalizedText);
     }
 
+    function isStandaloneProLabel(text) {
+      const normalizedText = normalizeDomText(text)
+        .replace(/[•·]/g, ' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+      return normalizedText === 'pro'
+        || normalizedText === 'chatgpt pro'
+        || /^(?:pro\s+)*pro$/.test(normalizedText)
+        || /^(?:chatgpt\s+pro\s+)*chatgpt\s+pro$/.test(normalizedText);
+    }
+
+    function isStandaloneProModeControl(element) {
+      const text = getElementMatchText(element);
+      if (!isStandaloneProLabel(text)) return false;
+      return !hasThinkingContextToken(text)
+        && !matchesThinkingEffortLabel(text, 'heavy')
+        && !matchesThinkingEffortLabel(text, 'standard')
+        && !matchesThinkingEffortLabel(text, 'light');
+    }
+
     function getElementReadableText(element) {
       if (!(element instanceof HTMLElement)) return '';
       const parts = [
@@ -38183,7 +38311,6 @@ async function injectToChat(
       if (effort === 'standard') return 'Standard';
       if (effort === 'extended') return 'Heavy';
       if (effort === 'heavy') return 'Heavy';
-      if (effort === 'pro') return 'Pro';
       return '';
     }
 
@@ -38208,7 +38335,7 @@ async function injectToChat(
     function detectThinkingEffortState() {
       const checkedItem = getCheckedThinkingEffortMenuItem();
       const checkedLabel = getElementReadableText(checkedItem);
-      for (const effort of ['pro', 'heavy', 'standard', 'light']) {
+      for (const effort of ['heavy', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(checkedLabel, effort)) {
           return {
             effort,
@@ -38219,7 +38346,7 @@ async function injectToChat(
 
       const pillButton = findThinkingEffortPillButton();
       const pillLabel = getElementReadableText(pillButton);
-      for (const effort of ['pro', 'heavy', 'standard', 'light']) {
+      for (const effort of ['heavy', 'standard', 'light']) {
         if (matchesThinkingEffortLabel(pillLabel, effort)) {
           return {
             effort,
@@ -38291,10 +38418,9 @@ async function injectToChat(
     }
 
     function getThinkingEffortKeywords(effort) {
-      if (effort === 'light') return ['light', 'lekki', 'instant', 'blyskaw', 'błyskaw'];
+      if (effort === 'light') return ['light', 'lekki'];
       if (effort === 'standard') return ['standard', 'medium', 'sredni', 'średni'];
       if (effort === 'heavy') return ['heavy', 'advanced', 'zaawansowan', 'zaa', 'extended', 'rozszerzon', 'intensive', 'intensywn', 'ciezki', 'ciężk'];
-      if (effort === 'pro') return ['pro'];
       return [];
     }
 
@@ -38328,7 +38454,6 @@ async function injectToChat(
         matchesThinkingEffortLabel(text, 'light')
         || matchesThinkingEffortLabel(text, 'standard')
         || matchesThinkingEffortLabel(text, 'heavy')
-        || matchesThinkingEffortLabel(text, 'pro')
       );
     }
 
@@ -38431,6 +38556,7 @@ async function injectToChat(
         if (!isElementVisibleForInteraction(button)) return false;
         if (button.closest('[data-message-author-role]')) return false;
         const text = getElementMatchText(button);
+        if (isStandaloneProModeControl(button)) return false;
         if (!hasThinkingContextToken(text) && !isThinkingEffortMenuLabel(text)) return false;
         const className = normalizeDomText(button.className || '');
         const isComposerControl = !!(
@@ -38445,7 +38571,7 @@ async function injectToChat(
           || button.closest('[role="menu"]')
           || button.closest('[data-radix-popper-content-wrapper]')
         );
-        const isStrongThinkingEffortControl = text.includes('zaawansowan') && isThinkingEffortMenuLabel(text);
+        const isStrongThinkingEffortControl = (text.includes('zaawansowan') || text.includes('intensywn')) && isThinkingEffortMenuLabel(text);
         return isStrongThinkingEffortControl || isComposerControl || hasMenuSignal;
       });
     }
@@ -38456,6 +38582,7 @@ async function injectToChat(
       const className = normalizeDomText(button.className || '');
       const id = normalizeDomText(button.id || '');
       const hasThinkingSignal = hasThinkingContextToken(text) || isThinkingEffortMenuLabel(text);
+      if (isStandaloneProModeControl(button)) return -1;
       if (effort && !matchesThinkingEffortLabel(text, effort)) return -1;
       if (!effort && !hasThinkingSignal) return -1;
 
@@ -38465,7 +38592,6 @@ async function injectToChat(
       if (text.includes('zaawansowan')) score += 120;
       if (text.includes('advanced')) score += 120;
       if (matchesThinkingEffortLabel(text, 'heavy')) score += 90;
-      if (containsWord(text, 'pro')) score += 20;
       if (button.getAttribute('aria-haspopup')) score += 60;
       if (button.getAttribute('aria-expanded')) score += 30;
       if (button.closest('form')) score += 40;
@@ -38510,6 +38636,7 @@ async function injectToChat(
       const className = normalizeDomText(button.className || '');
       if (!className.includes('composer-pill')) return false;
       const text = getElementMatchText(button);
+      if (isStandaloneProModeControl(button)) return true;
       if (!isModelModeSwitcherText(text)) return false;
       return !isThinkingEffortMenuLabel(text);
     }
@@ -38593,6 +38720,7 @@ async function injectToChat(
       let exact = null;
       let fallback = null;
       for (const item of items) {
+        if (isStandaloneProModeControl(item)) continue;
         const text = getElementMatchText(item);
         const normalized = ` ${text} `;
         if (normalized.includes(' thinking ')) {
@@ -38730,6 +38858,7 @@ async function injectToChat(
           return false;
         }
         const text = getElementMatchText(item);
+        if (isStandaloneProModeControl(item)) return false;
         return isThinkingEffortMenuLabel(text);
       });
     }
@@ -40042,19 +40171,38 @@ async function injectToChat(
     const startTime = Date.now();
     let stableReadyHits = 0;
     let clickedContinue = false;
+    let clickedStaleStop = false;
     let lastHeartbeatAt = Date.now();
     let lastAssistantText = (() => {
       const lastMsg = getLastAssistantMessageElement();
       return lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
     })();
     let lastAssistantChangeAt = Date.now();
+    let lastGeneratingActivityAt = Date.now();
+    let lastGenerationSignature = '';
+    let staleGenerationOverrideWarned = false;
+    let incompleteStaleReadyWarnKey = '';
+    const staleGeneratingReadyOverrideMs = 8_000;
+    const getGenerationSignature = (genStatus) => {
+      if (!genStatus?.generating) return '';
+      const element = genStatus.element instanceof HTMLElement ? genStatus.element : null;
+      if (!element) return `${genStatus.reason || 'unknown'}|no-element`;
+      return [
+        genStatus.reason || 'unknown',
+        element.tagName || '',
+        element.id || '',
+        element.getAttribute('data-testid') || '',
+        element.getAttribute('aria-label') || '',
+        compactText(element.textContent || '').slice(0, 80)
+      ].join('|');
+    };
 
     while (true) {
       if (shouldStopNow()) {
-        return { finished: false, reason: 'force_stopped', clickedContinue };
+        return { finished: false, reason: 'force_stopped', clickedContinue, clickedStaleStop };
       }
       if (captureGenerationBlockerState()) {
-        return { finished: false, reason: 'blocked', clickedContinue };
+        return { finished: false, reason: 'blocked', clickedContinue, clickedStaleStop };
       }
       if (hasRetryableChatGptGenerationErrorMessage()) {
         const retryResult = await clickRetryForRetryableGenerationError('generation_finish_guard');
@@ -40078,31 +40226,100 @@ async function injectToChat(
       }
 
       const genStatus = isGenerating();
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]') ||
-                     document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
-      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      if (!genStatus.generating) {
+        lastGenerationSignature = '';
+        lastGeneratingActivityAt = Date.now();
+        staleGenerationOverrideWarned = false;
+      } else {
+        const generationSignature = getGenerationSignature(genStatus);
+        if (generationSignature !== lastGenerationSignature) {
+          lastGenerationSignature = generationSignature;
+          lastGeneratingActivityAt = Date.now();
+          staleGenerationOverrideWarned = false;
+        }
+      }
+      const editor = findPromptComposerEditor();
+      const editorReady = !!editor;
       const lastMsg = getLastAssistantMessageElement();
       const currentLastText = lastMsg ? compactText(lastMsg.innerText || lastMsg.textContent || '') : '';
       if (currentLastText && currentLastText !== lastAssistantText) {
         lastAssistantText = currentLastText;
         lastAssistantChangeAt = Date.now();
+        lastGeneratingActivityAt = Date.now();
         stableReadyHits = 0;
+        staleGenerationOverrideWarned = false;
       }
 
       const textStable = Date.now() - lastAssistantChangeAt >= 3000;
       const completionReady = getResponseCompletionReadiness(currentLastText, waitPromptText, waitPromptNumber);
+      const activeContinueButton = findChatGptContinueGeneratingButton();
+      const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastGeneratingActivityAt) : 0;
+      const generationLooksStaleReadyBase = (
+        genStatus.generating
+        && editorReady
+        && textStable
+        && !activeContinueButton
+        && staleGeneratingForMs >= staleGeneratingReadyOverrideMs
+      );
+      const staleReadyCompletion = generationLooksStaleReadyBase
+        ? getResponseCompletionReadiness(currentLastText, waitPromptText, waitPromptNumber, {
+            forStaleGenerating: true
+          })
+        : { ready: false, reason: '' };
+      const generationLooksStaleReady = generationLooksStaleReadyBase && staleReadyCompletion.ready;
+      if (generationLooksStaleReadyBase && !staleReadyCompletion.ready) {
+        const warnKey = [
+          staleReadyCompletion.reason || 'unknown',
+          (staleReadyCompletion.missingMarkers || []).join(','),
+          currentLastText.length
+        ].join('|');
+        if (warnKey !== incompleteStaleReadyWarnKey) {
+          incompleteStaleReadyWarnKey = warnKey;
+          console.warn('[response-completion] Nie domykam stale Stop - odpowiedz nie wyglada na kompletna.', {
+            prompt: waitPromptNumber,
+            reason: genStatus.reason,
+            staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+            responseLength: currentLastText.length,
+            completionReason: staleReadyCompletion.reason,
+            missingMarkers: staleReadyCompletion.missingMarkers || []
+          });
+        }
+      }
+      if (generationLooksStaleReady && !staleGenerationOverrideWarned) {
+        staleGenerationOverrideWarned = true;
+        console.warn('[response-completion] Wykryto kompletny tekst i wiszacy wskaznik generowania.', {
+          prompt: waitPromptNumber,
+          reason: genStatus.reason,
+          staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+          responseLength: currentLastText.length,
+          completionReason: staleReadyCompletion.reason
+        });
+      }
+      if (generationLooksStaleReady && !clickedStaleStop) {
+        const staleStopButton = genStatus.element instanceof HTMLElement ? genStatus.element : findActiveStopButton();
+        if (staleStopButton && typeof staleStopButton.click === 'function') {
+          clickedStaleStop = true;
+          stableReadyHits = 0;
+          updateCounter(counter, waitCurrentPrompt, waitTotalPrompts, 'Domykam wiszacy Stop po kompletnym markerze...');
+          console.warn('[response-completion] Klikam Stop po kompletnym markerze, zeby odblokowac kolejny etap.', {
+            prompt: waitPromptNumber,
+            completionReason: staleReadyCompletion.reason
+          });
+          staleStopButton.click();
+          await new Promise((resolve) => setTimeout(resolve, 1200));
+          continue;
+        }
+      }
       const generationFinished = (
         !genStatus.generating
         && editorReady
         && textStable
-        && !findChatGptContinueGeneratingButton()
-        && completionReady.ready
+        && !activeContinueButton
       );
       if (generationFinished) {
         stableReadyHits += 1;
         if (stableReadyHits >= 2) {
-          return { finished: true, reason: 'generation_finished', clickedContinue };
+          return { finished: true, reason: 'generation_finished', clickedContinue, clickedStaleStop };
         }
       } else {
         stableReadyHits = 0;
@@ -40123,7 +40340,7 @@ async function injectToChat(
           phase: 'generation_finish_guard',
           statusCode: 'chat.generation_finish_guard',
           statusText: 'Czekam az ChatGPT skonczy generowac odpowiedz',
-          reason: genStatus.generating ? (genStatus.reason || 'generating') : (completionReady.reason || 'interface_not_stable'),
+          reason: genStatus.generating ? (genStatus.reason || 'generating') : (editorReady ? 'waiting_for_stable_text' : 'editor_not_ready'),
           ...(Array.isArray(completionReady.missingMarkers) && completionReady.missingMarkers.length > 0
             ? { missingMarkers: completionReady.missingMarkers }
             : {}),
@@ -40133,7 +40350,7 @@ async function injectToChat(
       }
 
       if (safeMaxWaitMs > 0 && (Date.now() - startTime) >= safeMaxWaitMs) {
-        return { finished: false, reason: 'timeout', clickedContinue };
+        return { finished: false, reason: 'timeout', clickedContinue, clickedStaleStop };
       }
 
       await new Promise((resolve) => setTimeout(resolve, 500));
@@ -40276,7 +40493,8 @@ async function injectToChat(
     let lastPhase2GenerationSignature = '';
     let phase2StaleGenerationOverrideWarned = false;
     let phase2IncompleteStaleReadyWarnKey = '';
-    const phase2StaleGeneratingReadyOverrideMs = 45_000;
+    let phase2ClickedStaleStop = false;
+    const phase2StaleGeneratingReadyOverrideMs = 8_000;
     const phase2StaleGeneratingFailMs = 180_000;
     const getPhase2GenerationSignature = (genStatus) => {
       if (!genStatus?.generating) return '';
@@ -40311,9 +40529,7 @@ async function injectToChat(
         return false;
       }
 
-      const editor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                     document.querySelector('div[contenteditable="true"]') ||
-                     document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
+      const editor = findPromptComposerEditor();
 
       const sendButton = document.querySelector('[data-testid="send-button"]') ||
                         document.querySelector('#composer-submit-button') ||
@@ -40359,7 +40575,7 @@ async function injectToChat(
         });
       }
 
-      const editorReady = editor && editor.getAttribute('contenteditable') === 'true';
+      const editorReady = !!editor;
       const noGeneration = !genStatus.generating;
 
       const responseNodes = getResponseDomNodes();
@@ -40420,11 +40636,14 @@ async function injectToChat(
 
       const isReady = noGeneration && editorReady && !hasThinkingInMessage && responseSeenInDOM && textStable && !hasProgressText;
       const staleGeneratingForMs = genStatus.generating ? (Date.now() - lastPhase2GeneratingActivityAt) : 0;
+      const activeStopButton = findActiveStopButton();
+      const activeContinueButton = findChatGptContinueGeneratingButton();
       const generationLooksStaleReadyBase = genStatus.generating
-        && editorReady
+        && (editorReady || !!activeStopButton)
         && responseSeenInDOM
         && textStable
         && !hasProgressText
+        && !activeContinueButton
         && staleGeneratingForMs >= phase2StaleGeneratingReadyOverrideMs;
       const staleReadyCompletion = getResponseCompletionReadiness(currentLastText, waitPromptText, waitPromptNumber, {
         forStaleGenerating: true
@@ -40456,6 +40675,20 @@ async function injectToChat(
           completionReason: staleReadyCompletion.reason
         });
       }
+      if (generationLooksStaleReady && activeStopButton && !phase2ClickedStaleStop) {
+        phase2ClickedStaleStop = true;
+        consecutiveReady = 0;
+        updateCounter(counter, waitCurrentPrompt, waitTotalPrompts, 'Domykam wiszacy Stop po kompletnym markerze...');
+        console.warn('[FAZA 2] Klikam Stop po kompletnym markerze, zeby waitForResponse mogl przejsc dalej.', {
+          prompt: waitPromptNumber,
+          staleFor: `${Math.round(staleGeneratingForMs / 1000)}s`,
+          completionReason: staleReadyCompletion.reason,
+          responseLength: currentLastText.length
+        });
+        activeStopButton.click();
+        await new Promise((resolve) => setTimeout(resolve, 1200));
+        continue;
+      }
 
       if (isReady || generationLooksStaleReady) {
         consecutiveReady += 1;
@@ -40481,10 +40714,8 @@ async function injectToChat(
             { forStaleGenerating: confirmGenStatus.generating === true }
           );
           const confirmContinueButton = findChatGptContinueGeneratingButton();
-          const confirmEditor = document.querySelector('[role="textbox"][contenteditable="true"]') ||
-                                document.querySelector('div[contenteditable="true"]') ||
-                                document.querySelector('[data-testid="composer-input"][contenteditable="true"]');
-          const confirmEditorReady = confirmEditor && confirmEditor.getAttribute('contenteditable') === 'true';
+          const confirmEditor = findPromptComposerEditor();
+          const confirmEditorReady = !!confirmEditor;
           const confirmReady = (
             !confirmTextChanged
             && !confirmCountChanged
@@ -40498,7 +40729,6 @@ async function injectToChat(
                 && confirmGenStatus.reason === genStatus.reason
               )
             )
-            && confirmCompletion.ready
           );
 
           if (!confirmReady) {
@@ -41309,7 +41539,8 @@ async function injectToChat(
       };
     }
 
-    if (missingHardMarkers.length > 0) {
+    const enforceHardMarkers = options?.forStaleGenerating === true || options?.strictCompletionMarkers === true;
+    if (missingHardMarkers.length > 0 && enforceHardMarkers) {
       return {
         ready: false,
         reason: 'missing_completion_marker',
@@ -41329,7 +41560,8 @@ async function injectToChat(
               : 'basic_response_ready'
           ),
       stageId: completionContract.stageId,
-      missingMarkers
+      missingMarkers,
+      missingHardMarkers
     };
   }
 
@@ -41372,30 +41604,23 @@ async function injectToChat(
       };
     }
 
-    if (missingHardMarkers.length > 0) {
-      return {
-        valid: false,
-        reason: 'missing_completion_marker',
-        stageId: completionContract.stageId,
-        missingMarkers,
-        missingHardMarkers,
-        statusText: `Odpowiedz niepelna - brakuje markera ${missingHardMarkers.join(', ')}`
-      };
-    }
-
     if (missingMarkers.length > 0) {
       console.warn('[response-validation] Brak markerow oczekiwanych przez prompt, ale DOM/tekst wskazuje zakonczona odpowiedz - traktuje jako soft diagnostic', {
         stageId: completionContract.stageId || '',
         missingMarkers,
+        missingHardMarkers,
         responseLength: safeText.length
       });
     }
 
     return {
       valid: true,
-      reason: missingMarkers.length > 0 ? 'ok_missing_soft_markers' : 'ok',
+      reason: missingHardMarkers.length > 0
+        ? 'ok_missing_completion_marker'
+        : (missingMarkers.length > 0 ? 'ok_missing_soft_markers' : 'ok'),
       stageId: completionContract.stageId,
       missingMarkers,
+      missingHardMarkers,
       statusText: 'Odpowiedz kompletna'
     };
   }

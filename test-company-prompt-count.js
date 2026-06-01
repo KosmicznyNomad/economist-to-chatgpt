@@ -267,11 +267,34 @@ function testCompanyPromptCatalogIsSixteenPrompts() {
 
 function testCompanyPromptFinalOutputsAreDataGapOrJsonOnly() {
   const prompts = parsePromptChainText(promptsText);
+  const stage0Prompt = prompts[0] || '';
+  const stage1Prompt = prompts[1] || '';
+  const stage2Prompt = prompts[2] || '';
   const stage5McpPrompt = prompts.find((prompt) => (
     prompt.includes('STAGE 5') && prompt.includes('MCP SECTOR OVERLAY')
   )) || '';
   const stage14RecordPrompt = prompts[14] || '';
   const sectorMemoryPrompt = prompts[15] || '';
+
+  assert(
+    stage0Prompt.includes('Source Material Reality Check (Mandatory Before Critical Rule)'),
+    'Stage 0 should classify satire/fiction before applying the assume-true rule.'
+  );
+  assert(
+    stage0Prompt.includes('NON_INVESTABLE_SOURCE: true')
+      && stage0Prompt.includes('PIPELINE_ROUTE: STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY'),
+    'Stage 0 should expose a terminal non-investable-source route in the handoff.'
+  );
+  assert(
+    stage1Prompt.includes('TERMINAL SOURCE GUARD')
+      && stage1Prompt.includes('SELECTED_SUB-SEGMENTS: []'),
+    'Stage 1 should preserve the non-investable-source stop route instead of deriving subsegments.'
+  );
+  assert(
+    stage2Prompt.includes('TERMINAL SOURCE GUARD')
+      && stage2Prompt.includes('COMPANIES_CARRIED_FORWARD: []'),
+    'Stage 2 should avoid creating companies when Stage 1 carries no investable subsegments.'
+  );
 
   assert(
     stage5McpPrompt.includes('Retrieve sector memory entries using combinations of:'),

@@ -230,6 +230,15 @@ function testApplyChatGptComputationStatePatch() {
     chatGptComputationLabel: 'ChatGPT Pro | Thinking | Thinking Heavy',
     chatGptComputationDetectedAt: 123456789
   });
+
+  const legacyProPatch = {};
+  ctx.applyChatGptComputationStatePatch(legacyProPatch, {
+    composerThinkingEffort: 'pro',
+    chatGptThinkingEffortDetected: 'pro',
+    chatGptThinkingEffortLabel: 'Pro'
+  });
+  assert.strictEqual(legacyProPatch.composerThinkingEffort, 'heavy');
+  assert.strictEqual(legacyProPatch.chatGptThinkingEffortDetected, 'heavy');
 }
 
 function testFormatChatGptComputationSummary() {
@@ -252,7 +261,7 @@ function testFormatChatGptComputationSummary() {
     'Model ChatGPT Pro | Tryb Thinking | Thinking Heavy'
   );
 
-  const proSummary = ctx.formatChatGptComputationSummary({
+  const legacyProSummary = ctx.formatChatGptComputationSummary({
     composerThinkingEffort: 'pro',
     chatGptModeKind: 'thinking',
     chatGptModelSwitcherLabel: 'ChatGPT Pro',
@@ -260,8 +269,8 @@ function testFormatChatGptComputationSummary() {
   });
 
   assert.strictEqual(
-    proSummary,
-    'Model ChatGPT Pro | Tryb Thinking | Thinking Pro'
+    legacyProSummary,
+    'Model ChatGPT Pro | Tryb Thinking | Thinking Heavy'
   );
 }
 

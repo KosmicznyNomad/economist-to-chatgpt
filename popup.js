@@ -139,20 +139,23 @@ function normalizePopupComposerThinkingEffort(value) {
     || normalized === 'zaawansowan'
     || normalized === 'zaa'
     || normalized === 'extended'
+    || normalized === 'intensive'
+    || normalized === 'intensywny'
+    || normalized === 'intensywne'
+    || normalized === 'intensywn'
   ) {
     return 'heavy';
   }
   if (normalized === 'medium' || normalized === 'sredni' || normalized === 'średni') return 'standard';
   if (normalized === 'instant' || normalized === 'blyskawiczny' || normalized === 'błyskawiczny') return 'light';
-  if (normalized === 'pro') return 'pro';
+  if (normalized === 'pro') return 'heavy';
   if (normalized === 'light' || normalized === 'standard' || normalized === 'heavy') return normalized;
   return '';
 }
 
 function humanizePopupThinkingEffort(value) {
   const normalized = normalizePopupComposerThinkingEffort(value);
-  if (normalized === 'heavy') return 'zaawansowany';
-  if (normalized === 'pro') return 'pro';
+  if (normalized === 'heavy') return 'intensywny';
   if (normalized === 'standard') return 'średni';
   if (normalized === 'light') return 'błyskawiczny';
   return '';
@@ -2285,8 +2288,8 @@ if (resumeAllExtendedBtn) {
 if (resumeAllHeavyBtn) {
   resumeAllHeavyBtn.addEventListener('click', () => {
     void executeResumeAllFromPopup(resumeAllHeavyBtn, {
-      origin: 'popup-resume-all-pro',
-      composerThinkingEffort: 'pro',
+      origin: 'popup-resume-all-thinking-intensive',
+      composerThinkingEffort: 'heavy',
     });
   });
 }

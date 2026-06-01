@@ -467,8 +467,8 @@ CORE_DECISION_GRADE_AFTER_MCP: TRUE
     portfolioPrompts[0],
     1
   );
-  assert.strictEqual(portfolioPrompt1MissingMarker.valid, false);
-  assert.strictEqual(portfolioPrompt1MissingMarker.reason, 'missing_completion_marker');
+  assert.strictEqual(portfolioPrompt1MissingMarker.valid, true);
+  assert.strictEqual(portfolioPrompt1MissingMarker.reason, 'ok_missing_completion_marker');
   assert.strictEqual(portfolioPrompt1MissingMarker.missingHardMarkers.length, 1);
   assert.strictEqual(portfolioPrompt1MissingMarker.missingHardMarkers[0], 'PORTFOLIO_PROMPT_1_COMPLETE');
 
@@ -487,8 +487,37 @@ PORTFOLIO_PROMPT_1_COMPLETE`;
     portfolioPrompts[0],
     1
   );
-  assert.strictEqual(portfolioPrompt1Readiness.ready, false);
-  assert.strictEqual(portfolioPrompt1Readiness.reason, 'missing_completion_marker');
+  assert.strictEqual(portfolioPrompt1Readiness.ready, true);
+  assert.strictEqual(portfolioPrompt1Readiness.reason, 'basic_response_ready_missing_soft_markers');
+
+  const portfolioPrompt1StaleReadiness = ctx.getResponseCompletionReadiness(
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompts[0],
+    1,
+    { forStaleGenerating: true }
+  );
+  assert.strictEqual(portfolioPrompt1StaleReadiness.ready, false);
+  assert.strictEqual(portfolioPrompt1StaleReadiness.reason, 'missing_completion_marker');
+
+  const portfolioPrompt1StrictReadiness = ctx.getResponseCompletionReadiness(
+    portfolioPrompt1WithoutMarker,
+    portfolioPrompts[0],
+    1,
+    { strictCompletionMarkers: true }
+  );
+  assert.strictEqual(portfolioPrompt1StrictReadiness.ready, false);
+  assert.strictEqual(portfolioPrompt1StrictReadiness.reason, 'missing_completion_marker');
+  const portfolioPrompt1StrictMissingMarkers = portfolioPrompt1StrictReadiness.missingHardMarkers || [];
+  assert.strictEqual(portfolioPrompt1StrictMissingMarkers.length, 1);
+  assert.strictEqual(portfolioPrompt1StrictMissingMarkers[0], 'PORTFOLIO_PROMPT_1_COMPLETE');
+
+  const portfolioPrompt1CompletionReady = ctx.getResponseCompletionReadiness(
+    portfolioPrompt1Complete,
+    portfolioPrompts[0],
+    1
+  );
+  assert.strictEqual(portfolioPrompt1CompletionReady.ready, true);
+  assert.strictEqual(portfolioPrompt1CompletionReady.reason, 'completion_contract_satisfied');
 
   const getAssistantSelectorCalls = installAssistantTextSequence(ctx, [
     portfolioPrompt1WithoutMarker,
@@ -500,8 +529,8 @@ PORTFOLIO_PROMPT_1_COMPLETE`;
     promptNumber: 1,
     preferLatest: true
   });
-  assert.strictEqual(capturedPortfolioPrompt1, portfolioPrompt1Complete);
-  assert(getAssistantSelectorCalls() >= 3);
+  assert.strictEqual(capturedPortfolioPrompt1, portfolioPrompt1WithoutMarker);
+  assert(getAssistantSelectorCalls() >= 1);
 
   const portfolioPrompt3TruncatedJson = ctx.validateStageResponseForPrompt(
     '{"thesis_construction_summary":"tekst","portfolio_construction_commentary":"tekst","layers":[',
@@ -525,6 +554,12 @@ PORTFOLIO_PROMPT_1_COMPLETE`;
   assert(stageCompletionIndex > guardCallIndex, 'Stage completion must happen after generation-finished guard.');
   assert.match(backgroundSource, /Nie wysylam kolejnego etapu - ChatGPT nadal generuje/);
   assert.match(backgroundSource, /Nie wysylam Prompt 2 - Prompt 1 nadal nie jest zakonczony/);
+  assert.match(backgroundSource, /staleGeneratingReadyOverrideMs = 8_000/);
+  assert.match(backgroundSource, /phase2StaleGeneratingReadyOverrideMs = 8_000/);
+  assert.match(backgroundSource, /Klikam Stop po kompletnym markerze/);
+  assert.match(backgroundSource, /waitForResponse mogl przejsc dalej/);
+  assert.match(backgroundSource, /clickedStaleStop/);
+  assert.match(backgroundSource, /phase2ClickedStaleStop/);
   assert.match(backgroundSource, /promptText:\s*payload/);
   assert.match(backgroundSource, /promptText:\s*prompt/);
   assert.match(backgroundSource, /Nie wysylam prompt chain - Stage 0 jest niekompletny/);

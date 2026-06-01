@@ -24,8 +24,21 @@ function normalizeComposerThinkingEffort(value) {
     || normalized === 'standard'
     || normalized === 'extended'
     || normalized === 'heavy'
+    || normalized === 'intensive'
+    || normalized === 'intensywny'
+    || normalized === 'intensywne'
+    || normalized === 'intensywn'
+    || normalized === 'pro'
   ) {
-    return normalized;
+    return (
+      normalized === 'pro'
+      || normalized === 'intensive'
+      || normalized === 'intensywny'
+      || normalized === 'intensywne'
+      || normalized === 'intensywn'
+    )
+      ? 'heavy'
+      : normalized;
   }
   return '';
 }

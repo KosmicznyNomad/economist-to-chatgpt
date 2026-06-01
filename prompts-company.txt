@@ -145,7 +145,7 @@ construction, Stage 14 character.
 
 CONFIDENCE: HIGH / MEDIUM / LOW
 Used by: Stage 2 Exposure, Stage 3 Proof, Stage 4 CORE, Stage 10 Wedge,
-Stage 11 TOTAL, Stage 12-13 sizing.
+Stage 11 TOTAL, Stage 12-14 position planning.
 
 ENTRY_BLOCKER: NONE / PRICE / PROOF / QUALITY
 Used by: Stage 7 selection, Stage 12 Gate 3.5, Stage 13 ranking, Stage 14
@@ -200,6 +200,39 @@ You will work through a strict sequence to maintain auditability and avoid narra
 3. **Generate thesis candidates** -> Produce 3 conditional statements from the worldview
 4. **Apply contract-form test** -> Verify each thesis can map to: payer -> contract vehicle -> invoice items -> gates -> timing -> capture
 5. **Produce Stage 0 handoff** -> Output one winning thesis, one passed contract-form chain, top spend buckets, and top gates for downstream stages
+
+# Source Material Reality Check (Mandatory Before Critical Rule)
+
+Before applying the "assume true" rule, classify the source material:
+
+- REAL_TRANSFORMATION: a serious source making factual or analytical claims
+  about a real-world market, technology, policy, or company shift.
+- LOW_DENSITY_REAL_SOURCE: a real source with sparse evidence, such as a
+  recap, short post, listicle, or thin market note. Continue narrowly with
+  lower confidence and mainly E1/E2 anchors.
+- SATIRE_OR_FICTION: humor, parody, fabricated announcements, impossible
+  technical claims, fictional entities, or obviously comedic escalation.
+- NOT_INVESTABLE_SOURCE: source lacks a real economic mechanism even after
+  narrow interpretation.
+
+If the source is SATIRE_OR_FICTION or NOT_INVESTABLE_SOURCE:
+- Do not assume the fictional premise is true.
+- Do not create a public-company investment thesis.
+- Do not force a passed contract-form chain.
+- Output Section 0 and a Stage 0 handoff anyway, but mark:
+  SOURCE_REALITY_CHECK: SATIRE_OR_FICTION or NOT_INVESTABLE_SOURCE
+  NON_INVESTABLE_SOURCE: true
+  PIPELINE_ROUTE: STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY
+  WINNING_THESIS: None - source does not contain a real investable transformation.
+  CONTRACT_MAP Decision: FAIL
+  TOP_SPEND_BUCKETS: none
+  TOP_GATES: none
+
+The "assume true" rule applies only after the source passes this reality
+check as REAL_TRANSFORMATION or LOW_DENSITY_REAL_SOURCE. It prevents
+debating a serious thesis; it must not convert jokes, fiction, or impossible
+claims into investable facts.
+
 **Critical Rule**: Do NOT debate whether the thesis is true. Assume it is TRUE (as an axiom) and run consequences forward in the real economy. Assuming the thesis is true authorizes conditional deduction only. It does not imply that the thesis creates incremental equity value for a listed company. Use your full prior knowledge (engineering, history, industrial organization, chemistry, military logistics, supply chains, procurement, energy, finance), but do not replace the author's logic with generic narratives. Clearly label any external inference.
 
 # DATA_GAP PROTOCOL
@@ -263,7 +296,7 @@ A strong Layer 3+ opportunity should match at least TWO of these:
 
 # Your Task
 
-Produce ONE winning thesis, one passed contract-form chain, and a compact Stage 0 handoff for downstream capital-flow work.
+Produce ONE winning thesis, one passed contract-form chain, and a compact Stage 0 handoff for downstream capital-flow work, unless the Source Material Reality Check marks the source as SATIRE_OR_FICTION or NOT_INVESTABLE_SOURCE.
 
 **Important sequencing rule**: Do not jump to "money-as-physics" until you complete worldview reconstruction and thesis selection. This prevents generic drift and forces you to carry the author's specific mental model into the capital-flow map.
 
@@ -499,6 +532,9 @@ at a CENTRAL node solely on CORE quality grounds.
 At the END of your Stage 0 output, include a clearly marked block:
 
 === STAGE 0 HANDOFF ===
+SOURCE_REALITY_CHECK: [REAL_TRANSFORMATION / LOW_DENSITY_REAL_SOURCE / SATIRE_OR_FICTION / NOT_INVESTABLE_SOURCE]
+NON_INVESTABLE_SOURCE: [true/false]
+PIPELINE_ROUTE: [CONTINUE / STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY]
 WINNING_THESIS: [single sentence]
 THESIS_RATIONALE: [2-4 sentences]
 CONTROL_TOKENS: [comma-separated list of 12-20 author tokens]
@@ -572,6 +608,27 @@ You are NOT validating whether the thesis is true (Stage 0 already did
 that). You are translating the thesis into something Stage 2-13 can use
 to rank companies.
 **Inputs**: Inherit from '=== STAGE 0 HANDOFF ===' block: WINNING_THESIS, THESIS_RATIONALE, THESIS_SOURCE_META, CONTRACT_MAP, CONTROL_TOKENS, DISCONFIRMERS.
+
+TERMINAL SOURCE GUARD
+
+If the inherited Stage 0 handoff contains any of:
+- NON_INVESTABLE_SOURCE: true
+- PIPELINE_ROUTE: STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY
+- SOURCE_REALITY_CHECK: SATIRE_OR_FICTION
+- SOURCE_REALITY_CHECK: NOT_INVESTABLE_SOURCE
+
+then do not derive sub-segments, do not search the web, and do not create
+invoice pools. Output only a compact Stage 1 handoff preserving the stop
+route:
+
+=== STAGE 1 HANDOFF ===
+PIPELINE_ROUTE: STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY
+WINNING_THESIS: None - non-investable source material.
+THESIS_SOURCE: [compact source line if available, otherwise MANUAL_REVIEW]
+SELECTED_SUB-SEGMENTS: []
+IMPACT_MODE_HYPOTHESES: []
+STOP_REASON: Inherited Stage 0 marked the source as satire, fiction, or otherwise not investable.
+=== END HANDOFF ===
 
 
 
@@ -952,6 +1009,19 @@ Derived 2–3 invoice-first sub-segments (Stage 1) that carry the thesis cash fl
 Mapped who pays, what is invoiced (invoice items), the contract mechanism, gates, and the timing funnel from budget to cash
 Your current task is to translate this thesis and sub-segment analysis into a concrete, auditable basket of publicly-traded companies. The critical requirement is to identify companies with genuine exposure to the capital flows identified in your thesis—not companies that merely sound thematically related.
 
+TERMINAL SOURCE GUARD
+
+If the inherited Stage 1 handoff contains PIPELINE_ROUTE:
+STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY, STOP_REASON tied to non-investable
+source material, or SELECTED_SUB-SEGMENTS: [], do not search the web and do
+not create public-company candidates. Output only:
+
+=== STAGE 2 FUNDAMENTAL HANDOFF ===
+PIPELINE_ROUTE: STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY
+COMPANIES_CARRIED_FORWARD: []
+STOP_REASON: Inherited Stage 1 has no investable sub-segments because Stage 0 marked the source as satire, fiction, or otherwise not investable.
+=== END HANDOFF ===
+
 ## EXECUTION PREFERENCE (IBKR CFD)
 
 - Prefer companies that are on the IBKR Stock CFD eligible list (equities with CFD availability).
@@ -1087,7 +1157,7 @@ not an analytical target.
 
 **Liquidity Floor:**
 - Maximum 3 companies with average daily trading volume <$5M
-- If thesis points to >3 illiquid opportunities, flag them for position sizing (<2% each)
+- If thesis points to >3 illiquid opportunities, flag them for very small position sizing
 - Never exclude a Core Play solely due to liquidity—adjust position sizing instead
 
 **Tasks:**
@@ -1123,24 +1193,25 @@ Then run a LIVE READ (3-5 sentences of current, contested reality): latest earni
 EXPOSURE EVIDENCE QUALITY
 
 For each company, classify exposure evidence quality at one of three
-levels. The level modulates sizing in Stage 13. It does not eliminate
+levels. The level modulates role, conditions, and monitoring. It does not eliminate
 the company.
 
 HIGH: Directly disclosed thesis revenue, backlog, or segment margin tied
 to invoice items. Or the company is a functional pure-play in the invoice
-item. Supports full-range sizing in Stage 13 if other elements align.
+item. Supports a stronger role if other elements align.
 
 MEDIUM: One inferential step from disclosed financials to thesis
 exposure. Examples: a segment with disclosed economics that contains
 thesis products but is not separately broken out, or a product line where
-peer comparison provides a credible proxy. Supports moderate sizing.
+peer comparison provides a credible proxy. Supports a conditional role
+with clear proof requirements.
 
 LOW: Proxy-heavy estimation, thematic fit, or two or more inferential
-steps. No disclosed financials for the thesis stream. Supports starter
-position only with a clear proof KPI required for upgrade.
+steps. No disclosed financials for the thesis stream. Supports watch-only
+status with a clear proof KPI required for upgrade.
 
 All three levels are valid candidates. Lower evidence quality leads to
-smaller sizing and tighter monitoring, not elimination. Pipeline
+tighter monitoring and more conditional records, not elimination. Pipeline
 preserves low-confidence candidates as watch records because they often
 become high-conviction positions as proof emerges.
 
@@ -1249,10 +1320,10 @@ Evidence chain:
 If Q1 has no specific answer, classify as Sector Monitor. If Q3 has no specific answer, the company can be Material Play at best, not Core Play.
 
 4. **Classify Each Candidate:**
-   - Core Play (>40% exposure)
-   - Material Play (20-40% exposure)
-   - Catalytic Play (10-20% exposure)
-   - Below threshold (<10% exposure) -> Exclude
+   - Core Play
+   - Material Play
+   - Catalytic Play
+   - Below threshold -> Exclude
 
 5. **Document for Each Candidate:**
    - Company name and ticker
@@ -1462,7 +1533,7 @@ Timing and sentiment indicators are execution context only. They must not change
 - **Score <2**: STRONG ENTRY WINDOW
 - **Score 2-4**: HEALTHY
 - **Score 5-7**: ELEVATED (consider waiting for 10-15% pullback)
-- **Score 8+**: OVERHEATED (avoid entirely or size at <2% of portfolio)
+- **Score 8+**: OVERHEATED (avoid entirely or require a much stronger proof/price setup)
 
 **Tasks:**
 
@@ -1852,40 +1923,40 @@ Quality of Stage 4 determines quality of everything downstream.
 
 CONFIDENCE MODULATES OUTPUT QUALITY, NEVER BLOCKS PIPELINE
 
-CORE_CONFIDENCE is a three-level scale that modulates sizing, language
+CORE_CONFIDENCE is a three-level scale that modulates role, language
 precision, and required proof in downstream stages. No level blocks the
 pipeline from producing a final investment record.
 
 This is a fundamental pipeline rule: every company that reaches Stage 4
 will receive a CORE valuation at some confidence level. The question is
 never "should this company have a CORE" - the question is "how confident
-is the CORE and what does that confidence imply for sizing?"
+is the CORE and what does that confidence imply for role and conditions?"
 
 A company with LOW CORE_CONFIDENCE still produces a CORE_ADOPTED
 Bear/Base/Bull triplet. The triplet has wider ranges, the supporting
 language acknowledges uncertainty explicitly, and Stage 13 will recommend
-smaller sizing or watch-only status. But the company stays in the
+more conditional watch status. But the company stays in the
 pipeline as a watch candidate, not a discarded one.
 
 HIGH CONFIDENCE
 Mamy dobre dane: segment map jasny, guidance dostepny, consensus istnieje, historical margins widoczne, FCF bridge auditable. Mozna robic pelna wycene z umiarkowana pewnoscia.
-- Sizing w Stage 13: pelny zakres, jesli valuation i proof to wspieraja.
+- Role w Stage 13: mocniejsza rola, jesli valuation i proof to wspieraja.
 - Jezyk rekomendacji: clear directional view.
 - Stage 11 moze produkowac Tier classification.
 
 MEDIUM CONFIDENCE
 Mamy wiekszosc danych: segment widoczny, ale niektore proxy; guidance czesciowy; peer comparison wymaga adjustments; FCF bridge ma wider ranges. Mozna robic wycene z wiekszymi zakresami.
-- Sizing w Stage 13: zredukowany.
+- Role w Stage 13: bardziej warunkowa.
 - Jezyk rekomendacji: cautious directional view z named uncertainties.
 - Stage 11 produkuje Tier z explicit confidence caveat.
 
 LOW CONFIDENCE
 Mamy fragmentaryczne dane: segment ukryty, guidance brakuje, peer proxy weak, FCF bridge requires heavy assumptions. Wycena jest directional, nie precise.
-- Sizing w Stage 13: starter only albo watch.
+- Role w Stage 13: watch z jasnym warunkiem upgrade.
 - Jezyk rekomendacji: scenariusze raczej niz point estimates.
 - Stage 11 produkuje qualitative view z required KPIs do upgrade.
 
-Pipeline zawsze produkuje finalny rekord. Niski confidence znaczy mniejsze sizing i wiecej KPIs do monitorowania. Brak rekordu nie jest opcja.
+Pipeline zawsze produkuje finalny rekord. Niski confidence znaczy bardziej warunkowy rekord i wiecej KPIs do monitorowania. Brak rekordu nie jest opcja.
 
 MIEJSCE W WORKFLOW
 
@@ -2075,10 +2146,9 @@ WEDGE_MECHANISM: [jak teza zmienia segment, 1 sentence]
 PROOF_TO_MODEL_BASE: [jaki proof poziom pozwala na full Base modeling]
 
 SIZING_GUIDANCE_FROM_CORE:
-  HIGH confidence: full sizing range supported (3-5% of portfolio if
-    other elements align)
-  MEDIUM confidence: reduced sizing range (1-2% of portfolio)
-  LOW confidence: starter sizing only (0.5-1%) or watch-only with
+  HIGH confidence: full sizing range supported if other elements align
+  MEDIUM confidence: reduced sizing range
+  LOW confidence: starter sizing only or watch-only with
     explicit KPI required to upgrade
 
 FLAGS: [tylko jesli cos faktycznie wymaga uwagi, max 2-3]
@@ -2707,7 +2777,7 @@ TERMINAL SHARE CONSTRAINT (mandatory):
 Report TerminalShare = PV_TV / (PV_FCF + PV_TV) for Base.
 - ≤50%: NORMAL
 - 50-65%: DURATION_SENSITIVE, apply -100 bps to divergence_growth
-- >65%: TERMINAL_DOMINATED, apply -200 bps, cap Stage 13 Value Asymmetry at 3, require Traction Rank top 3 for ADVANCE, WACC+terminal = hard WATCH cap
+- >65%: TERMINAL_DOMINATED, apply -200 bps, require Traction Rank top 3 for ADVANCE, WACC+terminal = hard WATCH cap
 
 ---
 
@@ -2796,13 +2866,13 @@ outcome reserved for clearly weak combinations.
 
 CORE_CONFIDENCE modulates sizing within each decision:
 
-HIGH confidence with ADVANCE: full sizing range (3-5%)
+HIGH confidence with ADVANCE: full sizing range
 HIGH confidence with WATCH: clear blocker definition, position
   contingent on resolution
-MEDIUM confidence with ADVANCE: reduced sizing (1-2%)
+MEDIUM confidence with ADVANCE: reduced sizing
 MEDIUM confidence with WATCH: starter position possible if blocker
   is PROOF and KPI is near-term
-LOW confidence with ADVANCE: starter sizing only (0.5-1%)
+LOW confidence with ADVANCE: starter sizing only
 LOW confidence with WATCH: watch-only, KPI required for upgrade
 
 DROP does not depend on confidence — it is a fundamental rejection
@@ -3442,30 +3512,13 @@ Check conditions and FLAG them (Stage 13 enforces elimination):
 
 # Ranking Methodology (all finalists — no elimination)
 
-For EACH finalist, compute:
+Rank all finalists qualitatively by the strength of the selected
+Revaluation Parameter, the credibility of the delivery path, the
+proximity of the VOI window, and the downside floor. Include flags in
+the output but do not eliminate any company. All finalists proceed to
+Stage 10.
 
-**RevaluationExpectedImpact = (Valuation Impact %) × (Probability Multiplier)**
-
-REI is an ordinal prioritization score, not an expected return and not a valuation input.
-
-Use broad interpretation:
-- 0-5: weak
-- 5-10: moderate
-- 10-15: strong
-- >15: very strong
-
-Do not rank companies differently solely because REI differs by less than 5 points.
-
-The selected Revaluation Parameter matters more than the exact REI score.
-
-Use these probability multipliers:
-- Low = 0.25
-- Medium = 0.50
-- High = 0.75
-
-**Rank all finalists** by RevaluationExpectedImpact descending. Include flags in the output but do not eliminate any company. All finalists proceed to Stage 10.
-
-**Tie-breaker (only if scores are equal):**
+**Tie-breaker (only if qualitative rank is otherwise equal):**
 1. Earlier VOI window wins
 2. If still tied, better downside floor (Bear_TOTAL closer to current price) wins
 
@@ -3490,7 +3543,7 @@ To answer this question properly:
   - Quote or reference specific data points from Stage 7 outputs (operational KPIs, VOI events, gates, WedgeRealism, PoolConfidence, Asymmetry_TOTAL, etc.)
   - Show your reasoning for choosing the specific RP and threshold
   - Explicitly check each disqualifier condition step-by-step
-  - If the company passes all tests, show the calculation: Valuation Impact % × Probability Multiplier = RevaluationExpectedImpact score
+  - If the company passes all tests, explain why the selected RP has the strongest rerating force among available candidates
   - Mark failures clearly with the reason
 
 After completing your analysis, provide your final output in two parts:
@@ -3501,15 +3554,14 @@ After completing your analysis, provide your final output in two parts:
 
 Create a table with one row per company (including those that failed) and these columns:
 
-| Company | RP (metric + units) | Upside threshold | VOI window | RERATING_WINDOW_CLASS | DCF lever | Valuation impact (%) | Probability (L/M/H) | REI score | Flags | Rank |
+| Company | RP (metric + units) | Upside threshold | VOI window | RERATING_WINDOW_CLASS | DCF lever | Valuation impact (%) | Probability (L/M/H) | Flags | Rank |
 
 **Notes:**
 - For companies that failed any step or were disqualified, indicate the failure reason in the appropriate column
-- Include the calculated RevaluationExpectedImpact score for all valid candidates
 
 ## Part 2: Ranked Summary (all finalists, in rank order)
 
-For EACH finalist (in descending REI rank):
+For EACH finalist (in qualitative rank order):
 
 **[Rank #] [Company Name]**
 
@@ -3532,19 +3584,19 @@ Rerating window: [IMMEDIATE / NEAR / MID / LONG / TOO_FAR]
 Here is a generic example showing the required format (with placeholder content):
 
 
-| Company | RP (one metric with units) | Upside threshold | VOI window | RERATING_WINDOW_CLASS | Which DCF lever flips | Valuation impact (%) | Probability | Priced-in? | WedgeRealism | Asymmetry_TOTAL | RevaluationExpectedImpact |
-|---------|---------------------------|------------------|------------|-----------------------|----------------------|---------------------|-------------|-----------|--------------|----------------|--------------------------|
-| Company A | [Metric] [units] | [number] | [Q# YYYY] | [IMMEDIATE/NEAR/MID/LONG/TOO_FAR] | [Revenue growth / Margin / Cash flow] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [score] |
-| Company B | [Metric] [units] | [number] | [Q# YYYY] | [IMMEDIATE/NEAR/MID/LONG/TOO_FAR] | [Lever type] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [score] |
+| Company | RP (one metric with units) | Upside threshold | VOI window | RERATING_WINDOW_CLASS | Which DCF lever flips | Valuation impact (%) | Probability | Priced-in? | WedgeRealism | Asymmetry_TOTAL | Rank rationale |
+|---------|---------------------------|------------------|------------|-----------------------|----------------------|---------------------|-------------|-----------|--------------|----------------|----------------|
+| Company A | [Metric] [units] | [number] | [Q# YYYY] | [IMMEDIATE/NEAR/MID/LONG/TOO_FAR] | [Revenue growth / Margin / Cash flow] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [sentence] |
+| Company B | [Metric] [units] | [number] | [Q# YYYY] | [IMMEDIATE/NEAR/MID/LONG/TOO_FAR] | [Lever type] | [X%] | [L/M/H] | [Yes/No] | [PASS/FAIL] | [X:1] | [sentence] |
 
 
 
 **#1 [Company A]**
-RP: [Metric] reaching [threshold]. REI: [score]. Flags: [None].
+RP: [Metric] reaching [threshold]. Flags: [None].
 Why re-rate: [sentence]. Falsifier: [metric] below [threshold] by [date].
 
 **#2 [Company B]**
-RP: [Metric] reaching [threshold]. REI: [score]. Flags: [LOW_ASYMMETRY].
+RP: [Metric] reaching [threshold]. Flags: [LOW_ASYMMETRY].
 Why re-rate: [sentence]. Falsifier: [metric] below [threshold] by [date].
 
 **#3 [Company C]** ...
@@ -3558,7 +3610,6 @@ RANKED_ORDER: [Company1, Company2, Company3, Company4 if applicable]
 [For each company:]
   COMPANY: [Name]
   RP: [metric + units + threshold]
-  REI_SCORE: [number]
   VOI_EVENT: [event + quarter]
   RERATING_WINDOW_CLASS: [IMMEDIATE / NEAR / MID / LONG / TOO_FAR]
   FALSIFIER: [metric + threshold + timeframe]
@@ -3590,7 +3641,7 @@ Identify the most realistic incremental cash flows from the thesis that can actu
 
 INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY calculation, execute these searches in order:
-1. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER, FLAGS
+1. Search for '=== STAGE 9 HANDOFF ===' -> extract per-company: RP, VOI_EVENT, FALSIFIER, FLAGS
 2. Search for '=== STAGE 4 CORE RECONSTRUCTION HANDOFF ===' -> extract per-company: CORE_ADOPTED, CORE_CONFIDENCE, CORE_GROWTH_DRIVERS, AFFECTED_SEGMENT, MARKET_GAP_INTERPRETATION, WEDGE_TYPE_HYPOTHESIS, WEDGE_MECHANISM, PROOF_TO_MODEL_BASE
 3. Search for '=== STAGE 5 MCP SECTOR OVERLAY HANDOFF ===' if available -> extract KEY_SECTORAL_RISK, KEY_SECTORAL_OPPORTUNITY, CORE_CONFIDENCE_ADJUSTMENT, STAGE10_GUIDANCE
 4. Search for Stage 6 output → extract per-company: Monetization Path (A/B/C), DominantDriver, diagnostic valuation flags
@@ -3599,7 +3650,7 @@ Before ANY calculation, execute these searches in order:
 
 Stage 9, Stage 4, Stage 3, and Stage 2 inputs must be available in context. If Stage 9 inputs are available in context: USE THEM directly in Step 1 Context Pack.
 Do NOT "reconstruct" Stage 9 outputs from earlier stages.
-Do NOT skip Stage 9 RP/REI and substitute your own metric selection.
+Do NOT skip Stage 9 RP and substitute your own metric selection.
 If Stage 9 inputs are not available in context: reconstruct only from
 explicit Stage 7 finalists and Stage 6 valuation context, label the RP
 pack RECONSTRUCTED with confidence LOW, and continue. Output
@@ -3705,7 +3756,7 @@ Create a “Context Pack” table with:
 - MCP-adjusted boundary and Stage 10 route if Stage 5 exists
 - Monetization Path A/B/C and Dominant Driver (from Stage 6, diagnostic)
 - One-line thesis stream definition (what is included)
-- Stage 9 RP, REI score, and flags (from Stage 9 ranked output)
+- Stage 9 RP and flags (from Stage 9 ranked output)
 If any of the following are missing from context: price, diluted shares,
 and a usable baseline definition, first try DataGap Rule steps 1-2 and
 run search/proxy to obtain them. If still unavailable, reconstruct with
@@ -4258,8 +4309,6 @@ HARD GATE (not just a flag):
   - Cannot receive Tier 1 or Tier 2 classification
   - Cannot be classified as ADVANCE in Stage 6
   - Maximum classification: WATCH
-  - In Stage 13 Composite Score, Value Asymmetry dimension
-    is capped at score 2 regardless of headline asymmetry
   - Reverse DCF cannot be used as a primary ranking input
   - Classify the valuation signal as duration-sensitive
   - Require near-term cash-flow KPI to support any watchlist priority
@@ -4442,7 +4491,7 @@ Bear / Market / Base / Bull with: revenue CAGR, FCF margin Y3, equity value per 
 
 | Company | Ticker | Price | Bear_TOTAL | Bear_Contract | Base_TOTAL | Bull_TOTAL | EV_TOTAL | %PricedIn | Implied_CAGR | Base_CORE_CAGR | Base_TOTAL_CAGR | Implied_Thesis_Capture | Market_Implied_Residual | Residual_Class | Divergence_bps | Horizon_Spread | TerminalShare | Asymmetry_TOTAL | Tier | Wedge_to_Price | WEDGE_ROUTE | CORE_ADOPTED_METHOD | CORE_MODEL_RISK_FLAGS | Flags |
 
-This table enables Stage 13 Composite Rank by providing directly comparable metrics.
+This table enables Stage 13 qualitative ranking by providing directly comparable metrics.
 
 === STAGE 11 HANDOFF ===
 [For each finalist:]
@@ -4495,7 +4544,7 @@ INHERITANCE LOCK (CRITICAL — HISTORICAL DRIFT POINT):
 Before ANY gate evaluation, execute these searches:
 1. Search for '=== STAGE 11 HANDOFF ===' -> extract per-company: BEAR_TOTAL, BASE_TOTAL, BULL_TOTAL, EXPECTED_VALUE, ASYMMETRY_TOTAL, PRICED_IN, IMPLIED_CAGR, TIER, CORE_CONFIDENCE, WEDGE_ROUTE, MARKET_IMPLIED_RESIDUAL, RESIDUAL_TO_PRICE, RESIDUAL_CLASS, MARKET_GAP, MARKET_GAP_DESCRIPTION, BUY_ZONE_RELIABILITY, HARD_PRICE_TRIGGER_ALLOWED, CORE_ADOPTED_METHOD, CORE_MODEL_RISK_FLAGS, FLAGS
 2. Search for '=== STAGE 10 HANDOFF ===' → extract per-company: WEDGE_NPV_PER_SHARE, EXPECTED_WEDGE, WEDGE_TO_PRICE, WEDGE_ROUTE, WEDGE_ROUTE_BREAKDOWN, WEDGE_TYPE, IMPACT_MODE, WEDGE_ONLY_SUFFICIENT, BASELINE_CONTAMINATION, PERSISTENCE, FLAGS
-3. Search for '=== STAGE 9 HANDOFF ===' → extract per-company: RP, REI_SCORE, VOI_EVENT, FALSIFIER
+3. Search for '=== STAGE 9 HANDOFF ===' -> extract per-company: RP, VOI_EVENT, FALSIFIER
 
 PROHIBITION: Do NOT use Stage 6 values for Gate 2 if Stage 11 handoff exists.
 Stage 11 TOTAL values are the ONLY valid inputs for Gate 2 (Value).
@@ -4541,7 +4590,7 @@ Binary rule:
 INPUT SOURCE MAP (reference, not re-extraction):
 - Gate 1 (Quality): Stage 7 moat + Stage 8 returns quality/capital allocation + Stage 4 CORE floor
 - Gate 2 (Value): Stage 11 TOTAL Bear/Base/Bull (NOT Stage 6), Stage 10 Wedge_to_Price (diagnostic), Stage 6 proof rank
-- Gate 3 (Proof): Stage 3 TRACTION_ASSESSMENT/KPI/VOI, Stage 9 RP/REI
+- Gate 3 (Proof): Stage 3 TRACTION_ASSESSMENT/KPI/VOI, Stage 9 RP/VOI
 - Gate 4 (Execution): Stage 10 falsifiers, Stage 11 triggers, Stage 9 VOI event
 - Thesis context: Stage 0 premise/disconfirmers, Stage 1 sub-segments, Stage 2 company role
 All inputs inherited via INHERITANCE LOCK above.
@@ -4620,9 +4669,9 @@ GATE 2 — VALUE (is the price favorable?)
 Purpose: separate “great company” from “good price.”
 This gate is computed ONLY on TOTAL.
 
-Gate 2 Value dominates Composite scoring.
+Gate 2 Value dominates actionability.
 
-If Gate 2 FAILS, the company cannot be considered actionable regardless of business quality or Composite Score.
+If Gate 2 FAILS, the company cannot be considered actionable regardless of business quality.
 
 It may only be WATCH with PRICE, PROOF, or QUALITY blocker unless a
 specific price or proof trigger is met.
@@ -4689,17 +4738,17 @@ VALUATION ASSESSMENT — THREE QUALITATIVE LEVELS
 
 PASS (ATTRACTIVE): Asymmetry >= 3:1 and divergence from market view
 is meaningful. The market is not pricing in something material that
-your analysis identifies. Full sizing range supported if other gates
+your analysis identifies. Stronger role supported if other gates
 align.
 
 RISK (MODERATE): Asymmetry 2:1 to 3:1, or divergence is small or
 uncertain. Real opportunity exists but less compelling. Reduced
-sizing in Stage 13.
+role strength in Stage 13.
 
 FAIL (UNATTRACTIVE): Asymmetry below 2:1, or market is already pricing
 Base case or better. Setup is sound but entry point is wrong. Default
-outcome: WATCH with PRICE_BLOCKER, waiting for pullback to a specific
-target (typically Base_TOTAL × 0.85).
+outcome: WATCH with PRICE_BLOCKER, waiting for a better entry point
+defined by the valuation work and proof context.
 
 DECISION LOGIC
 
@@ -4713,7 +4762,7 @@ category:
 - ATTRACTIVE + Gate 1 QUALITY_CONCERN = WATCH with QUALITY_CONCERN
 - MODERATE or UNATTRACTIVE + sound proof = WATCH with PRICE_BLOCKER
 
-Stage 13 sizing reflects valuation assessment combined with
+Stage 13 role reflects valuation assessment combined with
 CORE_CONFIDENCE from Stage 4. UNATTRACTIVE valuation does not
 eliminate the company — it leads to PRICE_BLOCKER status with a
 specific price target for upgrade.
@@ -4760,21 +4809,21 @@ actionable.
 Four categories:
 
 NONE: No material blocker. Proof, valuation, timing, and quality are
-all adequate for near-term action. Full sizing range supported.
+all adequate for near-term action.
 
 PRICE_BLOCKER: Setup is sound but current valuation blocks upside.
-The position becomes actionable when price reaches a specific target,
-typically Base_TOTAL × 0.85 to 0.90. Wait for pullback or wait for
-proof that justifies current price.
+The position becomes actionable when price reaches a specific target
+supported by the valuation work. Wait for pullback or wait for proof
+that justifies current price.
 
 PROOF_BLOCKER: Setup is sound but the money funnel has not progressed
-enough for confident sizing. The position becomes actionable when a
+enough for confident action. The position becomes actionable when a
 specific KPI (from Stage 9) crosses a defined threshold. Starter
 position possible if other elements are unusually strong.
 
 QUALITY_CONCERN: Company sits at the borderline of business quality.
 Not structural impairment (which would be AVOID) but enough concern
-that quality monitoring is required. Reduced sizing throughout.
+that quality monitoring is required.
 
 Classification rules:
 
@@ -4825,7 +4874,7 @@ AVOID: Gate 1 reveals fundamental structural issues (solvency, fraud,
 irreversible decline). This is rare.
 
 WATCH with NONE blocker: All gates align. Actionable immediately at
-full sizing. Stage 13 will rank against other candidates.
+the current evidence threshold. Stage 13 will rank against other candidates.
 
 WATCH with PRICE_BLOCKER: Setup sound but valuation too rich. Specific
 price target defined. Wait for pullback.
@@ -4834,7 +4883,7 @@ WATCH with PROOF_BLOCKER: Setup sound but proof too early. Specific
 KPI defined. Wait for evidence or take starter position.
 
 WATCH with QUALITY_CONCERN: Setup sound but business quality borderline.
-Reduced sizing with quality monitoring plan.
+Quality monitoring plan required.
 
 Default to WATCH for borderline cases. AVOID is reserved for clear
 structural problems. The pipeline benefits from having more watch
@@ -4872,7 +4921,7 @@ Gate 2 — Value: PASS/RISK/FAIL
 - CORE_CONFIDENCE_LOW / CORE_REVIEW_NEEDED if present
 - PRICE_TRIGGER_PRACTICALITY and HARD_PRICE_TRIGGER_ALLOWED
 - VALUATION_OBJECT_FIT: HIGH / MEDIUM / LOW
-- If PRICE blocker applies: show price_trigger = Base_TOTAL × 0.85-0.90
+- If PRICE blocker applies: show the practical price/proof trigger without using a fixed valuation multiple shortcut
 
 Gate 3 — Proof & VOI: X/5 -> LOW/MEDIUM/HIGH
 - KPI confirm / warn / falsify (Stage 7/8)
@@ -4930,7 +4979,7 @@ FLAGS:
 --- PROMPT SEPARATOR ---
 
 ═══════════════════════════════════════════════════════════════════
-STAGE 13 — COMPOSITE RANK & FINAL SELECTION
+STAGE 13 — QUALITATIVE RANK & FINAL SELECTION
 ═══════════════════════════════════════════════════════════════════
 
 ROLE
@@ -4971,244 +5020,55 @@ Remove any company with AVOID decision. If only one remains, proceed
 with one PRIMARY and explain why no SECONDARY exists. If two or more
 remain, ranking must produce PRIMARY and SECONDARY.
 
-STEP 2 — COMPUTE COMPOSITE SCORE (6 dimensions, 0-5 each)
-
-Composite Score is a watchlist prioritization tool only.
-
-It cannot override Gate 2 Value or Gate 3 Proof.
-
-A high Composite Score should not hide a weak value setup, weak proof, proxy-heavy economics, or non-material wedge.
-
-Dimension 1: Traction Quality (weight 30%)
-Source: Stage 3 proof floor + TRACTION_ASSESSMENT + Semantics Verdict
-  5: HARD_TRACTION + HIGH quality of move + clean or manageable semantics
-  4: HARD_TRACTION or SOLID_TRACTION with some cash-conversion caveat
-  3: SOFT_TRACTION + STRONG or GOOD capture potential
-  2: SOFT_TRACTION + WEAK capture potential
-  1: EARLY_TRACTION with STRONG capture potential and clear VOI
-  0: EARLY_TRACTION with weak capture or no VOI
-
-Dimension 2: Competitive Position / Gate Control (weight 20%)
-Source: Stage 7 qualitative moat + Stage 3 capture potential
-  5: STRONG moat + STRONG capture potential with hard gate
-  4: STRONG moat or STRONG thesis-specific capture with some customer bargaining risk
-  3: GOOD moat + GOOD/STRONG capture
-  2: GOOD moat but thesis capture is weak or not specific
-  1: WEAK moat but some temporary capacity/gate advantage
-  0: WEAK moat + WEAK capture
-
-Dimension 3: Value Asymmetry (weight 15%)
-Source: Stage 11 Asymmetry_TOTAL
-  IMPORTANT: If HORIZON_DEPENDENT flag is set, cap at score 2.
-  If DominantDriver = WACC, cap at score 3.
-  If company is WATCH with PRICE blocker from Stage 12, minimum score = 1.
-  5: Asymmetry > 5:1 AND DominantDriver is NOT WACC
-  4: 4:1–5:1 AND DominantDriver is NOT WACC
-  3: 3:1–4:1, OR any asymmetry with DominantDriver = WACC
-  2: 2:1–3:1, OR HORIZON_DEPENDENT cap
-  1: 1.5:1–2:1
-  0: < 1.5:1
-
-Dimension 4: Revaluation Imminence (weight 10%)
-Source: Stage 9 REI_SCORE
-  5: REI > 15% AND VOI < 6 months
-  4: REI 10-15% OR VOI 6-9 months
-  3: REI 5-10% AND VOI < 12 months
-  2: REI 5-10% AND VOI 12-18 months
-  1: REI < 5% OR VOI > 18 months
-  0: No measurable RP or priced-in
-
-Dimension 5: Returns Quality & Capital Allocation (weight 15%)
-Source: Stage 8
-  5: thesis-adjusted ROIC or ROTCE > 15% or > WACC by >=500bps, strong cash conversion, disciplined dilution
-  4: 10-15% or > WACC by >=300bps, acceptable conversion and allocation
-  3: modestly above cost of capital, mixed but acceptable conversion/allocation
-  2: around cost of capital or leverage-dependent optics
-  1: below cost of capital, weak conversion, or meaningful dilution
-  0: persistent value destruction or capital allocation failure
-
-Dimension 6: Execution Readiness (weight 10%)
-Source: Stage 12 gate results + Stage 2 overheating score
-  5: All Gates PASS, overheating <= 2
-  4: All Gates PASS, overheating 3-4
-  3: Gate 2 RISK but rest PASS
-  2: Gate 3 LOW/MEDIUM but quality + value OK
-  1: Gate 2 FAIL but quality strong
-  0: Gate 1 FAIL (already AVOID)
-
-Valuation Object Fit penalty:
-Use VALUATION_OBJECT_FIT from Stage 12 Gate 2.
-
-- HIGH: no penalty
-- MEDIUM: subtract 0.2 from final Composite Score
-- LOW: subtract 0.5 from final Composite Score and cap EntryScore at 6.5
-
-If VALUATION_OBJECT_FIT = LOW, flag MODEL_OBJECT_RISK.
-
-Composite Score = SUM(dimension_score × weight), then apply Valuation Object Fit penalty if applicable.
-Scale 0-5.
-If company carries ET-C from the Stage 2 company-mapping output, subtract 0.3 from final Composite Score.
-
-All weighted Composite calculations must be computed mechanically from the displayed component scores.
-
-Do not manually approximate Composite.
-
-If arithmetic and narrative ranking conflict, keep the arithmetic correct and explain the conflict separately.
-
-STEP 2.5 — ENTRY SCORE 0-10 (near-term actionability score)
-
-Purpose:
-ENTRY_SCORE_0_10 measures the probability of a meaningful rerating in the next 2–4 quarters.
-It is not a long-term business-quality score.
-It does not override WATCH/AVOID.
-
-Current-condition success definition:
-A high ENTRY_SCORE requires a setup where proof, value gap, and timing can plausibly force a rerating in the next 2–4 quarters.
-A great business with weak proof, long latency, or priced-in expectations must be capped.
-
-Base calculation:
-RawEntryScore = 2 × Composite Score
-
-Use the final Composite Score after all existing penalties.
-Do not recompute Composite.
-
-HardCap logic:
-HardCap = the minimum of all applicable caps below.
-If no cap applies, HardCap = 10.0.
-
-A) Structural / Reality caps
-- DECISION = AVOID or CATEGORY = STRUCTURAL -> cap 2.5
-- WedgeRealism = FAIL and PoolConfidence = Medium or High -> cap 3.5
-- TRACTION_ASSESSMENT = EARLY_TRACTION -> cap 4.0
-
-B) Timing / Latency caps
-- RERATING_WINDOW_CLASS = IMMEDIATE and Timing Friction = 0–12m -> no cap
-- RERATING_WINDOW_CLASS = NEAR or Timing Friction = 12–18m -> cap 8.0
-- RERATING_WINDOW_CLASS = MID or Timing Friction = 18–24m -> cap 7.0
-- RERATING_WINDOW_CLASS = LONG or Timing Friction = 24–36m -> cap 6.0
-- RERATING_WINDOW_CLASS = TOO_FAR or Timing Friction = 36m+ -> cap 5.0
-
-C) Proof caps
-- TRACTION_ASSESSMENT = HARD_TRACTION -> no cap
-- TRACTION_ASSESSMENT = SOFT_TRACTION -> cap 8.0
-- TRACTION_ASSESSMENT = EARLY_TRACTION -> cap 6.5
-- Gate 3 = LOW or CATEGORY = PROOF_BLOCKER -> cap 6.0
-
-D) Price / expectations caps
-- CATEGORY = PRICE_BLOCKER and price trigger not yet met -> cap 7.5
-- VALUATION = UNATTRACTIVE -> cap 6.0
-- Asymmetry_TOTAL < 2.0 -> cap 5.5
-- Asymmetry_TOTAL >= 2.0 and < 3.0 -> cap 7.5
-
-E) Duration / regime caps
-- DominantDriver = WACC or Monetization Path = C without contract-grade cash-flow proof -> cap 6.5
-- FLAGS contain HORIZON_DEPENDENT or RANK_UNSTABLE -> cap 6.0
-- FLAGS contain TERMINAL_DOMINATED -> cap 6.5
-
-F) Core / residual caps
-- CORE_MODEL_RISK_FLAGS contain CORE_VALUATION_UNCERTAIN -> cap 7.0
-- CORE_ADOPTED_MISSING -> cap 6.5
-- RESIDUAL_CLASS = HIGH -> cap 7.0
-- RESIDUAL_CLASS = EXTREME -> cap 6.0
-- VALUATION_OBJECT_FIT = LOW -> cap 6.5
-
-Soft penalties:
-PenaltyPoints = sum of applicable penalties
-- Cash Flag = Mild Drag -> +0.4
-- Cash Flag = Red Flag -> +1.0
-- DILUTION_RISK or proxy-heavy evidence for the thesis stream -> +0.5
-
-Formula:
-ENTRY_SCORE_0_10 = round(max(0, min(RawEntryScore, HardCap) - PenaltyPoints), 1)
-
-Interpretation:
-- 8.0–10.0 = actionable now
-- 6.5–7.9 = conditional actionable
-- 5.0–6.4 = watchlist only
-- below 5.0 = not actionable for near-term entry
-
-Important:
-ENTRY_SCORE_0_10 must never upgrade an AVOID to WATCH.
-It is a ranking overlay for surviving names, not a gate override.
-
-STEP 3 — RANK AND SELECT TOP 2
+STEP 2 — RANK AND SELECT TOP 2
 
 Rank all WATCH companies that survived prior gates.
 
-Sort remaining WATCH companies by:
-1. ENTRY_SCORE_0_10
-2. Composite Score
-3. Earlier VOI window
-4. Better downside floor
+Sort remaining companies qualitatively by strength of mispricing,
+quality of proof, and proximity of catalyst.
 
 If the thesis wedge is operationally real but immaterial to the stock, do not reward thematic fit in ranking. The name must win on CORE mispricing or superior returns quality.
 
 Selection rules:
 
-PRIMARY: top company in combined Composite Score and Entry Score
-ranking. Sizing is modulated by Composite, Entry Score, and
-CORE_CONFIDENCE.
+PRIMARY: strongest company in the qualitative ranking. Explain why its
+mispricing, proof quality, catalyst proximity, and business quality beat
+the alternatives.
 
-SECONDARY: second-best company. Same sizing logic.
+SECONDARY: second-best company, or "None - only one candidate survived".
+Explain what makes it weaker or more conditional than PRIMARY.
 
 Presence on the watchlist (as PRIMARY or SECONDARY) is GUARANTEED for
-the top 2 companies that survived prior gates. Composite Score
-determines sizing, not eligibility. A company with low Composite Score
-becomes a small-sizing watch position, not an eliminated candidate.
-
-Final sizing guidance for Stage 14:
-
-Composite 4.0-5.0 with Entry Score 8.0-10.0:
-  PRIMARY 3-5%, SECONDARY 2-3%
-
-Composite 3.0-3.9 with Entry Score 6.5-7.9:
-  PRIMARY 1.5-2.5%, SECONDARY 1-1.5%
-
-Composite 2.0-2.9 with Entry Score 5.0-6.4:
-  PRIMARY 0.5-1.5%, SECONDARY 0.3-0.8%
-
-Below Composite 2.0 or Entry Score below 5.0:
-  WATCH only, no current sizing, explicit upgrade KPI defined
+the top 2 companies that survived prior gates. Ranking determines role,
+not eligibility. A lower-ranked surviving candidate becomes a more
+conditional watch record, not an eliminated candidate.
 
 The output is always two records (or one if only one company passed
-Stage 7). The records vary in sizing and decision_role, never in
+Stage 7). The records vary in decision_role and conditions, never in
 presence.
 
 Correlation Guard: If #1 and #2 map to the same SubSegment_ID AND >70% overlap in invoice items:
 - Replace #2 with #3 if available
-- If no #3 or also overlaps: keep both, flag CONCENTRATION_RISK, cap combined sizing at 6%
+- If no #3 or also overlaps: keep both and flag CONCENTRATION_RISK
 
-STEP 4 — ASSIGN ROLES AND SIZING
-
-#1 = PRIMARY (larger position, earlier entry)
-#2 = SECONDARY (smaller position or conditional on VOI from PRIMARY)
-
-Sizing:
-  Composite 4.0-5.0: PRIMARY 3-5%, SECONDARY 2-3%
-  Composite 3.0-3.9: PRIMARY 2-3%, SECONDARY 1-2%
-  Composite 2.0-2.9: PRIMARY 1-2%, SECONDARY 0.5-1%
-  Composite < 2.0: WATCH only (no sizing)
-
-If CONCENTRATION_RISK: cap combined at 6%.
-
-STEP 5 — OUTPUT
+STEP 3 — OUTPUT
 
 Comparison Table (all finalists):
-| Company | Ticker | Decision | Category | EntryBlocker | D1 (30%) | D2 (20%) | D3 (15%) | D4 (10%) | D5 (15%) | D6 (10%) | Composite | EntryScore | Rank | Role | Sizing |
+| Company | Ticker | Role | Rationale |
 
 Selection Summary:
-PRIMARY: [Company] — Composite [X.XX]/5.0 — EntryScore [Y.Y]/10 — Sizing [X%]
+PRIMARY: [Company] — [one-line rationale]
   Why Primary: [2 sentences]
-SECONDARY: [Company, or "None - only one candidate survived"] — Composite [X.XX]/5.0 — EntryScore [Y.Y]/10 — Sizing [X% or N/A]
+SECONDARY: [Company, or "None - only one candidate survived"] — [one-line rationale]
   Why Secondary: [2 sentences]
   Conditional on: [if applicable]
 ELIMINATED (AVOID): [list with 1-sentence reason]
-NOT SELECTED (WATCH): [list with Composite, EntryScore, and upgrade condition]
+NOT SELECTED (WATCH): [list with upgrade condition]
 
 === STAGE 13 HANDOFF ===
-PRIMARY: [Company] | [Ticker] | Composite: [X.XX] | EntryScore: [Y.Y/10] | EntryBlocker: [blocker] | Sizing: [X%]
-SECONDARY: [Company, or "None - only one candidate survived"] | [Ticker or N/A] | Composite: [X.XX or N/A] | EntryScore: [Y.Y/10 or N/A] | EntryBlocker: [blocker or N/A] | Sizing: [X% or N/A]
-CORRELATION_GUARD: [PASS / CONCENTRATION_RISK with cap]
+PRIMARY: [Company] | [Ticker] | Rationale: [one sentence]
+SECONDARY: [Company, or "None - only one candidate survived"] | [Ticker or N/A] | Rationale: [one sentence]
+CORRELATION_GUARD: [PASS / CONCENTRATION_RISK]
 === END HANDOFF ===
 
 --- PROMPT SEPARATOR ---
@@ -5257,10 +5117,6 @@ Musisz wyszukać w tej kolejności:
 Wyciągnij:
 PRIMARY
 SECONDARY
-Composite
-EntryScore
-EntryBlocker
-Sizing
 Correlation Guard
 === STAGE 12 HANDOFF ===
 Wyciągnij dla każdej wybranej spółki:
@@ -5316,7 +5172,6 @@ FLAGS
 === STAGE 9 HANDOFF ===
 Wyciągnij:
 RP
-REI_SCORE
 VOI_EVENT
 RERATING_WINDOW_CLASS
 FALSIFIER
@@ -5451,7 +5306,6 @@ Każdy rekord musi mieć dokładnie te sekcje:
   "taxonomy": { ... },
   "opportunity": { ... },
   "character": { ... },
-  "kpi": { ... },
   "extras": { ... }
 }
 Zasady stylistyczne
@@ -5522,13 +5376,6 @@ fields.bull_scenario_total
 
 Format dokładnie:
 Bull_TOTAL: [wartosc]/akcja, CAGR [x%], FCFmY3 [y%]
-
-fields.voi_falsy_kluczowe_ryzyka
-
-Format dokładnie:
-VOI: ..., Fals: ..., Primary risk: ..., Composite: X.XX/5.0, EntryScore: Y.Y/10, Sizing: ...
-
-To pole ma być krótką linią decyzji, nie technicznym opisem.
 
 Sekcja 2 — taxonomy
 
@@ -5704,63 +5551,6 @@ dlaczego.
 
 Nie ogólnik. Nie lista.
 
-Sekcja 5 — kpi
-
-Format:
-
-{
-  "schema_id": "core10",
-  "items": [
-    { "key": "FQ", "label": "Financial Quality", "value": 8 },
-    ...
-  ]
-}
-schema_id
-
-Dokładnie:
-core10
-
-items
-
-Dokładnie 10 KPI, w tej kolejności:
-
-FQ
-TE
-CM
-VS
-TQ
-PP
-CP
-CD
-NO
-MR
-Dopuszczalne label
-
-Możesz użyć bardziej ludzkich polskich labeli, byle były jednoznaczne i spójne:
-
-Financial Quality / Jakosc finansowa
-Thesis Exposure / Ekspozycja na teze
-Competitive Moat / Moat konkurencyjny
-Valuation Safety / Setup wyceny
-Traction Quality / Jakosc trakcji
-Pricing Power / Sila cenowa
-Catalyst Proximity / Bliskosc reratingu
-Capital Discipline / Dyscyplina kapitalowa
-Non-Obviousness / Nieoczywistosc
-Monetization Realism / Realizm monetyzacji
-
-Nie twórz nowych KPI.
-
-KPI scores in the final record are ordinal memory aids, not arithmetic valuation inputs.
-
-If upstream valuation relied on proxy-heavy assumptions, emphasize:
-- what is known,
-- what is not proven,
-- what would make the case investable,
-- what would falsify it.
-
-Do not let numeric KPI scores obscure a weak valuation setup.
-
 Sekcja 6 — extras
 obowiązkowa, bogata, praktyczna
 
@@ -5777,8 +5567,7 @@ Musi zawierać dokładnie te sekcje:
   "proof_context": { ... },
   "quality_context": { ... },
   "execution_context": { ... },
-  "decision_audit": { ... },
-  "kpi_details": [ ... ]
+  "decision_audit": { ... }
 }
 extras.identity
 
@@ -5800,14 +5589,11 @@ extras.selection_context
 
 Pola obowiązkowe:
 
-composite_score
-entry_score
-traction_rank_score
+role_rationale
+traction_summary
 revaluation_parameter
-revaluation_expected_impact
 rerating_window_class
 voi_event
-sizing_guidance
 correlation_group
 
 To ma tłumaczyć, dlaczego ta nazwa znalazła się w finalnym wyborze.
@@ -6033,34 +5819,10 @@ redesign. Capacity over-build destroys pricing. Dual-sourcing
 transfers the rent. A specific structural path that ends the case.
 
 why_it_is_better_than_the_other_finalists (synthesis of all four)
-Comparison on economic substance, not on Composite Score difference.
+Comparison on economic substance, not on score differences.
 "Cleaner proof level with disclosed segment margin" or "Layer 3+
 market neglect that competitors do not have." Concrete economic
 differentiation that maps to the four elements.
-
-extras.kpi_details
-
-Dokładnie 10 elementów, w tej samej kolejności co kpi.items.
-
-Każdy element musi mieć:
-
-{
-  "key": "FQ",
-  "score": 8,
-  "why": "...",
-  "watch_for": "...",
-  "decision_use": "..."
-}
-Reguły:
-why = 2–4 zdania
-wyjaśnij skąd wynik i dlaczego ma znaczenie
-watch_for = 1–3 zdania
-co w przyszłych raportach może ten KPI poprawić lub pogorszyć
-decision_use = 1–2 zdania
-jak ten KPI wpływa na decyzję inwestycyjną
-
-To pole musi być naprawdę pomocne.
-Nie może być dekoracją.
 
 Najważniejsza zasada audytowalności
 
@@ -6093,15 +5855,11 @@ fields
 taxonomy
 opportunity
 character
-kpi
 extras
 extras nie jest puste
-extras.kpi_details ma dokładnie 10 elementów
-kpi.items[i].value == extras.kpi_details[i].score
 fields.bear_scenario_total zaczyna się od Bear_TOTAL:
 fields.base_scenario_total zaczyna się od Base_TOTAL:
 fields.bull_scenario_total zaczyna się od Bull_TOTAL:
-fields.voi_falsy_kluczowe_ryzyka zaczyna się od VOI:
 taxonomy nie zawiera placeholderów
 entry_condition_type zgadza się z blockerem
 proof_class zgadza się z proof / semantics
