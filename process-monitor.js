@@ -1512,7 +1512,7 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const queueStartingSlots = Number.isInteger(queue?.startingSlots)
     ? queue.startingSlots
     : Math.max(0, queueSlots - queueLiveSlots);
-  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 7;
+  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 4;
   const queueSize = Number.isInteger(queue?.queueSize) ? queue.queueSize : 0;
 
   if (processSummary) {

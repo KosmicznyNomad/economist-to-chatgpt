@@ -204,7 +204,7 @@ function buildContext() {
     Math,
     Object,
     Promise,
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 4,
     ANALYSIS_TYPE_COMPANY: 'company',
     CHAT_URL: 'https://chatgpt.com/company',
     EXTENSION_FEATURE_REVISION: 'source-materials-heartbeat-v1',
@@ -235,7 +235,7 @@ function buildContext() {
     ensureExtensionInstallationId: async () => 'ext-test-support',
     getAnalysisQueueStatusSnapshot: async () => ({
       success: true,
-      maxConcurrent: 7,
+      maxConcurrent: 4,
       activeSlots: 1,
       queueSize: 2,
       waitingJobs: 2,

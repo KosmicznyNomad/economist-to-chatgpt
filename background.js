@@ -34,7 +34,7 @@ const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
-const ANALYSIS_QUEUE_MAX_CONCURRENT = 7;
+const ANALYSIS_QUEUE_MAX_CONCURRENT = 4;
 const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
 const ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS = 45 * 1000;
 const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
@@ -10993,8 +10993,9 @@ function buildQueuedProcessPatchForJob(job) {
   return patch;
 }
 
-function shouldBypassAnalysisQueueForAnalysisType(analysisType) {
-  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO;
+function shouldBypassAnalysisQueueForAnalysisType(_analysisType) {
+  // Every local analysis type consumes a global queue slot.
+  return false;
 }
 
 function findManualTextSourceForQueueBypass(sourceId, manualTextSources = []) {
