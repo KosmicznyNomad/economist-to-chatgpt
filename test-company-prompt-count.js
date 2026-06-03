@@ -235,9 +235,9 @@ function parsePromptChainText(rawText) {
   return [normalizedText.trim()];
 }
 
-function testCompanyPromptCatalogIsSixteenPrompts() {
+function testCompanyPromptCatalogIsEighteenPrompts() {
   const prompts = parsePromptChainText(promptsText);
-  assert.strictEqual(prompts.length, 16, 'Company prompt chain should contain exactly 16 prompts.');
+  assert.strictEqual(prompts.length, 18, 'Company prompt chain should contain exactly 18 prompts.');
 
   const stageMetadataBlockMatch = backgroundSource.match(/const DEFAULT_STAGE_METADATA_COMPANY = \[[\s\S]*?\n\];/);
   assert(stageMetadataBlockMatch, 'Stage metadata block should exist.');
@@ -245,19 +245,19 @@ function testCompanyPromptCatalogIsSixteenPrompts() {
   const promptNumbers = [...stageMetadataBlockMatch[0].matchAll(/promptNumber:\s*(\d+)/g)].map((match) => Number(match[1]));
   assert.deepStrictEqual(
     promptNumbers,
-    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16],
-    'Stage metadata prompt numbers should align to the 16-prompt chain.'
+    [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18],
+    'Stage metadata prompt numbers should align to the 18-prompt chain.'
   );
   const stageIds = [...stageMetadataBlockMatch[0].matchAll(/stageId:\s*'([^']+)'/g)].map((match) => match[1]);
   assert.deepStrictEqual(
     stageIds,
-    ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15'],
+    ['0', '1', '2', '3', '4', '5', '6', '7', '8', '9', '10', '11', '12', '13', '14', '15', '16', '17'],
     'Stage metadata ids should use consecutive numeric stage ids in prompt order.'
   );
 
   assert(
-    stageMapText.includes('## Prompt Index Mapping (16 prompts)'),
-    'Stage map should document the same 16-prompt total.'
+    stageMapText.includes('## Prompt Index Mapping (18 prompts)'),
+    'Stage map should document the same 18-prompt total.'
   );
   assert(
     backgroundSource.includes('function refreshCompanyStageMetadataFromPrompts'),
@@ -274,50 +274,55 @@ function testCompanyPromptFinalOutputsAreDataGapOrJsonOnly() {
     prompt.includes('STAGE 5') && prompt.includes('MCP SECTOR OVERLAY')
   )) || '';
   const stage14RecordPrompt = prompts[14] || '';
-  const sectorMemoryPrompt = prompts[15] || '';
+  const stage15McpWritePrompt = prompts[15] || '';
+  const sectorMemoryPrompt = prompts[16] || '';
+  const stage17McpWritePrompt = prompts[17] || '';
 
   assert(
-    stage0Prompt.includes('Source Material Reality Check (Mandatory Before Critical Rule)'),
-    'Stage 0 should classify satire/fiction before applying the assume-true rule.'
+    stage0Prompt.includes('=== STAGE 0 HANDOFF ===')
+      && stage0Prompt.includes('CONTRACT_MAP:')
+      && stage0Prompt.includes('THESIS_TYPE: [A / B / C]'),
+    'Stage 0 should emit the mechanism handoff with contract map and thesis type.'
   );
   assert(
-    stage0Prompt.includes('NON_INVESTABLE_SOURCE: true')
-      && stage0Prompt.includes('PIPELINE_ROUTE: STOP_AFTER_STAGE_0_SECTOR_MEMORY_ONLY'),
-    'Stage 0 should expose a terminal non-investable-source route in the handoff.'
+    stage0Prompt.includes('Output only Section 0 and the Stage 0 handoff.'),
+    'Stage 0 should stop after the thesis reconstruction and handoff.'
   );
   assert(
-    stage1Prompt.includes('TERMINAL SOURCE GUARD')
-      && stage1Prompt.includes('SELECTED_SUB-SEGMENTS: []'),
-    'Stage 1 should preserve the non-investable-source stop route instead of deriving subsegments.'
+    stage1Prompt.includes("search context for '=== STAGE 0 HANDOFF ==='")
+      && stage1Prompt.includes('If NOT found: output DATA_GAP_STAGE=0 and STOP.')
+      && stage1Prompt.includes('SELECTED_SUB-SEGMENTS: [list names of selected sub-segments]'),
+    'Stage 1 should require Stage 0 inheritance and expose selected sub-segments in its handoff.'
   );
   assert(
-    stage2Prompt.includes('TERMINAL SOURCE GUARD')
-      && stage2Prompt.includes('COMPANIES_CARRIED_FORWARD: []'),
-    'Stage 2 should avoid creating companies when Stage 1 carries no investable subsegments.'
+    stage2Prompt.includes("Search context for '=== STAGE 1 HANDOFF ==='")
+      && stage2Prompt.includes('If NOT found: output DATA_GAP_STAGE=1 and STOP.')
+      && stage2Prompt.includes('=== STAGE 2 FUNDAMENTAL HANDOFF ==='),
+    'Stage 2 should require Stage 1 inheritance and emit the fundamental handoff.'
   );
 
   assert(
-    stage5McpPrompt.includes('Retrieve sector memory entries using combinations of:'),
+    stage5McpPrompt.includes('Retrieve sector memory entries using short combinations of:'),
     'Stage 5 should define sector-memory retrieval inputs.'
   );
   assert(
-    stage5McpPrompt.includes('if analysis.evidence_bundle is available, call it first'),
-    'Stage 5 should prefer the simplified evidence bundle read path.'
+    stage5McpPrompt.includes('Use MCP / Iskierka sector-context search.'),
+    'Stage 5 should explicitly use Iskierka sector-context search.'
   );
   assert(
-    stage5McpPrompt.includes('mark MCP_UNAVAILABLE'),
+    stage5McpPrompt.includes('MCP_TOOL_UNAVAILABLE'),
     'Stage 5 should mark MCP unavailability explicitly.'
   );
   assert(
-    stage5McpPrompt.includes('Do not call list_resources/resources/list for Stage 5 analytical'),
-    'Stage 5 should avoid broad resource listing for sector-memory retrieval.'
+    stage5McpPrompt.includes('MCP_ALIAS_NOT_FOUND'),
+    'Stage 5 should distinguish missing aliases from unavailable MCP.'
   );
   assert(
-    stage5McpPrompt.includes('If a call is unavailable, do not describe it as "no exact match"'),
+    stage5McpPrompt.includes('Do not call an empty result MCP_UNAVAILABLE.'),
     'Stage 5 should distinguish MCP transport errors from empty search results.'
   );
   assert(
-    stage5McpPrompt.includes('MCP_STATUS: available / available_no_match / unavailable'),
+    stage5McpPrompt.includes('MCP_STATUS:'),
     'Stage 5 handoff should represent successful empty retrieval separately from MCP unavailability.'
   );
   assert(
@@ -326,28 +331,35 @@ function testCompanyPromptFinalOutputsAreDataGapOrJsonOnly() {
   );
 
   assert(
-    !stage14RecordPrompt.includes('economist.response.v2'),
-    'Stage 14 should no longer require the legacy economist.response.v2 schema string.'
+    stage14RecordPrompt.includes('"schema": "economist.response.v2"')
+      && stage14RecordPrompt.includes('records ma 0–2 rekordy'),
+    'Stage 14 should require the structured economist.response.v2 object with 0-2 records.'
   );
   assert(
-    stage14RecordPrompt.includes('records ma dokładnie 2 rekordy'),
-    'Stage 14 final instruction should require exactly two records.'
+    stage14RecordPrompt.includes('records[] może być puste tylko wtedy'),
+    'Stage 14 final instruction should allow empty records only for a true no-company case.'
   );
   assert(
-    sectorMemoryPrompt.includes('Return only a JSON array.'),
+    stage15McpWritePrompt.includes('STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS')
+      && stage15McpWritePrompt.includes('stage12_research_rows_upsert')
+      && stage15McpWritePrompt.includes('FINAL OUTPUT RULE DLA PROMPTU 16'),
+    'Stage 15 should copy/write Stage 14 records through the dedicated MCP writer and return the JSON unchanged.'
+  );
+  assert(
+    sectorMemoryPrompt.includes('STAGE 16 — SECTOR INTELLIGENCE MEMORY ROW WRITER')
+      && sectorMemoryPrompt.includes('Return only a JSON array.'),
     'Sector-memory prompt should output only the JSON array captured by the extension.'
   );
   assert(
-    !promptsText.includes('STAGE 15 — MCP WRITE FINAL INVESTMENT RECORDS')
-      && !promptsText.includes('STAGE 17 — MCP WRITE SECTOR MEMORY ROWS'),
-    'Company prompts should not contain separate MCP write/copy prompts.'
+    stage17McpWritePrompt.includes('STAGE 17 — MCP WRITE SECTOR MEMORY ROWS')
+      && stage17McpWritePrompt.includes('sector_context.upsert_stage13')
+      && stage17McpWritePrompt.includes('FINAL OUTPUT RULE DLA PROMPTU 18'),
+    'Stage 17 should copy/write Stage 16 sector memory rows through the dedicated MCP writer and return the JSON unchanged.'
   );
   assert(
-    !promptsText.includes('stage12_research_rows_upsert')
-      && !promptsText.includes('stage12_research_rows.upsert')
-      && !promptsText.includes('sector_context.upsert_stage13')
-      && !promptsText.includes('sector_context_upsert_stage13'),
-    'Final prompt outputs should be JSON-only; persistence is handled by the extension.'
+    stage15McpWritePrompt.includes('Nie używaj `context_packs.upsert`, `sector_context.upsert_stage13`, intake/history endpoints ani `watchlist-company-context`.')
+      && stage17McpWritePrompt.includes('Nie używaj `context_packs.upsert`, `stage12_research_rows.upsert`, endpointów research rows ani `watchlist-company-context`.'),
+    'MCP copy prompts should route research rows and sector memory to their dedicated tools only.'
   );
   assert(
     !promptsText.includes('DATA_GAPS_STOP__MISSING_CRITICAL_INPUTS__HALT_PROMPT_CHAIN')
@@ -406,12 +418,21 @@ function testStage14InvestmentJsonExtractorAcceptsCurrentAndLegacyShape() {
       }
     ]
   });
+  const schemaTaggedEmptyRecords = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: []
+  });
+  const recordsOnlyEmpty = JSON.stringify({
+    records: []
+  });
   const sectorMemoryArray = JSON.stringify([
     { sektor: 'Semiconductors', podsektor: 'Substrate', opis: 'Not an investment record.' }
   ]);
 
   assert.strictEqual(context.extractStage12InvestmentJsonText(schemaTagged), schemaTagged);
   assert.strictEqual(context.extractStage12InvestmentJsonText(recordsOnly), recordsOnly);
+  assert.strictEqual(context.extractStage12InvestmentJsonText(schemaTaggedEmptyRecords), schemaTaggedEmptyRecords);
+  assert.strictEqual(context.extractStage12InvestmentJsonText(recordsOnlyEmpty), '');
   assert.strictEqual(context.extractStage12InvestmentJsonText(sectorMemoryArray), '');
 }
 
@@ -425,7 +446,7 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     JSON,
     ANALYSIS_QUEUE_KIND_ARTICLE: 'article',
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
-	    PROMPTS_COMPANY: new Array(16).fill('prompt'),
+	    PROMPTS_COMPANY: new Array(18).fill('prompt'),
 	    normalizeComposerThinkingEffort(value) {
 	      const normalized = typeof value === 'string' ? value.trim().toLowerCase() : '';
 	      return normalized === 'extended'
@@ -439,7 +460,7 @@ function testResumeQueuePatchUsesNextPromptNumber() {
       if (Array.isArray(job?.promptChainSnapshot) && job.promptChainSnapshot.length > 0) {
         return job.promptChainSnapshot.length;
       }
-      return 16;
+      return 18;
     }
   });
 
@@ -462,7 +483,7 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     resumeTargetTabId: 101
   });
   assert.strictEqual(firstPromptPatch.currentPrompt, 1);
-  assert.strictEqual(firstPromptPatch.totalPrompts, 16);
+  assert.strictEqual(firstPromptPatch.totalPrompts, 18);
   assert.strictEqual(firstPromptPatch.stageIndex, 0);
   assert.strictEqual(firstPromptPatch.stageName, 'Prompt 1');
 
@@ -472,17 +493,17 @@ function testResumeQueuePatchUsesNextPromptNumber() {
     analysisType: 'company',
     kind: 'resume_stage',
     createdAt: 1,
-    resumeStartIndex: 15,
+    resumeStartIndex: 17,
     resumeTargetTabId: 202
   });
-  assert.strictEqual(finalPromptPatch.currentPrompt, 16);
-  assert.strictEqual(finalPromptPatch.totalPrompts, 16);
-  assert.strictEqual(finalPromptPatch.stageIndex, 15);
-  assert.strictEqual(finalPromptPatch.stageName, 'Prompt 16');
+  assert.strictEqual(finalPromptPatch.currentPrompt, 18);
+  assert.strictEqual(finalPromptPatch.totalPrompts, 18);
+  assert.strictEqual(finalPromptPatch.stageIndex, 17);
+  assert.strictEqual(finalPromptPatch.stageName, 'Prompt 18');
 }
 
 function main() {
-  testCompanyPromptCatalogIsSixteenPrompts();
+  testCompanyPromptCatalogIsEighteenPrompts();
   testCompanyPromptFinalOutputsAreDataGapOrJsonOnly();
   testSectorMemoryFallbackIsWired();
   testStage14InvestmentJsonExtractorAcceptsCurrentAndLegacyShape();

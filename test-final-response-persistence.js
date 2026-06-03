@@ -369,6 +369,23 @@ async function testAcceptsStructuredV2FinalContract() {
   assert.strictEqual(result.contractKind, 'economist.response.v2');
 }
 
+async function testAcceptsStructuredV2EmptyRecordsFinalContract() {
+  const responseText = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: []
+  });
+  const result = await context.resolveCompletedProcessFinalResponseText({
+    currentPrompt: 15,
+    totalPrompts: 15,
+    completedResponseText: responseText
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.contractKind, 'economist.response.v2');
+  assert.strictEqual(result.responseText, responseText);
+  assert.strictEqual(result.contract.structuredResponse.records.length, 0);
+}
+
 async function testAcceptsPortfolioFinalJsonContract() {
   const responseText = makePortfolioFinalResponse();
   const result = await context.resolveCompletedProcessFinalResponseText({
@@ -658,6 +675,7 @@ async function main() {
   await testAcceptsCompletedPayloadEvenWhenPromptCountersLag();
   await testRejectsInvalidFinalContract();
   await testAcceptsStructuredV2FinalContract();
+  await testAcceptsStructuredV2EmptyRecordsFinalContract();
   await testAcceptsPortfolioFinalJsonContract();
   testExtractsPortfolioFeedbackSubmitPayloadFromTextFinalJson();
   testPortfolioFinalJsonIsNotLocalOnlyDispatchSkipped();

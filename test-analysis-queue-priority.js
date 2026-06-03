@@ -245,7 +245,7 @@ function buildPriorityContext() {
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 7,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 4,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
@@ -264,7 +264,7 @@ function buildPriorityContext() {
     analysisQueueState: {
       waitingJobs: [],
       activeJobs: [],
-      maxConcurrent: 7,
+      maxConcurrent: 4,
       lastSequence: 0
     },
     analysisQueueVersion: 0,

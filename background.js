@@ -41,7 +41,7 @@ const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
 const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
-const ANALYSIS_QUEUE_MAX_CONCURRENT = 3;
+const ANALYSIS_QUEUE_MAX_CONCURRENT = 4;
 const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
 const ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS = 45 * 1000;
 const PROCESS_WINDOW_AUTO_MINIMIZE_ENABLED = true;
@@ -14075,8 +14075,22 @@ const DEFAULT_STAGE_METADATA_COMPANY = [
     promptIndex: 15,
     promptNumber: 16,
     stageId: '15',
-    stageName: "Stage 15: Sector Intelligence Memory Row Writer",
+    stageName: "Stage 15: MCP Write Final Investment Records",
+    description: "Copy and write the Stage 14 structured investment records through the dedicated MCP writer."
+  },
+  {
+    promptIndex: 16,
+    promptNumber: 17,
+    stageId: '16',
+    stageName: "Stage 16: Sector Intelligence Memory Row Writer",
     description: "Durable sector intelligence records for future portfolio positioning and company analyses."
+  },
+  {
+    promptIndex: 17,
+    promptNumber: 18,
+    stageId: '17',
+    stageName: "Stage 17: MCP Write Sector Memory Rows",
+    description: "Copy and write the Stage 16 sector memory rows through the dedicated MCP writer."
   }
 ];
 
@@ -14104,7 +14118,9 @@ const COMPANY_STAGE_ID_PROMPT_INDEX_HINTS = new Map([
   ['12', 12],
   ['13', 13],
   ['14', 14],
-  ['15', 15]
+  ['15', 15],
+  ['16', 16],
+  ['17', 17]
 ]);
 
 function normalizeCompanyStageIdentifier(rawValue) {
@@ -23059,6 +23075,13 @@ function extractStructuredWatchlistResponseFromText(rawText) {
         .map((record) => sanitizeStructuredWatchlistRecord(record))
         .filter((record) => !!record);
       if (records.length === 0) {
+        if (schema === 'economist.response.v2' && Array.isArray(parsed.records) && parsed.records.length === 0) {
+          return {
+            schema: 'economist.response.v2',
+            schemaVersion,
+            records: []
+          };
+        }
         continue;
       }
       return {
@@ -30108,6 +30131,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
           ? (message.sourceRecordSuffix || message.source_record_suffix)
           : '',
         skipWatchlistDispatch: message.skipWatchlistDispatch === true,
+        skipWatchlistDispatchReason: typeof message.skipWatchlistDispatchReason === 'string'
+          ? message.skipWatchlistDispatchReason
+          : '',
         allowPortfolioFeedbackDispatch: message.allowPortfolioFeedbackDispatch === true,
         skipProcessPersistencePatch: message.skipProcessPersistencePatch === true
       }
@@ -37027,6 +37053,9 @@ async function injectToChat(
       if (responseOptions.skipWatchlistDispatch === true) {
         messagePayload.skipWatchlistDispatch = true;
       }
+      if (typeof responseOptions.skipWatchlistDispatchReason === 'string' && responseOptions.skipWatchlistDispatchReason.trim()) {
+        messagePayload.skipWatchlistDispatchReason = responseOptions.skipWatchlistDispatchReason.trim();
+      }
       if (responseOptions.allowPortfolioFeedbackDispatch === true) {
         messagePayload.allowPortfolioFeedbackDispatch = true;
       }
@@ -41699,12 +41728,15 @@ async function injectToChat(
             || (record.fields && typeof record.fields === 'object' && !Array.isArray(record.fields))
           )
         ));
+        const explicitEmptyV2Records = schema === 'economist.response.v2'
+          && Array.isArray(parsed?.records)
+          && records.length === 0;
         if (
           parsed
           && typeof parsed === 'object'
           && !Array.isArray(parsed)
           && (!schema || schema === 'economist.response.v2')
-          && recordsLookLikeFinalRows
+          && (recordsLookLikeFinalRows || explicitEmptyV2Records)
         ) {
           return candidate;
         }
@@ -44093,6 +44125,20 @@ async function injectToChat(
           ? (extractPortfolioFinalJsonText(lastPromptResponse) || lastPromptResponse)
           : '';
         const useStage12InvestmentResponse = !isPortfolioAnalysis && !!stage12Response;
+        const stage12InvestmentHasEmptyRecords = (() => {
+          if (!useStage12InvestmentResponse) return false;
+          try {
+            const parsed = JSON.parse(stage12Response);
+            const schema = typeof parsed?.schema === 'string'
+              ? parsed.schema.trim().toLowerCase()
+              : '';
+            return schema === 'economist.response.v2'
+              && Array.isArray(parsed?.records)
+              && parsed.records.length === 0;
+          } catch (_error) {
+            return false;
+          }
+        })();
         const selectedResponseReason = isPortfolioAnalysis
           ? 'portfolio_final_json'
           : (useStage12InvestmentResponse ? 'stage14_investment_json' : 'last_prompt');
@@ -44139,7 +44185,29 @@ async function injectToChat(
                   selected_response_kind: 'portfolio_final_json'
                 }
               }
-              : {}
+              : (
+                useStage12InvestmentResponse
+                  ? {
+                    schema: 'economist.response.v2',
+                    sourceRecordSuffix: 'stage14_investment_json',
+                    dispatchFlushReason: 'stage14_investment_json',
+                    ...(stage12InvestmentHasEmptyRecords
+                      ? {
+                        skipWatchlistDispatch: true,
+                        skipWatchlistDispatchReason: 'structured_v2_empty_records',
+                        stageMeta: {
+                          selected_response_kind: 'stage14_investment_json',
+                          structured_v2_empty_records: true
+                        }
+                      }
+                      : {
+                        stageMeta: {
+                          selected_response_kind: 'stage14_investment_json'
+                        }
+                      })
+                  }
+                  : {}
+              )
           );
           if (tabSaveResult.ok) {
             persistedViaMessage = true;
