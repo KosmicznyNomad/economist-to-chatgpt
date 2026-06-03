@@ -6,24 +6,6 @@
   }
 })(typeof globalThis !== 'undefined' ? globalThis : this, function createWatchlistDispatchShapeUtils() {
   const DECISION_ROLES = new Set(['PRIMARY', 'SECONDARY']);
-  const CANONICAL_FIELD_KEYS = [
-    'data_decyzji',
-    'spolka',
-    'zrodlo_tezy',
-    'material_zrodlowy_podcast',
-    'teza_inwestycyjna',
-    'bear_scenario_total',
-    'base_scenario_total',
-    'bull_scenario_total',
-    'voi_falsy_kluczowe_ryzyka',
-    'sektor',
-    'rodzina_spolki',
-    'typ_spolki',
-    'model_przychodu',
-    'region',
-    'waluta',
-    'decision_role'
-  ];
   const STRUCTURED_FIELD_ALIASES = {
     data_decyzji: ['decision_date', 'date'],
     spolka: ['nazwa_spolki', 'nazwa', 'company_name', 'company', 'issuer_name', 'issuer'],
@@ -84,6 +66,16 @@
     return normalized && typeof normalized === 'object' && !Array.isArray(normalized)
       ? normalized
       : {};
+  }
+
+  function hasStructuredContent(value) {
+    if (Array.isArray(value)) {
+      return value.some((item) => hasStructuredContent(item));
+    }
+    if (value && typeof value === 'object') {
+      return Object.values(value).some((item) => hasStructuredContent(item));
+    }
+    return !!normalizeText(value);
   }
 
   function firstNonEmptyStructuredValue(source, keys) {
@@ -318,11 +310,9 @@
   function normalizeStructuredFields(fields, decisionRole) {
     const source = normalizeStructuredSection(fields, STRUCTURED_FIELD_ALIASES);
     const normalized = { ...source };
-    CANONICAL_FIELD_KEYS.forEach((key) => {
-      if (!normalizeText(normalized[key])) {
-        normalized[key] = '';
-      } else {
-        normalized[key] = normalizeText(normalized[key]);
+    Object.keys(normalized).forEach((key) => {
+      if (typeof normalized[key] === 'string') {
+        normalized[key] = normalized[key].trim();
       }
     });
     const normalizedRole = normalizeStructuredRole(
@@ -399,15 +389,21 @@
     const normalizedFields = normalizeStructuredFields(rawFields, decisionRole);
     const hasFieldContent = Object.values(normalizedFields).some((value) => normalizeText(value));
     if (!hasFieldContent) return null;
-    return {
+    const normalizedRecord = {
       decision_role: decisionRole,
-      fields: normalizedFields,
-      taxonomy: normalizeStructuredTaxonomy(record.taxonomy),
-      opportunity: normalizeStructuredOpportunity(record.opportunity),
-      character: normalizeStructuredCharacter(record.character),
-      kpi: normalizeStructuredKpi(record.kpi),
-      extras: normalizeStructuredExtras(record.extras)
+      fields: normalizedFields
     };
+    const taxonomy = normalizeStructuredTaxonomy(record.taxonomy);
+    const opportunity = normalizeStructuredOpportunity(record.opportunity);
+    const character = normalizeStructuredCharacter(record.character);
+    const kpi = normalizeStructuredKpi(record.kpi);
+    const extras = normalizeStructuredExtras(record.extras);
+    if (hasStructuredContent(taxonomy)) normalizedRecord.taxonomy = taxonomy;
+    if (hasStructuredContent(opportunity)) normalizedRecord.opportunity = opportunity;
+    if (hasStructuredContent(character)) normalizedRecord.character = character;
+    if (hasStructuredContent(kpi)) normalizedRecord.kpi = kpi;
+    if (hasStructuredContent(extras)) normalizedRecord.extras = extras;
+    return normalizedRecord;
   }
 
   function normalizeStructuredWatchlistRecords(records) {

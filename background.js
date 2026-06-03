@@ -22968,7 +22968,7 @@ function normalizeStructuredWatchlistNamedSection(rawSection, keys) {
   keys.forEach((key) => {
     normalized[key] = normalizeStructuredWatchlistValue(section?.[key]);
   });
-  return Object.keys(normalized).length > 0 ? normalized : null;
+  return Object.values(normalized).some((value) => normalizeStructuredWatchlistValue(value)) ? normalized : null;
 }
 
 function serializeStructuredWatchlistKpiScorecard(rawKpi) {
@@ -23070,6 +23070,7 @@ function extractStructuredWatchlistResponseFromText(rawText) {
       }
 
       const schemaVersion = normalizeStructuredWatchlistValue(parsed.schema_version || parsed.schemaVersion);
+      const extras = normalizeStructuredWatchlistObject(parsed.extras);
       const recordCandidates = Array.isArray(parsed.records) ? parsed.records : [parsed];
       const records = recordCandidates
         .map((record) => sanitizeStructuredWatchlistRecord(record))
@@ -23079,7 +23080,8 @@ function extractStructuredWatchlistResponseFromText(rawText) {
           return {
             schema: 'economist.response.v2',
             schemaVersion,
-            records: []
+            records: [],
+            ...(extras ? { extras } : {})
           };
         }
         continue;
@@ -23087,7 +23089,8 @@ function extractStructuredWatchlistResponseFromText(rawText) {
       return {
         schema: 'economist.response.v2',
         schemaVersion,
-        records
+        records,
+        ...(extras ? { extras } : {})
       };
     } catch (error) {
       continue;
@@ -23650,7 +23653,8 @@ function normalizeWatchlistDispatchPayload(response) {
   const validation = typeof DecisionContractUtils.validateDecisionContractText === 'function'
     ? DecisionContractUtils.validateDecisionContractText(text)
     : null;
-  const directStructuredRecords = Array.isArray(response.records)
+  const hasDirectStructuredRecordArray = Array.isArray(response.records);
+  const directStructuredRecords = hasDirectStructuredRecordArray
     ? (
       typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
         ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(response.records)
@@ -23659,7 +23663,7 @@ function normalizeWatchlistDispatchPayload(response) {
           .filter((record) => !!record)
     )
     : [];
-  if (!text.trim() && directStructuredRecords.length === 0) return null;
+  if (!text.trim() && !hasDirectStructuredRecordArray) return null;
   const extractedStructuredPayload = typeof DecisionContractUtils.extractStructuredDecisionPayload === 'function'
     ? DecisionContractUtils.extractStructuredDecisionPayload(text)
     : null;
@@ -23712,22 +23716,26 @@ function normalizeWatchlistDispatchPayload(response) {
         ? payload.records.reduce((sum, record) => sum + scoreRecord(record), 0)
         : 0
     );
+    if (!leftPayload && rightPayload) return rightPayload;
+    if (leftPayload && !rightPayload) return leftPayload;
     return scorePayload(rightPayload) > scorePayload(leftPayload) ? rightPayload : leftPayload;
   };
-  const normalizedExtractedStructuredPayload = extractedStructuredPayload?.records?.length
+  const normalizedExtractedStructuredPayload = extractedStructuredPayload && Array.isArray(extractedStructuredPayload.records)
     ? {
       schema: 'economist.response.v2',
       schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
       records: typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
         ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(extractedStructuredPayload.records)
-        : extractedStructuredPayload.records
+        : extractedStructuredPayload.records,
+      ...(normalizeStructuredWatchlistObject(extractedStructuredPayload.extras) ? { extras: normalizeStructuredWatchlistObject(extractedStructuredPayload.extras) } : {})
     }
     : null;
-  const structuredPayload = directStructuredRecords.length > 0
+  const structuredPayload = hasDirectStructuredRecordArray
     ? {
       schema: 'economist.response.v2',
       schemaVersion: normalizeStructuredWatchlistValue(response.schema_version || response.schemaVersion),
-      records: directStructuredRecords
+      records: directStructuredRecords,
+      ...(normalizeStructuredWatchlistObject(response.extras) ? { extras: normalizeStructuredWatchlistObject(response.extras) } : {})
     }
     : chooseRicherStructuredPayload(
       normalizedExtractedStructuredPayload,
@@ -23739,11 +23747,12 @@ function normalizeWatchlistDispatchPayload(response) {
     || decisionRecords.find((record) => record.decisionRole === 'PRIMARY')
     || decisionRecords[decisionRecords.length - 1]
     || null;
-  const structuredDispatchText = structuredPayload?.records?.length
+  const structuredDispatchText = structuredPayload && Array.isArray(structuredPayload.records)
     ? JSON.stringify({
       schema: 'economist.response.v2',
       ...(structuredPayload.schemaVersion ? { schema_version: structuredPayload.schemaVersion } : {}),
-      records: structuredPayload.records
+      records: structuredPayload.records,
+      ...(normalizeStructuredWatchlistObject(structuredPayload.extras) ? { extras: normalizeStructuredWatchlistObject(structuredPayload.extras) } : {})
     })
     : '';
   const dispatchText = structuredPayload
@@ -23796,7 +23805,10 @@ function normalizeWatchlistDispatchPayload(response) {
   if (structuredPayload?.schemaVersion) {
     payload.schema_version = structuredPayload.schemaVersion;
   }
-  if (structuredPayload?.records?.length) {
+  if (normalizeStructuredWatchlistObject(structuredPayload?.extras)) {
+    payload.extras = normalizeStructuredWatchlistObject(structuredPayload.extras);
+  }
+  if (structuredPayload && Array.isArray(structuredPayload.records)) {
     payload.records = typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
       ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(structuredPayload.records)
       : structuredPayload.records;
@@ -23830,7 +23842,7 @@ function normalizeWatchlistDispatchPayload(response) {
   if (compatibilityDecisionRecords.length > 0) {
     payload.decisionRecordCount = compatibilityDecisionRecords.length;
     payload.decisionRecords = compatibilityDecisionRecords;
-  } else if (structuredPayload?.records?.length) {
+  } else if (structuredPayload && Array.isArray(structuredPayload.records)) {
     payload.decisionRecordCount = structuredPayload.records.length;
   }
   if (response.decisionContract && typeof response.decisionContract === 'object') {
@@ -23876,12 +23888,13 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
     return portfolioFeedbackPayload;
   }
   const rawText = typeof rawPayload.text === 'string' ? rawPayload.text : '';
-  const hasStructuredRecords = Array.isArray(rawPayload.records) && rawPayload.records.length > 0;
-  if (!rawText.trim() && !hasStructuredRecords) return null;
+  const hasStructuredRecordArray = Array.isArray(rawPayload.records);
+  const hasStructuredRecords = hasStructuredRecordArray && rawPayload.records.length > 0;
+  if (!rawText.trim() && !hasStructuredRecordArray) return null;
   const schema = trimProblemLogText(
-    rawPayload.schema || (hasStructuredRecords ? 'economist.response.v2' : 'economist.response.v1'),
+    rawPayload.schema || (hasStructuredRecordArray ? 'economist.response.v2' : 'economist.response.v1'),
     80
-  ) || (hasStructuredRecords ? 'economist.response.v2' : 'economist.response.v1');
+  ) || (hasStructuredRecordArray ? 'economist.response.v2' : 'economist.response.v1');
   const runId = typeof rawPayload.runId === 'string' ? rawPayload.runId.trim() : '';
   const responseId = typeof rawPayload.responseId === 'string' && rawPayload.responseId.trim()
     ? rawPayload.responseId.trim()
@@ -23942,10 +23955,12 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
           ? payload.records.reduce((sum, record) => sum + scoreRecord(record), 0)
           : 0
       );
+      if (!leftPayload && rightPayload) return rightPayload;
+      if (leftPayload && !rightPayload) return leftPayload;
       return scorePayload(rightPayload) > scorePayload(leftPayload) ? rightPayload : leftPayload;
     };
     const extractedFromText = extractStructuredWatchlistResponseFromText(rawText);
-    if (schema !== 'economist.response.v2' && !hasStructuredRecords && !extractedFromText) {
+    if (schema !== 'economist.response.v2' && !hasStructuredRecordArray && !extractedFromText) {
       return null;
     }
     const records = Array.isArray(rawPayload.records)
@@ -23957,11 +23972,12 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
             .filter((record) => !!record)
       )
       : [];
-    if (records.length > 0) {
+    if (hasStructuredRecordArray) {
       return {
         schema: 'economist.response.v2',
         schemaVersion: normalizeStructuredWatchlistValue(rawPayload.schema_version || rawPayload.schemaVersion),
-        records
+        records,
+        ...(normalizeStructuredWatchlistObject(rawPayload.extras) ? { extras: normalizeStructuredWatchlistObject(rawPayload.extras) } : {})
       };
     }
     return chooseRicherStructuredPayload(
@@ -23972,11 +23988,12 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (schema === 'economist.response.v2' && !structuredResponse) {
     return null;
   }
-  const structuredDispatchText = structuredResponse?.records?.length
+  const structuredDispatchText = structuredResponse && Array.isArray(structuredResponse.records)
     ? JSON.stringify({
       schema: 'economist.response.v2',
       ...(structuredResponse.schemaVersion ? { schema_version: structuredResponse.schemaVersion } : {}),
-      records: structuredResponse.records
+      records: structuredResponse.records,
+      ...(normalizeStructuredWatchlistObject(structuredResponse.extras) ? { extras: normalizeStructuredWatchlistObject(structuredResponse.extras) } : {})
     })
     : '';
   const payload = {
@@ -24021,6 +24038,9 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   if (structuredResponse?.schemaVersion) {
     payload.schema_version = structuredResponse.schemaVersion;
   }
+  if (normalizeStructuredWatchlistObject(structuredResponse?.extras)) {
+    payload.extras = normalizeStructuredWatchlistObject(structuredResponse.extras);
+  }
   if (Array.isArray(rawPayload.records)) {
     payload.records = typeof WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords === 'function'
       ? WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords(rawPayload.records)
@@ -24047,7 +24067,7 @@ function normalizeOutboundWatchlistDispatchPayload(rawPayload) {
   const compatibilityDecisionRecordSource = Array.isArray(rawPayload.decisionRecords) && rawPayload.decisionRecords.length > 0
     ? rawPayload.decisionRecords
     : (
-      structuredResponse?.records?.length
+      structuredResponse && Array.isArray(structuredResponse.records) && structuredResponse.records.length > 0
         ? extractDecisionRecordsFromText(rawText || structuredDispatchText)
         : []
     );

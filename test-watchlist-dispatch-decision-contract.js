@@ -656,6 +656,113 @@ function testStructuredJsonDispatchPayloadBackfillsAliasFields() {
   assert.strictEqual(outbound.decisionRecords[0].entryConditionType, 'DURATION');
 }
 
+function testEssayStage14DispatchPayload() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          data_decyzji: '2026-06-03',
+          spolka: 'Alpha Corp (ALP:NASDAQ)',
+          zrodlo_tezy: 'Source thesis in one sentence',
+          teza_inwestycyjna: 'Esej inwestycyjny o firmie.'
+        },
+        taxonomy: {
+          sector: 'Semiconductors',
+          region: 'USA',
+          currency: 'USD'
+        }
+      },
+      {
+        decision_role: 'SECONDARY',
+        fields: {
+          data_decyzji: '2026-06-03',
+          spolka: 'Beta Corp (BET:NASDAQ)',
+          zrodlo_tezy: 'Second source thesis',
+          teza_inwestycyjna: 'Drugi esej inwestycyjny.'
+        }
+      }
+    ]
+  });
+
+  const payload = context.normalizeWatchlistDispatchPayload({
+    text,
+    source: 'Stage 14 essay JSON',
+    analysisType: 'company',
+    responseId: 'resp-v2-essay',
+    runId: 'run-v2-essay',
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'economist.response.v2');
+  assert.strictEqual(payload.records.length, 2);
+  assert.strictEqual(payload.decisionRecords.length, 2);
+  assert.strictEqual(payload.decisionRecordCount, 2);
+  assert.strictEqual(payload.records[0].fields.spolka, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(payload.records[0].fields.teza_inwestycyjna, 'Esej inwestycyjny o firmie.');
+  assert.strictEqual(payload.records[0].fields.bear_scenario_total, undefined);
+  assert.strictEqual(payload.records[0].taxonomy.sector, 'Semiconductors');
+  assert.strictEqual(payload.records[0].opportunity, undefined);
+  assert.strictEqual(payload.records[0].kpi, undefined);
+  assert.strictEqual(payload.records[0].extras, undefined);
+  assert.strictEqual(payload.decisionRecords[0].company, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(payload.decisionRecords[0].thesis, 'Esej inwestycyjny o firmie.');
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload(payload);
+  assert.strictEqual(outbound.schema, 'economist.response.v2');
+  assert.strictEqual(outbound.records.length, 2);
+  assert.strictEqual(outbound.decisionRecordCount, 2);
+  assert.strictEqual(outbound.records[0].kpi, undefined);
+  assert.strictEqual(outbound.decisionRecords[1].company, 'Beta Corp (BET:NASDAQ)');
+}
+
+function testEmptyEssayStage14DispatchPayload() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [],
+    extras: {
+      shortfall_reason: 'Brak publicznej spółki z realnym linkiem do mechanizmu.'
+    }
+  });
+
+  const payload = context.normalizeWatchlistDispatchPayload({
+    text,
+    source: 'Stage 14 empty essay JSON',
+    analysisType: 'company',
+    responseId: 'resp-v2-empty-essay',
+    runId: 'run-v2-empty-essay',
+    timestamp: 1_710_000_000_000
+  });
+
+  assert.strictEqual(payload.schema, 'economist.response.v2');
+  assert.strictEqual(payload.records.length, 0);
+  assert.strictEqual(payload.decisionRecordCount, 0);
+  assert.strictEqual(payload.decisionRecords, undefined);
+  assert.strictEqual(payload.extras.shortfall_reason, 'Brak publicznej spółki z realnym linkiem do mechanizmu.');
+  assert.strictEqual(payload.text, text);
+
+  const outbound = context.normalizeOutboundWatchlistDispatchPayload({
+    schema: 'economist.response.v2',
+    text: '',
+    records: [],
+    extras: {
+      shortfall_reason: 'Brak publicznej spółki z realnym linkiem do mechanizmu.'
+    },
+    source: 'Stage 14 empty essay JSON',
+    analysisType: 'company',
+    responseId: 'resp-v2-empty-essay-outbound',
+    runId: 'run-v2-empty-essay-outbound',
+    timestamp: 1_710_000_000_000
+  });
+  assert.strictEqual(outbound.schema, 'economist.response.v2');
+  assert.strictEqual(outbound.records.length, 0);
+  assert.strictEqual(outbound.decisionRecordCount, 0);
+  assert.strictEqual(outbound.extras.shortfall_reason, 'Brak publicznej spółki z realnym linkiem do mechanizmu.');
+  assert.ok(outbound.text.includes('"records":[]'));
+  assert.ok(outbound.text.includes('"shortfall_reason"'));
+}
+
 function testStructuredV2DispatchWithoutTextSynthesizesPayloadText() {
   const payload = context.normalizeWatchlistDispatchPayload({
     text: '',
@@ -849,6 +956,8 @@ function main() {
   testStructuredV2PayloadPreservesRecords();
   testStructuredJsonDispatchPayload();
   testStructuredJsonDispatchPayloadBackfillsAliasFields();
+  testEssayStage14DispatchPayload();
+  testEmptyEssayStage14DispatchPayload();
   testStructuredV2DispatchWithoutTextSynthesizesPayloadText();
   testOutboundStructuredV2WithoutTextAcceptsDirectRecords();
   testDispatchPayloadPreservesChatGptComputationTelemetry();

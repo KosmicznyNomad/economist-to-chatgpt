@@ -211,10 +211,42 @@ function testDispatchShapeBackfillsAliasStructuredRecords() {
   assert.deepStrictEqual(records[0].extras, { note: 'alias-compatible' });
 }
 
+function testDispatchShapeKeepsEssayStage14RecordsMinimal() {
+  const records = WatchlistDispatchShapeUtils.normalizeStructuredWatchlistRecords([
+    {
+      decision_role: 'PRIMARY',
+      fields: {
+        data_decyzji: '2026-06-03',
+        spolka: 'Alpha Corp (ALP:NASDAQ)',
+        zrodlo_tezy: 'Source thesis in one sentence',
+        teza_inwestycyjna: 'Esej inwestycyjny o firmie.'
+      },
+      taxonomy: {
+        sector: 'Semiconductors',
+        region: 'USA',
+        currency: 'USD'
+      }
+    }
+  ]);
+
+  assert.strictEqual(records.length, 1);
+  assert.strictEqual(records[0].decision_role, 'PRIMARY');
+  assert.strictEqual(records[0].fields.decision_role, 'PRIMARY');
+  assert.strictEqual(records[0].fields.spolka, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(records[0].fields.teza_inwestycyjna, 'Esej inwestycyjny o firmie.');
+  assert.strictEqual(records[0].fields.bear_scenario_total, undefined);
+  assert.strictEqual(records[0].taxonomy.sector, 'Semiconductors');
+  assert.strictEqual(records[0].opportunity, undefined);
+  assert.strictEqual(records[0].character, undefined);
+  assert.strictEqual(records[0].kpi, undefined);
+  assert.strictEqual(records[0].extras, undefined);
+}
+
 function main() {
   testDispatchShapeNormalizesDecisionRecords();
   testDispatchShapeNormalizesStructuredRecords();
   testDispatchShapeBackfillsAliasStructuredRecords();
+  testDispatchShapeKeepsEssayStage14RecordsMinimal();
   console.log('test-watchlist-dispatch-shape.js: ok');
 }
 

@@ -53,6 +53,35 @@
     return normalized;
   }
 
+  function cloneStructuredSection(section) {
+    if (!section || typeof section !== 'object' || Array.isArray(section)) return {};
+    const normalized = {};
+    Object.entries(section).forEach(([rawKey, rawValue]) => {
+      const key = normalizeText(rawKey);
+      if (!key) return;
+      normalized[key] = typeof rawValue === 'string' ? rawValue.trim() : rawValue;
+    });
+    return normalized;
+  }
+
+  function hasStructuredContent(value) {
+    if (Array.isArray(value)) {
+      return value.some((item) => hasStructuredContent(item));
+    }
+    if (value && typeof value === 'object') {
+      return Object.values(value).some((item) => hasStructuredContent(item));
+    }
+    return !!normalizeText(value);
+  }
+
+  function hasStructuredEssayRecordMinimum(record) {
+    if (!record || typeof record !== 'object') return false;
+    const fields = record.fields && typeof record.fields === 'object' ? record.fields : {};
+    return !!normalizeText(record.decision_role || fields.decision_role)
+      && !!normalizeText(fields.spolka)
+      && !!normalizeText(fields.teza_inwestycyjna);
+  }
+
   function normalizeStructuredDecisionAction(value) {
     const normalized = normalizeText(value).toUpperCase();
     if (!normalized) return '';
@@ -302,18 +331,24 @@
     const decisionRole = normalizeText(record.decision_role || fields.decision_role).toUpperCase();
     if (decisionRole !== 'PRIMARY' && decisionRole !== 'SECONDARY') return null;
 
-    return {
+    const normalizedRecord = {
       decision_role: decisionRole,
       fields: {
-        ...fields,
+        ...cloneStructuredSection(fields),
         decision_role: decisionRole
-      },
-      taxonomy,
-      opportunity: normalizeStructuredNamedSection(opportunity, OPPORTUNITY_KEYS),
-      character: normalizeStructuredNamedSection(character, CHARACTER_KEYS),
-      kpi,
-      extras
+      }
     };
+    const normalizedTaxonomy = cloneStructuredSection(taxonomy);
+    const normalizedOpportunity = normalizeStructuredNamedSection(opportunity, OPPORTUNITY_KEYS);
+    const normalizedCharacter = normalizeStructuredNamedSection(character, CHARACTER_KEYS);
+    const normalizedKpi = cloneStructuredSection(kpi);
+    const normalizedExtras = cloneStructuredSection(extras);
+    if (hasStructuredContent(normalizedTaxonomy)) normalizedRecord.taxonomy = normalizedTaxonomy;
+    if (hasStructuredContent(normalizedOpportunity)) normalizedRecord.opportunity = normalizedOpportunity;
+    if (hasStructuredContent(normalizedCharacter)) normalizedRecord.character = normalizedCharacter;
+    if (hasStructuredContent(normalizedKpi)) normalizedRecord.kpi = normalizedKpi;
+    if (hasStructuredContent(normalizedExtras)) normalizedRecord.extras = normalizedExtras;
+    return normalizedRecord;
   }
 
   function extractStructuredDecisionPayload(rawText) {
@@ -322,14 +357,19 @@
     const schema = normalizeText(parsed.schema).toLowerCase();
     if (schema && schema !== 'economist.response.v2') return null;
 
-    const records = (Array.isArray(parsed.records) ? parsed.records : [])
+    const rawRecords = Array.isArray(parsed.records) ? parsed.records : [];
+    const records = rawRecords
       .map((record) => normalizeStructuredPayloadRecord(record))
       .filter(Boolean);
-    if (records.length === 0) return null;
+    if (records.length === 0 && rawRecords.length > 0) return null;
+    if (records.length === 0 && !Array.isArray(parsed.records)) return null;
 
     return {
       schema: 'economist.response.v2',
-      records
+      records,
+      ...(parsed.extras && typeof parsed.extras === 'object' && !Array.isArray(parsed.extras)
+        ? { extras: cloneStructuredSection(parsed.extras) }
+        : {})
     };
   }
 
@@ -766,13 +806,14 @@
 
       const issueCodes = [];
       let status = 'invalid';
+      const missingEssayMinimum = records.some((record) => !hasStructuredEssayRecordMinimum(record));
 
       if (records.length === 2) {
         if (records[0].decisionRole !== 'PRIMARY' || records[1].decisionRole !== 'SECONDARY') {
           issueCodes.push('invalid_role_order');
         }
-        if (records.some((record) => !record.field10Meta || record.field10Meta.isComplete !== true)) {
-          issueCodes.push('field10_invalid');
+        if (missingEssayMinimum) {
+          issueCodes.push('structured_essay_required_fields_missing');
         }
         if (issueCodes.length === 0) {
           status = 'current';
@@ -781,12 +822,14 @@
         if (records[0].decisionRole !== 'PRIMARY') {
           issueCodes.push('shortfall_requires_primary_role');
         }
-        if (records.some((record) => !record.field10Meta || record.field10Meta.isComplete !== true)) {
-          issueCodes.push('field10_invalid');
+        if (missingEssayMinimum) {
+          issueCodes.push('structured_essay_required_fields_missing');
         }
         if (issueCodes.length === 0) {
           status = 'shortfall';
         }
+      } else if (structuredPayload.records.length === 0) {
+        status = 'empty';
       } else {
         issueCodes.push('no_decision_records');
       }
@@ -818,9 +861,9 @@
         issueCodes: uniqueStrings(issueCodes),
         status,
         canonicalText: text,
-        shortfallDetected: status === 'shortfall',
+        shortfallDetected: status === 'shortfall' || status === 'empty',
         usedFlattenedText: false,
-        currentContractPassed: status === 'current' || status === 'shortfall',
+        currentContractPassed: status === 'current' || status === 'shortfall' || status === 'empty',
         decisionContract
       };
     }

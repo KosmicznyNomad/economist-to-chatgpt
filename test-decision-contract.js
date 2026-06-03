@@ -299,6 +299,66 @@ function testStructuredJsonV2Contract() {
   assert.strictEqual(validation.records[1].character.primary_kill_risk, 'procurement delay');
 }
 
+function testEssayStructuredJsonV2Contract() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [
+      {
+        decision_role: 'PRIMARY',
+        fields: {
+          data_decyzji: '2026-06-03',
+          spolka: 'Alpha Corp (ALP:NASDAQ)',
+          zrodlo_tezy: 'Source thesis in one sentence',
+          teza_inwestycyjna: 'Esej inwestycyjny o firmie.'
+        },
+        taxonomy: {
+          sector: 'Semiconductors',
+          region: 'USA',
+          currency: 'USD'
+        }
+      },
+      {
+        decision_role: 'SECONDARY',
+        fields: {
+          data_decyzji: '2026-06-03',
+          spolka: 'Beta Corp (BET:NASDAQ)',
+          zrodlo_tezy: 'Second source thesis',
+          teza_inwestycyjna: 'Drugi esej inwestycyjny.'
+        }
+      }
+    ]
+  });
+
+  const validation = DecisionContractUtils.validateDecisionContractText(text);
+  assert.strictEqual(validation.status, 'current');
+  assert.strictEqual(validation.currentContractPassed, true);
+  assert.strictEqual(validation.recordCount, 2);
+  assert.strictEqual(validation.issueCodes.includes('field10_invalid'), false);
+  assert.strictEqual(validation.primaryRecord.company, 'Alpha Corp (ALP:NASDAQ)');
+  assert.strictEqual(validation.primaryRecord.thesis, 'Esej inwestycyjny o firmie.');
+  assert.strictEqual(validation.primaryRecord.bear, '');
+  assert.strictEqual(validation.structuredPayload.records[0].taxonomy.sector, 'Semiconductors');
+  assert.strictEqual(validation.structuredPayload.records[0].opportunity, undefined);
+  assert.strictEqual(validation.structuredPayload.records[0].kpi, undefined);
+}
+
+function testEmptyEssayStructuredJsonV2Contract() {
+  const text = JSON.stringify({
+    schema: 'economist.response.v2',
+    records: [],
+    extras: {
+      shortfall_reason: 'Brak publicznej spółki z realnym linkiem do mechanizmu.'
+    }
+  });
+
+  const validation = DecisionContractUtils.validateDecisionContractText(text);
+  assert.strictEqual(validation.status, 'empty');
+  assert.strictEqual(validation.currentContractPassed, true);
+  assert.strictEqual(validation.recordCount, 0);
+  assert.strictEqual(validation.structuredPayload.records.length, 0);
+  assert.strictEqual(validation.structuredPayload.extras.shortfall_reason, 'Brak publicznej spółki z realnym linkiem do mechanizmu.');
+}
+
 function main() {
   testCurrentContract();
   testShortfallContract();
@@ -308,6 +368,8 @@ function main() {
   testViewHelpers();
   testViewHelpersFallbacks();
   testStructuredJsonV2Contract();
+  testEssayStructuredJsonV2Contract();
+  testEmptyEssayStructuredJsonV2Contract();
   console.log('test-decision-contract.js: ok');
 }
 
