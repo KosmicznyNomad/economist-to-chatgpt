@@ -332,11 +332,12 @@ function testCompanyPromptFinalOutputsAreDataGapOrJsonOnly() {
 
   assert(
     stage14RecordPrompt.includes('"schema": "economist.response.v2"')
-      && stage14RecordPrompt.includes('records ma 0–2 rekordy'),
-    'Stage 14 should require the structured economist.response.v2 object with 0-2 records.'
+      && stage14RecordPrompt.includes('records to tablica 0–2 rekordów')
+      && stage14RecordPrompt.includes('"teza_inwestycyjna": "<ESEJ>"'),
+    'Stage 14 should require the essay-style economist.response.v2 object with 0-2 records.'
   );
   assert(
-    stage14RecordPrompt.includes('records[] może być puste tylko wtedy'),
+    stage14RecordPrompt.includes('records może być puste tylko wtedy'),
     'Stage 14 final instruction should allow empty records only for a true no-company case.'
   );
   assert(
