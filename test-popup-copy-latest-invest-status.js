@@ -155,6 +155,9 @@ function main() {
     'normalizeDispatchToken',
     'humanizeDispatchToken',
     'getDispatchReasonLabel',
+    'getAnalysisQueueUiMetrics',
+    'getAnalysisQueueStateLabel',
+    'formatAnalysisQueueSummary',
     'formatFinalStagePersistenceStatus',
     'formatCopyLatestInvestFinalResponseStatus'
   ].forEach((functionName) => {
@@ -230,6 +233,20 @@ function main() {
   assert(batchStatusDerivedFromResults.includes('Lokalny zapis: 4/4 OK.'));
   assert(batchStatusDerivedFromResults.includes('Intake accepted: 2/4.'));
   assert(batchStatusDerivedFromResults.includes('DB verified: 1/4.'));
+
+  const queueSummary = context.formatAnalysisQueueSummary({
+    paused: false,
+    maxConcurrent: 1,
+    reservedSlots: 1,
+    liveSlots: 0,
+    startingSlots: 1,
+    queueSize: 2,
+    awaitingWindowCloseSlots: 1
+  });
+  assert.strictEqual(
+    queueSummary,
+    'Kolejka analiz: aktywna, sloty 1/1, zywe okna 0/1, startujace 1, oczekuje 2, zamykanie 1.'
+  );
 
   const acceptedButUnverified = context.formatFinalStagePersistenceStatus({
     success: true,

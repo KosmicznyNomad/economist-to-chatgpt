@@ -438,15 +438,28 @@ function testPortfolioFinalJsonIsNotLocalOnlyDispatchSkipped() {
   assert.strictEqual(decision.skip, false);
   assert.strictEqual(decision.allowPortfolioFeedbackDispatch, true);
 
-  const legacyPortfolioDecision = context.resolveSaveResponseDispatchSkipDecision(
+  const defaultPortfolioDecision = context.resolveSaveResponseDispatchSkipDecision(
     'portfolio',
     '',
     '',
     {}
   );
 
-  assert.strictEqual(legacyPortfolioDecision.skip, true);
-  assert.strictEqual(legacyPortfolioDecision.reason, 'portfolio_analysis_saved_locally');
+  assert.strictEqual(defaultPortfolioDecision.skip, false);
+  assert.strictEqual(defaultPortfolioDecision.reason, '');
+
+  const explicitSkipDecision = context.resolveSaveResponseDispatchSkipDecision(
+    'portfolio',
+    '',
+    '',
+    {
+      skipWatchlistDispatch: true,
+      skipWatchlistDispatchReason: 'manual_skip'
+    }
+  );
+
+  assert.strictEqual(explicitSkipDecision.skip, true);
+  assert.strictEqual(explicitSkipDecision.reason, 'manual_skip');
 }
 
 async function testFallsBackToCanonicalStorageWhenProcessPayloadMissing() {

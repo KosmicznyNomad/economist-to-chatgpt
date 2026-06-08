@@ -209,7 +209,7 @@ async function testCountsAllLiveProcesses() {
   context.analysisQueueState = {
     waitingJobs: [{ jobId: 'aq-wait-1', runId: 'run-wait-1', sequence: 8, createdAt: now }],
     activeJobs: [],
-    maxConcurrent: 4,
+    maxConcurrent: 1,
     lastSequence: 8
   };
   for (let index = 1; index <= 4; index += 1) {
@@ -259,6 +259,124 @@ async function testOpenAnalysisTabsBlockNewQueueStarts() {
     context.analysisQueueState.waitingJobs.map((job) => job.runId),
     ['run-wait-open-tabs'],
     'Waiting job should stay queued until existing analysis tabs are closed.'
+  );
+}
+
+async function testOpenAnalysisTabCounterIgnoresGenericChatGptTabs() {
+  context = buildScenarioContext();
+  context.chrome = {
+    tabs: {
+      query: async () => [
+        { id: 1, url: 'https://chatgpt.com/' },
+        { id: 2, url: 'https://chatgpt.com/c/regular-user-chat' },
+        { id: 3, url: 'https://chat.openai.com/c/another-regular-chat' },
+        { id: 4, url: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/company-run' },
+        { id: 5, url: 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/c/portfolio-run' },
+        { id: 6, pendingUrl: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/project' },
+        { id: 7, url: 'https://example.com/' }
+      ]
+    }
+  };
+
+  const openAnalysisTabs = await context.countOpenAnalysisChatTabs();
+
+  assert.strictEqual(
+    openAnalysisTabs,
+    3,
+    'Only Iskierka/Portfolio GPT tabs should reserve queue slots; generic ChatGPT tabs must not block the queue.'
+  );
+}
+
+async function testResumeJobAdoptsItsOpenTargetAnalysisTab() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{
+      jobId: 'aq-resume-open-tab',
+      runId: 'run-resume-open-tab',
+      kind: 'resume_stage',
+      sequence: 1,
+      createdAt: now,
+      resumeTargetTabId: 501,
+      resumeTargetWindowId: 601,
+      resumeStartIndex: 4
+    }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 1
+  };
+  context.chrome = {
+    tabs: {
+      query: async () => [
+        { id: 501, windowId: 601, url: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/company-resume' },
+        { id: 777, windowId: 777, url: 'https://chatgpt.com/c/regular-user-chat' }
+      ]
+    }
+  };
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('resume_adopts_open_target_tab');
+
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    ['run-resume-open-tab'],
+    'Resume job should be allowed to adopt its already-open target Iskierka tab.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-resume-open-tab']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs, []);
+}
+
+async function testOrphanOpenAnalysisTabBlocksAfterConfirmedRelease() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [{ jobId: 'aq-1', runId: 'run-1', sequence: 1, createdAt: now, slotReservedAt: now }],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'completed',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0,
+        verifyState: 'verified'
+      }
+    },
+    timestamp: now
+  });
+  context.countOpenAnalysisChatTabs = async () => 1;
+  context.closeWindowResult = false;
+
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  await context.reconcileAnalysisQueueState('orphan_open_analysis_tab_after_confirmed_release');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Queue must not start the next job while an orphan analysis tab is still open.'
+  );
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
+    ['run-2'],
+    'Waiting job should stay queued until the orphan analysis tab is gone.'
+  );
+  assert.deepStrictEqual(
+    context.closedRuns,
+    [],
+    'Confirmed process without a concrete window context should not request a synthetic close.'
   );
 }
 
@@ -346,7 +464,7 @@ async function testReleasedRunningQueueManagedProcessDoesNotConsumeSlot() {
   );
 }
 
-async function testPortfolioProcessDoesNotConsumeQueueSlot() {
+async function testPortfolioProcessConsumesSequentialQueueSlot() {
   context = buildScenarioContext();
   const now = Date.now();
   context.analysisQueueState = {
@@ -369,14 +487,19 @@ async function testPortfolioProcessDoesNotConsumeQueueSlot() {
   context.liveTabs.add(350);
 
   const status = await context.getAnalysisQueueStatusSnapshot();
-  assert.strictEqual(status.activeSlots, 0, 'Portfolio analysis must not consume an analysis queue slot.');
+  assert.strictEqual(status.activeSlots, 1, 'Portfolio analysis must consume the sequential analysis queue slot.');
 
   context.startedJobs = [];
   await context.reconcileAnalysisQueueState('portfolio_slot_exempt');
   assert.deepStrictEqual(
     context.startedJobs.map((job) => job.runId),
+    [],
+    'Company queue must wait while portfolio analysis is already running.'
+  );
+  assert.deepStrictEqual(
+    context.analysisQueueState.waitingJobs.map((job) => job.runId),
     ['run-company-1'],
-    'Company queue should still start while portfolio analysis is already running.'
+    'Waiting company job should stay queued until portfolio completes.'
   );
 }
 
@@ -416,22 +539,29 @@ async function testCompletedPendingDispatchKeepsSlotReserved() {
   );
   assert.strictEqual(
     activity.active,
-    false,
-    'Completed process with local save should stop occupying its analysis slot.'
+    true,
+    'Completed process with pending DB dispatch should still occupy its queue slot.'
   );
+  const pendingStatus = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(pendingStatus.activeSlots, 1);
+  assert.strictEqual(pendingStatus.reservedSlots, 1);
 
   context.startedJobs = [];
   context.upserts = [];
   await context.reconcileAnalysisQueueState('completed_dispatch_pending');
   assert.strictEqual(
     context.startedJobs.length,
-    1,
-    'Queue should immediately reuse the slot once local save succeeds.'
+    0,
+    'Queue must not reuse the slot until DB dispatch is confirmed.'
   );
-  assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
-  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-2']);
-  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), []);
+  assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), []);
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-1']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
   assert.deepStrictEqual(context.closedRuns, []);
+  assert(
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'awaiting_dispatch_confirmation'),
+    'Pending dispatch should keep the active queue slot marked as awaiting DB confirmation.'
+  );
 }
 
 async function testSavedProcessWithMissingLocalContextKeepsWindowOpen() {
@@ -469,17 +599,334 @@ async function testSavedProcessWithMissingLocalContextKeepsWindowOpen() {
   context.startedJobs = [];
   context.upserts = [];
   context.closedRuns = [];
+  context.closeWindowResult = false;
   await context.reconcileAnalysisQueueState('saved_missing_context');
 
-  assert.deepStrictEqual(context.closedRuns, []);
+  assert.deepStrictEqual(context.closedRuns, ['run-1']);
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Saved confirmed process with missing local context must still hold the slot until its window close succeeds.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-1']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+  assert(
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'awaiting_window_close'),
+    'Saved process that lost local context should wait for confirmed process-window close before releasing.'
+  );
+
+  context.processRegistry.set('run-1', {
+    ...context.processRegistry.get('run-1'),
+    windowClose: {
+      state: 'closed',
+      closedAt: now
+    }
+  });
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  context.closeWindowResult = true;
+  await context.reconcileAnalysisQueueState('saved_missing_context_window_closed');
   assert.deepStrictEqual(context.startedJobs.map((job) => job.runId), ['run-2']);
   assert(
     context.upserts.some((entry) => (
       entry.runId === 'run-1'
-      && entry.patch.slotReleaseReason === 'final_stage_local_saved_after_local_context_loss'
+      && entry.patch.slotReleaseReason === 'dispatch_confirmed_after_local_context_loss'
+      && entry.patch.slotReserved === false
     )),
-    'Saved process that lost its local tab should release without requesting process-window close.'
+    'Saved process that lost local context should release only after its process window is closed.'
   );
+}
+
+async function testSavedProcessWithMissingLocalContextPendingDispatchKeepsSlotReserved() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [{ jobId: 'aq-1', runId: 'run-1', sequence: 1, createdAt: now, slotReservedAt: now }],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'running',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'queued',
+        sent: 0,
+        failed: 0,
+        pending: 1
+      }
+    },
+    tabId: 321,
+    windowId: 421,
+    timestamp: now - 120000
+  });
+
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  await context.reconcileAnalysisQueueState('saved_missing_context_dispatch_pending');
+
+  assert.deepStrictEqual(context.closedRuns, []);
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Saved process with missing local context must still hold the slot while DB dispatch is pending.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-1']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+  assert(
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'awaiting_dispatch_confirmation'),
+    'Missing local context must not override pending DB dispatch confirmation.'
+  );
+}
+
+async function testRestoredPendingDispatchProcessReservesSlotWithoutActiveJob() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'completed',
+    queueManaged: true,
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'queued',
+        sent: 0,
+        failed: 0,
+        pending: 1
+      }
+    },
+    timestamp: now
+  });
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(status.activeSlots, 1);
+  assert.strictEqual(status.reservedSlots, 1);
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('restored_pending_dispatch_without_active_job');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Restored pending-dispatch process should reserve capacity even if activeJobs was lost.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+}
+
+async function testRestoredAwaitingWindowCloseProcessReservesSlotWithoutActiveJob() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'completed',
+    queueManaged: true,
+    queueState: 'awaiting_window_close',
+    slotReserved: true,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0,
+        verifyState: 'verified'
+      }
+    },
+    windowClose: {
+      state: 'retrying',
+      attemptCount: 3,
+      nextAttemptAt: now + 60000
+    },
+    tabId: 321,
+    windowId: 421,
+    timestamp: now
+  });
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(status.activeSlots, 1);
+  assert.strictEqual(status.reservedSlots, 1);
+  assert.strictEqual(status.awaitingWindowCloseSlots, 1);
+  const activeProcesses = await context.collectAnalysisQueueActiveProcesses();
+  assert.strictEqual(
+    activeProcesses[0]?.activity?.reason,
+    'awaiting_window_close',
+    'Restored window-close process should report the real slot-hold reason.'
+  );
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('restored_window_close_without_active_job');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Restored window-close process should reserve capacity even if activeJobs was lost.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+}
+
+async function testRestoredConfirmedWindowClosePlanReservesSlotBeforeQueueStateRewrite() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'completed',
+    queueManaged: true,
+    queueState: 'awaiting_dispatch_confirmation',
+    slotReserved: false,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0,
+        verifyState: 'verified'
+      }
+    },
+    tabId: 321,
+    windowId: 421,
+    timestamp: now
+  });
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(
+    status.activeSlots,
+    1,
+    'Restored dispatch-confirmed process with a closeable window should occupy a slot before queueState is rewritten.'
+  );
+  assert.strictEqual(status.awaitingWindowCloseSlots, 1);
+
+  const activeProcesses = await context.collectAnalysisQueueActiveProcesses();
+  assert.strictEqual(
+    activeProcesses[0]?.activity?.reason,
+    'awaiting_window_close',
+    'Pending close plan should be reported as awaiting_window_close even with stale queueState.'
+  );
+
+  context.startedJobs = [];
+  context.upserts = [];
+  context.closedRuns = [];
+  await context.reconcileAnalysisQueueState('restored_window_close_plan_before_state_rewrite');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Queue must not start a waiting job while a restored confirmed process still needs window close.'
+  );
+  assert.deepStrictEqual(
+    context.closedRuns,
+    ['run-1'],
+    'Restored confirmed process should immediately retry closing its process window.'
+  );
+  assert(
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'awaiting_window_close'),
+    'Restored confirmed process should be rewritten to awaiting_window_close while close is pending.'
+  );
+  assert(
+    context.upserts.some((entry) => (
+      entry.runId === 'run-1'
+      && entry.patch.queueState === 'dispatch_confirmed'
+      && entry.patch.slotReserved === false
+      && entry.patch.slotReleaseReason === 'dispatch_confirmed_window_closed'
+    )),
+    'Restored confirmed process should release its stale slot after the recovered window close succeeds.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+}
+
+async function testRestoredStaleReleasedAwaitingWindowCloseProcessReservesSlot() {
+  context = buildScenarioContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [{ jobId: 'aq-2', runId: 'run-2', sequence: 2, createdAt: now }],
+    activeJobs: [],
+    maxConcurrent: 1,
+    lastSequence: 2
+  };
+  context.processRegistry.set('run-1', {
+    id: 'run-1',
+    status: 'completed',
+    queueManaged: true,
+    queueState: 'awaiting_window_close',
+    slotReserved: false,
+    currentPrompt: 5,
+    totalPrompts: 5,
+    stageIndex: 4,
+    completedResponseSaved: true,
+    persistenceStatus: {
+      saveOk: true,
+      dispatch: {
+        state: 'dispatch_confirmed',
+        sent: 1,
+        failed: 0,
+        pending: 0,
+        verifyState: 'verified'
+      }
+    },
+    windowClose: {
+      state: 'retrying',
+      attemptCount: 1,
+      nextAttemptAt: now + 60000
+    },
+    tabId: 321,
+    windowId: 421,
+    timestamp: now
+  });
+
+  const status = await context.getAnalysisQueueStatusSnapshot();
+  assert.strictEqual(
+    status.activeSlots,
+    1,
+    'Restored awaiting-window-close process should occupy a slot even when stale storage says slotReserved=false.'
+  );
+  assert.strictEqual(status.awaitingWindowCloseSlots, 1);
+
+  context.startedJobs = [];
+  await context.reconcileAnalysisQueueState('restored_stale_released_window_close');
+  assert.deepStrictEqual(
+    context.startedJobs.map((job) => job.runId),
+    [],
+    'Queue must not start a waiting job while restored awaiting-window-close process still needs tab closure.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
 }
 
 async function testLocalSaveFailureKeepsCompletedProcessWindowOpen() {
@@ -499,6 +946,7 @@ async function testLocalSaveFailureKeepsCompletedProcessWindowOpen() {
     currentPrompt: 5,
     totalPrompts: 5,
     stageIndex: 4,
+    completedResponseCapturedAt: now,
     completedResponseSaved: false,
     persistenceStatus: {
       saveOk: false,
@@ -521,8 +969,14 @@ async function testLocalSaveFailureKeepsCompletedProcessWindowOpen() {
   );
   assert.deepStrictEqual(
     context.startedJobs.map((job) => job.runId),
-    ['run-2'],
-    'Queue should immediately reuse the released slot after local save failure.'
+    [],
+    'Queue must not reuse the slot when the completed response failed local persistence.'
+  );
+  assert.deepStrictEqual(context.analysisQueueState.activeJobs.map((job) => job.runId), ['run-1']);
+  assert.deepStrictEqual(context.analysisQueueState.waitingJobs.map((job) => job.runId), ['run-2']);
+  assert(
+    context.upserts.some((entry) => entry.runId === 'run-1' && entry.patch.queueState === 'awaiting_local_save'),
+    'Local save failure should leave the active queue slot awaiting persistence recovery.'
   );
 }
 
@@ -594,7 +1048,7 @@ async function testManualPdfJobsRespectDedicatedConcurrencyCap() {
       { jobId: 'aq-web-1', runId: 'run-web-1', sequence: 5, createdAt: now, sourceKind: 'article' }
     ],
     activeJobs: [],
-    maxConcurrent: 4,
+    maxConcurrent: 1,
     lastSequence: 5
   };
 
@@ -602,13 +1056,13 @@ async function testManualPdfJobsRespectDedicatedConcurrencyCap() {
   await context.reconcileAnalysisQueueState('manual_pdf_cap');
   assert.deepStrictEqual(
     context.startedJobs.map((job) => job.runId),
-    ['run-pdf-1', 'run-pdf-2', 'run-pdf-3', 'run-web-1'],
-    'Queue should cap manual PDF jobs at 3 while still using remaining slots for other sources.'
+    ['run-pdf-1'],
+    'Sequential queue should start only one manual PDF job at a time.'
   );
   assert.deepStrictEqual(
     context.analysisQueueState.waitingJobs.map((job) => job.runId),
-    ['run-pdf-4'],
-    'Fourth manual PDF job should stay queued until a dedicated PDF slot is free.'
+    ['run-pdf-2', 'run-pdf-3', 'run-pdf-4', 'run-web-1'],
+    'Remaining jobs should stay queued until the active PDF process completes.'
   );
 }
 
@@ -704,10 +1158,27 @@ function buildScenarioContext() {
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 4,
-    MANUAL_PDF_QUEUE_MAX_CONCURRENCY: 3,
+    CHAT_GPT_HOSTS: new Set([
+      'chatgpt.com',
+      'www.chatgpt.com',
+      'chat.openai.com',
+      'www.chat.openai.com'
+    ]),
+    INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
+    INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
+    PORTFOLIO_CHAT_URL: 'https://chatgpt.com/g/g-p-69f5df201ec08191bdffe0376f17191e/project',
+    PORTFOLIO_GPT_PATH_BASE: '/g/g-p-69f5df201ec08191bdffe0376f17191e',
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 1,
+    MANUAL_PDF_QUEUE_MAX_CONCURRENCY: 1,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
+    PROCESS_WINDOW_CLOSE_RETRY: {
+      enabled: true,
+      initialDelayMs: 1500,
+      maxDelayMs: 60 * 1000,
+      maxAttempts: 24,
+      alarmName: 'completed-process-window-close-retry'
+    },
     CLOSED_PROCESS_STATUSES: new Set([
       'completed',
       'failed',
@@ -724,7 +1195,7 @@ function buildScenarioContext() {
     analysisQueueState: {
       waitingJobs: [],
       activeJobs: [],
-      maxConcurrent: 4,
+      maxConcurrent: 1,
       lastSequence: 0
     },
     analysisQueueVersion: 0,
@@ -734,6 +1205,7 @@ function buildScenarioContext() {
     startedJobs: [],
     upserts: [],
     closedRuns: [],
+    closeWindowResult: true,
     ensureAnalysisQueueReady: async () => scenarioContext.analysisQueueState,
     ensureProcessRegistryReady: async () => scenarioContext.processRegistry,
     withAnalysisQueueMutationLock: async (task) => task(),
@@ -751,6 +1223,20 @@ function buildScenarioContext() {
       ok: true,
       tabs: clone(scenarioContext.windowTabs.get(windowId) || [])
     }),
+    normalizeProcessWindowCloseState: (value) => (value && typeof value === 'object' ? value : null),
+    resolveProcessWindowCloseRetryPlan: (process) => {
+      const delivery = scenarioContext.getProcessQueueDeliveryState(process);
+      const queueState = typeof process?.queueState === 'string' ? process.queueState.trim() : '';
+      const windowClose = scenarioContext.normalizeProcessWindowCloseState(process?.windowClose);
+      if (windowClose?.state === 'closed') {
+        return { needed: false, reason: 'already_closed', delivery };
+      }
+      const hasWindowContext = Number.isInteger(process?.tabId) || Number.isInteger(process?.windowId);
+      if (queueState === 'awaiting_window_close' || (delivery?.confirmed === true && hasWindowContext)) {
+        return { needed: true, reason: 'test_window_close_needed', delivery };
+      }
+      return { needed: false, reason: 'test_window_close_not_needed', delivery };
+    },
     upsertProcess: async (runId, patch) => {
       const current = scenarioContext.processRegistry.get(runId) || { id: runId };
       const next = { ...current, ...clone(patch) };
@@ -761,7 +1247,7 @@ function buildScenarioContext() {
     closeProcessWindowAfterQueueSuccess: async (process) => {
       const runId = typeof process?.id === 'string' ? process.id : '';
       scenarioContext.closedRuns.push(runId);
-      return true;
+      return scenarioContext.closeWindowResult !== false;
     },
     reportAnalysisQueueEvent: async () => true,
     runQueuedAnalysisJob: (job, reason) => {
@@ -791,11 +1277,21 @@ function buildScenarioContext() {
     'hasProcessCloseableSavedResponse',
     'isProcessWindowAutoCloseEnabled',
     'isDataGapTerminalProcess',
+    'shouldHoldAnalysisQueueSlotForWindowClose',
+    'shouldAttemptAnalysisQueueWindowClose',
     'buildStaleQueueReleasePatch',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
     'getProcessLastActivityTimestamp',
     'getAnalysisQueueProcessContextKey',
+    'isInvestGptUrl',
+    'isPortfolioGptUrl',
+    'isAnalysisGptUrl',
+    'getTabEffectiveUrl',
+    'getOpenAnalysisChatTabs',
+    'countAnalysisTabsById',
+    'countOpenAnalysisChatTabs',
+    'countAdoptableOpenAnalysisTabsForWaitingResumeJobs',
     'shouldProcessOccupyAnalysisQueueSlot',
     'isProcessWithinAnalysisQueueContextGrace',
     'getAnalysisQueueProcessActivityState',
@@ -825,12 +1321,20 @@ function loadScenarioFunctions(scenarioContext, functionNames) {
 async function main() {
   await testCountsAllLiveProcesses();
   await testOpenAnalysisTabsBlockNewQueueStarts();
+  await testOpenAnalysisTabCounterIgnoresGenericChatGptTabs();
+  await testResumeJobAdoptsItsOpenTargetAnalysisTab();
+  await testOrphanOpenAnalysisTabBlocksAfterConfirmedRelease();
   await testGracePreventsPrematureSlotRelease();
   await testClosedWindowDoesNotConsumeSlot();
   await testReleasedRunningQueueManagedProcessDoesNotConsumeSlot();
-  await testPortfolioProcessDoesNotConsumeQueueSlot();
+  await testPortfolioProcessConsumesSequentialQueueSlot();
   await testCompletedPendingDispatchKeepsSlotReserved();
   await testSavedProcessWithMissingLocalContextKeepsWindowOpen();
+  await testSavedProcessWithMissingLocalContextPendingDispatchKeepsSlotReserved();
+  await testRestoredPendingDispatchProcessReservesSlotWithoutActiveJob();
+  await testRestoredAwaitingWindowCloseProcessReservesSlotWithoutActiveJob();
+  await testRestoredConfirmedWindowClosePlanReservesSlotBeforeQueueStateRewrite();
+  await testRestoredStaleReleasedAwaitingWindowCloseProcessReservesSlot();
   await testLocalSaveFailureKeepsCompletedProcessWindowOpen();
   await testDuplicateActiveJobsReleaseSupersededContext();
   await testManualPdfJobsRespectDedicatedConcurrencyCap();

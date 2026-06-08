@@ -245,7 +245,7 @@ function buildPriorityContext() {
     ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     ANALYSIS_TYPE_COMPANY: 'company',
     ANALYSIS_TYPE_PORTFOLIO: 'portfolio',
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 4,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 1,
     ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS: 5 * 60 * 1000,
     ANALYSIS_QUEUE_LOCAL_CONTEXT_GRACE_MS: 45 * 1000,
     CLOSED_PROCESS_STATUSES: new Set([
@@ -264,7 +264,7 @@ function buildPriorityContext() {
     analysisQueueState: {
       waitingJobs: [],
       activeJobs: [],
-      maxConcurrent: 4,
+      maxConcurrent: 1,
       lastSequence: 0
     },
     analysisQueueVersion: 0,
@@ -298,10 +298,16 @@ function buildPriorityContext() {
     ensureAnalysisQueueReady: async () => context.analysisQueueState,
     ensureProcessRegistryReady: async () => context.processRegistry,
     withAnalysisQueueMutationLock: async (task) => task(),
-    cloneAnalysisQueueState: () => clone(context.analysisQueueState),
-    getAnalysisQueueSnapshot: async () => clone(context.analysisQueueState),
+    cloneAnalysisQueueState: () => (typeof context.sanitizeAnalysisQueueState === 'function'
+      ? context.sanitizeAnalysisQueueState(context.analysisQueueState)
+      : clone(context.analysisQueueState)),
+    getAnalysisQueueSnapshot: async () => (typeof context.sanitizeAnalysisQueueState === 'function'
+      ? context.sanitizeAnalysisQueueState(context.analysisQueueState)
+      : clone(context.analysisQueueState)),
     persistAnalysisQueueState: async (state) => {
-      context.analysisQueueState = clone(state);
+      context.analysisQueueState = typeof context.sanitizeAnalysisQueueState === 'function'
+        ? context.sanitizeAnalysisQueueState(state)
+        : clone(state);
       return context.analysisQueueState;
     },
     pruneProcessRecords: (records) => clone(records),
@@ -361,10 +367,14 @@ function buildPriorityContext() {
     'getProcessQueueDeliveryState',
     'hasProcessCloseableSavedResponse',
     'isProcessWindowAutoCloseEnabled',
+    'shouldHoldAnalysisQueueSlotForWindowClose',
+    'shouldAttemptAnalysisQueueWindowClose',
     'getAnalysisQueueCompletionTimestamp',
     'resolveAnalysisQueueDispatchDeadlineAt',
     'getProcessLastActivityTimestamp',
     'getAnalysisQueueProcessContextKey',
+    'countAnalysisTabsById',
+    'countAdoptableOpenAnalysisTabsForWaitingResumeJobs',
     'shouldProcessOccupyAnalysisQueueSlot',
     'isProcessWithinAnalysisQueueContextGrace',
     'getAnalysisQueueProcessActivityState',
@@ -412,6 +422,21 @@ function testSanitizeRestoresPriorityOrderAndLastSequence() {
     7,
     'Sanitized queue should preserve the highest observed sequence even when stored lastSequence is stale.'
   );
+  assert.strictEqual(
+    state.maxConcurrent,
+    1,
+    'Sanitized queue should overwrite stale persisted maxConcurrent values with the sequential limit.'
+  );
+
+  const staleLimitState = context.sanitizeAnalysisQueueState({
+    waitingJobs: [
+      createArticleJob('article-stale-limit', 1, 100, 1)
+    ],
+    activeJobs: [],
+    maxConcurrent: 4,
+    lastSequence: 1
+  });
+  assert.strictEqual(staleLimitState.maxConcurrent, 1);
 }
 
 async function testReconcileStartsResumesBeforeArticles() {
@@ -426,7 +451,7 @@ async function testReconcileStartsResumesBeforeArticles() {
       createResumeJob('resume-3', 5, now - 1000, 103, 6)
     ],
     activeJobs: [],
-    maxConcurrent: 4,
+    maxConcurrent: 1,
     lastSequence: 5
   };
 
@@ -434,16 +459,16 @@ async function testReconcileStartsResumesBeforeArticles() {
 
   assert.deepStrictEqual(
     clone(context.startedJobs.map((job) => job.runId)),
-    ['resume-1', 'resume-2', 'resume-3', 'article-1'],
-    'Reconcile should dispatch queued resumes before older article jobs.'
+    ['resume-1'],
+    'Reconcile should dispatch queued resumes before older article jobs while keeping the sequential slot limit.'
   );
   assert.deepStrictEqual(
     clone(context.analysisQueueState.activeJobs.map((job) => job.runId)),
-    ['resume-1', 'resume-2', 'resume-3', 'article-1']
+    ['resume-1']
   );
   assert.deepStrictEqual(
     clone(context.analysisQueueState.waitingJobs.map((job) => job.runId)),
-    ['article-2']
+    ['resume-2', 'resume-3', 'article-1', 'article-2']
   );
 }
 
@@ -457,7 +482,7 @@ async function testReconcileKeepsArticleFifoWithoutResumes() {
       createArticleJob('article-3', 3, now - 1000, 3)
     ],
     activeJobs: [],
-    maxConcurrent: 2,
+    maxConcurrent: 1,
     lastSequence: 3
   };
 
@@ -465,12 +490,48 @@ async function testReconcileKeepsArticleFifoWithoutResumes() {
 
   assert.deepStrictEqual(
     clone(context.startedJobs.map((job) => job.runId)),
-    ['article-1', 'article-2'],
-    'Without queued resumes, article jobs should keep FIFO ordering.'
+    ['article-1'],
+    'Without queued resumes, article jobs should keep FIFO ordering while respecting the sequential slot limit.'
   );
   assert.deepStrictEqual(
     clone(context.analysisQueueState.waitingJobs.map((job) => job.runId)),
-    ['article-3']
+    ['article-2', 'article-3']
+  );
+}
+
+async function testReconcileMigratesStaleConcurrentLimit() {
+  const context = buildPriorityContext();
+  const now = Date.now();
+  context.analysisQueueState = {
+    waitingJobs: [
+      createArticleJob('article-1', 1, now - 3000, 1),
+      createArticleJob('article-2', 2, now - 2000, 2),
+      createArticleJob('article-3', 3, now - 1000, 3)
+    ],
+    activeJobs: [],
+    maxConcurrent: 4,
+    lastSequence: 3
+  };
+
+  await context.reconcileAnalysisQueueState('stale_concurrent_limit');
+
+  assert.strictEqual(
+    context.analysisQueueState.maxConcurrent,
+    1,
+    'Reconcile should persist the sanitized sequential maxConcurrent value even when storage had 4.'
+  );
+  assert.deepStrictEqual(
+    clone(context.startedJobs.map((job) => job.runId)),
+    ['article-1'],
+    'Stale maxConcurrent=4 must not allow multiple jobs to start in one reconcile.'
+  );
+  assert.deepStrictEqual(
+    clone(context.analysisQueueState.activeJobs.map((job) => job.runId)),
+    ['article-1']
+  );
+  assert.deepStrictEqual(
+    clone(context.analysisQueueState.waitingJobs.map((job) => job.runId)),
+    ['article-2', 'article-3']
   );
 }
 
@@ -478,6 +539,7 @@ async function main() {
   testSanitizeRestoresPriorityOrderAndLastSequence();
   await testReconcileStartsResumesBeforeArticles();
   await testReconcileKeepsArticleFifoWithoutResumes();
+  await testReconcileMigratesStaleConcurrentLimit();
   console.log('analysis queue priority test: ok');
 }
 

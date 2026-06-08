@@ -228,13 +228,12 @@ function buildContext() {
     ],
     processArticles: async (tabs, promptChain, chatUrl, analysisType, options) => {
       context.processArticleCalls.push({ tabs, promptChain, chatUrl, analysisType, options });
-      const isPortfolio = analysisType === 'portfolio';
       return {
         success: true,
-        queuedCount: isPortfolio ? 0 : tabs.length,
-        launchedCount: isPortfolio ? tabs.length : 0,
-        queueBypassCount: isPortfolio ? tabs.length : 0,
-        queueBypass: isPortfolio,
+        queuedCount: tabs.length,
+        launchedCount: 0,
+        queueBypassCount: 0,
+        queueBypass: false,
         queueSize: context.processArticleCalls.length,
         activeSlots: 1,
         reservedSlots: 1,
@@ -308,17 +307,36 @@ async function testPopupRunQueuesCompanyOnlyByDefault() {
   assert.strictEqual(context.processArticleCalls[0].options.composerThinkingEffort, 'heavy');
 }
 
+async function testPopupRunIgnoresRemoteRequestAndQueuesLocally() {
+  const context = buildContext();
+  const result = await context.runAnalysis({
+    remote: true,
+    executionMode: 'remote',
+    runnerId: 'runner-should-not-be-used'
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.remote, undefined);
+  assert.strictEqual(result.queuedCount, 2);
+  assert.strictEqual(result.companyQueuedCount, 2);
+  assert.strictEqual(result.portfolioQueuedCount, 0);
+  assert.strictEqual(result.queueBypass, false);
+  assert.strictEqual(context.processArticleCalls.length, 1);
+  assert.strictEqual(context.processArticleCalls[0].analysisType, 'company');
+  assert.strictEqual(context.processArticleCalls[0].options.reason, 'run_analysis_enqueue');
+}
+
 async function testRunAnalysisCanExplicitlyIncludePortfolio() {
   const context = buildContext();
   const result = await context.runAnalysis({ remote: false, includePortfolio: true });
 
   assert.strictEqual(result.success, true);
-  assert.strictEqual(result.queuedCount, 2);
+  assert.strictEqual(result.queuedCount, 4);
   assert.strictEqual(result.companyQueuedCount, 2);
-  assert.strictEqual(result.portfolioQueuedCount, 0);
-  assert.strictEqual(result.portfolioLaunchedCount, 2);
-  assert.strictEqual(result.extraPortfolioQueued, false);
-  assert.strictEqual(result.extraPortfolioLaunched, true);
+  assert.strictEqual(result.portfolioQueuedCount, 2);
+  assert.strictEqual(result.portfolioLaunchedCount, 0);
+  assert.strictEqual(result.extraPortfolioQueued, true);
+  assert.strictEqual(result.extraPortfolioLaunched, false);
   assert.strictEqual(result.extraPortfolioStarted, true);
   assert.strictEqual(context.processArticleCalls.length, 2);
   assert.strictEqual(context.processArticleCalls[0].analysisType, 'company');
@@ -339,12 +357,12 @@ async function testManualTextSharesOneSourceAcrossCompanyAndPortfolio() {
   const result = await context.runManualSourceAnalysisWithPortfolio(sourceText, 'Manual source', 5, 'company');
 
   assert.strictEqual(result.success, true);
-  assert.strictEqual(result.queuedCount, 5);
+  assert.strictEqual(result.queuedCount, 6);
   assert.strictEqual(result.companyQueuedCount, 5);
-  assert.strictEqual(result.portfolioQueuedCount, 0);
-  assert.strictEqual(result.portfolioLaunchedCount, 1);
-  assert.strictEqual(result.extraPortfolioQueued, false);
-  assert.strictEqual(result.extraPortfolioLaunched, true);
+  assert.strictEqual(result.portfolioQueuedCount, 1);
+  assert.strictEqual(result.portfolioLaunchedCount, 0);
+  assert.strictEqual(result.extraPortfolioQueued, true);
+  assert.strictEqual(result.extraPortfolioLaunched, false);
   assert.strictEqual(context.sourceMaterialSubmissions.length, 1);
   assert.strictEqual(context.sourceMaterialSubmissions[0].source.text, sourceText);
   assert.strictEqual(context.sourceMaterialSubmissions[0].source.processKind, 'manual_source_enqueue');
@@ -386,10 +404,10 @@ async function testManualPortfolioOnlyQueuesOnePortfolioProcess() {
   const result = await context.runManualSourceAnalysis(sourceText, 'Manual portfolio', 5, 'portfolio');
 
   assert.strictEqual(result.success, true);
-  assert.strictEqual(result.queuedCount, 0);
-  assert.strictEqual(result.launchedCount, 1);
-  assert.strictEqual(result.queueBypassCount, 1);
-  assert.strictEqual(result.queueBypass, true);
+  assert.strictEqual(result.queuedCount, 1);
+  assert.strictEqual(result.launchedCount, 0);
+  assert.strictEqual(result.queueBypassCount, 0);
+  assert.strictEqual(result.queueBypass, false);
   assert.strictEqual(context.sourceMaterialSubmissions.length, 1);
   assert.strictEqual(context.sourceMaterialSubmissions[0].source.metadata.analysis_type, 'portfolio');
   assert.strictEqual(context.sourceMaterialSubmissions[0].source.metadata.requested_instances, 1);
@@ -402,6 +420,30 @@ async function testManualPortfolioOnlyQueuesOnePortfolioProcess() {
   );
   assert.deepStrictEqual(context.processArticleCalls[0].promptChain, ['portfolio prompt']);
   assert.strictEqual(context.processArticleCalls[0].tabs.length, 1);
+}
+
+async function testManualSourceStartsLocallyWhenSourceMaterialServerFails() {
+  const context = buildContext();
+  context.submitSourceMaterialForProcess = async (source, options) => {
+    context.sourceMaterialSubmissions.push({ source, options });
+    return {
+      success: false,
+      status: 502,
+      error: 'http_502'
+    };
+  };
+
+  const sourceText = 'L'.repeat(10000);
+  const result = await context.runManualSourceAnalysis(sourceText, 'Local despite source material 502', 5, 'portfolio');
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(context.sourceMaterialSubmissions.length, 1);
+  assert.strictEqual(context.processArticleCalls.length, 1);
+  assert.strictEqual(context.processArticleCalls[0].analysisType, 'portfolio');
+  assert.strictEqual(context.processArticleCalls[0].tabs[0].sourceMaterialStored, false);
+  assert.strictEqual(context.processArticleCalls[0].tabs[0].sourceMaterialSubmitFailed, true);
+  assert.strictEqual(context.processArticleCalls[0].tabs[0].sourceMaterialSubmitFailureReason, 'http_502');
+  assert.strictEqual(context.processArticleCalls[0].tabs[0].sourceMaterialText, sourceText);
 }
 
 function testSourceTextPlaceholderInjectionSupportsPortfolioArticleAlias() {
@@ -440,8 +482,57 @@ function testManualSourceShowsSinglePortfolioActionWithoutModeToggle() {
   assert.strictEqual(popupJs.includes('options.analysisType'), false);
   assert.strictEqual(popupJs.includes('includePortfolio: false'), true);
   assert.strictEqual(manualSourceHtml.includes('Uruchom zestaw promptow'), true);
+  assert.strictEqual(manualSourceHtml.includes('remoteModeInput'), false);
+  assert.strictEqual(manualSourceHtml.includes('remoteRunnerSelect'), false);
+  assert.strictEqual(manualSourceHtml.includes('remoteRefreshBtn'), false);
+  assert.strictEqual(manualSourceHtml.includes('Wyslij na zdalnego runnera'), false);
+  assert.strictEqual(manualSourceHtml.includes('Proces uruchamia sie lokalnie; po zakonczeniu wtyczka wysyla wynik na serwer.'), true);
   assert.strictEqual(manualSourceJs.includes('analysisType: normalizedLaunchType'), true);
   assert.strictEqual(manualSourceJs.includes('PORTFOLIO_ONLY_LOCAL_LABEL'), true);
+  assert.strictEqual(manualSourceJs.includes('portfolioOnlyBtn.textContent = PORTFOLIO_ONLY_LOCAL_LABEL'), true);
+  assert.strictEqual(manualSourceJs.includes('remoteModeInput.checked = false'), true);
+  assert.strictEqual(manualSourceJs.includes('remoteModeInput.disabled = true'), true);
+  assert.strictEqual(manualSourceJs.includes('wylacz remote'), false);
+  assert.strictEqual(manualSourceJs.includes('Remote niedostepny'), false);
+  assert.strictEqual(manualSourceJs.includes('Wyslij remote'), false);
+  assert.strictEqual(manualSourceJs.includes('REMOTE_SUBMIT_LABEL'), false);
+  assert.strictEqual(manualSourceJs.includes('PORTFOLIO_ONLY_REMOTE_LABEL'), false);
+  assert.strictEqual(manualSourceJs.includes("executionMode: 'remote'"), false);
+  assert.strictEqual(manualSourceJs.includes('function getRemoteModeEnabled()'), true);
+  assert.strictEqual(manualSourceJs.includes('return false;'), true);
+  assert.strictEqual(manualSourceJs.includes('const remoteEnabled = manualSourcePortfolioOnly ? false : getRemoteModeEnabled();'), true);
+  assert.strictEqual(manualSourceJs.includes('const forceLocal = options?.forceLocal === true || launchPortfolioOnly || manualSourcePortfolioOnly;'), true);
+  assert.strictEqual(manualSourceJs.includes('const remoteEnabled = forceLocal ? false : getRemoteModeEnabled();'), true);
+  assert.strictEqual(manualSourceJs.includes('void loadRemoteRunnerOptions({ silent: true });'), false);
+  assert.strictEqual(
+    backgroundSource.includes('remote: false,'),
+    true
+  );
+  assert.strictEqual(
+    backgroundSource.includes('const requestedRemote ='),
+    false
+  );
+  assert.strictEqual(backgroundSource.includes('scheduleCompletedProcessWindowCloseAfterSave'), true);
+  assert.strictEqual(backgroundSource.includes('save_response_completed'), true);
+  assert.strictEqual(
+    manualSourceJs.includes('submitManualSourceFromButton(portfolioOnlyBtn, MANUAL_ANALYSIS_TYPE_PORTFOLIO, { forceLocal: true })'),
+    true
+  );
+}
+
+function testManualSourceFormatsWatchlistHttpErrorsWithoutRemotePrompt() {
+  const manualSourceJs = fs.readFileSync(path.join(__dirname, 'manual-source.js'), 'utf8');
+  const context = {};
+  vm.runInNewContext(extractFunctionSource(manualSourceJs, 'formatManualSourceLaunchError'), context);
+
+  const http502 = context.formatManualSourceLaunchError('http_502', true);
+  const http503 = context.formatManualSourceLaunchError('http_503', true);
+  assert.ok(http502.includes('HTTP 502'));
+  assert.ok(http502.includes('Proces uruchamiamy lokalnie'));
+  assert.strictEqual(http502.includes('wylacz remote'), false);
+  assert.ok(http503.includes('HTTP 503'));
+  assert.strictEqual(http503.includes('wylacz remote'), false);
+  assert.strictEqual(context.formatManualSourceLaunchError('http_413', true).includes('za duzy'), true);
 }
 
 function testPortfolioPromptChainHasThreePrompts() {
@@ -610,11 +701,14 @@ function testPortfolioPromptOneResponseIsCopiedToDatabase() {
 
 async function main() {
   await testPopupRunQueuesCompanyOnlyByDefault();
+  await testPopupRunIgnoresRemoteRequestAndQueuesLocally();
   await testRunAnalysisCanExplicitlyIncludePortfolio();
   await testManualTextSharesOneSourceAcrossCompanyAndPortfolio();
   await testManualPortfolioOnlyQueuesOnePortfolioProcess();
+  await testManualSourceStartsLocallyWhenSourceMaterialServerFails();
   testSourceTextPlaceholderInjectionSupportsPortfolioArticleAlias();
   testManualSourceShowsSinglePortfolioActionWithoutModeToggle();
+  testManualSourceFormatsWatchlistHttpErrorsWithoutRemotePrompt();
   testPortfolioPromptChainHasThreePrompts();
   testPortfolioPromptSnapshotStatusUsesLineMarkers();
   testPortfolioPromptOneResponseIsCopiedToDatabase();

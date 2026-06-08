@@ -89,10 +89,20 @@ const context = vm.createContext({
     if (!value) return '';
     if (value.length <= maxLength) return value;
     return `${value.slice(0, Math.max(0, maxLength - 3))}...`;
-  }
+  },
+  reasonLabels: {
+    window_close_pending: 'Czeka na zamkniecie karty procesu'
+  },
+  persistenceErrorLabels: {}
 });
 
 [
+  'normalizeCodeToken',
+  'humanizeToken',
+  'getReasonLabel',
+  'getPersistenceErrorLabel',
+  'getProcessEmergencyPersistence',
+  'buildProcessReasonLine',
   'getProcessCompletionAuditStateLabel',
   'getProcessCompletionAuditLevel',
   'formatProcessCompletionAuditText'
@@ -137,6 +147,20 @@ function main() {
   assert(text.includes('window_contains_other_tabs'));
   assert.strictEqual(context.getProcessCompletionAuditLevel({ overallState: 'dispatch_confirmed_window_closed' }), 'ok');
   assert.strictEqual(context.getProcessCompletionAuditLevel({ overallState: 'dispatch_failed' }), 'err');
+
+  const reasonLine = context.buildProcessReasonLine({
+    reason: 'window_close_pending',
+    queueState: 'awaiting_window_close',
+    windowClose: {
+      state: 'retrying',
+      attemptCount: 7
+    }
+  });
+  assert(reasonLine.includes('Czeka na zamkniecie karty procesu'));
+  assert(reasonLine.includes('kolejka czeka na zamkniecie karty'));
+  assert(reasonLine.includes('state=retrying'));
+  assert(reasonLine.includes('attempt=7'));
+
   console.log('test-process-monitor-completion-audit.js: ok');
 }
 

@@ -32,16 +32,11 @@ function normalizeManualSourceAnalysisType(value) {
 const manualSourceAnalysisType = normalizeManualSourceAnalysisType(urlParams.get('analysisType'));
 const manualSourcePortfolioOnly = manualSourceAnalysisType === MANUAL_ANALYSIS_TYPE_PORTFOLIO;
 const LOCAL_SUBMIT_LABEL = manualSourcePortfolioOnly ? 'Uruchom portfolio' : 'Uruchom zestaw promptow';
-const REMOTE_SUBMIT_LABEL = manualSourcePortfolioOnly ? 'Wyslij portfolio' : 'Wyslij zestaw';
 const PORTFOLIO_ONLY_LOCAL_LABEL = 'Uruchom tylko portfolio';
-const PORTFOLIO_ONLY_REMOTE_LABEL = 'Wyslij tylko portfolio';
 const IDLE_SUBMIT_LABELS = new Set([
   'Uruchom',
-  'Wyslij remote',
   LOCAL_SUBMIT_LABEL,
-  REMOTE_SUBMIT_LABEL,
-  PORTFOLIO_ONLY_LOCAL_LABEL,
-  PORTFOLIO_ONLY_REMOTE_LABEL
+  PORTFOLIO_ONLY_LOCAL_LABEL
 ]);
 const DEFAULT_INSTANCES = manualSourcePortfolioOnly ? 1 : 5;
 const ALLOWED_INSTANCE_COUNTS = new Set([1, 5, 10, 20]);
@@ -71,6 +66,13 @@ if (presetTitle && !titleInput.value) {
 
 function applyManualSourceAnalysisModeUi() {
   if (!manualSourcePortfolioOnly) return;
+  if (remoteModeInput) {
+    remoteModeInput.checked = false;
+    remoteModeInput.disabled = true;
+  }
+  if (remoteControls) {
+    remoteControls.hidden = true;
+  }
   document.title = 'Wklej zrodlo do portfolio';
   const heading = document.querySelector('h1');
   const description = document.querySelector('.description');
@@ -100,7 +102,7 @@ function setProviderStatus(text, tone = 'info') {
 }
 
 function getRemoteModeEnabled() {
-  return remoteModeInput?.checked === true;
+  return false;
 }
 
 function getSelectedRemoteRunnerId() {
@@ -166,27 +168,33 @@ function renderRemoteRunnerOptions(preferredRunnerId = '') {
 }
 
 function syncRemoteControls() {
-  const remoteEnabled = getRemoteModeEnabled();
+  const manualLocalOnly = true;
+  if (remoteModeInput) {
+    remoteModeInput.checked = false;
+  }
+  const remoteEnabled = false;
   const hasPdf = selectedPdfFiles.length > 0;
   const hasRunner = !!getSelectedRemoteRunnerId();
 
   if (remoteControls) {
-    remoteControls.hidden = !remoteEnabled;
+    remoteControls.hidden = manualLocalOnly || !remoteEnabled;
   }
   if (remoteRunnerSelect) {
-    remoteRunnerSelect.disabled = queueActive || !remoteEnabled || remoteRunnerLoading || (!hasRunner && remoteRunners.length === 0);
+    remoteRunnerSelect.disabled = manualLocalOnly || queueActive || !remoteEnabled || remoteRunnerLoading || (!hasRunner && remoteRunners.length === 0);
   }
   if (remoteRefreshBtn) {
-    remoteRefreshBtn.disabled = queueActive || remoteRunnerLoading;
+    remoteRefreshBtn.disabled = manualLocalOnly || queueActive || remoteRunnerLoading;
   }
   if (remoteModeInput) {
-    remoteModeInput.disabled = queueActive;
+    remoteModeInput.disabled = true;
   }
   if (remoteInfo) {
-    if (!remoteEnabled) {
-      remoteInfo.textContent = 'Remote dziala dla tekstu wklejonego w to okno. PDF-y zostaja lokalnie na tym komputerze.';
+    if (manualLocalOnly) {
+      remoteInfo.textContent = 'Proces uruchamia sie lokalnie; po zakonczeniu wtyczka wysyla wynik na serwer.';
+    } else if (!remoteEnabled) {
+      remoteInfo.textContent = 'Proces uruchamia sie lokalnie; po zakonczeniu wtyczka wysyla wynik na serwer.';
     } else if (hasPdf) {
-      remoteInfo.textContent = 'Remote nie obsluguje PDF z tego okna. Usun PDF-y albo wylacz remote.';
+      remoteInfo.textContent = 'PDF-y uruchamiaja sie lokalnie przez kolejke na tym komputerze.';
     } else if (remoteRunnerLoadError) {
       remoteInfo.textContent = remoteRunnerLoadError;
     } else if (!hasRunner) {
@@ -215,7 +223,7 @@ async function loadRemoteRunnerOptions(options = {}) {
       ? configResponse.selectedRunnerId.trim()
       : '';
     if (!remoteConfigHydrated && remoteModeInput) {
-      remoteModeInput.checked = configResponse?.executionMode === 'remote';
+      remoteModeInput.checked = false;
       remoteConfigHydrated = true;
     }
     remoteRunners = Array.isArray(runnersResponse?.items)
@@ -262,18 +270,18 @@ function buildPdfToken(index, file) {
 function updateSubmitButton() {
   const hasText = sourceInput.value.trim().length > 0;
   const hasPdf = selectedPdfFiles.length > 0;
-  const remoteEnabled = getRemoteModeEnabled();
+  const remoteEnabled = manualSourcePortfolioOnly ? false : getRemoteModeEnabled();
   const remoteBlocked = remoteEnabled && (hasPdf || !hasText || !getSelectedRemoteRunnerId() || remoteRunnerLoading || !!remoteRunnerLoadError);
   const disabled = queueActive || submitRequestActive || (!hasText && !hasPdf) || remoteBlocked;
   submitBtn.disabled = disabled;
   if (!queueActive && !submitRequestActive && IDLE_SUBMIT_LABELS.has(submitBtn.textContent)) {
-    submitBtn.textContent = remoteEnabled ? REMOTE_SUBMIT_LABEL : LOCAL_SUBMIT_LABEL;
+    submitBtn.textContent = LOCAL_SUBMIT_LABEL;
   }
   if (portfolioOnlyBtn) {
     portfolioOnlyBtn.hidden = manualSourcePortfolioOnly;
-    portfolioOnlyBtn.disabled = disabled;
+    portfolioOnlyBtn.disabled = queueActive || submitRequestActive || (!hasText && !hasPdf);
     if (!queueActive && !submitRequestActive && IDLE_SUBMIT_LABELS.has(portfolioOnlyBtn.textContent)) {
-      portfolioOnlyBtn.textContent = remoteEnabled ? PORTFOLIO_ONLY_REMOTE_LABEL : PORTFOLIO_ONLY_LOCAL_LABEL;
+      portfolioOnlyBtn.textContent = PORTFOLIO_ONLY_LOCAL_LABEL;
     }
   }
 }
@@ -306,6 +314,13 @@ function formatManualSourceLaunchError(errorCode, launchPortfolioOnly) {
   }
   if (code === 'request_entity_too_large' || code === 'http_413') {
     return 'Material jest za duzy dla aktualnego limitu serwera. Po deployu poprawionej konfiguracji Nginx limit bedzie wyzszy.';
+  }
+  if (code === 'http_502') {
+    return 'Watchlist zwrocil HTTP 502 (Bad Gateway). Proces uruchamiamy lokalnie; sprobuj ponownie za chwile albo sprawdz problem-log.';
+  }
+  if (/^http_\d{3}$/.test(code)) {
+    const httpStatus = code.slice('http_'.length);
+    return `Watchlist zwrocil HTTP ${httpStatus}. Proces uruchamiamy lokalnie; sprobuj ponownie albo sprawdz problem-log.`;
   }
   if (code === 'remote_runner_not_selected') {
     return 'Nie wybrano runnera remote.';
@@ -632,9 +647,9 @@ function releasePdfProviderState(releaseMessage = '') {
   pdfInput.value = '';
   setQueueUiLocked(false);
   renderPdfList();
-  submitBtn.textContent = getRemoteModeEnabled() ? REMOTE_SUBMIT_LABEL : LOCAL_SUBMIT_LABEL;
+  submitBtn.textContent = LOCAL_SUBMIT_LABEL;
   if (portfolioOnlyBtn) {
-    portfolioOnlyBtn.textContent = getRemoteModeEnabled() ? PORTFOLIO_ONLY_REMOTE_LABEL : PORTFOLIO_ONLY_LOCAL_LABEL;
+    portfolioOnlyBtn.textContent = PORTFOLIO_ONLY_LOCAL_LABEL;
   }
   updateSubmitButton();
 
@@ -673,7 +688,7 @@ instancePresetButtons.forEach((button) => {
   });
 });
 
-async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
+async function submitManualSourceFromButton(triggerButton, launchAnalysisType, options = {}) {
   if (queueActive || submitRequestActive) return;
 
   const normalizedLaunchType = normalizeManualSourceAnalysisType(launchAnalysisType);
@@ -681,7 +696,8 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
   const hasPdf = selectedPdfFiles.length > 0;
   const text = sourceInput.value.trim();
   const title = titleInput.value.trim() || 'Recznie wklejony artykul';
-  const remoteEnabled = getRemoteModeEnabled();
+  const forceLocal = options?.forceLocal === true || launchPortfolioOnly || manualSourcePortfolioOnly;
+  const remoteEnabled = forceLocal ? false : getRemoteModeEnabled();
   const remoteRunnerId = getSelectedRemoteRunnerId();
   const effectiveInstances = launchPortfolioOnly ? 1 : instances;
 
@@ -700,7 +716,7 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
   submitRequestActive = true;
   updateSubmitButton();
   triggerButton.disabled = true;
-  triggerButton.textContent = remoteEnabled ? 'Wysylam...' : 'Uruchamiam...';
+  triggerButton.textContent = 'Uruchamiam...';
 
   const payload = hasPdf
     ? {
@@ -719,9 +735,9 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
       title,
       analysisType: normalizedLaunchType,
       instances: effectiveInstances,
-      remote: remoteEnabled,
-      runnerId: remoteEnabled ? remoteRunnerId : '',
-      executionMode: remoteEnabled ? 'remote' : 'local',
+      remote: false,
+      runnerId: '',
+      executionMode: 'local',
     };
 
   if (hasPdf) {
@@ -753,7 +769,7 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
     return;
   }
 
-  const maxConcurrent = Number.isInteger(response?.maxConcurrent) ? response.maxConcurrent : 4;
+  const maxConcurrent = Number.isInteger(response?.maxConcurrent) ? response.maxConcurrent : 1;
   const usedSlots = Number.isInteger(response?.reservedSlots)
     ? response.reservedSlots
     : (Number.isInteger(response?.activeSlots) ? response.activeSlots : 0);
@@ -773,9 +789,9 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
       : (Number.isInteger(response?.queueBypassCount) ? response.queueBypassCount : 0);
     const pdfLaunchLead = queuedCount > 0
       ? `Zakolejkowano ${queuedCount} zadan.`
-      : `Uruchomiono ${portfolioLaunchedCount} zadan poza kolejka.`;
+      : `Uruchomiono ${portfolioLaunchedCount} zadan.`;
     const portfolioPdfSummary = queuedCount > 0 && portfolioLaunchedCount > 0
-      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
+      ? ` Portfolio uruchomione: ${portfolioLaunchedCount}.`
       : '';
     setProviderStatus(
       `Provider aktywny. ${pdfLaunchLead}${portfolioPdfSummary} Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
@@ -786,41 +802,33 @@ async function submitManualSourceFromButton(triggerButton, launchAnalysisType) {
   }
 
   submitRequestActive = false;
-  if (response?.remote === true) {
-    triggerButton.textContent = 'Wyslano';
-    const portfolioSuffix = launchPortfolioOnly
-      ? 'portfolio'
-      : `company${response?.extraPortfolioQueued ? ' + portfolio 1x' : ''}`;
-    setProviderStatus(
-      `Wyslano ${response?.submittedCount || response?.queuedCount || 0} jobow ${portfolioSuffix} do runnera ${response?.runnerId || remoteRunnerId}.`,
-      'success'
-    );
-  } else {
-    triggerButton.textContent = 'Uruchomiono';
-    const queuedCount = Number.isInteger(response?.queuedCount)
-      ? response.queuedCount
-      : (Number.isInteger(response?.queued) ? response.queued : 0);
-    const portfolioLaunchedCount = Number.isInteger(response?.portfolioLaunchedCount)
-      ? response.portfolioLaunchedCount
-      : (Number.isInteger(response?.queueBypassCount) ? response.queueBypassCount : 0);
-    const portfolioSuffix = launchPortfolioOnly
-      ? 'portfolio'
-      : `company${response?.extraPortfolioStarted ? ' + portfolio 1x' : ''}`;
-    const launchLead = queuedCount > 0
-      ? `Zakolejkowano ${queuedCount} analiz ${portfolioSuffix}.`
-      : `Uruchomiono ${portfolioLaunchedCount} analiz ${portfolioSuffix} poza kolejka.`;
-    const portfolioLaunchSummary = queuedCount > 0 && portfolioLaunchedCount > 0
-      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
-      : '';
-    setProviderStatus(
-      `${launchLead}${portfolioLaunchSummary} Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
-      'success'
-    );
-  }
+  triggerButton.textContent = 'Uruchomiono';
+  const queuedCount = Number.isInteger(response?.queuedCount)
+    ? response.queuedCount
+    : (Number.isInteger(response?.queued) ? response.queued : 0);
+  const portfolioLaunchedCount = Number.isInteger(response?.portfolioLaunchedCount)
+    ? response.portfolioLaunchedCount
+    : (Number.isInteger(response?.queueBypassCount) ? response.queueBypassCount : 0);
+  const portfolioSuffix = launchPortfolioOnly
+    ? 'portfolio'
+    : `company${response?.extraPortfolioStarted ? ' + portfolio 1x' : ''}`;
+  const launchLead = queuedCount > 0
+    ? `Zakolejkowano ${queuedCount} analiz ${portfolioSuffix}.`
+    : `Uruchomiono ${portfolioLaunchedCount} analiz ${portfolioSuffix}.`;
+  const portfolioLaunchSummary = queuedCount > 0 && portfolioLaunchedCount > 0
+    ? ` Portfolio uruchomione: ${portfolioLaunchedCount}.`
+    : '';
+  const remoteFallbackSummary = response?.remoteFallback === true
+    ? `Lokalna kolejka przejela start (${formatManualSourceLaunchError(response?.remoteFallbackReason || 'analysis_launch_failed', launchPortfolioOnly)}). `
+    : '';
+  setProviderStatus(
+    `${remoteFallbackSummary}${launchLead}${portfolioLaunchSummary} Sloty ${usedSlots}/${maxConcurrent}, kolejka ${response?.queueSize || 0}.`,
+    'success'
+  );
   setTimeout(() => {
     triggerButton.textContent = launchPortfolioOnly
-      ? (getRemoteModeEnabled() ? PORTFOLIO_ONLY_REMOTE_LABEL : PORTFOLIO_ONLY_LOCAL_LABEL)
-      : (getRemoteModeEnabled() ? REMOTE_SUBMIT_LABEL : LOCAL_SUBMIT_LABEL);
+      ? PORTFOLIO_ONLY_LOCAL_LABEL
+      : LOCAL_SUBMIT_LABEL;
     updateSubmitButton();
   }, 900);
 }
@@ -830,7 +838,7 @@ submitBtn.addEventListener('click', () => {
 });
 
 portfolioOnlyBtn?.addEventListener('click', () => {
-  void submitManualSourceFromButton(portfolioOnlyBtn, MANUAL_ANALYSIS_TYPE_PORTFOLIO);
+  void submitManualSourceFromButton(portfolioOnlyBtn, MANUAL_ANALYSIS_TYPE_PORTFOLIO, { forceLocal: true });
 });
 
 cancelBtn.addEventListener('click', () => {
@@ -915,4 +923,3 @@ syncRemoteControls();
 updateSubmitButton();
 updateInstancesDisplay();
 void hydrateClipboardPrefill();
-void loadRemoteRunnerOptions({ silent: true });

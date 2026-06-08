@@ -210,7 +210,7 @@ function buildContext() {
     getAnalysisQueueStatusSnapshot: async () => ({
       success: true,
       queuedCount: 0,
-      maxConcurrent: 4,
+      maxConcurrent: 1,
       queueSize: 0,
       activeSlots: 0,
       reservedSlots: 0,
@@ -223,7 +223,7 @@ function buildContext() {
         success: true,
         jobs,
         queuedCount: jobs.length,
-        maxConcurrent: 4,
+        maxConcurrent: 1,
         queueSize: jobs.length,
         activeSlots: 1,
         reservedSlots: 2,
@@ -256,9 +256,6 @@ function buildContext() {
     'sanitizeManualTextSourceRecord',
     'sanitizeManualTextSourceRecords',
     'shouldBypassAnalysisQueueForAnalysisType',
-    'findManualTextSourceForQueueBypass',
-    'hydrateManualTextForQueueBypass',
-    'generateAnalysisQueueBypassRunId',
     'launchAnalysisJobsOutsideQueue'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
@@ -281,7 +278,7 @@ function toPlainJson(value) {
 async function testReturnsQueueSnapshotForEmptyInput() {
   const context = buildContext();
   const result = await context.processArticles([], [], '', 'company');
-  assert.strictEqual(result.maxConcurrent, 4);
+  assert.strictEqual(result.maxConcurrent, 1);
   assert.strictEqual(result.queuedCount, 0);
   assert.strictEqual(context.captured, null);
 }
@@ -301,7 +298,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
     manualTextSources: [{ id: 'manual-src-1', text: 'manual source body' }]
   });
 
-  assert.strictEqual(result.maxConcurrent, 4);
+  assert.strictEqual(result.maxConcurrent, 1);
   assert.strictEqual(result.queuedCount, 2);
   assert.ok(context.captured, 'enqueueAnalysisJobs should be called');
   assert.strictEqual(context.captured.options.reason, 'process_articles_enqueue');
@@ -345,7 +342,7 @@ async function testBuildsQueueJobsInsteadOfDirectExecution() {
   });
 }
 
-async function testPortfolioBypassesQueueSlots() {
+async function testPortfolioQueuesSequentially() {
   const context = buildContext();
   const tabs = [
     { id: 'manual-portfolio-1', title: 'Portfolio text', url: 'manual://source', manualTextSourceId: 'manual-src-1' }
@@ -357,25 +354,63 @@ async function testPortfolioBypassesQueueSlots() {
     reason: 'portfolio_direct_test'
   });
 
-  assert.strictEqual(result.queuedCount, 0);
-  assert.strictEqual(result.launchedCount, 1);
-  assert.strictEqual(result.queueBypassCount, 1);
-  assert.strictEqual(result.queueBypass, true);
-  assert.strictEqual(context.captured, null, 'Portfolio process should not be enqueued.');
-  assert.strictEqual(context.launched.length, 1);
-  assert.strictEqual(context.launched[0].analysisType, 'portfolio');
-  assert.strictEqual(context.launched[0].chatUrl, 'https://portfolio.example');
-  assert.deepStrictEqual(context.launched[0].promptChain, ['p1']);
-  assert.strictEqual(context.launched[0].options.queueBypass, true);
-  assert.strictEqual(context.launched[0].options.queueBypassReason, 'portfolio_direct_test');
-  assert.strictEqual(context.launched[0].options.composerThinkingEffort, 'heavy');
-  assert.strictEqual(context.launched[0].tab.manualText, 'portfolio body');
+  assert.strictEqual(result.queuedCount, 1);
+  assert.ok(context.captured, 'Portfolio process should be enqueued sequentially.');
+  assert.strictEqual(context.launched.length, 0);
+  assert.strictEqual(context.captured.jobs.length, 1);
+  assert.strictEqual(context.captured.jobs[0].analysisType, 'portfolio');
+  assert.strictEqual(context.captured.jobs[0].chatUrl, 'https://portfolio.example');
+  assert.deepStrictEqual(context.captured.jobs[0].promptChainSnapshot, ['p1']);
+  assert.strictEqual(context.captured.options.reason, 'portfolio_direct_test');
+}
+
+async function testLegacyBypassLauncherQueuesAsSafetyNet() {
+  const context = buildContext();
+  const tabs = [
+    { id: 'legacy-bypass-1', title: 'Legacy bypass source', url: 'manual://source' }
+  ];
+
+  const result = await context.launchAnalysisJobsOutsideQueue(tabs, ['p1'], 'https://chat.example', 'portfolio', {
+    reason: 'legacy_bypass_direct_call'
+  });
+
+  assert.strictEqual(result.queuedCount, 1);
+  assert.strictEqual(context.launched.length, 0);
+  assert.ok(context.captured, 'Legacy bypass launcher should route jobs back into the sequential queue.');
+  assert.strictEqual(context.captured.options.reason, 'legacy_bypass_direct_call');
+  assert.strictEqual(context.captured.jobs[0].analysisType, 'portfolio');
+  assert.strictEqual(context.captured.jobs[0].title, 'Legacy bypass source');
+}
+
+function testManualPdfQueueCannotBypassSequentialQueue() {
+  const manualPdfSource = extractFunctionSource(backgroundSource, 'runManualPdfAnalysisQueue');
+
+  assert(
+    manualPdfSource.includes('await enqueueAnalysisJobs(queueJobs'),
+    'Manual PDF flow should enqueue the full batch through the local sequential queue.'
+  );
+  assert.strictEqual(
+    manualPdfSource.includes('launchAnalysisJobsOutsideQueue'),
+    false,
+    'Manual PDF flow must not launch jobs outside the queue.'
+  );
+  assert.strictEqual(
+    manualPdfSource.includes('shouldBypassAnalysisQueueForAnalysisType'),
+    false,
+    'Manual PDF flow must not branch on queue bypass rules.'
+  );
+  assert(
+    manualPdfSource.includes('queueBypass: false'),
+    'Manual PDF result should report that no bypass/direct launch happened.'
+  );
 }
 
 async function main() {
   await testReturnsQueueSnapshotForEmptyInput();
   await testBuildsQueueJobsInsteadOfDirectExecution();
-  await testPortfolioBypassesQueueSlots();
+  await testPortfolioQueuesSequentially();
+  await testLegacyBypassLauncherQueuesAsSafetyNet();
+  testManualPdfQueueCannotBypassSequentialQueue();
   console.log('processArticles queue api test: ok');
 }
 

@@ -208,8 +208,10 @@ function createContext({ tabs = [], processes = [] } = {}) {
     CHAT_GPT_HOSTS: new Set(['chatgpt.com', 'chat.openai.com']),
     INVEST_GPT_URL_BASE: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
     INVEST_GPT_PATH_BASE: '/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka',
+    ANALYSIS_QUEUE_KIND_RESUME_STAGE: 'resume_stage',
     PROMPTS_COMPANY: new Array(16).fill('prompt'),
     processRegistry: new Map(),
+    enqueueCalls: [],
     chrome: {
       tabs: {
         async query() {
@@ -219,6 +221,30 @@ function createContext({ tabs = [], processes = [] } = {}) {
     },
     async getProcessSnapshot() {
       return processes;
+    },
+    safeAlert() {},
+    async getTabByIdSafe(tabId) {
+      return tabs.find((tab) => tab?.id === tabId) || null;
+    },
+    async ensureCompanyPromptsReady() {
+      return true;
+    },
+    async enqueueAnalysisJobs(jobs, options = {}) {
+      context.enqueueCalls.push({ jobs, options });
+      return {
+        success: true,
+        jobs: (Array.isArray(jobs) ? jobs : []).map((job, index) => ({
+          ...job,
+          jobId: job?.jobId || `aq-resume-${index + 1}`,
+          runId: job?.runId || `run-resume-${index + 1}`
+        })),
+        queuedCount: Array.isArray(jobs) ? jobs.length : 0,
+        queueSize: Array.isArray(jobs) ? jobs.length : 0,
+        activeSlots: 0,
+        reservedSlots: 0,
+        liveSlots: 0,
+        startingSlots: 0
+      };
     },
     normalizeProcessStatus(status) {
       return String(status || '').trim().toLowerCase() || 'running';
@@ -245,6 +271,8 @@ function createContext({ tabs = [], processes = [] } = {}) {
 
   vm.createContext(context);
   [
+    'normalizeComposerThinkingEffort',
+    'formatResumeProcessTitleWithThinkingEffort',
     'normalizeChatConversationUrl',
     'isChatGptUrl',
     'isInvestGptUrl',
@@ -259,7 +287,8 @@ function createContext({ tabs = [], processes = [] } = {}) {
     'isReloadResumeRowLaunchConfirmed',
     'buildReloadResumeAutoCloseTabLabel',
     'evaluateReloadResumeAutoCloseForTab',
-    'buildReloadResumeMonitorAutoCloseStatus'
+    'buildReloadResumeMonitorAutoCloseStatus',
+    'resumeFromStage'
   ].forEach((functionName) => {
     vm.runInContext(extractFunctionSource(backgroundSource, functionName), context, {
       filename: 'background.js'
@@ -395,11 +424,53 @@ async function testAutoCloseWaitsForRowOnlyStartedProcessConfirmation() {
   assert.strictEqual(status.launchConfirmed, 1);
 }
 
+async function testResumeFromStageQueuesInsteadOfDirectStart() {
+  const context = createContext({
+    tabs: [
+      {
+        id: 77,
+        windowId: 12,
+        index: 0,
+        title: 'Company resume tab',
+        url: 'https://chatgpt.com/g/g-p-69d3b1343e508191a6d2fcd1aa139fb9-iskierka/c/resume-queued'
+      }
+    ],
+    processes: []
+  });
+
+  const result = await context.resumeFromStage(4, {
+    targetTabId: 77,
+    targetWindowId: 12,
+    processTitle: 'Auto Start: Prompt 5',
+    reloadBeforeResume: false,
+    composerThinkingEffort: 'heavy',
+    forceRepeatLastPrompt: true
+  });
+
+  assert.strictEqual(result.success, true);
+  assert.strictEqual(result.mode, 'queued');
+  assert.strictEqual(result.detached, true);
+  assert.strictEqual(result.processId, 'run-resume-1');
+  assert.strictEqual(context.enqueueCalls.length, 1);
+  assert.strictEqual(context.enqueueCalls[0].options.reason, 'resume_from_stage_enqueue');
+  assert.strictEqual(context.enqueueCalls[0].jobs.length, 1);
+  const job = context.enqueueCalls[0].jobs[0];
+  assert.strictEqual(job.kind, 'resume_stage');
+  assert.strictEqual(job.resumeTargetTabId, 77);
+  assert.strictEqual(job.resumeTargetWindowId, 12);
+  assert.strictEqual(job.resumeStartIndex, 4);
+  assert.strictEqual(job.reloadBeforeResume, false);
+  assert.strictEqual(job.forceRepeatLastPrompt, true);
+  assert.strictEqual(job.bypassPause, true);
+  assert.strictEqual(job.title, 'Auto Start [HEAVY]: Prompt 5');
+}
+
 async function main() {
   await testResumeAllFindsProcessWhenTabIsGenericChatGptConversation();
   await testInvestMatcherAcceptsCurrentIskierkaAndLegacyInvestUrls();
   await testResumeAllUsesInvocationWindowFallbackForProcessContext();
   await testAutoCloseWaitsForRowOnlyStartedProcessConfirmation();
+  await testResumeFromStageQueuesInsteadOfDirectStart();
   console.log('test-resume-all-process-fallback.js passed');
 }
 

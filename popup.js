@@ -480,7 +480,7 @@ async function refreshRemoteRunnerStatus() {
 }
 
 function getAnalysisQueueUiMetrics(status) {
-  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 4;
+  const maxConcurrent = Number.isInteger(status?.maxConcurrent) ? status.maxConcurrent : 1;
   const reservedSlots = Number.isInteger(status?.reservedSlots)
     ? Math.max(0, status.reservedSlots)
     : (Number.isInteger(status?.activeSlots) ? Math.max(0, status.activeSlots) : 0);
@@ -490,12 +490,16 @@ function getAnalysisQueueUiMetrics(status) {
   const startingSlots = Number.isInteger(status?.startingSlots)
     ? Math.max(0, status.startingSlots)
     : Math.max(0, reservedSlots - liveSlots);
+  const awaitingWindowCloseSlots = Number.isInteger(status?.awaitingWindowCloseSlots)
+    ? Math.max(0, status.awaitingWindowCloseSlots)
+    : 0;
   const queueSize = Number.isInteger(status?.queueSize) ? Math.max(0, status.queueSize) : 0;
   return {
     maxConcurrent,
     reservedSlots,
     liveSlots,
     startingSlots,
+    awaitingWindowCloseSlots,
     queueSize
   };
 }
@@ -526,6 +530,9 @@ function formatAnalysisQueueSummary(status, options = {}) {
   }
   if (includeQueue) {
     parts.push(`oczekuje ${metrics.queueSize}`);
+  }
+  if (metrics.awaitingWindowCloseSlots > 0) {
+    parts.push(`zamykanie ${metrics.awaitingWindowCloseSlots}`);
   }
   return `${parts.join(', ')}.`;
 }
@@ -1438,7 +1445,7 @@ async function executeRunAnalysisFromPopup(button, options = {}) {
       includeQueue: true
     });
     const portfolioLaunchSummary = portfolioLaunchedCount > 0
-      ? ` Portfolio poza kolejka: ${portfolioLaunchedCount}.`
+      ? ` Portfolio uruchomione: ${portfolioLaunchedCount}.`
       : '';
     setRunStatus(`Zakolejkowano ${queuedCount} analiz.${portfolioLaunchSummary} ${queueSummary}`);
     void refreshAnalysisQueueStatus();

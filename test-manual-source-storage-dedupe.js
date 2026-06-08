@@ -226,14 +226,13 @@ function buildContext() {
     ensurePromptChainReadyForAnalysisType: async () => true,
     processArticles: async (tabs, promptChain, chatUrl, analysisType, options) => {
       context.captured = { tabs, promptChain, chatUrl, analysisType, options };
-      const isPortfolio = analysisType === 'portfolio';
       return {
         success: true,
-        queuedCount: isPortfolio ? 0 : tabs.length,
-        launchedCount: isPortfolio ? tabs.length : 0,
-        queueBypassCount: isPortfolio ? tabs.length : 0,
-        queueBypass: isPortfolio,
-        queueSize: isPortfolio ? 0 : tabs.length
+        queuedCount: tabs.length,
+        launchedCount: 0,
+        queueBypassCount: 0,
+        queueBypass: false,
+        queueSize: tabs.length
       };
     },
     submitSourceMaterialForProcess: async (source, options) => {
@@ -246,7 +245,8 @@ function buildContext() {
           sourceMaterialLength: source?.text?.length || 0
         }
       };
-    }
+    },
+    sanitizeManualPdfAttachmentContext: () => null
   };
 
   vm.createContext(context);
@@ -260,9 +260,12 @@ function buildContext() {
     'pruneManualTextSourcesForJobs',
     'mergeManualTextSourceRecords',
     'compactManualTextSnapshotsForQueueState',
+    'sanitizeAnalysisQueueTabSnapshot',
     'normalizeManualInstances',
     'normalizeSourceMaterialLength',
     'normalizeSourceMaterialSubmitFailure',
+    'getSourceMaterialSubmitFailureReasonFromTab',
+    'hasSourceMaterialSubmitFailureFallback',
     'reportManualSourceMaterialSaveEvent',
     'submitManualSourceMaterialForQueue',
     'runManualSourceAnalysis'
@@ -307,10 +310,10 @@ async function main() {
   );
 
   const portfolioResult = await context.runManualSourceAnalysis(sourceText, 'Manual portfolio source', 20, 'portfolio');
-  assert.strictEqual(portfolioResult.queuedCount, 0);
-  assert.strictEqual(portfolioResult.launchedCount, 1);
-  assert.strictEqual(portfolioResult.queueBypassCount, 1);
-  assert.strictEqual(portfolioResult.queueBypass, true);
+  assert.strictEqual(portfolioResult.queuedCount, 1);
+  assert.strictEqual(portfolioResult.launchedCount, 0);
+  assert.strictEqual(portfolioResult.queueBypassCount, 0);
+  assert.strictEqual(portfolioResult.queueBypass, false);
   assert.strictEqual(context.sourceMaterialSubmissions.length, 2);
   assert.strictEqual(context.captured.tabs.length, 1);
   assert.strictEqual(context.captured.analysisType, 'portfolio');
@@ -354,6 +357,19 @@ async function main() {
     migrated.waitingJobs[0].tabSnapshot.manualTextSourceId,
     migrated.waitingJobs[1].tabSnapshot.manualTextSourceId
   );
+
+  const fallbackSnapshot = context.sanitizeAnalysisQueueTabSnapshot({
+    id: 'manual-fallback-1',
+    title: 'Manual fallback',
+    url: 'manual://source',
+    manualTextSourceId: sourceId,
+    sourceMaterialSubmitFailed: true,
+    sourceMaterialSubmitFailureReason: 'http_502'
+  });
+  assert.strictEqual(fallbackSnapshot.sourceMaterialSubmitFailed, true);
+  assert.strictEqual(fallbackSnapshot.sourceMaterialSubmitFailureReason, 'http_502');
+  assert.strictEqual(context.getSourceMaterialSubmitFailureReasonFromTab(fallbackSnapshot), 'http_502');
+  assert.strictEqual(context.hasSourceMaterialSubmitFailureFallback(fallbackSnapshot), true);
 
   console.log('manual source storage dedupe test: ok');
 }

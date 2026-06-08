@@ -179,7 +179,7 @@
       cursor: not-allowed;
     }
 
-    .remote-section {
+    .local-run-section {
       display: grid;
       gap: 10px;
       margin-bottom: 18px;
@@ -187,50 +187,6 @@
       border: 1px solid #e2e8f0;
       border-radius: 6px;
       background: #f8fafc;
-    }
-
-    .remote-toggle {
-      display: inline-flex;
-      align-items: center;
-      gap: 8px;
-      margin-bottom: 0;
-      cursor: pointer;
-    }
-
-    .remote-toggle input {
-      width: 16px;
-      height: 16px;
-      margin: 0;
-    }
-
-    .remote-controls {
-      display: grid;
-      gap: 8px;
-      grid-template-columns: minmax(0, 1fr) auto;
-      align-items: center;
-    }
-
-    .remote-controls select {
-      width: 100%;
-      min-height: 36px;
-      padding: 8px 10px;
-      border: 1px solid #ddd;
-      border-radius: 4px;
-      background: #fff;
-      font-family: inherit;
-      font-size: 14px;
-    }
-
-    .remote-refresh-btn {
-      min-height: 36px;
-      padding: 8px 12px;
-      border: 1px solid #ddd;
-      background: #fff;
-      color: #334155;
-    }
-
-    .remote-refresh-btn:hover {
-      background: #f1f5f9;
     }
 
     .info {
@@ -343,16 +299,8 @@
       <span class="info" id="instancesInfo">Dla PDF mnozy kazdy plik.</span>
     </div>
 
-    <div class="remote-section">
-      <label class="remote-toggle" for="remoteModeInput">
-        <input type="checkbox" id="remoteModeInput">
-        <span>Wyslij na zdalnego runnera</span>
-      </label>
-      <div class="remote-controls" id="remoteControls" hidden>
-        <select id="remoteRunnerSelect" aria-label="Zdalny runner"></select>
-        <button type="button" class="remote-refresh-btn" id="remoteRefreshBtn">Odswiez</button>
-      </div>
-      <p class="info" id="remoteInfo">Remote dziala dla tekstu wklejonego w to okno. PDF-y zostaja lokalnie na tym komputerze.</p>
+    <div class="local-run-section">
+      <p class="info" id="remoteInfo">Proces uruchamia sie lokalnie; po zakonczeniu wtyczka wysyla wynik na serwer.</p>
     </div>
 
     <div class="buttons">

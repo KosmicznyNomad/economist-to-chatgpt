@@ -295,6 +295,68 @@ async function main() {
   assert.strictEqual(latePauseContext.claimCalls, 0, 'Late pause should stop claim before request is sent.');
   assert.strictEqual(latePauseContext.enqueueCalls, 0, 'Late pause should not enqueue remote work locally.');
 
+  const cycleContext = {
+    console,
+    Promise,
+    Map,
+    remoteRunnerCycleInProgress: false,
+    remoteRunnerCycleRequested: false,
+    syncCalls: 0,
+    heartbeatCalls: 0,
+    recoverCalls: 0,
+    pollCalls: 0,
+    followUps: [],
+    processRegistry: new Map(),
+    getStoredRemoteRunnerEnabled: async () => true,
+    clearRemoteRunnerRescueTimer: () => {},
+    syncRemoteRunnerAlarm: async () => {
+      cycleContext.syncCalls += 1;
+      return { enabled: true };
+    },
+    sendRemoteRunnerHeartbeat: async () => {
+      cycleContext.heartbeatCalls += 1;
+      return { success: true };
+    },
+    getRemoteRunnerLocalState: async () => ({
+      activeRemoteJob: null
+    }),
+    getProcessQueueDeliveryState: () => ({ state: '', confirmed: false }),
+    reportRemoteJobEvent: async () => ({ success: true }),
+    recoverAssignedRemoteJob: async () => {
+      cycleContext.recoverCalls += 1;
+      return { success: true, skipped: true, reason: 'no_assigned_remote_job' };
+    },
+    pollAndClaimRemoteJob: async () => {
+      cycleContext.pollCalls += 1;
+      return { success: true, claimed: false, reason: 'queue_empty' };
+    },
+    requestRemoteRunnerCycle: (reason) => {
+      cycleContext.followUps.push(reason);
+    },
+    scheduleRemoteRunnerRescueCycle: () => {}
+  };
+
+  vm.createContext(cycleContext);
+  ['shouldRemoteRunnerCycleClaimWork', 'runRemoteRunnerCycle'].forEach((functionName) => {
+    vm.runInContext(extractFunctionSource(backgroundSource, functionName), cycleContext, {
+      filename: 'background.js'
+    });
+  });
+
+  const bootCycleResult = await cycleContext.runRemoteRunnerCycle('service_worker_boot');
+  assert.strictEqual(bootCycleResult.success, true);
+  assert.strictEqual(bootCycleResult.skipped, true);
+  assert.strictEqual(bootCycleResult.reason, 'remote_claim_disabled_for_local_mode');
+  assert.strictEqual(cycleContext.heartbeatCalls, 1, 'Automatic cycle should still heartbeat.');
+  assert.strictEqual(cycleContext.recoverCalls, 0, 'Automatic cycle must not recover assigned remote jobs.');
+  assert.strictEqual(cycleContext.pollCalls, 0, 'Automatic cycle must not claim remote jobs.');
+
+  const explicitCycleResult = await cycleContext.runRemoteRunnerCycle('popup-remote-runner-cycle');
+  assert.strictEqual(explicitCycleResult.success, true);
+  assert.strictEqual(cycleContext.heartbeatCalls, 2);
+  assert.strictEqual(cycleContext.recoverCalls, 1, 'Explicit popup cycle may recover assigned remote jobs.');
+  assert.strictEqual(cycleContext.pollCalls, 1, 'Explicit popup cycle may poll and claim remote jobs.');
+
   console.log('remote runner pause test: ok');
 }
 

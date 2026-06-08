@@ -39,7 +39,7 @@ const AUTO_RECOVERY_RELOAD_TIMEOUT_MS = 30000;
 const AUTO_RECOVERY_REASONS = ['send_failed', 'timeout'];
 const MANUAL_PDF_CHUNK_SIZE = 512 * 1024;
 const MANUAL_PDF_PROVIDER_TIMEOUT_MS = 20000;
-const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 3;
+const MANUAL_PDF_QUEUE_MAX_CONCURRENCY = 1;
 const ANALYSIS_QUEUE_STORAGE_KEY = 'analysis_queue_state';
 const ANALYSIS_QUEUE_MAX_CONCURRENT = 4;
 const ANALYSIS_QUEUE_DISPATCH_CONFIRM_TIMEOUT_MS = 5 * 60 * 1000;
@@ -2019,6 +2019,11 @@ function sanitizeAnalysisQueueTabSnapshot(rawTab) {
   if (Number.isInteger(sourceMaterialLength)) snapshot.sourceMaterialLength = sourceMaterialLength;
   if (rawTab.sourceMaterialStored === true) snapshot.sourceMaterialStored = true;
   if (rawTab.sourceMaterialNeedsProcessLink === true) snapshot.sourceMaterialNeedsProcessLink = true;
+  if (rawTab.sourceMaterialSubmitFailed === true) {
+    snapshot.sourceMaterialSubmitFailed = true;
+    const failureReason = getSourceMaterialSubmitFailureReasonFromTab(rawTab);
+    if (failureReason) snapshot.sourceMaterialSubmitFailureReason = failureReason;
+  }
   const manualTextSourceId = sanitizeManualTextSourceId(rawTab.manualTextSourceId);
   if (manualTextSourceId) snapshot.manualTextSourceId = manualTextSourceId;
   if (typeof rawTab.manualText === 'string') snapshot.manualText = rawTab.manualText;
@@ -2734,10 +2739,22 @@ function shouldProcessOccupyAnalysisQueueSlot(process) {
     return false;
   }
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
+  if (
+    process.queueManaged === true
+    && shouldHoldAnalysisQueueSlotForWindowClose(process)
+  ) {
+    return true;
+  }
   if (process.queueManaged === true && process.slotReserved === false && status !== 'queued') {
     return false;
   }
-  if (status === 'finalizing' || status === 'completed') return false;
+  if (status === 'finalizing' || status === 'completed') {
+    if (process.queueManaged === true && process.slotReserved === true) {
+      const delivery = getProcessQueueDeliveryState(process);
+      return delivery.confirmed !== true;
+    }
+    return false;
+  }
   if (isClosedProcessStatus(status)) return false;
   if (status === 'queued') {
     return process.queueManaged === true && process.slotReserved === true;
@@ -2768,14 +2785,20 @@ async function getAnalysisQueueProcessActivityState(process, nowTs = Date.now())
   const status = normalizeProcessStatus(process?.status);
   if (status === 'completed') {
     const runId = typeof process?.id === 'string' ? process.id.trim() : '';
+    const delivery = getProcessQueueDeliveryState(process);
+    const reason = shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs)
+      ? 'awaiting_window_close'
+      : (delivery.confirmed === true
+        ? 'completed_dispatch_confirmed'
+        : (hasProcessReachedFinalStage(process)
+          ? 'completed_dispatch_pending'
+          : 'completed_final_stage_pending'));
     return {
       active: true,
       live: false,
       recent: false,
       contextKey: runId ? `run:${runId}` : contextKey,
-      reason: hasProcessReachedFinalStage(process)
-        ? 'completed_dispatch_pending'
-        : 'completed_final_stage_pending'
+      reason
     };
   }
 
@@ -2925,12 +2948,15 @@ async function getAnalysisQueueStatusSnapshot() {
     ? await countOpenAnalysisChatTabs().catch(() => 0)
     : 0;
   const activeSlots = Math.max(activeProcesses.length, openAnalysisChatTabs);
-  const reservedSlots = Math.max(snapshot.activeJobs.length, openAnalysisChatTabs);
+  const reservedSlots = Math.max(snapshot.activeJobs.length, activeProcesses.length, openAnalysisChatTabs);
   const liveSlots = Math.max(
     activeProcesses.filter((entry) => entry?.activity?.live === true).length,
     openAnalysisChatTabs
   );
   const startingSlots = Math.max(0, reservedSlots - liveSlots);
+  const awaitingWindowCloseSlots = activeProcesses.filter((entry) => {
+    return shouldHoldAnalysisQueueSlotForWindowClose(entry?.process);
+  }).length;
   return {
     success: true,
     paused,
@@ -2940,6 +2966,7 @@ async function getAnalysisQueueStatusSnapshot() {
     reservedSlots,
     liveSlots,
     startingSlots,
+    awaitingWindowCloseSlots,
     openAnalysisChatTabs,
     queueSize: snapshot.waitingJobs.length,
     waitingJobs: snapshot.waitingJobs.length,
@@ -3985,6 +4012,13 @@ async function recoverAssignedRemoteJob(options = {}) {
       reason: localState?.queuedRemoteJob ? 'local_remote_job_present' : 'local_remote_process_present'
     };
   }
+  if (localState?.localBusy === true) {
+    return {
+      success: true,
+      skipped: true,
+      reason: 'local_busy'
+    };
+  }
 
   const statusResult = await getRemoteRunnerStatusViaApi(identity.runnerId, {
     timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
@@ -4249,6 +4283,13 @@ function scheduleRemoteRunnerRescueCycle(reason = 'cycle_failed', delayMs = ISKR
   }, safeDelay);
 }
 
+function shouldRemoteRunnerCycleClaimWork(reason = '') {
+  const normalizedReason = typeof reason === 'string' ? reason.trim() : '';
+  if (!normalizedReason) return false;
+  return normalizedReason === 'popup-remote-runner-cycle'
+    || normalizedReason.includes('popup-remote-runner-cycle');
+}
+
 async function runRemoteRunnerCycle(reason = 'manual') {
   if (remoteRunnerCycleInProgress) {
     remoteRunnerCycleRequested = true;
@@ -4305,6 +4346,14 @@ async function runRemoteRunnerCycle(reason = 'manual') {
           error: error?.message || String(error)
         });
       });
+    }
+
+    if (!shouldRemoteRunnerCycleClaimWork(normalizedReason)) {
+      return {
+        success: true,
+        skipped: true,
+        reason: 'remote_claim_disabled_for_local_mode'
+      };
     }
 
     const recoveryResult = await recoverAssignedRemoteJob({
@@ -9151,15 +9200,13 @@ function resolveSaveResponseDispatchSkipDecision(analysisType = 'company', respo
     || normalizedSourceRecordSuffix === 'portfolio_final_json';
   const allowPortfolioFeedbackDispatch = options.allowPortfolioFeedbackDispatch === true
     || isPortfolioFinalDispatchCandidate;
-  const portfolioLocalOnly = normalizedAnalysisType === ANALYSIS_TYPE_PORTFOLIO
-    && !allowPortfolioFeedbackDispatch;
   const explicitSkip = options.skipWatchlistDispatch === true
     && !allowPortfolioFeedbackDispatch;
-  const skip = explicitSkip || portfolioLocalOnly;
+  const skip = explicitSkip;
   const reason = skip
     ? (
       options.skipWatchlistDispatchReason
-      || (portfolioLocalOnly ? 'portfolio_analysis_saved_locally' : 'dispatch_skipped_by_options')
+      || 'dispatch_skipped_by_options'
     )
     : '';
   return {
@@ -9650,6 +9697,50 @@ function isProcessWindowAutoCloseEnabled() {
   }
 }
 
+function hasProcessWindowCloseContext(process) {
+  if (!process || typeof process !== 'object') return false;
+  return Number.isInteger(process?.tabId)
+    || Number.isInteger(process?.windowId)
+    || collectProcessConversationCloseKeys(process).length > 0;
+}
+
+function isTerminalQueueProcessWindowCloseCandidate(process, lifecycleStatus = '') {
+  if (!process || typeof process !== 'object') return false;
+  if (process.queueManaged !== true) return false;
+  const normalizedStatus = normalizeProcessLifecycleStatus(
+    lifecycleStatus || process.lifecycleStatus || process.status,
+    ''
+  );
+  if (!normalizedStatus || normalizedStatus === 'completed' || normalizedStatus === 'finalizing') {
+    return false;
+  }
+  if (!isClosedProcessStatus(normalizedStatus)) return false;
+  if (isDataGapTerminalProcess(process)) return false;
+  if (hasProcessCloseableSavedResponse(process)) return false;
+  return hasProcessWindowCloseContext(process);
+}
+
+function shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs = Date.now()) {
+  if (!isProcessWindowAutoCloseEnabled()) return false;
+  if (!process || typeof process !== 'object') return false;
+  if (typeof resolveProcessWindowCloseRetryPlan !== 'function') return false;
+  const plan = resolveProcessWindowCloseRetryPlan(process);
+  return plan?.needed === true;
+}
+
+function shouldAttemptAnalysisQueueWindowClose(process, nowTs = Date.now()) {
+  if (!shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs)) return false;
+  const windowClose = typeof normalizeProcessWindowCloseState === 'function'
+    ? normalizeProcessWindowCloseState(process?.windowClose)
+    : null;
+  const state = typeof windowClose?.state === 'string' ? windowClose.state.trim() : '';
+  if (state === 'retrying') {
+    const nextAttemptAt = Number.isInteger(windowClose?.nextAttemptAt) ? windowClose.nextAttemptAt : 0;
+    return nextAttemptAt <= nowTs;
+  }
+  return true;
+}
+
 function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
   if (!job || typeof job !== 'object') {
     return { action: 'release', closeWindow: false, reason: 'invalid_job' };
@@ -9660,9 +9751,17 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
 
   const status = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (isDataGapTerminalProcess(process)) {
+    if (shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs)) {
+      return {
+        action: 'keep',
+        closeWindow: shouldAttemptAnalysisQueueWindowClose(process, nowTs),
+        reason: 'window_close_pending',
+        queueState: 'awaiting_window_close'
+      };
+    }
     return {
       action: 'release',
-      closeWindow: isProcessWindowAutoCloseEnabled(),
+      closeWindow: false,
       reason: 'data_gap_stage',
       slotReleaseReason: 'data_gap_stage'
     };
@@ -9676,39 +9775,69 @@ function resolveAnalysisQueueReleaseDecision(job, process, nowTs = Date.now()) {
     }
     const delivery = getProcessQueueDeliveryState(process);
     if (delivery.confirmed === true) {
+      if (shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs)) {
+        return {
+          action: 'keep',
+          closeWindow: shouldAttemptAnalysisQueueWindowClose(process, nowTs),
+          reason: 'window_close_pending',
+          queueState: 'awaiting_window_close'
+        };
+      }
       return {
         action: 'release',
-        closeWindow: isProcessWindowAutoCloseEnabled(),
+        closeWindow: false,
         reason: 'dispatch_confirmed',
         slotReleaseReason: 'dispatch_confirmed'
       };
     }
     if (delivery.saveOk !== true) {
       return {
-        action: 'release',
+        action: 'keep',
         closeWindow: false,
         reason: 'local_save_failed',
-        slotReleaseReason: 'final_stage_save_failed'
+        queueState: 'awaiting_local_save'
       };
     }
     return {
-      action: 'release',
-      closeWindow: isProcessWindowAutoCloseEnabled(),
+      action: 'keep',
+      closeWindow: false,
       reason: 'dispatch_pending',
-      slotReleaseReason: 'final_stage_local_saved'
+      queueState: 'awaiting_dispatch_confirmation'
     };
   }
 
   if (isClosedProcessStatus(status)) {
     const delivery = getProcessQueueDeliveryState(process);
     if (hasProcessCloseableSavedResponse(process)) {
+      if (delivery.confirmed !== true) {
+        return {
+          action: 'keep',
+          closeWindow: false,
+          reason: 'dispatch_pending',
+          queueState: 'awaiting_dispatch_confirmation'
+        };
+      }
+      if (shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs)) {
+        return {
+          action: 'keep',
+          closeWindow: shouldAttemptAnalysisQueueWindowClose(process, nowTs),
+          reason: 'window_close_pending',
+          queueState: 'awaiting_window_close'
+        };
+      }
       return {
         action: 'release',
-        closeWindow: isProcessWindowAutoCloseEnabled(),
-        reason: delivery.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending',
-        slotReleaseReason: delivery.confirmed === true
-          ? 'dispatch_confirmed_after_local_context_loss'
-          : 'final_stage_local_saved_after_local_context_loss'
+        closeWindow: false,
+        reason: 'dispatch_confirmed',
+        slotReleaseReason: 'dispatch_confirmed_after_local_context_loss'
+      };
+    }
+    if (shouldHoldAnalysisQueueSlotForWindowClose(process, nowTs)) {
+      return {
+        action: 'keep',
+        closeWindow: shouldAttemptAnalysisQueueWindowClose(process, nowTs),
+        reason: 'window_close_pending',
+        queueState: 'awaiting_window_close'
       };
     }
     return { action: 'release', closeWindow: false, reason: status || 'closed' };
@@ -9824,6 +9953,16 @@ async function buildStaleQueueReleasePatch(process, now = Date.now()) {
   };
 }
 
+function isProcessTabCloseTarget(process, tab) {
+  if (!process || typeof process !== 'object' || !tab || typeof tab !== 'object') return false;
+  const tabUrl = getTabEffectiveUrl(tab);
+  if (!isChatGptUrl(tabUrl)) return false;
+  const closeKeys = collectProcessConversationCloseKeys(process);
+  if (closeKeys.length === 0) return true;
+  const tabKey = getChatConversationCloseKey(tabUrl);
+  return !!tabKey && closeKeys.includes(tabKey);
+}
+
 async function inspectProcessWindowContext(process) {
   if (!process || typeof process !== 'object') {
     return {
@@ -9835,16 +9974,20 @@ async function inspectProcessWindowContext(process) {
   }
   const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
+  let processTabContextMismatch = false;
 
   if (processTabId !== null) {
     const tab = await getTabByIdSafe(processTabId);
     if (tab && Number.isInteger(tab.id)) {
-      return {
-        exists: true,
-        missingKnown: false,
-        hasOnlyProcessTab: false,
-        reason: 'tab_present'
-      };
+      if (isProcessTabCloseTarget(process, tab)) {
+        return {
+          exists: true,
+          missingKnown: false,
+          hasOnlyProcessTab: false,
+          reason: 'tab_present'
+        };
+      }
+      processTabContextMismatch = true;
     }
   }
 
@@ -9857,6 +10000,15 @@ async function inspectProcessWindowContext(process) {
       reason: 'tab_present_by_conversation_url',
       tabId: matchedConversationTab.id,
       windowId: Number.isInteger(matchedConversationTab.windowId) ? matchedConversationTab.windowId : null
+    };
+  }
+
+  if (processTabContextMismatch) {
+    return {
+      exists: false,
+      missingKnown: true,
+      hasOnlyProcessTab: false,
+      reason: 'process_tab_context_mismatch'
     };
   }
 
@@ -9969,11 +10121,17 @@ async function attemptProcessWindowClose(process) {
   const processWindowId = Number.isInteger(process.windowId) ? process.windowId : null;
   const processTabId = Number.isInteger(process.tabId) ? process.tabId : null;
   let tabClosed = false;
+  let processTabContextMismatch = false;
 
   if (processTabId !== null) {
-    tabClosed = await removeTabSafe(processTabId);
-    if (tabClosed) {
-      return { closed: true, reason: 'tab_closed', closeMode: 'tab' };
+    const processTab = await getTabByIdSafe(processTabId);
+    if (!processTab || isProcessTabCloseTarget(process, processTab)) {
+      tabClosed = await removeTabSafe(processTabId);
+      if (tabClosed) {
+        return { closed: true, reason: 'tab_closed', closeMode: 'tab' };
+      }
+    } else {
+      processTabContextMismatch = true;
     }
   }
 
@@ -9989,6 +10147,16 @@ async function attemptProcessWindowClose(process) {
         resolvedWindowId: Number.isInteger(matchedConversationTab.windowId) ? matchedConversationTab.windowId : null
       };
     }
+  }
+
+  if (processTabContextMismatch) {
+    return {
+      closed: false,
+      reason: 'process_tab_context_mismatch',
+      closeMode: '',
+      resolvedTabId: processTabId,
+      resolvedWindowId: processWindowId
+    };
   }
 
   if (processWindowId !== null) {
@@ -10008,6 +10176,27 @@ async function attemptProcessWindowClose(process) {
         closed: true,
         reason: 'window_empty',
         closeMode: 'window'
+      };
+    }
+    const knownProcessTab = processTabId !== null
+      ? (validTabs.find((tab) => tab.id === processTabId) || null)
+      : null;
+    if (knownProcessTab) {
+      if (!isProcessTabCloseTarget(process, knownProcessTab)) {
+        return {
+          closed: false,
+          reason: 'process_tab_context_mismatch',
+          closeMode: '',
+          resolvedTabId: processTabId,
+          resolvedWindowId: processWindowId
+        };
+      }
+      return {
+        closed: false,
+        reason: 'process_tab_remove_failed',
+        closeMode: '',
+        resolvedTabId: processTabId,
+        resolvedWindowId: processWindowId
       };
     }
     const chatTabs = validTabs.filter((tab) => isChatGptUrl(getTabEffectiveUrl(tab)));
@@ -10103,16 +10292,29 @@ function resolveProcessWindowCloseRetryPlan(process) {
   const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   const closeableSavedResponse = hasProcessCloseableSavedResponse(process);
   const dataGapTerminal = isDataGapTerminalProcess(process);
-  if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing' && !closeableSavedResponse && !dataGapTerminal) {
+  const terminalQueueProcess = isTerminalQueueProcessWindowCloseCandidate(process, lifecycleStatus);
+  if (lifecycleStatus !== 'completed'
+    && lifecycleStatus !== 'finalizing'
+    && !closeableSavedResponse
+    && !dataGapTerminal
+    && !terminalQueueProcess) {
     return { needed: false, reason: 'status_not_closeable', delivery: getProcessQueueDeliveryState(process) };
   }
-  if (!hasProcessReachedFinalStage(process) && !closeableSavedResponse && !dataGapTerminal) {
+  if (!hasProcessReachedFinalStage(process) && !closeableSavedResponse && !dataGapTerminal && !terminalQueueProcess) {
     return { needed: false, reason: 'not_final_stage', delivery: getProcessQueueDeliveryState(process) };
   }
 
   const delivery = getProcessQueueDeliveryState(process);
-  if (delivery.saveOk !== true && !dataGapTerminal) {
+  if (delivery.saveOk !== true && !dataGapTerminal && !terminalQueueProcess) {
     return { needed: false, reason: 'save_not_confirmed', delivery };
+  }
+  if (!dataGapTerminal && !terminalQueueProcess && delivery.confirmed !== true) {
+    return { needed: false, reason: 'dispatch_not_confirmed', delivery };
+  }
+
+  const hasWindowContext = hasProcessWindowCloseContext(process);
+  if (!hasWindowContext) {
+    return { needed: false, reason: 'missing_window_context', delivery };
   }
 
   const windowClose = normalizeProcessWindowCloseState(process.windowClose);
@@ -10120,21 +10322,19 @@ function resolveProcessWindowCloseRetryPlan(process) {
     return { needed: false, reason: 'already_closed', delivery };
   }
   if (windowClose?.state === 'failed') {
+    if (process?.queueManaged === true && (delivery.confirmed === true || dataGapTerminal || terminalQueueProcess)) {
+      return { needed: true, reason: 'close_retry_exhausted_retrying', delivery };
+    }
     return { needed: false, reason: 'close_retry_exhausted', delivery };
-  }
-
-  const hasWindowContext = Number.isInteger(process?.tabId)
-    || Number.isInteger(process?.windowId)
-    || collectProcessConversationCloseKeys(process).length > 0;
-  if (!hasWindowContext) {
-    return { needed: false, reason: 'missing_window_context', delivery };
   }
 
   return {
     needed: true,
     reason: dataGapTerminal
       ? 'data_gap_stage'
-      : (delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed'),
+      : (terminalQueueProcess
+        ? 'terminal_queue_process'
+        : (delivery.confirmed === true ? 'dispatch_confirmed' : 'local_save_completed')),
     delivery
   };
 }
@@ -10284,6 +10484,10 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
         });
       }
       clearProcessWindowCloseRetry(normalizedRunId);
+      if (typeof requestAnalysisQueueReconcile === 'function'
+        && process?.queueManaged === true) {
+        requestAnalysisQueueReconcile('process_window_close_confirmed');
+      }
       return { success: true, closed: true, reason: inspectResult.reason || 'window_missing' };
     }
 
@@ -10318,14 +10522,26 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
         });
       }
       clearProcessWindowCloseRetry(normalizedRunId);
+      if (typeof requestAnalysisQueueReconcile === 'function'
+        && process?.queueManaged === true) {
+        requestAnalysisQueueReconcile('process_window_close_confirmed');
+      }
       return { success: true, closed: true, reason: closeResult.reason || 'closed' };
     }
 
-    const nextRetryAt = currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+    const keepRetryingQueueClose = process?.queueManaged === true
+      && (
+        plan?.delivery?.confirmed === true
+        || plan?.reason === 'data_gap_stage'
+        || plan?.reason === 'terminal_queue_process'
+      );
+    const retryExhausted = currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+      && keepRetryingQueueClose !== true;
+    const nextRetryAt = retryExhausted
       ? 0
       : (now + getProcessWindowCloseRetryDelayMs(currentAttemptCount));
     const windowCloseState = {
-      state: currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'failed' : 'retrying',
+      state: retryExhausted ? 'failed' : 'retrying',
       requestedAt: Number.isInteger(process?.windowClose?.requestedAt) ? process.windowClose.requestedAt : now,
       lastAttemptAt: now,
       attemptCount: currentAttemptCount,
@@ -10340,13 +10556,16 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
       windowClose: windowCloseState,
       timestamp: now
     });
+    const closePendingMessage = retryExhausted
+      ? 'Completed process window close exhausted retries'
+      : (keepRetryingQueueClose && currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
+        ? 'Completed queue process window close still pending after max attempts; keeping slot reserved'
+        : 'Completed process window close still pending');
     if (typeof emitWatchlistDispatchProcessLog === 'function') {
       emitWatchlistDispatchProcessLog(
         currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts ? 'warn' : 'info',
         'completed_process_window_close_result',
-        currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts
-          ? 'Completed process window close exhausted retries'
-          : 'Completed process window close still pending',
+        closePendingMessage,
         {
           runId: normalizedRunId,
           origin: windowCloseState.lastReason,
@@ -10354,6 +10573,8 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
           reason: closeResult.reason || 'close_failed',
           closeMode: closeResult.closeMode || '',
           attemptCount: currentAttemptCount,
+          maxAttempts: PROCESS_WINDOW_CLOSE_RETRY.maxAttempts,
+          keepRetryingQueueClose,
           tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
           windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
           dispatchState: plan?.delivery?.state || ''
@@ -10361,7 +10582,7 @@ async function runProcessWindowCloseRetry(runId = '', options = {}) {
       );
     }
 
-    if (currentAttemptCount >= PROCESS_WINDOW_CLOSE_RETRY.maxAttempts) {
+    if (retryExhausted) {
       clearProcessWindowCloseRetry(normalizedRunId, { keepAttempts: true });
       return { success: false, closed: false, reason: 'window_close_retry_exhausted' };
     }
@@ -10421,6 +10642,18 @@ async function closeProcessWindowAfterQueueSuccess(process, options = {}) {
   return result?.closed === true;
 }
 
+function scheduleCompletedProcessWindowCloseAfterSave(runId = '', origin = 'save_response_completed') {
+  const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
+  if (!normalizedRunId || !isProcessWindowAutoCloseEnabled()) return false;
+  const process = processRegistry.get(normalizedRunId) || null;
+  if (!process || typeof process !== 'object') return false;
+  return scheduleProcessWindowCloseRetry(process, {
+    origin,
+    force: true,
+    delayMs: PROCESS_WINDOW_CLOSE_RETRY.initialDelayMs
+  });
+}
+
 function clearCompletedProcessPersistenceRetry(runId = '', options = {}) {
   const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
   if (!normalizedRunId) return false;
@@ -10467,6 +10700,9 @@ function resolveCompletedProcessPersistenceRetryPlan(process) {
     const queueSkipReason = typeof dispatch?.queueSkipReason === 'string' ? dispatch.queueSkipReason.trim() : '';
     if (delivery.queueSkipped === true) {
       if (queueSkipReason === 'dispatch_disabled' || queueSkipReason === 'invalid_payload') {
+        if (process?.queueManaged === true && hasResponsePayload) {
+          return { needed: true, mode: 'replay', reason: queueSkipReason || 'queue_skipped', delivery };
+        }
         return { needed: false, mode: '', reason: queueSkipReason || 'queue_skipped_not_retriable', delivery };
       }
       if (!hasResponsePayload) {
@@ -10583,10 +10819,6 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
   const lifecycleStatus = normalizeProcessLifecycleStatus(process.lifecycleStatus || process.status, 'running');
   if (lifecycleStatus !== 'completed' && lifecycleStatus !== 'finalizing') return false;
   if (process.queueManaged !== true) return false;
-  const slotAlreadyReleased = process.slotReserved === false
-    || process.queueState === 'slot_released'
-    || process.queueState === 'dispatch_confirmed';
-  if (!slotAlreadyReleased) return false;
 
   const delivery = getProcessQueueDeliveryState(process);
   if (delivery.confirmed !== true) return false;
@@ -10603,29 +10835,86 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
   }
 
   const trace = buildProcessCopyTrace(process, normalizedRunId);
+  const origin = typeof options?.origin === 'string' && options.origin.trim()
+    ? options.origin.trim()
+    : 'dispatch_confirmed';
+  const closePlan = typeof resolveProcessWindowCloseRetryPlan === 'function'
+    ? resolveProcessWindowCloseRetryPlan(process)
+    : { needed: false, reason: 'close_plan_unavailable' };
+  const closeWindowRequested = closePlan?.needed === true;
+  let closed = false;
+
+  if (closeWindowRequested) {
+    await upsertProcess(normalizedRunId, {
+      queueManaged: true,
+      queueJobId: typeof process.queueJobId === 'string' ? process.queueJobId : '',
+      queueState: 'awaiting_window_close',
+      slotReserved: true,
+      timestamp: Date.now()
+    });
+    process = processRegistry.get(normalizedRunId) || process;
+    closed = await closeProcessWindowAfterQueueSuccess(process, { origin });
+    process = processRegistry.get(normalizedRunId) || process;
+    if (!closed) {
+      emitWatchlistDispatchProcessLog('warn', 'completed_process_window_close', 'Completed queued process confirmed, waiting for process tab/window close', {
+        trace,
+        runId: normalizedRunId,
+        origin,
+        tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
+        windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
+        queueState: typeof process?.queueState === 'string' ? process.queueState : '',
+        closed: false
+      });
+      await reportAnalysisQueueEvent('job_window_close_after_confirm', {
+        process,
+        runId: normalizedRunId,
+        jobId: typeof process?.queueJobId === 'string' ? process.queueJobId : '',
+        status: 'close_pending',
+        reason: origin,
+        queueState: typeof process?.queueState === 'string' ? process.queueState : 'awaiting_window_close',
+        closeWindowRequested: true,
+        closed: false,
+        dispatchState: delivery?.state || 'dispatch_confirmed',
+        dispatchConfirmed: true,
+        title: 'Analysis queue: close after dispatch confirm'
+      }).catch((error) => {
+        console.warn('[analysis-queue] late close log failed:', {
+          runId: normalizedRunId,
+          error: error?.message || String(error)
+        });
+      });
+      return false;
+    }
+  }
+
   const now = Date.now();
-  if (process.queueState !== 'dispatch_confirmed') {
+  const slotAlreadyReleased = process.slotReserved === false
+    && process.queueState === 'dispatch_confirmed';
+  if (!slotAlreadyReleased) {
+    const existingReleaseReason = typeof process.slotReleaseReason === 'string' && process.slotReleaseReason.trim()
+      ? process.slotReleaseReason.trim()
+      : '';
     await upsertProcess(normalizedRunId, {
       queueManaged: true,
       queueJobId: typeof process.queueJobId === 'string' ? process.queueJobId : '',
       queueState: 'dispatch_confirmed',
       slotReserved: false,
       slotReleasedAt: Number.isInteger(process.slotReleasedAt) ? process.slotReleasedAt : now,
-      slotReleaseReason: typeof process.slotReleaseReason === 'string' && process.slotReleaseReason.trim()
-        ? process.slotReleaseReason.trim()
-        : 'dispatch_confirmed_late',
+      slotReleaseReason: existingReleaseReason || 'dispatch_confirmed',
       timestamp: now
     });
     process = processRegistry.get(normalizedRunId) || process;
   }
 
-  const closed = await closeProcessWindowAfterQueueSuccess(process);
-  emitWatchlistDispatchProcessLog(closed ? 'info' : 'warn', 'completed_process_window_close', closed
+  if (!closeWindowRequested) {
+    closed = false;
+  }
+  emitWatchlistDispatchProcessLog((closed || !closeWindowRequested) ? 'info' : 'warn', 'completed_process_window_close', closed
     ? 'Closed queued process window after dispatch confirmation'
-    : 'Completed queued process confirmed, but no process tab/window was closed', {
+    : 'Completed queued process confirmed; no process tab/window close was required', {
     trace,
     runId: normalizedRunId,
-    origin: typeof options?.origin === 'string' ? options.origin : 'dispatch_confirmed',
+    origin,
     tabId: Number.isInteger(process?.tabId) ? process.tabId : null,
     windowId: Number.isInteger(process?.windowId) ? process.windowId : null,
     queueState: typeof process?.queueState === 'string' ? process.queueState : '',
@@ -10636,9 +10925,9 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
     runId: normalizedRunId,
     jobId: typeof process?.queueJobId === 'string' ? process.queueJobId : '',
     status: closed ? 'closed' : 'close_skipped',
-    reason: typeof options?.origin === 'string' ? options.origin : 'dispatch_confirmed',
+    reason: origin,
     queueState: typeof process?.queueState === 'string' ? process.queueState : 'dispatch_confirmed',
-    closeWindowRequested: true,
+    closeWindowRequested,
     closed,
     dispatchState: delivery?.state || 'dispatch_confirmed',
     dispatchConfirmed: true,
@@ -10649,6 +10938,11 @@ async function closeCompletedProcessAfterDispatchConfirmed(runId = '', options =
       error: error?.message || String(error)
     });
   });
+  if (typeof requestAnalysisQueueReconcile === 'function') {
+    requestAnalysisQueueReconcile(closed
+      ? 'dispatch_confirmed_window_closed'
+      : 'dispatch_confirmed_window_close_not_needed');
+  }
   return closed;
 }
 
@@ -10793,7 +11087,10 @@ async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
       };
     }
 
-    if (attemptCount >= COMPLETED_PROCESS_PERSISTENCE_RETRY.maxAttempts) {
+    const keepRetryingQueueDispatch = process?.queueManaged === true;
+    const retryExhausted = attemptCount >= COMPLETED_PROCESS_PERSISTENCE_RETRY.maxAttempts
+      && keepRetryingQueueDispatch !== true;
+    if (retryExhausted) {
       clearCompletedProcessPersistenceRetry(normalizedRunId, { keepAttempts: true });
       emitWatchlistDispatchProcessLog('warn', 'completed_persist_retry_exhausted', 'Completed process persistence retry reached max attempts', {
         trace,
@@ -10811,6 +11108,18 @@ async function runCompletedProcessPersistenceRetry(runId = '', options = {}) {
         attemptCount,
         delivery
       };
+    }
+    if (keepRetryingQueueDispatch && attemptCount >= COMPLETED_PROCESS_PERSISTENCE_RETRY.maxAttempts) {
+      emitWatchlistDispatchProcessLog('warn', 'completed_persist_retry_still_pending_after_max_attempts', 'Completed queue process persistence retry still pending after max attempts; keeping slot reserved', {
+        trace,
+        runId: normalizedRunId,
+        origin,
+        attemptCount,
+        maxAttempts: COMPLETED_PROCESS_PERSISTENCE_RETRY.maxAttempts,
+        mode: plan.mode,
+        reason: plan.reason,
+        deliveryState: delivery?.state || ''
+      });
     }
 
     scheduleCompletedProcessPersistenceRetry(process, {
@@ -11035,33 +11344,7 @@ function buildQueuedProcessPatchForJob(job) {
 }
 
 function shouldBypassAnalysisQueueForAnalysisType(analysisType) {
-  return normalizeAnalysisTypeForPromptChain(analysisType) === ANALYSIS_TYPE_PORTFOLIO;
-}
-
-function findManualTextSourceForQueueBypass(sourceId, manualTextSources = []) {
-  const normalizedSourceId = sanitizeManualTextSourceId(sourceId);
-  if (!normalizedSourceId) return null;
-  return sanitizeManualTextSourceRecords(manualTextSources)
-    .find((source) => source?.id === normalizedSourceId) || null;
-}
-
-function hydrateManualTextForQueueBypass(tab, manualTextSources = []) {
-  if (!tab || typeof tab !== 'object') return tab;
-  if (typeof tab.manualText === 'string' && tab.manualText.trim()) return tab;
-  const manualUrl = typeof tab.url === 'string' ? tab.url : '';
-  if (!manualUrl.startsWith('manual://')) return tab;
-  const source = findManualTextSourceForQueueBypass(tab.manualTextSourceId, manualTextSources);
-  if (!source || typeof source.text !== 'string' || !source.text.trim()) return tab;
-  return {
-    ...tab,
-    manualText: source.text
-  };
-}
-
-function generateAnalysisQueueBypassRunId(analysisType = ANALYSIS_TYPE_COMPANY, index = 0) {
-  const normalizedAnalysisType = normalizeAnalysisTypeForPromptChain(analysisType);
-  const safeIndex = Number.isInteger(index) ? Math.max(0, index) : 0;
-  return `${normalizedAnalysisType}-queue-bypass-${Date.now()}-${safeIndex}-${Math.random().toString(36).slice(2, 8)}`;
+  return false;
 }
 
 async function launchAnalysisJobsOutsideQueue(tabs, promptChain, chatUrl, analysisType, options = {}) {
@@ -11075,108 +11358,75 @@ async function launchAnalysisJobsOutsideQueue(tabs, promptChain, chatUrl, analys
       queuedCount: 0,
       launchedCount: 0,
       queueBypassCount: 0,
-      queueBypass: true
+      queueBypass: false
     };
   }
 
-  const promptChainSnapshot = sanitizePromptChainSnapshot(promptChain);
-  const invocationWindowId = Number.isInteger(options?.invocationWindowId)
-    ? options.invocationWindowId
-    : null;
-  const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort)
-    || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT;
-  const manualTextSources = sanitizeManualTextSourceRecords(options?.manualTextSources);
-  const launchedJobs = sourceTabs.map((tab, index) => {
-    const sourceUrl = typeof tab?.url === 'string' ? tab.url : '';
-    const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
-      ? options.sourceKind.trim()
-      : (sourceUrl === 'manual://pdf'
-        ? 'manual_pdf'
-        : (sourceUrl.startsWith('manual://') ? 'manual_text' : 'article'));
-    const title = typeof tab?.title === 'string' && tab.title.trim() ? tab.title.trim() : 'Bez tytulu';
-    const runId = generateAnalysisQueueBypassRunId(normalizedAnalysisType, index);
-    const launchTab = hydrateManualTextForQueueBypass({
-      ...tab,
-      sourceKind
-    }, manualTextSources);
-
-    void Promise.resolve()
-      .then(async () => {
-        await sleep(index * 500);
-        await executeAnalysisProcessJob(
-          launchTab,
-          promptChainSnapshot,
-          typeof chatUrl === 'string' ? chatUrl : '',
-          normalizedAnalysisType,
-          {
-            invocationWindowId,
-            runId,
-            sourceKind,
-            queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
-            manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
-            manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
-            composerThinkingEffort,
-            queueBypass: true,
-            queueBypassReason: typeof options?.reason === 'string' && options.reason.trim()
-              ? options.reason.trim()
-              : 'analysis_queue_bypass'
-          }
-        );
-      })
-      .catch(async (error) => {
-        console.warn('[analysis-queue] bypass launch failed:', {
-          runId,
-          analysisType: normalizedAnalysisType,
-          title,
-          error: error?.message || String(error)
-        });
-        if (typeof upsertProcess === 'function') {
-          await upsertProcess(runId, {
-            title,
-            analysisType: normalizedAnalysisType,
-            status: 'failed',
-            statusText: 'Blad uruchomienia poza kolejka',
-            reason: 'queue_bypass_launch_exception',
-            error: error?.message || String(error),
-            needsAction: false,
-            autoRecovery: null,
-            queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
-            manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
-            manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
-            finishedAt: Date.now(),
-            timestamp: Date.now()
-          }).catch(() => null);
-        }
-      });
-
-    return {
-      runId,
-      analysisType: normalizedAnalysisType,
-      title,
-      sourceKind,
-      queueBatchId: typeof options?.queueBatchId === 'string' ? options.queueBatchId : '',
-      manualPdfBatchId: typeof options?.manualPdfBatchId === 'string' ? options.manualPdfBatchId : '',
-      manualPdfProviderId: typeof options?.manualPdfProviderId === 'string' ? options.manualPdfProviderId : '',
-      queueBypass: true
-    };
-  });
-
-  const queueSnapshot = await getAnalysisQueueStatusSnapshot();
-  return {
-    success: true,
-    jobs: launchedJobs,
+  console.warn('[analysis-queue] Queue bypass requested, but local queue scheduling is enforced; enqueuing jobs instead.', {
     analysisType: normalizedAnalysisType,
-    queuedCount: 0,
-    launchedCount: launchedJobs.length,
-    queueBypassCount: launchedJobs.length,
-    queueBypass: true,
-    maxConcurrent: queueSnapshot.maxConcurrent,
-    queueSize: queueSnapshot.queueSize,
-    activeSlots: queueSnapshot.activeSlots,
-    reservedSlots: queueSnapshot.reservedSlots,
-    liveSlots: queueSnapshot.liveSlots,
-    startingSlots: queueSnapshot.startingSlots
-  };
+    count: sourceTabs.length,
+    reason: typeof options?.reason === 'string' ? options.reason : ''
+  });
+  return processArticles(sourceTabs, promptChain, chatUrl, normalizedAnalysisType, {
+    ...options,
+    forceQueue: true,
+    reason: typeof options?.reason === 'string' && options.reason.trim()
+      ? options.reason.trim()
+      : 'queue_bypass_disabled_enqueue'
+  });
+}
+
+function isQueuedExecutionSetupFailureResult(result) {
+  if (!result || typeof result !== 'object') return false;
+  if (result.success === true || result.stopped === true) return false;
+  const reason = typeof result.reason === 'string' ? result.reason.trim() : '';
+  const error = typeof result.error === 'string' ? result.error.trim() : '';
+  return reason === 'invalid_tab'
+    || reason === 'prompts_empty'
+    || error === 'invalid_tab'
+    || error === 'prompts_empty';
+}
+
+async function markQueuedExecutionSetupFailureIfUnsettled(job, result) {
+  const safeJob = sanitizeAnalysisQueueJob(job);
+  if (!safeJob || !isQueuedExecutionSetupFailureResult(result)) return false;
+  await ensureProcessRegistryReady();
+  const currentProcess = processRegistry.get(safeJob.runId) || null;
+  const status = normalizeProcessLifecycleStatus(
+    currentProcess?.lifecycleStatus || currentProcess?.status,
+    'running'
+  );
+  if (isClosedProcessStatus(status)) return false;
+  const actionRequired = normalizeProcessActionRequired(
+    currentProcess?.actionRequired || '',
+    currentProcess ? deriveProcessActionRequired(currentProcess) : 'none'
+  );
+  if (currentProcess?.needsAction === true || actionRequired !== 'none') return false;
+  const now = Date.now();
+  const reason = typeof result.reason === 'string' && result.reason.trim()
+    ? result.reason.trim()
+    : (typeof result.error === 'string' && result.error.trim() ? result.error.trim() : 'queue_setup_failed');
+  await upsertProcess(safeJob.runId, {
+    title: safeJob.title,
+    analysisType: safeJob.analysisType || ANALYSIS_TYPE_COMPANY,
+    lifecycleStatus: 'failed',
+    status: 'failed',
+    phase: 'setup',
+    actionRequired: 'none',
+    statusCode: `queue.${reason}`,
+    statusText: 'Blad przygotowania procesu',
+    reason,
+    error: typeof result.error === 'string' && result.error.trim() ? result.error.trim() : reason,
+    needsAction: false,
+    queueManaged: true,
+    queueJobId: safeJob.jobId,
+    queueState: 'active',
+    slotReserved: true,
+    autoRecovery: null,
+    finishedAt: now,
+    timestamp: now
+  });
+  return true;
 }
 
 async function enqueueAnalysisJobs(rawJobs, options = {}) {
@@ -11763,6 +12013,7 @@ function runQueuedAnalysisJob(job, reason = 'scheduler') {
             : ''
         }
       );
+      await markQueuedExecutionSetupFailureIfUnsettled(scheduledJob, executionResult);
       if (scheduledJob?.remote?.remoteJobId && scheduledJob?.remote?.remoteAttemptId) {
         const currentProcess = processRegistry.get(scheduledJob.runId) || null;
         const delivery = currentProcess ? getProcessQueueDeliveryState(currentProcess) : null;
@@ -11884,6 +12135,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
       let startJobs = [];
       let releaseJobs = [];
       let releaseEventRecords = [];
+      let keepWindowCloseJobs = [];
       const followUpProcessPatchesByRunId = new Map();
       const queueFollowUpProcessPatch = (runId, patch) => {
         const normalizedRunId = typeof runId === 'string' ? runId.trim() : '';
@@ -11909,6 +12161,7 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         for (const activeJob of state.activeJobs) {
           const process = processRegistry.get(activeJob.runId) || null;
           const decision = resolveAnalysisQueueReleaseDecision(activeJob, process, now);
+          let activeQueueStateOverride = '';
           if (decision.action === 'release') {
             releaseJobs.push({
               job: activeJob,
@@ -11918,39 +12171,71 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             });
             continue;
           }
+          if (decision.closeWindow === true && process) {
+            keepWindowCloseJobs.push({
+              job: activeJob,
+              process,
+              reason: decision.reason || 'window_close_pending'
+            });
+          }
           const processActivity = process
             ? await getAnalysisQueueProcessActivityState(process, now)
             : null;
           if (process && processActivity?.active !== true) {
             const closeSavedMissingContextWindow = hasProcessCloseableSavedResponse(process);
             const delivery = closeSavedMissingContextWindow ? getProcessQueueDeliveryState(process) : null;
-            const releaseReason = closeSavedMissingContextWindow
-              ? (delivery?.confirmed === true ? 'dispatch_confirmed' : 'dispatch_pending')
-              : 'local_context_missing';
-            releaseJobs.push({
-              job: activeJob,
-              process,
-              reason: releaseReason,
-              slotReleaseReason: closeSavedMissingContextWindow
-                ? 'final_stage_local_saved_after_local_context_loss'
-                : 'local_context_missing',
-              closeWindow: closeSavedMissingContextWindow && isProcessWindowAutoCloseEnabled()
-            });
-            const stalePatch = await buildStaleQueueReleasePatch(process, now);
-            if (stalePatch) {
-              queueFollowUpProcessPatch(activeJob.runId, {
-                queueManaged: true,
-                queueJobId: activeJob.jobId,
-                queueState: 'slot_released',
-                slotReserved: false,
-                slotReleasedAt: now,
-                slotReleaseReason: closeSavedMissingContextWindow
-                  ? 'final_stage_local_saved_after_local_context_loss'
-                  : 'local_context_missing',
-                ...stalePatch
-              });
+            if (
+              closeSavedMissingContextWindow
+              && delivery?.confirmed === true
+              && shouldHoldAnalysisQueueSlotForWindowClose(process, now)
+            ) {
+              activeQueueStateOverride = 'awaiting_window_close';
+              if (shouldAttemptAnalysisQueueWindowClose(process, now)) {
+                keepWindowCloseJobs.push({
+                  job: activeJob,
+                  process,
+                  reason: 'window_close_pending'
+                });
+              }
+            } else if (closeSavedMissingContextWindow && delivery?.confirmed !== true) {
+              activeQueueStateOverride = delivery?.saveOk === true
+                ? 'awaiting_dispatch_confirmation'
+                : 'awaiting_local_save';
             }
-            continue;
+            const shouldHoldForPersistence = decision.queueState === 'awaiting_local_save'
+              || decision.queueState === 'awaiting_dispatch_confirmation'
+              || !!activeQueueStateOverride;
+            const shouldReleaseMissingContext = !shouldHoldForPersistence
+              && (!closeSavedMissingContextWindow || delivery?.confirmed === true);
+            if (shouldReleaseMissingContext) {
+              const releaseReason = closeSavedMissingContextWindow
+                ? 'dispatch_confirmed'
+                : 'local_context_missing';
+              releaseJobs.push({
+                job: activeJob,
+                process,
+                reason: releaseReason,
+                slotReleaseReason: closeSavedMissingContextWindow
+                  ? 'dispatch_confirmed_after_local_context_loss'
+                  : 'local_context_missing',
+                closeWindow: false
+              });
+              const stalePatch = await buildStaleQueueReleasePatch(process, now);
+              if (stalePatch) {
+                queueFollowUpProcessPatch(activeJob.runId, {
+                  queueManaged: true,
+                  queueJobId: activeJob.jobId,
+                  queueState: 'slot_released',
+                  slotReserved: false,
+                  slotReleasedAt: now,
+                  slotReleaseReason: closeSavedMissingContextWindow
+                    ? 'dispatch_confirmed_after_local_context_loss'
+                    : 'local_context_missing',
+                  ...stalePatch
+                });
+              }
+              continue;
+            }
           }
 
           const nextActiveJob = sanitizeAnalysisQueueJob({
@@ -12009,11 +12294,12 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
             continue;
           }
           nextActiveJobsByContext.set(contextKey, candidate);
-          if (process && typeof decision.queueState === 'string' && process.queueState !== decision.queueState) {
+          const nextQueueState = activeQueueStateOverride || decision.queueState;
+          if (process && typeof nextQueueState === 'string' && process.queueState !== nextQueueState) {
             queueFollowUpProcessPatch(activeJob.runId, {
               queueManaged: true,
               queueJobId: activeJob.jobId,
-              queueState: decision.queueState,
+              queueState: nextQueueState,
               slotReserved: true,
               slotReservedAt: Number.isInteger(activeJob.slotReservedAt) ? activeJob.slotReservedAt : now,
               timestamp: now
@@ -12032,13 +12318,55 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
           nowTs: now,
           excludedRunIds: releasedRunIds
         });
+        const activeRunIds = new Set(
+          state.activeJobs
+            .map((job) => (typeof job?.runId === 'string' ? job.runId.trim() : ''))
+            .filter(Boolean)
+        );
+        for (const occupiedEntry of occupiedSlots) {
+          const occupiedProcess = occupiedEntry?.process;
+          const occupiedRunId = typeof occupiedProcess?.id === 'string' ? occupiedProcess.id.trim() : '';
+          if (!occupiedRunId || activeRunIds.has(occupiedRunId)) continue;
+          if (!shouldHoldAnalysisQueueSlotForWindowClose(occupiedProcess, now)) continue;
+          const syntheticJobId = typeof occupiedProcess.queueJobId === 'string' && occupiedProcess.queueJobId.trim()
+            ? occupiedProcess.queueJobId.trim()
+            : `restored:${occupiedRunId}`;
+          queueFollowUpProcessPatch(occupiedRunId, {
+            queueManaged: true,
+            queueJobId: typeof occupiedProcess.queueJobId === 'string' ? occupiedProcess.queueJobId : '',
+            queueState: 'awaiting_window_close',
+            slotReserved: true,
+            slotReservedAt: Number.isInteger(occupiedProcess.slotReservedAt) ? occupiedProcess.slotReservedAt : now,
+            timestamp: now
+          });
+          if (shouldAttemptAnalysisQueueWindowClose(occupiedProcess, now)) {
+            keepWindowCloseJobs.push({
+              job: {
+                jobId: syntheticJobId,
+                runId: occupiedRunId,
+                slotReservedAt: Number.isInteger(occupiedProcess.slotReservedAt) ? occupiedProcess.slotReservedAt : now
+              },
+              process: occupiedProcess,
+              reason: 'restored_window_close_pending',
+              restoredProcessOnly: true
+            });
+          }
+        }
+        const openAnalysisChatTabRecords = typeof getOpenAnalysisChatTabs === 'function'
+          ? await getOpenAnalysisChatTabs().catch(() => [])
+          : [];
         const openAnalysisChatTabs = typeof countOpenAnalysisChatTabs === 'function'
-          ? await countOpenAnalysisChatTabs().catch(() => 0)
-          : 0;
+          ? await countOpenAnalysisChatTabs().catch(() => countAnalysisTabsById(openAnalysisChatTabRecords))
+          : countAnalysisTabsById(openAnalysisChatTabRecords);
+        const adoptableOpenAnalysisChatTabs = countAdoptableOpenAnalysisTabsForWaitingResumeJobs(
+          state.waitingJobs,
+          openAnalysisChatTabRecords
+        );
+        const blockingOpenAnalysisChatTabs = Math.max(0, openAnalysisChatTabs - adoptableOpenAnalysisChatTabs);
         let reservedSlots = Math.max(
           occupiedSlots.length,
           state.activeJobs.length,
-          openAnalysisChatTabs
+          blockingOpenAnalysisChatTabs
         );
         sortAnalysisQueueWaitingJobs(state.waitingJobs);
         let manualPdfReservedSlots = state.activeJobs.filter((job) => job?.sourceKind === 'manual_pdf').length;
@@ -12114,6 +12442,40 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         await upsertProcess(update.runId, update.patch);
       }
 
+      const keepWindowCloseEventRecords = [];
+      for (const closeRequest of keepWindowCloseJobs) {
+        const windowClosed = await closeProcessWindowAfterQueueSuccess(closeRequest.process, {
+          origin: closeRequest.reason || 'queue_window_close_pending'
+        });
+        keepWindowCloseEventRecords.push({
+          job: closeRequest.job,
+          process: processRegistry.get(closeRequest.job.runId) || closeRequest.process,
+          reason: closeRequest.reason || 'window_close_pending',
+          windowClosed
+        });
+        if (windowClosed === true) {
+          if (closeRequest.restoredProcessOnly === true) {
+            const restoredRunId = typeof closeRequest?.job?.runId === 'string' ? closeRequest.job.runId.trim() : '';
+            if (restoredRunId) {
+              const releaseNow = Date.now();
+              await upsertProcess(restoredRunId, {
+                queueManaged: true,
+                queueJobId: typeof closeRequest?.job?.jobId === 'string'
+                  && !closeRequest.job.jobId.startsWith('restored:')
+                  ? closeRequest.job.jobId
+                  : '',
+                queueState: 'dispatch_confirmed',
+                slotReserved: false,
+                slotReleasedAt: releaseNow,
+                slotReleaseReason: 'dispatch_confirmed_window_closed',
+                timestamp: releaseNow
+              });
+            }
+          }
+          requestAnalysisQueueReconcile('queue_window_close_finished');
+        }
+      }
+
       for (const release of releaseJobs) {
         if (release.process) {
           const releaseQueueState = release.reason === 'dispatch_confirmed'
@@ -12169,8 +12531,41 @@ async function reconcileAnalysisQueueState(reason = 'manual') {
         runQueuedAnalysisJob(startJob, normalizedReason);
       }
 
-      if (startJobs.length > 0 || releaseEventRecords.length > 0 || followUpProcessPatches.length > 0) {
+      if (
+        startJobs.length > 0
+        || releaseEventRecords.length > 0
+        || keepWindowCloseEventRecords.length > 0
+        || followUpProcessPatches.length > 0
+      ) {
         const queueLogSnapshot = await getAnalysisQueueStatusSnapshot().catch(() => null);
+        await Promise.all(keepWindowCloseEventRecords.map((closeEvent) => {
+          const currentProcess = closeEvent.process || processRegistry.get(closeEvent.job.runId) || null;
+          const delivery = currentProcess ? getProcessQueueDeliveryState(currentProcess) : null;
+          return reportAnalysisQueueEvent('job_window_close_pending', {
+            job: closeEvent.job,
+            process: currentProcess,
+            status: closeEvent.windowClosed === true ? 'closed' : 'close_pending',
+            reason: closeEvent.reason,
+            queueState: typeof currentProcess?.queueState === 'string'
+              ? currentProcess.queueState
+              : 'awaiting_window_close',
+            waitingJobs: Number.isInteger(queueLogSnapshot?.waitingJobs) ? queueLogSnapshot.waitingJobs : null,
+            activeSlots: Number.isInteger(queueLogSnapshot?.activeSlots) ? queueLogSnapshot.activeSlots : null,
+            maxConcurrent: Number.isInteger(queueLogSnapshot?.maxConcurrent) ? queueLogSnapshot.maxConcurrent : null,
+            closeWindowRequested: true,
+            closed: closeEvent.windowClosed === true,
+            dispatchState: delivery?.state || '',
+            dispatchConfirmed: delivery?.confirmed === true,
+            triggerReason: normalizedReason,
+            title: 'Analysis queue: waiting for process window close'
+          }).catch((error) => {
+            console.warn('[analysis-queue] pending window close log failed:', {
+              jobId: closeEvent.job?.jobId || '',
+              runId: closeEvent.job?.runId || '',
+              error: error?.message || String(error)
+            });
+          });
+        }));
         await Promise.all(releaseEventRecords.map((releaseEvent) => {
           const currentProcess = releaseEvent.process || processRegistry.get(releaseEvent.job.runId) || null;
           const delivery = currentProcess ? getProcessQueueDeliveryState(currentProcess) : null;
@@ -13103,6 +13498,9 @@ async function ensureCompletedProcessResponsePersisted(process, options = {}) {
   }
 
   await upsertProcess(runId, patch);
+  if (replayResult?.attempted && replayResult?.success) {
+    scheduleCompletedProcessWindowCloseAfterSave(runId, `ensure_completed_response_persisted:${origin}`);
+  }
   return replayResult;
 }
 
@@ -19138,23 +19536,27 @@ function getTabEffectiveUrl(tab) {
   return pendingUrl;
 }
 
-async function countOpenAnalysisChatTabs() {
+async function getOpenAnalysisChatTabs() {
   if (typeof chrome === 'undefined' || !chrome?.tabs || typeof chrome.tabs.query !== 'function') {
-    return 0;
+    return [];
   }
 
   let tabs = [];
   try {
     tabs = await chrome.tabs.query({});
   } catch (error) {
-    return 0;
+    return [];
   }
 
-  if (!Array.isArray(tabs)) return 0;
+  if (!Array.isArray(tabs)) return [];
+  return tabs.filter((tab) => isAnalysisGptUrl(getTabEffectiveUrl(tab)));
+}
+
+function countAnalysisTabsById(openAnalysisTabs = []) {
+  if (!Array.isArray(openAnalysisTabs)) return 0;
   const tabIds = new Set();
   let fallbackCount = 0;
-  for (const tab of tabs) {
-    if (!isAnalysisGptUrl(getTabEffectiveUrl(tab))) continue;
+  for (const tab of openAnalysisTabs) {
     if (Number.isInteger(tab?.id)) {
       tabIds.add(tab.id);
     } else {
@@ -19162,6 +19564,31 @@ async function countOpenAnalysisChatTabs() {
     }
   }
   return tabIds.size + fallbackCount;
+}
+
+async function countOpenAnalysisChatTabs() {
+  const tabs = await getOpenAnalysisChatTabs();
+  return countAnalysisTabsById(tabs);
+}
+
+function countAdoptableOpenAnalysisTabsForWaitingResumeJobs(waitingJobs = [], openAnalysisTabs = []) {
+  if (!Array.isArray(waitingJobs) || !Array.isArray(openAnalysisTabs)) return 0;
+  const openTabIds = new Set(
+    openAnalysisTabs
+      .map((tab) => (Number.isInteger(tab?.id) ? tab.id : null))
+      .filter((tabId) => Number.isInteger(tabId))
+  );
+  if (openTabIds.size === 0) return 0;
+
+  const adoptedTabIds = new Set();
+  for (const job of waitingJobs) {
+    if (job?.kind !== ANALYSIS_QUEUE_KIND_RESUME_STAGE) continue;
+    const targetTabId = Number.isInteger(job?.resumeTargetTabId) ? job.resumeTargetTabId : null;
+    if (Number.isInteger(targetTabId) && openTabIds.has(targetTabId)) {
+      adoptedTabIds.add(targetTabId);
+    }
+  }
+  return adoptedTabIds.size;
 }
 
 function compareTabsByWindowAndIndex(left, right) {
@@ -22092,9 +22519,22 @@ function formatDispatchUiSummary(dispatchOutcome) {
 
 function isExplicitlyVerifiedDispatch(dispatchOutcome) {
   const dispatch = dispatchOutcome && typeof dispatchOutcome === 'object' ? dispatchOutcome : null;
+  if (!dispatch) return false;
   const state = typeof dispatch?.state === 'string' ? dispatch.state.trim().toLowerCase() : '';
   const verifyState = normalizeWatchlistVerifyState(dispatch?.verifyState);
-  return state === 'dispatch_confirmed' || verifyState === 'verified';
+  if (verifyState === 'verified') return true;
+  if (dispatch.queueSkipped === true || dispatch.flushSkipped === true) return false;
+  if (Number.isInteger(dispatch.failed) && dispatch.failed > 0) return false;
+  const terminalVerifyStates = new Set([
+    'missing_fields',
+    'mismatch',
+    'ingest_failed',
+    'ingest_quarantined',
+    'materialization_unavailable',
+    'expected_records_missing'
+  ]);
+  if (terminalVerifyStates.has(verifyState)) return false;
+  return state === 'dispatch_confirmed';
 }
 
 function isAcceptedWatchlistDispatch(dispatchOutcome) {
@@ -25947,7 +26387,7 @@ function sanitizeExtensionHeartbeatQueueStatus(queue) {
   return {
     success: raw.success !== false,
     paused: raw.paused === true,
-    maxConcurrent: Number.isInteger(raw.maxConcurrent) ? raw.maxConcurrent : ANALYSIS_QUEUE_MAX_CONCURRENT,
+    maxConcurrent: ANALYSIS_QUEUE_MAX_CONCURRENT,
     activeSlots: Number.isInteger(raw.activeSlots) ? raw.activeSlots : 0,
     reservedSlots: Number.isInteger(raw.reservedSlots) ? raw.reservedSlots : 0,
     liveSlots: Number.isInteger(raw.liveSlots) ? raw.liveSlots : 0,
@@ -28880,6 +29320,18 @@ function normalizeSourceMaterialSubmitFailure(result = null, fallback = 'source_
   return fallback;
 }
 
+function getSourceMaterialSubmitFailureReasonFromTab(tab = null) {
+  if (!tab || typeof tab !== 'object' || tab.sourceMaterialSubmitFailed !== true) return '';
+  const reason = typeof tab.sourceMaterialSubmitFailureReason === 'string'
+    ? tab.sourceMaterialSubmitFailureReason.trim()
+    : '';
+  return reason || 'source_material_submit_failed';
+}
+
+function hasSourceMaterialSubmitFailureFallback(tab = null) {
+  return !!getSourceMaterialSubmitFailureReasonFromTab(tab);
+}
+
 async function reportManualSourceMaterialSaveEvent(eventName, options = {}) {
   if (typeof reportAnalysisQueueEvent !== 'function') return null;
   const level = normalizeProblemLogLevel(options?.level || 'info');
@@ -28913,14 +29365,22 @@ async function reportManualSourceMaterialSaveEvent(eventName, options = {}) {
 async function submitManualSourceMaterialForQueue(text, title, options = {}) {
   const safeText = typeof text === 'string' ? text : '';
   if (!safeText.trim()) return {};
-  if (typeof submitSourceMaterialForProcess !== 'function') {
-    throw new Error('source_material_submit_unavailable');
-  }
 
   const safeTitle = typeof title === 'string' && title.trim() ? title.trim() : 'Recznie wklejony artykul';
   const manualTextSourceId = typeof options?.manualTextSourceId === 'string' ? options.manualTextSourceId.trim() : '';
   const analysisType = normalizeAnalysisTypeForPromptChain(options?.analysisType);
   const processId = manualTextSourceId || `manual-source-${Date.now()}-${Math.random().toString(36).slice(2, 8)}`;
+  const buildLocalFallback = (reason) => ({
+    sourceMaterialStored: false,
+    sourceMaterialText: safeText,
+    sourceMaterialSubmitFailed: true,
+    sourceMaterialSubmitFailureReason: reason || 'source_material_submit_failed'
+  });
+
+  if (typeof submitSourceMaterialForProcess !== 'function') {
+    return buildLocalFallback('source_material_submit_unavailable');
+  }
+
   await reportManualSourceMaterialSaveEvent('save_start', {
     level: 'info',
     status: 'starting',
@@ -28953,21 +29413,21 @@ async function submitManualSourceMaterialForQueue(text, title, options = {}) {
     : {};
   if (materialResult?.success !== true || !payload.sourceMaterialId) {
     const failureReason = normalizeSourceMaterialSubmitFailure(materialResult, 'source_material_enqueue_submit_failed');
-    console.warn('[source-material] manual enqueue submit failed; analysis launch blocked', {
+    console.warn('[source-material] manual enqueue submit failed; continuing local analysis', {
       reason: failureReason,
       status: Number.isInteger(materialResult?.status) ? materialResult.status : null
     });
     await reportManualSourceMaterialSaveEvent('save_failed', {
-      level: 'error',
+      level: 'warn',
       status: 'failed',
       reason: failureReason,
       title: safeTitle,
       manualTextSourceId,
       analysisType,
       statusText: `status=${Number.isInteger(materialResult?.status) ? materialResult.status : 'n/a'} | textLength=${safeText.length}`,
-      message: `Nie uruchamiam analizy, bo material zrodlowy nie zostal zapisany: ${failureReason}`
+      message: `Kontynuuje lokalna analize mimo braku zapisu materialu zrodlowego: ${failureReason}`
     }).catch(() => null);
-    throw new Error(failureReason);
+    return buildLocalFallback(failureReason);
   }
 
   const sourceMaterialId = typeof payload.sourceMaterialId === 'string' ? payload.sourceMaterialId.trim() : '';
@@ -30046,6 +30506,12 @@ async function saveResponse(
         statusCode: persistenceStatusCode,
         origin: deferDispatchFlush ? 'save_response_deferred' : 'save_response'
       }));
+      scheduleCompletedProcessWindowCloseAfterSave(
+        normalizedRunId,
+        pipelineDispatchState === 'dispatch_confirmed'
+          ? 'save_response_dispatch_confirmed'
+          : 'save_response_completed'
+      );
     }
     return {
       success: true,
@@ -30558,12 +31024,11 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const normalizedInstances = analysisType === ANALYSIS_TYPE_PORTFOLIO
       ? 1
       : normalizeManualInstances(message?.instances);
-    const requestedRemote = message?.remote === true || normalizeRemoteExecutionMode(message?.executionMode) === 'remote';
     console.log('[manual-source] MANUAL_SOURCE_SUBMIT:', {
       mode,
       analysisType,
       autoPortfolioAnalysis,
-      remote: requestedRemote,
+      remote: false,
       titleLength: typeof message?.title === 'string' ? message.title.length : 0,
       textLength: typeof message?.text === 'string' ? message.text.length : 0,
       instances: normalizedInstances,
@@ -30573,10 +31038,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     });
 
     if (mode === 'pdf') {
-      if (requestedRemote) {
-        sendResponse({ success: false, error: 'remote_pdf_not_supported' });
-        return true;
-      }
       const providerId = typeof message?.pdfProviderId === 'string' ? message.pdfProviderId.trim() : '';
       const pdfFiles = Array.isArray(message?.pdfFiles) ? message.pdfFiles : [];
       if (!providerId || pdfFiles.length === 0) {
@@ -30615,51 +31076,6 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         : true;
       if (!promptsReady || !portfolioPromptsReady) {
         sendResponse({ success: false, error: 'prompts_not_loaded' });
-        return;
-      }
-
-      if (requestedRemote) {
-        const remoteRunnerId = typeof message?.runnerId === 'string' && message.runnerId.trim()
-          ? message.runnerId.trim()
-          : (typeof message?.selectedRunnerId === 'string' ? message.selectedRunnerId.trim() : '');
-        const remoteResult = await submitManualSourceAnalysisToRemoteRunner(
-          message.text,
-          message.title,
-          normalizedInstances,
-          remoteRunnerId,
-          {
-            timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
-            retryCount: 1,
-            analysisType,
-            promptChain: getPromptChainForAnalysisType(analysisType)
-          }
-        );
-        const portfolioRemoteResult = autoPortfolioAnalysis
-          ? await submitManualSourceAnalysisToRemoteRunner(
-              message.text,
-              message.title,
-              1,
-              remoteRunnerId,
-              {
-                timeoutMs: Math.max(30000, ISKRA_REMOTE_RUNNER.requestTimeoutMs),
-                retryCount: 1,
-                analysisType: ANALYSIS_TYPE_PORTFOLIO,
-                promptChain: getPromptChainForAnalysisType(ANALYSIS_TYPE_PORTFOLIO)
-              }
-            )
-          : null;
-        const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
-          analysisType,
-          mode: 'remote_text',
-          primaryFallbackQueued: normalizedInstances
-        });
-        sendResponse({
-          ...mergedRemoteResult,
-          mode: 'remote_text',
-          analysisType,
-          remote: true,
-          runnerId: remoteRunnerId || mergedRemoteResult?.runnerId || ''
-        });
         return;
       }
 
@@ -32073,6 +32489,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
     let sourceMaterialLength = normalizeSourceMaterialLength(
       tab?.sourceMaterialLength ?? remoteJobContext?.sourceMaterialLength
     );
+    let sourceMaterialSubmitFailureReason = getSourceMaterialSubmitFailureReasonFromTab(tab);
+    let sourceMaterialSubmitFailed = hasSourceMaterialSubmitFailureFallback(tab) && !sourceMaterialId;
     const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
       ? tab.manualPdfAttachment
       : null;
@@ -32198,7 +32616,11 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
 
     const title = tab.title || 'Bez tytułu';
     processTitle = title;
+    const allowLocalSourceMaterialFailureFallback = isManualSource
+      && sourceKind === 'manual_text'
+      && !remoteJobContext;
     const shouldSubmitSourceMaterialForProcess = extractedText.trim()
+      && !sourceMaterialSubmitFailed
       && (!sourceMaterialId || tab?.sourceMaterialNeedsProcessLink === true);
     if (shouldSubmitSourceMaterialForProcess) {
       const materialResult = await submitSourceMaterialForProcess({
@@ -32226,6 +32648,8 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
         sourceMaterialId = materialPayload.sourceMaterialId.trim();
         sourceMaterialHash = typeof materialPayload.sourceMaterialHash === 'string' ? materialPayload.sourceMaterialHash.trim() : sourceMaterialHash;
         sourceMaterialLength = normalizeSourceMaterialLength(materialPayload.sourceMaterialLength) ?? sourceMaterialLength;
+        sourceMaterialSubmitFailureReason = '';
+        sourceMaterialSubmitFailed = false;
       } else {
         const failureReason = normalizeSourceMaterialSubmitFailure(materialResult, 'source_material_submit_failed');
         console.warn('[source-material] pre-submit failed', {
@@ -32233,7 +32657,7 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
           reason: failureReason,
           status: Number.isInteger(materialResult?.status) ? materialResult.status : null
         });
-        if (!sourceMaterialId) {
+        if (!sourceMaterialId && !allowLocalSourceMaterialFailureFallback) {
           await reportAnalysisQueueEvent('source_material_save_failed', {
             level: 'error',
             status: 'failed',
@@ -32271,6 +32695,22 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
             error: failureReason
           };
         }
+        sourceMaterialSubmitFailureReason = failureReason;
+        sourceMaterialSubmitFailed = true;
+        await reportAnalysisQueueEvent('source_material_save_failed', {
+          level: 'warn',
+          status: 'local_fallback',
+          reason: failureReason,
+          runId: processId,
+          jobId: queueJobId,
+          analysisType,
+          title,
+          sourceUrl,
+          currentPrompt: 0,
+          totalPrompts: promptChainSafe.length,
+          statusText: `status=${Number.isInteger(materialResult?.status) ? materialResult.status : 'n/a'} | sourceKind=${sourceKind}`,
+          message: `Kontynuuje lokalna analize mimo braku zapisu materialu zrodlowego: ${failureReason}`
+        }).catch(() => null);
       }
     }
     await upsertProcess(processId, {
@@ -32284,6 +32724,10 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
       ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
       sourceMaterialStored: !!sourceMaterialId,
+      ...(sourceMaterialSubmitFailed ? {
+        sourceMaterialSubmitFailed: true,
+        sourceMaterialSubmitFailureReason
+      } : {}),
       ...(composerThinkingEffort ? { composerThinkingEffort } : {}),
       timestamp: Date.now()
     });
@@ -32310,6 +32754,10 @@ async function executeAnalysisProcessJob(tab, promptChain, chatUrl, analysisType
       ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
       ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
       sourceMaterialStored: !!sourceMaterialId,
+      ...(sourceMaterialSubmitFailed ? {
+        sourceMaterialSubmitFailed: true,
+        sourceMaterialSubmitFailureReason
+      } : {}),
       ...(composerThinkingEffort ? { composerThinkingEffort } : {})
     });
 
@@ -32972,8 +33420,8 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
       return getAnalysisQueueStatusSnapshot();
     }
 
-    if (shouldBypassAnalysisQueueForAnalysisType(analysisType)) {
-      console.log(`[${analysisType}] Uruchamiam ${sourceTabs.length} analiz poza kolejka slotow`);
+    if (options?.forceQueue !== true && shouldBypassAnalysisQueueForAnalysisType(analysisType)) {
+      console.log(`[${analysisType}] Uruchamiam ${sourceTabs.length} analiz bez rezerwacji slotu kolejki`);
       return launchAnalysisJobsOutsideQueue(sourceTabs, promptChain, chatUrl, analysisType, {
         ...options,
         reason: typeof options?.reason === 'string' && options.reason.trim()
@@ -33031,976 +33479,6 @@ async function processArticles(tabs, promptChain, chatUrl, analysisType, options
     });
 }
 
-// Legacy direct executor retained only as a reference during queue-first cleanup.
-async function processArticlesLegacyDirectExecutor(tabs, promptChain, chatUrl, analysisType, options = {}) {
-  if (!tabs || tabs.length === 0) {
-    console.log(`[${analysisType}] Brak artykułów do przetworzenia`);
-    return [];
-  }
-
-  const invocationWindowId = Number.isInteger(options?.invocationWindowId)
-    ? options.invocationWindowId
-    : null;
-  
-  console.log(`[${analysisType}] Rozpoczynam przetwarzanie ${tabs.length} artykułów`);
-  
-  const processingPromises = tabs.map(async (tab, index) => {
-    const processId = `${analysisType}-${Date.now()}-${index}-${Math.random().toString(36).slice(2, 8)}`;
-    let processTitle = tab?.title || 'Bez tytulu';
-    let processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
-    const sourceWindowId = Number.isInteger(tab?.windowId) ? tab.windowId : null;
-    try {
-      console.log(`\n=== [${analysisType}] [${index + 1}/${tabs.length}] Przetwarzam kartę ID: ${tab.id}, Tytuł: ${tab.title}`);
-      console.log(`URL: ${tab.url}`);
-      
-      // Małe opóźnienie między startami aby nie przytłoczyć przeglądarki
-      await sleep(index * 500);
-      
-      // Sprawdź czy to pseudo-tab (ręcznie wklejone źródło)
-      const manualUrl = typeof tab?.url === 'string' ? tab.url : '';
-      const isManualSource = manualUrl.startsWith('manual://');
-      const isManualPdf = manualUrl === 'manual://pdf';
-      let extractedText;
-      const manualPdfAttachmentContext = isManualPdf && tab?.manualPdfAttachment && typeof tab.manualPdfAttachment === 'object'
-        ? tab.manualPdfAttachment
-        : null;      
-      if (isManualSource) {
-        // Użyj tekstu przekazanego bezpośrednio
-        extractedText = tab.manualText;
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Używam ręcznie wklejonego tekstu: ${extractedText?.length || 0} znaków`);
-        
-        // Dla manual source: brak walidacji długości (zgodnie z planem)
-        if (!extractedText || extractedText.length === 0) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - pusty tekst`);
-          return { success: false, title: processTitle, reason: 'pusty tekst', error: 'manual_source_empty' };
-        }
-      } else {
-        if (isYouTubeTabUrl(tab.url)) {
-          console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] YouTube source is no longer supported`);
-          return {
-            success: false,
-            title: processTitle,
-            reason: 'unsupported_youtube_source',
-            error: 'unsupported_youtube_source'
-          };
-        }
-
-        const results = await chrome.scripting.executeScript({
-          target: { tabId: tab.id },
-          function: extractText
-        });
-        extractedText = results[0]?.result;
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Wyekstrahowano ${extractedText?.length || 0} znaków`);
-        
-        // Dla automatycznych źródeł: walidacja minimum 50 znaków
-        if (!extractedText || extractedText.length < 50) {
-          console.log(`[${analysisType}] [${index + 1}/${tabs.length}] Pominięto - za mało tekstu`);
-          return {
-            success: false,
-            title: processTitle,
-            reason: 'za mało tekstu',
-            error: `text_too_short_${extractedText?.length || 0}`
-          };
-        }
-      }
-
-      // Pobierz tytuł
-      const title = tab.title || "Bez tytułu";
-      processTitle = title;
-      
-      // Wykryj źródło artykułu i zachowaj pełne metadane do finalnego payloadu.
-      const sourceUrl = isManualSource ? (tab.url || 'manual://source') : (tab.url || '');
-      const sourceName = isManualSource
-        ? (isManualPdf ? "Manual PDF" : "Manual Source")
-        : (resolveSupportedSourceNameFromUrl(sourceUrl) || "Unknown");
-      const sourceKind = typeof options?.sourceKind === 'string' && options.sourceKind.trim()
-        ? options.sourceKind.trim()
-        : (isManualPdf ? 'manual_pdf' : (isManualSource ? 'manual_text' : 'article'));
-      let sourceMaterialId = typeof tab?.sourceMaterialId === 'string' ? tab.sourceMaterialId.trim() : '';
-      let sourceMaterialHash = typeof tab?.sourceMaterialHash === 'string' ? tab.sourceMaterialHash.trim() : '';
-      let sourceMaterialLength = normalizeSourceMaterialLength(tab?.sourceMaterialLength);
-      if (!sourceMaterialId && typeof extractedText === 'string' && extractedText.trim()) {
-        const materialResult = await submitSourceMaterialForProcess({
-          text: extractedText,
-          title,
-          sourceKind,
-          sourceUrl,
-          runId: processId,
-          relation: 'process_input',
-          metadata: {
-            analysis_type: analysisType,
-            source_name: sourceName,
-            origin: 'legacy_direct_executor'
-          }
-        }, { retryCount: 0, timeoutMs: 15000 });
-        const materialPayload = materialResult?.payload && typeof materialResult.payload === 'object'
-          ? materialResult.payload
-          : {};
-        if (materialResult?.success === true && typeof materialPayload.sourceMaterialId === 'string' && materialPayload.sourceMaterialId.trim()) {
-          sourceMaterialId = materialPayload.sourceMaterialId.trim();
-          sourceMaterialHash = typeof materialPayload.sourceMaterialHash === 'string' ? materialPayload.sourceMaterialHash.trim() : sourceMaterialHash;
-          sourceMaterialLength = normalizeSourceMaterialLength(materialPayload.sourceMaterialLength) ?? sourceMaterialLength;
-        }
-      }
-
-      // Wyciągnij treść pierwszego prompta z promptChain
-      const firstPrompt = promptChain[0] || '';
-      
-      // Wstaw treść źródła do pierwszego prompta.
-      let payload = injectSourceTextIntoPromptTemplate(firstPrompt, extractedText);
-      
-      // Usuń pierwszy prompt z promptChain (zostanie użyty jako payload)
-      const restOfPrompts = promptChain.slice(1);
-      processTotalPrompts = Array.isArray(promptChain) ? promptChain.length : 0;
-      const processPromptOffset = processTotalPrompts > 0 ? 1 : 0;
-      await upsertProcess(processId, {
-        title,
-        analysisType,
-        status: 'starting',
-        statusText: 'Przygotowanie procesu',
-        currentPrompt: 0,
-        totalPrompts: processTotalPrompts,
-        needsAction: false,
-        startedAt: Date.now(),
-        timestamp: Date.now(),
-        sourceKind,
-        sourceName,
-        sourceUrl,
-        chatUrl,
-        ...(sourceMaterialId ? { sourceMaterialId } : {}),
-        ...(sourceMaterialHash ? { sourceMaterialHash } : {}),
-        ...(Number.isInteger(sourceMaterialLength) ? { sourceMaterialLength } : {}),
-        sourceMaterialStored: !!sourceMaterialId,
-        ...(invocationWindowId !== null ? { invocationWindowId } : {}),
-        ...(sourceWindowId !== null ? { sourceWindowId } : {}),
-        messages: []
-      });
-
-      const referenceWindow = await resolveReferenceWindowForChatCreation(
-        sourceWindowId !== null ? sourceWindowId : invocationWindowId
-      );
-
-      // Otwórz nowe okno ChatGPT
-      const window = await chrome.windows.create(
-        buildPhoneLikeChatWindowCreateOptions(chatUrl, referenceWindow)
-      );
-
-      const chatTabId = window.tabs[0].id;
-
-      const createdChatUngroup = await ungroupTabsById([chatTabId], {
-        origin: 'process-chat-tab-created'
-      });
-      if (!createdChatUngroup.ok && createdChatUngroup.reason !== 'already_ungrouped') {
-        console.warn('[run] chat tab ungroup failed:', {
-          tabId: chatTabId,
-          reason: createdChatUngroup.reason,
-          error: createdChatUngroup.error || ''
-        });
-      }
-
-      // POPRAWKA: Upewnij się że okno jest aktywne i karta ma fokus
-      await chrome.windows.update(window.id, { focused: true });
-      await chrome.tabs.update(chatTabId, { active: true });
-
-      await upsertProcess(processId, {
-        status: 'running',
-        statusText: 'Okno ChatGPT gotowe',
-        windowId: window.id,
-        tabId: chatTabId,
-        timestamp: Date.now()
-      });
-
-      // Czekaj na załadowanie strony
-      await waitForTabComplete(chatTabId);
-      try {
-        const loadedChatTab = await chrome.tabs.get(chatTabId);
-        const loadedChatUrl = normalizeChatConversationUrl(getTabEffectiveUrl(loadedChatTab));
-        if (loadedChatUrl) {
-          await upsertProcess(processId, {
-            chatUrl: loadedChatUrl,
-            timestamp: Date.now()
-          });
-        }
-      } catch (error) {
-        // Ignore URL capture errors; process can continue without a conversation link.
-      }
-
-      // Wstrzyknij tekst do ChatGPT z retry i uruchom prompt chain
-      let results;
-      let result;
-      let executionPayload = payload;
-      let executionPromptChain = restOfPrompts;
-      let executionPromptOffset = processPromptOffset;
-      let autoRecoveryAttempt = 0;
-      const autoRecoveryReasonsList = [...AUTO_RECOVERY_REASONS];
-      while (true) {
-        const executionArgs = [
-          executionPayload,
-          executionPromptChain,
-          WAIT_FOR_TEXTAREA_MS,
-          WAIT_FOR_RESPONSE_MS,
-          RETRY_INTERVAL_MS,
-          title,
-          analysisType,
-          processId,
-          {
-            promptOffset: executionPromptOffset,
-            totalPromptsOverride: processTotalPrompts
-          },
-          {
-            enabled: true,
-            attempt: autoRecoveryAttempt,
-            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-            delayMs: AUTO_RECOVERY_DELAY_MS,
-            reasons: autoRecoveryReasonsList
-          },
-          {
-            persistFinalResponseViaMessage: true,
-            mode: 'runtime_message',
-            saveTimeoutMs: FINAL_RESPONSE_SAVE_TIMEOUT_MS,
-            sourceTitle: title,
-            sourceName,
-            sourceUrl,
-            sourceMaterialId,
-            sourceMaterialHash,
-            sourceMaterialLength,
-            sourceMaterialStored: !!sourceMaterialId,
-            sourceMaterialText: sourceMaterialId ? '' : extractedText
-          },
-          manualPdfAttachmentContext
-        ];
-
-        try {
-          console.log(`\n🚀 Wywołuję executeScript dla karty ${chatTabId}...`);
-          results = await executeScriptWithTransientRetry({
-            tabId: chatTabId,
-            scriptFunction: injectToChat,
-            preloadFiles: INJECT_SHARED_HELPER_FILES,
-            args: executionArgs,
-            contextLabel: `${analysisType}:inject`,
-            onRetry: async ({ attempt, maxAttempts, errorText }) => {
-              await upsertProcess(processId, {
-                title: processTitle,
-                analysisType,
-                status: 'running',
-                needsAction: false,
-                statusText: `Retry executeScript ${attempt}/${maxAttempts}`,
-                reason: 'execute_script_retry',
-                error: errorText || '',
-                timestamp: Date.now()
-              });
-            }
-          });
-          console.log(`✅ executeScript zakończony pomyślnie`);
-        } catch (executeError) {
-          console.error(`\n${'='.repeat(80)}`);
-          console.error(`❌ executeScript FAILED`);
-          console.error(`  Tab ID: ${chatTabId}`);
-          console.error(`  Error: ${executeError.message}`);
-          console.error(`  Stack: ${executeError.stack}`);
-          console.error(`${'='.repeat(80)}\n`);
-          await upsertProcess(processId, {
-            title: processTitle,
-            analysisType,
-            status: 'failed',
-            needsAction: false,
-            statusText: 'Blad executeScript',
-            reason: 'execute_script_failed',
-            error: executeError.message || 'executeScript failed',
-            autoRecovery: null,
-            finishedAt: Date.now(),
-            timestamp: Date.now()
-          });
-          return { success: false, title, error: `executeScript error: ${executeError.message}` };
-        }
-
-        if (!results || results.length === 0) {
-          console.error(`❌ KRYTYCZNY: results jest puste lub undefined!`);
-          console.error(`  - results: ${results}`);
-          await upsertProcess(processId, {
-            title: processTitle,
-            analysisType,
-            status: 'failed',
-            needsAction: false,
-            statusText: 'Brak wyniku executeScript',
-            reason: 'missing_execute_result',
-            autoRecovery: null,
-            finishedAt: Date.now(),
-            timestamp: Date.now()
-          });
-          return { success: false, title, error: 'executeScript nie zwrocil wynikow' };
-        }
-
-        result = results[0]?.result;
-        const handoff = result?.error === 'auto_recovery_required' ? result?.autoRecovery : null;
-        if (!handoff || autoRecoveryAttempt >= AUTO_RECOVERY_MAX_ATTEMPTS) {
-          break;
-        }
-
-        autoRecoveryAttempt += 1;
-        const nextPromptOffset = Number.isInteger(handoff.promptOffset) && handoff.promptOffset >= 0
-          ? handoff.promptOffset
-          : executionPromptOffset;
-        const nextRemainingPrompts = Array.isArray(handoff.remainingPrompts)
-          ? handoff.remainingPrompts
-          : executionPromptChain;
-        const recoveryReasonBase = typeof handoff.reason === 'string' && handoff.reason.trim()
-          ? handoff.reason.trim()
-          : 'unknown';
-        const recoveryReason = `auto_recovery_${recoveryReasonBase}`;
-        const recoveryCurrentPrompt = Number.isInteger(handoff.currentPrompt) && handoff.currentPrompt >= 0
-          ? handoff.currentPrompt
-          : (nextPromptOffset > 0 ? nextPromptOffset : executionPromptOffset);
-        const recoveryStageIndex = Number.isInteger(handoff.stageIndex)
-          ? handoff.stageIndex
-          : (recoveryCurrentPrompt > 0 ? (recoveryCurrentPrompt - 1) : null);
-        const recoveryPatch = {
-          title: processTitle,
-          analysisType,
-          status: 'running',
-          needsAction: false,
-          currentPrompt: recoveryCurrentPrompt,
-          totalPrompts: processTotalPrompts,
-          statusText: `Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS}`,
-          reason: recoveryReason,
-          autoRecovery: {
-            attempt: autoRecoveryAttempt,
-            maxAttempts: AUTO_RECOVERY_MAX_ATTEMPTS,
-            delayMs: AUTO_RECOVERY_DELAY_MS,
-            reason: recoveryReasonBase,
-            currentPrompt: recoveryCurrentPrompt,
-            ...(Number.isInteger(recoveryStageIndex) ? { stageIndex: recoveryStageIndex } : {}),
-            updatedAt: Date.now()
-          },
-          timestamp: Date.now()
-        };
-        if (Number.isInteger(recoveryStageIndex)) {
-          recoveryPatch.stageIndex = recoveryStageIndex;
-          recoveryPatch.stageName = `Prompt ${recoveryStageIndex + 1}`;
-        }
-        await upsertProcess(processId, recoveryPatch);
-
-        console.warn(`[${analysisType}] [${index + 1}/${tabs.length}] Auto-resend ${autoRecoveryAttempt}/${AUTO_RECOVERY_MAX_ATTEMPTS} (${recoveryReasonBase}) dla prompta ${recoveryCurrentPrompt}`);
-        await sleep(AUTO_RECOVERY_DELAY_MS);
-
-        executionPayload = '';
-        executionPromptChain = nextRemainingPrompts;
-        executionPromptOffset = nextPromptOffset;
-      }
-
-      // Zapisz ostatnią odpowiedź zwróconą z injectToChat
-      console.log(`\n${'='.repeat(80)}`);
-      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] 🎯 ANALIZA WYNIKU Z executeScript`);
-      console.log(`Artykuł: ${title}`);
-      console.log(`${'='.repeat(80)}`);
-      
-      // Sprawdź co dokładnie zwróciło executeScript
-      console.log(`📦 results array:`, {
-        exists: !!results,
-        length: results?.length,
-        type: typeof results
-      });
-      
-      // Bezpieczna diagnostyka results (bez JSON.stringify)
-      if (results && results.length > 0) {
-        console.log(`📦 results[0] keys:`, results[0] ? Object.keys(results[0]) : 'brak');
-        console.log(`📦 results[0].result type:`, typeof results[0]?.result);
-        console.log(`📦 results[0].result exists:`, results[0]?.result !== undefined);
-      }
-      
-      if (!results || results.length === 0) {
-        console.error(`❌ KRYTYCZNY: results jest puste lub undefined!`);
-        console.error(`  - results: ${results}`);
-        console.log(`${'='.repeat(80)}\n`);
-        await upsertProcess(processId, {
-          title: processTitle,
-          analysisType,
-          status: 'failed',
-          needsAction: false,
-          statusText: 'Brak wyniku executeScript',
-          reason: 'missing_execute_result',
-          autoRecovery: null,
-          finishedAt: Date.now(),
-          timestamp: Date.now()
-        });
-        // Ten return trafia do Promise.allSettled jako fulfilled z tą wartością
-        return { success: false, title, error: 'executeScript nie zwrócił wyników' };
-      }
-      
-      console.log(`📦 results[0]:`, {
-        exists: !!results[0],
-        type: typeof results[0],
-        keys: results[0] ? Object.keys(results[0]) : []
-      });
-      
-      result = results[0]?.result;
-
-      // Capture conversation URL from injected context (preferred) or from the tab (fallback).
-      let conversationUrl = normalizeChatConversationUrl(result?.conversationUrl);
-      if (!conversationUrl) {
-        try {
-          const chatTab = await chrome.tabs.get(chatTabId);
-          const chatTabUrl = getTabEffectiveUrl(chatTab);
-          conversationUrl = normalizeChatConversationUrl(chatTabUrl);
-        } catch (error) {
-          // Ignore and continue without URL.
-        }
-      }
-      
-      if (result === undefined) {
-        console.error(`❌ KRYTYCZNY: results[0].result jest undefined!`);
-        console.error(`  - results[0]: ${JSON.stringify(results[0], null, 2)}`);
-      } else if (result === null) {
-        console.error(`❌ KRYTYCZNY: results[0].result jest null!`);
-      } else {
-        console.log(`✓ result istnieje i nie jest null/undefined`);
-        console.log(`  - type: ${typeof result}`);
-        console.log(`  - success: ${result.success}`);
-        console.log(`  - lastResponse type: ${typeof result.lastResponse}`);
-        console.log(`  - lastResponse defined: ${result.lastResponse !== undefined}`);
-        console.log(`  - lastResponse not null: ${result.lastResponse !== null}`);
-        if (result.lastResponse !== undefined && result.lastResponse !== null) {
-          console.log(`  - lastResponse length: ${result.lastResponse.length}`);
-          console.log(`  - lastResponse fingerprint: ${textFingerprint(result.lastResponse)}`);
-        }
-        if (result.error) {
-          console.log(`  - error: ${result.error}`);
-        }
-      }
-      
-      // DIAGNOSTYKA: Sprawdź dokładnie co mamy w result
-      console.log(`\n🔍 DIAGNOSTYKA RESULT:`);
-      console.log(`  - result exists: ${!!result}`);
-      console.log(`  - result.success: ${result?.success}`);
-      console.log(`  - result.lastResponse exists: ${result?.lastResponse !== undefined}`);
-      console.log(`  - result.lastResponse is null: ${result?.lastResponse === null}`);
-      console.log(`  - result.lastResponse length: ${result?.lastResponse?.length || 0}`);
-      console.log(`  - result.lastResponse trim length: ${result?.lastResponse?.trim()?.length || 0}`);
-      console.log(`  - result.lastResponse fingerprint: ${result?.lastResponse ? textFingerprint(result.lastResponse) : 'undefined'}`);
-
-      const injectMetrics = (result && typeof result === 'object' && result.metrics && typeof result.metrics === 'object')
-        ? result.metrics
-        : null;
-      if (injectMetrics) {
-        console.log(`[${analysisType}] [${index + 1}/${tabs.length}] injectToChat metrics:`, injectMetrics);
-      }
-      let finalStatus = 'completed';
-      let finalPhase = 'verify_remote';
-      let finalStatusCode = 'process.completed';
-      let finalStatusText = 'Zakonczono';
-      let finalReason = '';
-      let finalError = '';
-      let finalActionRequired = 'none';
-      let finalNeedsAction = false;
-      const resultLastResponse = typeof result?.lastResponse === 'string'
-        ? result.lastResponse
-        : '';
-      const hasResultLastResponse = resultLastResponse.trim().length > 0;
-      const resultSectorMemoryResponse = typeof result?.sectorMemoryResponse === 'string'
-        ? result.sectorMemoryResponse
-        : '';
-      const hasResultSectorMemoryResponse = resultSectorMemoryResponse.trim().length > 0;
-      const MAX_COMPLETED_RESPONSE_CHARS = 180000;
-      let completedResponsePatch = {};
-      let sectorMemoryResponsePatch = {};
-      let persistencePatch = null;
-      let dataGapPatch = {};
-      if (isInjectRateLimitBlockedResult(result)) {
-        const pendingPrompt = buildPendingPromptSnapshotFromStartIndex(
-          executionPromptOffset,
-          processTotalPrompts
-        );
-        const rateLimitPatch = buildInjectRateLimitNeedsActionPatch(result, {
-          currentPrompt: pendingPrompt.currentPrompt,
-          totalPrompts: processTotalPrompts,
-          stageIndex: pendingPrompt.stageIndex,
-          stageName: pendingPrompt.stageName,
-          conversationUrl
-        });
-        await upsertProcess(processId, {
-          title: processTitle,
-          analysisType,
-          ...rateLimitPatch,
-          ...(injectMetrics ? { injectMetrics } : {}),
-          timestamp: Date.now()
-        });
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: 'Wymaga akcji',
-          tone: 'warning',
-          lines: [
-            'ChatGPT zwrocil limit/restriction.',
-            'Otworz karte ChatGPT i wznow pozniej przez repeat/resume.'
-          ],
-          autoCloseMs: 0
-        });
-        return {
-          success: false,
-          title,
-          reason: 'limit_or_restriction',
-          error: 'rate_limit_blocked'
-        };
-      }
-
-      if (typeof result?.lastResponse === 'string') {
-        const completedResponseTruncated = resultLastResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
-        const storedCompletedResponse = completedResponseTruncated
-          ? resultLastResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
-          : resultLastResponse;
-
-        completedResponsePatch = {
-          completedResponseText: storedCompletedResponse,
-          completedResponseLength: resultLastResponse.length,
-          completedResponseTruncated,
-          completedResponseCapturedAt: Date.now(),
-          completedResponseSaved: false
-        };
-      }
-      if (hasResultSectorMemoryResponse) {
-        const sectorMemoryResponseTruncated = resultSectorMemoryResponse.length > MAX_COMPLETED_RESPONSE_CHARS;
-        sectorMemoryResponsePatch = {
-          sectorMemoryResponseText: sectorMemoryResponseTruncated
-            ? resultSectorMemoryResponse.slice(0, MAX_COMPLETED_RESPONSE_CHARS)
-            : resultSectorMemoryResponse,
-          sectorMemoryResponseLength: resultSectorMemoryResponse.length,
-          sectorMemoryResponseTruncated,
-          sectorMemoryResponseCapturedAt: Date.now(),
-          sectorMemoryResponseSaved: false,
-          sectorMemoryResponsePrompt: Number.isInteger(result?.sectorMemoryResponsePrompt)
-            ? result.sectorMemoryResponsePrompt
-            : 16,
-          sectorMemoryResponseStageIndex: Number.isInteger(result?.sectorMemoryResponseStageIndex)
-            ? result.sectorMemoryResponseStageIndex
-            : 15,
-          sectorMemoryResponseReason: typeof result?.sectorMemoryResponseReason === 'string'
-            ? result.sectorMemoryResponseReason
-            : 'sector_memory_json'
-        };
-      }
-      
-      if (isInjectDataGapTerminalResult(result)) {
-        const dataGapSummary = buildInjectDataGapTerminalSummary(result, {
-          currentPrompt: executionPromptOffset,
-          totalPrompts: processTotalPrompts
-        });
-        finalStatus = dataGapSummary.lifecycleStatus;
-        finalPhase = dataGapSummary.phase;
-        finalStatusCode = dataGapSummary.statusCode;
-        finalStatusText = dataGapSummary.statusText;
-        finalReason = dataGapSummary.reason;
-        finalError = dataGapSummary.error;
-        finalActionRequired = dataGapSummary.actionRequired;
-        finalNeedsAction = dataGapSummary.needsAction;
-        dataGapPatch = {
-          dataGapDetected: true,
-          dataGapSignal: 'assistant_data_gap_stage',
-          dataGapStageId: resolveDataGapStageIdFromObject(result),
-          dataGapMissingInputs: ''
-        };
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: dataGapSummary.heading,
-          tone: dataGapSummary.tone,
-          lines: dataGapSummary.logLines,
-          autoCloseMs: 0
-        });
-        console.log(`${'='.repeat(80)}\n`);
-      } else if (result && result.success && hasResultLastResponse) {
-        console.log(`\n✅ ✅ ✅ WARUNEK SPEŁNIONY - WYWOŁUJĘ saveResponse ✅ ✅ ✅`);
-        console.log(`Zapisuję odpowiedź: ${resultLastResponse.length} znaków`);
-        console.log(`Typ analizy: ${analysisType}`);
-        console.log(`Tytuł: ${title}`);
-        console.log(`[copy-flow] [process:save-call] run=${processId || 'no-run'} len=${resultLastResponse.length} fp=${textFingerprint(resultLastResponse)}`);
-        await mirrorCopyFlowLogToTab(chatTabId, 'log', `[save:start] run=${processId || 'no-run'} len=${resultLastResponse.length}`, {
-          analysisType,
-          source: title,
-          responseLength: resultLastResponse.length
-        });
-
-        const stageMeta = {};
-        if (Number.isInteger(result?.selectedResponsePrompt)) {
-          stageMeta.selected_response_prompt = result.selectedResponsePrompt;
-        }
-        if (Number.isInteger(result?.selectedResponseStageIndex)) {
-          stageMeta.selected_response_stage_index = result.selectedResponseStageIndex;
-        }
-        if (typeof result?.selectedResponseReason === 'string' && result.selectedResponseReason.trim()) {
-          stageMeta.selected_response_reason = result.selectedResponseReason.trim();
-        }
-        const providedResponseId = typeof result?.responseId === 'string' && result.responseId.trim()
-          ? result.responseId.trim()
-          : null;
-        const injectedSaveResult = result?.persistedSaveResult && typeof result.persistedSaveResult === 'object'
-          ? result.persistedSaveResult
-          : null;
-        const savedViaInjectedMessage = result?.persistedViaMessage === true && !!injectedSaveResult?.success;
-        const persistedSaveErrorFromInject = typeof result?.persistedSaveError === 'string'
-          ? result.persistedSaveError.trim()
-          : '';
-        if (!savedViaInjectedMessage && persistedSaveErrorFromInject) {
-          console.warn('[copy-flow] [process:save-fallback-background]', {
-            processId,
-            responseId: providedResponseId || '',
-            persistedSaveError: persistedSaveErrorFromInject
-          });
-        }
-
-        const saveResult = savedViaInjectedMessage
-          ? injectedSaveResult
-          : await saveResponse(
-            resultLastResponse,
-            title,
-            analysisType,
-            processId,
-            providedResponseId,
-            Object.keys(stageMeta).length > 0 ? stageMeta : null,
-            conversationUrl || null,
-            {
-              sourceTitle: title,
-              sourceName,
-              sourceUrl,
-              sourceMaterialId,
-              sourceMaterialHash,
-              sourceMaterialLength,
-              sourceMaterialStored: !!sourceMaterialId,
-              sourceMaterialText: sourceMaterialId ? '' : extractedText
-            }
-          );
-        const sectorMemoryPersistence = hasResultSectorMemoryResponse
-          ? await persistSectorMemoryResponseFromResult(result, {
-            source: title,
-            runId: processId,
-            conversationUrl: conversationUrl || null,
-            sourceMeta: {
-              sourceTitle: title,
-              sourceName,
-              sourceUrl,
-              sourceMaterialId,
-              sourceMaterialHash,
-              sourceMaterialLength,
-              sourceMaterialStored: !!sourceMaterialId
-            }
-          })
-          : null;
-        if (sectorMemoryPersistence?.attempted) {
-          sectorMemoryResponsePatch.sectorMemoryResponseSaved = sectorMemoryPersistence.success === true;
-          sectorMemoryResponsePatch.sectorMemoryPersistence = sectorMemoryPersistence;
-          sectorMemoryResponsePatch.sectorMemoryResponseItemCount = Number.isInteger(sectorMemoryPersistence.itemCount)
-            ? sectorMemoryPersistence.itemCount
-            : null;
-        }
-        const persistenceSummary = buildPersistenceUiSummary({
-          hasResponse: true,
-          saveResult,
-          bridgeError: persistedSaveErrorFromInject,
-          saveError: saveResult?.success
-            ? ''
-            : (persistedSaveErrorFromInject
-              ? persistedSaveErrorFromInject
-              : ((typeof saveResult?.reason === 'string' && saveResult.reason.trim())
-                ? saveResult.reason.trim()
-                : ((typeof saveResult?.error === 'string' && saveResult.error.trim())
-                  ? saveResult.error.trim()
-                  : 'save_response_failed')))
-        });
-        finalStatus = persistenceSummary.lifecycleStatus || 'completed';
-        finalPhase = persistenceSummary.phase || 'verify_remote';
-        finalStatusCode = persistenceSummary.statusCode || 'process.completed';
-        finalStatusText = persistenceSummary.statusText;
-        finalReason = persistenceSummary.reason;
-        finalActionRequired = persistenceSummary.actionRequired || 'none';
-        finalNeedsAction = persistenceSummary.needsAction === true;
-        persistencePatch = {
-          persistenceLog: persistenceSummary.logLines,
-          persistenceStatus: {
-            hasResponse: true,
-            saveOk: persistenceSummary.saveOk,
-            dispatchSummary: persistenceSummary.dispatchSummary,
-            copyTrace: persistenceSummary.copyTrace,
-            saveError: persistenceSummary.saveError,
-            bridgeError: persistenceSummary.bridgeError || '',
-            emergencyLocalSave: persistenceSummary.emergencyLocalSave || null,
-            emergencyPageSave: persistenceSummary.emergencyPageSave || null,
-            emergencyLocalOk: persistenceSummary.emergencyLocalOk === true,
-            emergencyPageOk: persistenceSummary.emergencyPageOk === true,
-            pageEmergencyOnly: persistenceSummary.pageEmergencyOnly === true,
-            recoveryHint: persistenceSummary.recoveryHint || '',
-            dispatch: persistenceSummary.dispatch || null,
-            dispatchProcessLog: persistenceSummary.dispatchProcessLog || [],
-            updatedAt: Date.now()
-          }
-        };
-        if (Object.keys(completedResponsePatch).length > 0) {
-          completedResponsePatch.completedResponseSaved = persistenceSummary.saveOk;
-          completedResponsePatch.completedResponseDispatch = persistenceSummary.dispatch || null;
-          completedResponsePatch.completedResponseDispatchSummary = persistenceSummary.dispatchSummary;
-          completedResponsePatch.completedResponseDispatchProcessLog = persistenceSummary.dispatchProcessLog || [];
-          completedResponsePatch.completedResponseSaveTrace = persistenceSummary.copyTrace || '';
-        }
-        await mirrorCopyFlowLogToTab(
-          chatTabId,
-          persistenceSummary.saveOk ? 'log' : 'warn',
-          persistenceSummary.saveOk
-            ? `[save:ok] trace=${saveResult?.copyTrace || 'n/a'}`
-            : '[save:failed]',
-          persistenceSummary.saveOk
-            ? {
-              responseId: saveResult?.response?.responseId || null,
-              verifiedCount: Number.isInteger(saveResult?.verifiedCount) ? saveResult.verifiedCount : null,
-              dispatch: saveResult?.dispatch || null
-            }
-            : {
-              analysisType,
-              source: title
-            }
-        );
-        await mirrorCopyFlowLogToTab(
-          chatTabId,
-          persistenceSummary.saveOk ? 'log' : 'warn',
-          '[save:summary]',
-          {
-            statusText: finalStatusText,
-            log: persistenceSummary.logLines,
-            reason: persistenceSummary.reason || '',
-            dispatch: persistenceSummary.dispatch || null
-          }
-        );
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: persistenceSummary.saveOk ? 'Zakonczono' : 'Zakonczono (blad zapisu)',
-          tone: persistenceSummary.tone,
-          lines: persistenceSummary.logLines,
-          autoCloseMs: 0
-        });
-        
-        console.log(`✅ ✅ ✅ saveResponse ZAKOŃCZONY ✅ ✅ ✅`);
-        console.log(`${'='.repeat(80)}\n`);
-      } else if (result && result.success && !hasResultLastResponse) {
-        console.warn(`\n⚠️ ⚠️ ⚠️ Proces SUKCES ale lastResponse jest pusta lub null ⚠️ ⚠️ ⚠️`);
-        console.warn(`lastResponse: "${result.lastResponse}" (długość: ${result.lastResponse?.length || 0})`);
-        const persistenceSummary = buildPersistenceUiSummary({ hasResponse: false });
-        finalStatus = persistenceSummary.lifecycleStatus || 'failed';
-        finalPhase = persistenceSummary.phase || 'save_local';
-        finalStatusCode = persistenceSummary.statusCode || 'response.empty';
-        finalStatusText = persistenceSummary.statusText;
-        finalReason = persistenceSummary.reason;
-        persistencePatch = {
-          persistenceLog: persistenceSummary.logLines,
-          persistenceStatus: {
-            hasResponse: false,
-            saveOk: false,
-            dispatchSummary: persistenceSummary.dispatchSummary,
-            copyTrace: '',
-            saveError: persistenceSummary.saveError,
-            bridgeError: '',
-            dispatch: null,
-            dispatchProcessLog: [],
-            updatedAt: Date.now()
-          }
-        };
-        await mirrorCopyFlowLogToTab(chatTabId, 'warn', '[save:skipped_empty_response]', {
-          statusText: finalStatusText,
-          log: persistenceSummary.logLines
-        });
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: 'Zakonczono (pusta odpowiedz)',
-          tone: persistenceSummary.tone,
-          lines: persistenceSummary.logLines,
-          autoCloseMs: 0
-        });
-        console.log(`${'='.repeat(80)}\n`);
-      } else if (isForceStoppedExecutionResult(result)) {
-        const stopSummary = buildForceStoppedExecutionSummary(result);
-        finalStatus = stopSummary.lifecycleStatus;
-        finalPhase = stopSummary.phase;
-        finalStatusCode = stopSummary.statusCode;
-        finalStatusText = stopSummary.statusText;
-        finalReason = stopSummary.reason;
-        finalError = stopSummary.error;
-        finalActionRequired = stopSummary.actionRequired;
-        finalNeedsAction = stopSummary.needsAction;
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: stopSummary.heading,
-          tone: stopSummary.tone,
-          lines: stopSummary.logLines,
-          autoCloseMs: 0
-        });
-        console.log(`${'='.repeat(80)}\n`);
-      } else if (result && !result.success) {
-        console.warn(`\n⚠️ ⚠️ ⚠️ Proces zakończony BEZ SUKCESU (success=false) ⚠️ ⚠️ ⚠️`);
-        finalStatus = 'failed';
-        finalPhase = 'response_wait';
-        finalError = result?.error || '';
-        if (finalError === 'pdf_attach_failed') {
-          const pdfAttachError = typeof injectMetrics?.pdfAttachError === 'string'
-            ? injectMetrics.pdfAttachError.trim()
-            : '';
-          finalStatusCode = 'chat.pdf_attach_failed';
-          finalStatusText = pdfAttachError
-            ? `pdf_attach_failed (${pdfAttachError})`
-            : 'pdf_attach_failed';
-          finalReason = 'pdf_attach_failed';
-          finalError = pdfAttachError || 'pdf_attach_failed';
-        } else {
-          finalStatusCode = 'process.inject_failed';
-          finalStatusText = 'Blad procesu';
-          finalReason = 'inject_failed';
-        }
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: 'Blad procesu',
-          tone: 'error',
-          lines: [`Powod: ${finalError || finalReason}`],
-          autoCloseMs: 0
-        });
-        console.log(`${'='.repeat(80)}\n`);
-      } else {
-        console.error(`\n❌ ❌ ❌ NIEOCZEKIWANY STAN ❌ ❌ ❌`);
-        console.error(`hasResult: ${!!result}`);
-        console.error(`success: ${result?.success}`);
-        console.error(`lastResponse: ${result?.lastResponse}`);
-        finalStatus = 'failed';
-        finalPhase = 'response_wait';
-        finalStatusCode = !result
-          ? 'process.missing_execute_result_payload'
-          : 'process.invalid_result';
-        finalStatusText = !result
-          ? 'Brak payloadu executeScript'
-          : 'Nieoczekiwany wynik';
-        finalReason = !result
-          ? 'missing_execute_result_payload'
-          : 'invalid_result';
-        finalError = !result
-          ? 'executeScript returned no result object'
-          : '';
-        await renderFinalCounterStatusOnTab(chatTabId, {
-          heading: 'Blad procesu',
-          tone: 'error',
-          lines: [`Powod: ${finalReason}`],
-          autoCloseMs: 0
-        });
-        console.log(`${'='.repeat(80)}\n`);
-      }
-
-      await upsertProcess(processId, {
-        title: processTitle,
-        analysisType,
-        lifecycleStatus: finalStatus,
-        status: finalStatus,
-        phase: finalPhase,
-        actionRequired: finalActionRequired,
-        statusCode: finalStatusCode,
-        needsAction: finalNeedsAction,
-        statusText: finalStatusText,
-        reason: finalReason,
-        error: finalError,
-        autoRecovery: null,
-        ...(injectMetrics ? { injectMetrics } : {}),
-	        ...(persistencePatch ? persistencePatch : {}),
-	        ...(conversationUrl ? { chatUrl: conversationUrl } : {}),
-	        ...(Object.keys(completedResponsePatch).length > 0
-	          ? completedResponsePatch
-	          : {}),
-	        ...(Object.keys(sectorMemoryResponsePatch).length > 0
-	          ? sectorMemoryResponsePatch
-	          : {}),
-	        ...(Object.keys(dataGapPatch).length > 0 ? dataGapPatch : {}),
-	        ...((finalStatus === 'completed' || finalStatus === 'finalizing' || finalReason === 'page_emergency_only')
-	          ? {
-	            currentPrompt: processTotalPrompts,
-            totalPrompts: processTotalPrompts,
-            ...(processTotalPrompts > 0
-              ? {
-                stageIndex: processTotalPrompts - 1,
-                stageName: `Prompt ${processTotalPrompts}`
-              }
-              : {
-                stageName: 'Start'
-	              })
-	          }
-	          : {}),
-	        ...(finalReason === 'data_gap_stage'
-	          ? {
-	            currentPrompt: Number.isInteger(result?.currentPrompt) ? result.currentPrompt : executionPromptOffset,
-	            totalPrompts: processTotalPrompts,
-	            ...(Number.isInteger(result?.stageIndex)
-	              ? {
-	                stageIndex: result.stageIndex,
-	                stageName: `Prompt ${result.stageIndex + 1}`
-	              }
-	              : {})
-	          }
-	          : {}),
-	        finishedAt: Date.now(),
-	        timestamp: Date.now()
-	      });
-
-      const processSuccess = finalStatus === 'completed';
-      console.log(`[${analysisType}] [${index + 1}/${tabs.length}] ${processSuccess ? '✅' : '❌'} Zakończono przetwarzanie: ${title} status=${finalStatus}`);
-      return {
-        success: processSuccess,
-        stopped: finalStatus === 'stopped',
-        title,
-        reason: finalReason || '',
-        error: finalError || ''
-      };
-
-    } catch (error) {
-      console.error(`[${analysisType}] [${index + 1}/${tabs.length}] ❌ Błąd:`, error);
-      await upsertProcess(processId, {
-        title: processTitle,
-        analysisType,
-        lifecycleStatus: 'failed',
-        status: 'failed',
-        phase: 'response_wait',
-        actionRequired: 'none',
-        statusCode: 'process.exception',
-        needsAction: false,
-        statusText: 'Blad procesu',
-        reason: 'exception',
-        error: error?.message || String(error),
-        autoRecovery: null,
-        finishedAt: Date.now(),
-        timestamp: Date.now()
-      });
-      return { success: false, error: error.message };
-    }
-  });
-
-  // Poczekaj na uruchomienie wszystkich
-  const results = await Promise.allSettled(processingPromises);
-  
-  const successful = results.filter(r => r.status === 'fulfilled' && r.value.success).length;
-  console.log(`\n[${analysisType}] 🎉 Uruchomiono ${successful}/${tabs.length} procesów ChatGPT`);
-  const failedEntries = results
-    .map((result, index) => {
-      if (result.status === 'fulfilled') {
-        if (result.value?.success) return null;
-        if (result.value?.stopped) return null;
-        return {
-          index,
-          title: result.value?.title || tabs[index]?.title || 'Bez tytulu',
-          reason: result.value?.reason || 'failed',
-          error: result.value?.error || ''
-        };
-      }
-      return {
-        index,
-        title: tabs[index]?.title || 'Bez tytulu',
-        reason: 'promise_rejected',
-        error: result.reason?.message || String(result.reason || '')
-      };
-    })
-    .filter(Boolean);
-  if (failedEntries.length > 0) {
-    console.warn(`[${analysisType}] ⚠️ Nieudane procesy: ${failedEntries.length}`);
-    for (const failed of failedEntries) {
-      console.warn(
-        `[${analysisType}] [${failed.index + 1}/${tabs.length}] title="${failed.title}" reason=${failed.reason} error=${truncateDispatchLogText(failed.error || '', 220)}`
-      );
-    }
-  }
-  
-  return results;
-}
-
-// Główna funkcja uruchamiająca analizę
 async function runAnalysis(options = {}) {
   try {
     console.log("\n=== ROZPOCZYNAM KONFIGURACJĘ ANALIZY ===");
@@ -34008,19 +33486,7 @@ async function runAnalysis(options = {}) {
     const invocationWindowId = Number.isInteger(options?.invocationWindowId)
       ? options.invocationWindowId
       : null;
-    const explicitExecutionMode = options?.remote === true
-      ? 'remote'
-      : (options?.remote === false
-        ? 'local'
-        : (typeof options?.executionMode === 'string' ? options.executionMode : ''));
-    const executionMode = explicitExecutionMode
-      ? normalizeRemoteExecutionMode(explicitExecutionMode)
-      : await getStoredRemoteExecutionMode();
-    const selectedRunnerId = typeof options?.runnerId === 'string' && options.runnerId.trim()
-      ? options.runnerId.trim()
-      : (typeof options?.selectedRunnerId === 'string' && options.selectedRunnerId.trim()
-        ? options.selectedRunnerId.trim()
-        : await getStoredSelectedRemoteRunnerId());
+    const executionMode = 'local';
     const includePortfolio = options?.includePortfolio === true;
     const composerThinkingEffort = normalizeComposerThinkingEffort(options?.composerThinkingEffort)
       || DEFAULT_ANALYSIS_COMPOSER_THINKING_EFFORT;
@@ -34108,60 +33574,6 @@ async function runAnalysis(options = {}) {
     console.log(`   - Analiza spółki: ${orderedTabs.length} artykułów`);
     if (includePortfolio) {
       console.log(`   - Portfolio Analysis: ${orderedTabs.length} artykułów`);
-    }
-
-    if (executionMode === 'remote') {
-      if (!selectedRunnerId) {
-        console.log("❌ Brak wybranego runnera remote");
-        return { success: false, error: 'remote_runner_not_selected' };
-      }
-      const preparedBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_COMPANY, 'company', {
-        runnerId: selectedRunnerId,
-        composerThinkingEffort
-      });
-      if (preparedBatch?.success !== true) {
-        return {
-          success: false,
-          error: preparedBatch?.error || 'remote_prepare_failed',
-          skippedCount: Array.isArray(preparedBatch?.skipped) ? preparedBatch.skipped.length : 0,
-          totalTabs: orderedTabs.length
-        };
-      }
-      let preparedPortfolioBatch = null;
-      if (includePortfolio) {
-        preparedPortfolioBatch = await buildPreparedAnalysisBatch(orderedTabs, PROMPTS_PORTFOLIO, ANALYSIS_TYPE_PORTFOLIO, {
-          runnerId: selectedRunnerId,
-          composerThinkingEffort
-        });
-        if (preparedPortfolioBatch?.success !== true) {
-          return {
-            success: false,
-            error: preparedPortfolioBatch?.error || 'portfolio_remote_prepare_failed',
-            skippedCount: Array.isArray(preparedPortfolioBatch?.skipped) ? preparedPortfolioBatch.skipped.length : 0,
-            totalTabs: orderedTabs.length
-          };
-        }
-      }
-
-      const remoteResult = await submitPreparedAnalysisBatchToRemoteRunner(preparedBatch, selectedRunnerId, {
-        invocationWindowId
-      });
-      const portfolioRemoteResult = includePortfolio
-        ? await submitPreparedAnalysisBatchToRemoteRunner(preparedPortfolioBatch, selectedRunnerId, {
-            invocationWindowId
-          })
-        : null;
-      const mergedRemoteResult = mergeAnalysisLaunchResults(remoteResult, portfolioRemoteResult, {
-        analysisType: ANALYSIS_TYPE_COMPANY,
-        mode: 'remote_tabs',
-        primaryFallbackQueued: orderedTabs.length
-      });
-      return {
-        ...mergedRemoteResult,
-        remote: true,
-        runnerId: selectedRunnerId,
-        totalTabs: orderedTabs.length
-      };
     }
 
     const queueResult = await processArticles(orderedTabs, PROMPTS_COMPANY, getChatUrlForAnalysisType(ANALYSIS_TYPE_COMPANY), 'company', {
@@ -34649,78 +34061,34 @@ async function runManualPdfAnalysisQueue({ title, instances, providerId, pdfFile
     }
   );
 
-  const queuedPdfJobs = queueJobs.filter((job) => !shouldBypassAnalysisQueueForAnalysisType(job?.analysisType));
-  const bypassPdfJobs = queueJobs.filter((job) => shouldBypassAnalysisQueueForAnalysisType(job?.analysisType));
-  const emptyQueueSnapshot = queuedPdfJobs.length === 0
-    ? await getAnalysisQueueStatusSnapshot()
-    : null;
-  const enqueueResult = queuedPdfJobs.length > 0
-    ? await enqueueAnalysisJobs(queuedPdfJobs, {
-        reason: 'manual_pdf_enqueue'
-      })
-    : {
-        success: true,
-        jobs: [],
-        queuedCount: 0,
-        maxConcurrent: Number.isInteger(emptyQueueSnapshot?.maxConcurrent) ? emptyQueueSnapshot.maxConcurrent : null,
-        queueSize: Number.isInteger(emptyQueueSnapshot?.queueSize) ? emptyQueueSnapshot.queueSize : 0,
-        activeSlots: Number.isInteger(emptyQueueSnapshot?.activeSlots) ? emptyQueueSnapshot.activeSlots : 0,
-        reservedSlots: Number.isInteger(emptyQueueSnapshot?.reservedSlots) ? emptyQueueSnapshot.reservedSlots : 0,
-        liveSlots: Number.isInteger(emptyQueueSnapshot?.liveSlots) ? emptyQueueSnapshot.liveSlots : 0,
-        startingSlots: Number.isInteger(emptyQueueSnapshot?.startingSlots) ? emptyQueueSnapshot.startingSlots : 0
-      };
-  const bypassResult = bypassPdfJobs.length > 0
-    ? await launchAnalysisJobsOutsideQueue(
-        bypassPdfJobs.map((job) => ({
-          ...job.tabSnapshot,
-          sourceKind: job.sourceKind,
-          sourceUrl: job.sourceUrl,
-          sourceMaterialId: job.sourceMaterialId,
-          sourceMaterialHash: job.sourceMaterialHash,
-          sourceMaterialLength: job.sourceMaterialLength,
-          sourceMaterialStored: job.sourceMaterialStored === true
-        })),
-        bypassPdfJobs[0].promptChainSnapshot,
-        bypassPdfJobs[0].chatUrl,
-        bypassPdfJobs[0].analysisType,
-        {
-          sourceKind: 'manual_pdf',
-          queueBatchId: batchId,
-          manualPdfBatchId: batchId,
-          manualPdfProviderId: safeProviderId,
-          reason: 'manual_pdf_portfolio_queue_bypass'
-        }
-      )
-    : null;
+  const enqueueResult = await enqueueAnalysisJobs(queueJobs, {
+    reason: 'manual_pdf_enqueue'
+  });
   registerManualPdfQueueBatch(batchId, safeProviderId, [
-    ...(Array.isArray(enqueueResult?.jobs) ? enqueueResult.jobs : []),
-    ...(Array.isArray(bypassResult?.jobs) ? bypassResult.jobs : [])
+    ...(Array.isArray(enqueueResult?.jobs) ? enqueueResult.jobs : [])
   ]);
-  const bypassCount = Number.isInteger(bypassResult?.queueBypassCount)
-    ? Math.max(0, bypassResult.queueBypassCount)
-    : 0;
-  const portfolioQueuedCount = Math.max(0, portfolioJobCount - bypassCount);
+  const portfolioQueuedCount = portfolioJobCount;
   return {
     success: true,
     mode: 'pdf',
     analysisType: normalizedAnalysisType,
     extraPortfolioQueued: portfolioQueuedCount > 0,
-    extraPortfolioLaunched: bypassCount > 0,
+    extraPortfolioLaunched: false,
     extraPortfolioStarted: portfolioJobCount > 0,
     companyQueuedCount: companyJobCount,
     portfolioQueuedCount,
-    portfolioLaunchedCount: bypassCount,
-    launchedCount: bypassCount,
-    queueBypassCount: bypassCount,
-    queueBypass: bypassCount > 0,
+    portfolioLaunchedCount: 0,
+    launchedCount: 0,
+    queueBypassCount: 0,
+    queueBypass: false,
     queued: enqueueResult?.queuedCount || 0,
     queuedCount: enqueueResult?.queuedCount || 0,
-    maxConcurrent: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'maxConcurrent', null),
-    queueSize: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'queueSize', 0),
-    activeSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'activeSlots', 0),
-    reservedSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'reservedSlots', 0),
-    liveSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'liveSlots', 0),
-    startingSlots: pickAnalysisLaunchMetric(enqueueResult, bypassResult, 'startingSlots', 0),
+    maxConcurrent: pickAnalysisLaunchMetric(enqueueResult, null, 'maxConcurrent', null),
+    queueSize: pickAnalysisLaunchMetric(enqueueResult, null, 'queueSize', 0),
+    activeSlots: pickAnalysisLaunchMetric(enqueueResult, null, 'activeSlots', 0),
+    reservedSlots: pickAnalysisLaunchMetric(enqueueResult, null, 'reservedSlots', 0),
+    liveSlots: pickAnalysisLaunchMetric(enqueueResult, null, 'liveSlots', 0),
+    startingSlots: pickAnalysisLaunchMetric(enqueueResult, null, 'startingSlots', 0),
     batchId
   };
 }

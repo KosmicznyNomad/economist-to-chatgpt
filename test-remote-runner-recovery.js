@@ -305,6 +305,44 @@ async function main() {
   assert.strictEqual(localStateWithProcess.activeRemoteJob.remote.remoteJobId, 'remote-process-job');
 
   context.processRegistry.clear();
+  context.getAnalysisQueueStatusSnapshot = async () => ({
+    totalJobs: 1,
+    queueSize: 1,
+    activeJobs: 0
+  });
+  context.getAnalysisQueueSnapshot = async () => ({
+    waitingJobs: [{
+      jobId: 'local-job-1',
+      runId: 'local-run-1',
+      title: 'Local waiting job'
+    }],
+    activeJobs: []
+  });
+
+  const localStateWithWaitingJob = await context.getRemoteRunnerLocalState();
+  assert.strictEqual(localStateWithWaitingJob.localBusy, true);
+  assert.strictEqual(localStateWithWaitingJob.localQueueSize, 1);
+  assert.strictEqual(localStateWithWaitingJob.queuedRemoteJob, null);
+
+  const localBusyResult = await context.recoverAssignedRemoteJob({
+    origin: 'test-local-waiting'
+  });
+  assert.strictEqual(localBusyResult.success, true);
+  assert.strictEqual(localBusyResult.skipped, true);
+  assert.strictEqual(localBusyResult.reason, 'local_busy');
+  assert.strictEqual(context.runnerStatusCalls.length, 0, 'Local waiting jobs must block remote recovery before status API calls.');
+  assert.strictEqual(context.jobFetchCalls.length, 0, 'Local waiting jobs must block remote recovery before fetching assigned jobs.');
+  assert.strictEqual(context.enqueuedJobs.length, 0);
+
+  context.getAnalysisQueueStatusSnapshot = async () => ({
+    totalJobs: 0,
+    queueSize: 0,
+    activeJobs: 0
+  });
+  context.getAnalysisQueueSnapshot = async () => ({
+    waitingJobs: [],
+    activeJobs: []
+  });
 
   const recoveryResult = await context.recoverAssignedRemoteJob({
     origin: 'test'

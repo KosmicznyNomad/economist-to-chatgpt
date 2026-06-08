@@ -132,7 +132,7 @@ function computeTimeout(watchlistDispatch) {
 assert.match(backgroundSource, /const FINAL_RESPONSE_SAVE_TIMEOUT_MS = computeFinalResponseSaveTimeoutMs\(\);/);
 assert.strictEqual(
   (backgroundSource.match(/saveTimeoutMs:\s*FINAL_RESPONSE_SAVE_TIMEOUT_MS/g) || []).length,
-  3
+  2
 );
 
 const defaultTimeout = computeTimeout({

@@ -348,7 +348,8 @@ const reasonLabels = {
   auto_recovery_provider_invalid_response: 'Auto-resend: niepoprawna odpowiedz providera',
   data_gap_stage: 'DATA_GAP_STAGE - karta zamknieta',
   data_gap_unresolved: 'DATA_GAP_STAGE nierozwiazany',
-  data_gap_rewind_applied: 'DATA_GAP_STAGE rewind zastosowany'
+  data_gap_rewind_applied: 'DATA_GAP_STAGE rewind zastosowany',
+  window_close_pending: 'Czeka na zamkniecie karty procesu'
 };
 const persistenceErrorLabels = {
   runtime_unavailable: 'most runtime niedostepny',
@@ -722,6 +723,20 @@ function buildProcessReasonLine(process) {
   }
   if (bridgeErrorCode) {
     details.push(`bridge=${getPersistenceErrorLabel(bridgeErrorCode)}`);
+  }
+  const queueState = normalizeCodeToken(process?.queueState || '');
+  if (queueState === 'awaiting_window_close') {
+    const windowClose = process?.windowClose && typeof process.windowClose === 'object'
+      ? process.windowClose
+      : null;
+    const closeState = normalizeCodeToken(windowClose?.state || '');
+    const attemptCount = Number.isInteger(windowClose?.attemptCount)
+      ? Math.max(0, windowClose.attemptCount)
+      : null;
+    const closeBits = ['kolejka czeka na zamkniecie karty'];
+    if (closeState) closeBits.push(`state=${humanizeToken(closeState)}`);
+    if (attemptCount !== null) closeBits.push(`attempt=${attemptCount}`);
+    details.push(closeBits.join(', '));
   }
   if (errorText) {
     details.push(`err=${errorText}`);
@@ -1634,18 +1649,24 @@ function updateSummaryPanels(allProcesses, activeProcesses, historyProcesses) {
   const queueStartingSlots = Number.isInteger(queue?.startingSlots)
     ? queue.startingSlots
     : Math.max(0, queueSlots - queueLiveSlots);
-  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 4;
+  const queueAwaitingWindowCloseSlots = Number.isInteger(queue?.awaitingWindowCloseSlots)
+    ? Math.max(0, queue.awaitingWindowCloseSlots)
+    : 0;
+  const queueMax = Number.isInteger(queue?.maxConcurrent) ? queue.maxConcurrent : 1;
   const queueSize = Number.isInteger(queue?.queueSize) ? queue.queueSize : 0;
 
   if (processSummary) {
-    const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Okna ${queueLiveSlots}/${queueMax} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
+    const closeChunk = queueAwaitingWindowCloseSlots > 0
+      ? ` | Zamykanie ${queueAwaitingWindowCloseSlots}`
+      : '';
+    const summary = `Aktywne ${activeCount} | Sloty ${queueSlots}/${queueMax} | Okna ${queueLiveSlots}/${queueMax}${closeChunk} | Kolejka ${queueSize} | Akcja ${needsActionCount} | Zakonczone ${completedCount} | Bledy ${failedCount} | P1 ${priorityCounts.P1} | P2 ${priorityCounts.P2} | Wszystkie ${totalCount}`;
     const details = [
       `DATA_GAP_STAGE: ${dataGapCount}`,
       `Braki odpowiedzi: ${missingReplyCount}`,
       `Sredni postep aktywnych: ${avgProgress}%`,
       `Najstarszy aktywny: ${formatRelativeTime(oldestActiveTs)}`,
       `Priorytety aktywnych: P1=${priorityCounts.P1}, P2=${priorityCounts.P2}, P3=${priorityCounts.P3}, P4=${priorityCounts.P4}`,
-      `Kolejka scheduler: sloty=${queueSlots}/${queueMax}, zywe_okna=${queueLiveSlots}/${queueMax}, startujace=${queueStartingSlots}, oczekuje=${queueSize}`,
+      `Kolejka scheduler: sloty=${queueSlots}/${queueMax}, zywe_okna=${queueLiveSlots}/${queueMax}, startujace=${queueStartingSlots}, zamykanie=${queueAwaitingWindowCloseSlots}, oczekuje=${queueSize}`,
       stageInfo
     ];
     if (consistencyIssues.length > 0) {

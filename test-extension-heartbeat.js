@@ -204,7 +204,7 @@ function buildContext() {
     Math,
     Object,
     Promise,
-    ANALYSIS_QUEUE_MAX_CONCURRENT: 4,
+    ANALYSIS_QUEUE_MAX_CONCURRENT: 1,
     ANALYSIS_TYPE_COMPANY: 'company',
     CHAT_URL: 'https://chatgpt.com/company',
     EXTENSION_FEATURE_REVISION: 'source-materials-heartbeat-v1',
@@ -235,7 +235,7 @@ function buildContext() {
     ensureExtensionInstallationId: async () => 'ext-test-support',
     getAnalysisQueueStatusSnapshot: async () => ({
       success: true,
-      maxConcurrent: 4,
+      maxConcurrent: 1,
       activeSlots: 1,
       queueSize: 2,
       waitingJobs: 2,
@@ -287,8 +287,21 @@ async function main() {
   assert.strictEqual(heartbeat.prompts.companyCount, 1);
   assert.strictEqual(heartbeat.prompts.portfolioCount, 1);
   assert.strictEqual(heartbeat.watchlist.ready, true);
+  assert.strictEqual(heartbeat.queue.maxConcurrent, 1);
   assert.strictEqual(Object.prototype.hasOwnProperty.call(heartbeat.watchlist, 'secret'), false);
   assert.ok(context.stored.iskra_extension_heartbeat);
+
+  const staleQueueStatus = context.sanitizeExtensionHeartbeatQueueStatus({
+    success: true,
+    maxConcurrent: 4,
+    activeSlots: 4,
+    queueSize: 9
+  });
+  assert.strictEqual(
+    staleQueueStatus.maxConcurrent,
+    1,
+    'Heartbeat queue status should not preserve old persisted maxConcurrent=4.'
+  );
 
   context.getWatchlistDispatchStatus = async () => ({
     enabled: true,
